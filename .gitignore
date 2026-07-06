@@ -1,0 +1,12 @@
+# Obsidian workspace/cache (개인 UI 상태 — 지식이 아님)
+.obsidian/
+
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Claude Code 로컬 설정
+.claude/settings.local.json
