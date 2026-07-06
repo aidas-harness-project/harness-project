@@ -11,7 +11,7 @@ second brain. 운영 규칙은 [Wiki Schema](CLAUDE.md) 참고.
 # 개요
 
 * [프로젝트 개요](overview.md) - PoC 정의, 핵심 질문, 포함/제외 범위.
-* [파이프라인 구조](pipeline.md) - 14단계 Agent Harness 전체 흐름.
+* [파이프라인 구조](pipeline.md) - Phase 1(최초 청구/검토)과 Phase 2(반려·감액 대응)로 나뉜 파이프라인 구조와 구현용 7개 묶음 Agent, 3주 일정 매핑.
 
 # 에이전트 (agents/)
 
@@ -43,6 +43,7 @@ second brain. 운영 규칙은 [Wiki Schema](CLAUDE.md) 참고.
 * [손해사정서 초안 기본 구조](templates/draft-report.md) - 개요·쟁점·약관·의학·감액 검토·의견으로 이어지는 손사서 초안 8개 섹션 구조.
 * [반박 포인트 리포트 형식](templates/rebuttal-points.md) - 감액사유별 보험사 주장·반박 후보·근거 자료·검수 필요를 정리하는 출력 형식.
 * [금지 표현 가이드](templates/forbidden-expressions.md) - 손사서 초안에서 피해야 할 단정적 법률·의료 표현과 그 대체 표현.
+* [컴포넌트 표준 출력 계약](templates/component-output.md) - 파이프라인의 모든 컴포넌트 출력이 공통으로 포함해야 하는 필드 — confidence, 근거 참조, 검수 플래그, 환각·금지표현 체크.
 
 # 평가 (evaluation/)
 
@@ -58,6 +59,7 @@ second brain. 운영 규칙은 [Wiki Schema](CLAUDE.md) 참고.
 # 소스 (sources/)
 
 * [LLM Wiki 패턴 아이디어 파일](sources/llm-wiki-idea.md) - LLM이 유지보수하는 개인 지식 베이스 패턴 — 이 위키 운영 방식의 근거 문서.
+* [Phase별 파이프라인 초안 (GPT 정리)](sources/pipeline-rough-gpt.md) - 파이프라인을 Phase 1(최초 청구/검토)과 Phase 2(반려·감액 대응)로 분리하고 구현용 7개 묶음 Agent를 제안한 설계 초안.
 
 # 참고 자료 (references/)
 

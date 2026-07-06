@@ -14,6 +14,20 @@ timestamp: 2026-07-06T00:00:00+09:00
 검색해 근거 문장과 함께 약관 조항 리스트를 반환한다. 완벽한 매핑이
 목표가 아니라 손사 검토의 **출발점이 되는 후보 추천**이 목표다.
 
+# 세부 컴포넌트 분해
+
+[파이프라인 개편](../pipeline.md) 이후 다음 컴포넌트로 세분화됐다
+(구현은 `PolicyPipelineAgent` 묶음):
+
+1. **Policy Document Processing** — 약관을 조항 단위로 구조화.
+2. **Policy Clause Extraction** — 지급요건·면책·감액 관련 조항 추출.
+3. **Policy Clause Normalization** — 조항을 표준 필드로 정규화.
+4. **Requirement Matching** — 담보별 지급요건과 청구 자료 매칭 (Phase 1).
+5. **Policy-to-Denial Matching** — 반려사유와 조항 연결 (Phase 2).
+
+검색 인프라는 벡터 인덱싱 없이 직접 프롬프팅/BM25로 시작한다
+(케이스 수가 적은 PoC에서는 과투자 — 규모 확대 시 도입).
+
 # 입력
 
 - [Claim Coverage Agent](claim-coverage.md)의 청구담보.
