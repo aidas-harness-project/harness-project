@@ -73,6 +73,17 @@ Phase 2 소속이지만, [스크리닝 리포트](templates/screening-report.md)
 모든 컴포넌트 출력은 [컴포넌트 표준 출력 계약](templates/component-output.md)을
 따른다.
 
+# 컴포넌트 I/O 계약
+
+각 컴포넌트의 입출력 JSON 형식과 "다음 단계로 넘기는 핵심 필드"는
+[I/O 계약 초안](sources/pipeline-io-contracts.md)에 정의되어 있다.
+파일 경로 규약: `data/raw/` → `data/processed/` → `outputs/CASE_XXX/`.
+
+가장 먼저 확정할 **스크리닝 backbone I/O 5개**:
+`document_manifest.json` → `classification_result.json` →
+`extracted_claim_fields.json` → `denial_reason_result.json` →
+`screening_report.json`.
+
 # 3주 일정 매핑
 
 | 주차 | 범위 | 필수 산출물 |

@@ -53,6 +53,15 @@ timestamp: 2026-07-06T00:00:00+09:00
 - 우선 검토 포인트:
 ```
 
+# 출력 형식
+
+`screening_report.json`(machine-readable)과 `screening_report.md`(사람용)를
+함께 생성한다 — 형식은 [I/O 계약](../sources/pipeline-io-contracts.md) 참고.
+
+> ⚠️ I/O 계약 초안의 예시에는 **§7 "1차 판단"이 빠져 있다.** JSON에
+> `preliminary_assessment`(진행 가능성·난이도·우선 검토 포인트) 블록을
+> 추가해서 이 템플릿의 7개 섹션을 모두 채울 것.
+
 # 섹션별 데이터 출처
 
 | 섹션 | 생성 주체 |

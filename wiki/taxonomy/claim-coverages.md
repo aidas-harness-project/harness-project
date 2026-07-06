@@ -11,14 +11,18 @@ timestamp: 2026-07-06T00:00:00+09:00
 
 # 담보
 
-| 표준 담보명 | 비고 |
-| --- | --- |
-| 실손의료비 | 급여/비급여 구분 검토 필요 |
-| 수술비 | 수술 정의 충족 여부가 쟁점이 되기도 함 |
-| 진단비 | 진단 확정 요건·검사 방법이 쟁점 (예: [뇌혈관질환진단비](../cases/coverage-dispute.md)) |
-| 상해후유장해 | 장해지급률 × 가입금액으로 산정 |
-| 질병후유장해 | 상해와 구분 필요 |
-| 배상책임 | 대인/대물 |
+표준 코드는 [I/O 계약](../sources/pipeline-io-contracts.md)의
+`normalized_coverage_type` 필드에서 사용한다 (`injury_disability`,
+`medical_expense`는 계약 초안에서 확정, 나머지는 제안값).
+
+| 표준 담보명 | 표준 코드 | 비고 |
+| --- | --- | --- |
+| 실손의료비 | `medical_expense` | 급여/비급여 구분 검토 필요 |
+| 수술비 | `surgery_benefit` (제안) | 수술 정의 충족 여부가 쟁점이 되기도 함 |
+| 진단비 | `diagnosis_benefit` (제안) | 진단 확정 요건·검사 방법이 쟁점 (예: [뇌혈관질환진단비](../cases/coverage-dispute.md)) |
+| 상해후유장해 | `injury_disability` | 장해지급률 × 가입금액으로 산정 |
+| 질병후유장해 | `disease_disability` (제안) | 상해와 구분 필요 |
+| 배상책임 | `liability` (제안) | 대인/대물 |
 
 이 목록은 PoC 진행 중 케이스에서 확인되는 담보로 확장한다.
 

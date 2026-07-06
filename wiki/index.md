@@ -43,7 +43,7 @@ second brain. 운영 규칙은 [Wiki Schema](CLAUDE.md) 참고.
 * [손해사정서 초안 기본 구조](templates/draft-report.md) - 개요·쟁점·약관·의학·감액 검토·의견으로 이어지는 손사서 초안 8개 섹션 구조.
 * [반박 포인트 리포트 형식](templates/rebuttal-points.md) - 감액사유별 보험사 주장·반박 후보·근거 자료·검수 필요를 정리하는 출력 형식.
 * [금지 표현 가이드](templates/forbidden-expressions.md) - 손사서 초안에서 피해야 할 단정적 법률·의료 표현과 그 대체 표현.
-* [컴포넌트 표준 출력 계약](templates/component-output.md) - 파이프라인의 모든 컴포넌트 출력이 공통으로 포함해야 하는 필드 — confidence, 근거 참조, 검수 플래그, 환각·금지표현 체크.
+* [컴포넌트 표준 출력 계약](templates/component-output.md) - 파이프라인의 모든 컴포넌트 출력이 공통으로 포함해야 하는 필드 — 실행 메타데이터, confidence, 근거 참조, 검수 플래그, 환각·금지표현 체크.
 
 # 평가 (evaluation/)
 
@@ -61,6 +61,7 @@ second brain. 운영 규칙은 [Wiki Schema](CLAUDE.md) 참고.
 * [LLM Wiki 패턴 아이디어 파일](sources/llm-wiki-idea.md) - LLM이 유지보수하는 개인 지식 베이스 패턴 — 이 위키 운영 방식의 근거 문서.
 * [Phase별 파이프라인 초안 (GPT 정리)](sources/pipeline-rough-gpt.md) - 파이프라인을 Phase 1(최초 청구/검토)과 Phase 2(반려·감액 대응)로 분리하고 구현용 7개 묶음 Agent를 제안한 설계 초안.
 * [From Idea to MVP (Launchifier Framework)](sources/mvp-launchifier.md) - 아이디어 검증부터 출시 후 스케일/피벗 결정까지 MVP 개발 14단계를 정리한 Igor Royzis의 가이드.
+* [컴포넌트별 I/O 계약 초안 (GPT 정리)](sources/pipeline-io-contracts.md) - Phase 1 18개·Phase 2 13개 컴포넌트의 입출력 JSON 예시, 공통 필드, 파일 매핑, 우선 확정할 핵심 I/O 5개를 정의한 계약 초안.
 
 # 참고 자료 (references/)
 
