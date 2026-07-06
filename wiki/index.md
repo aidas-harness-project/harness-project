@@ -60,6 +60,7 @@ second brain. 운영 규칙은 [Wiki Schema](CLAUDE.md) 참고.
 
 * [LLM Wiki 패턴 아이디어 파일](sources/llm-wiki-idea.md) - LLM이 유지보수하는 개인 지식 베이스 패턴 — 이 위키 운영 방식의 근거 문서.
 * [Phase별 파이프라인 초안 (GPT 정리)](sources/pipeline-rough-gpt.md) - 파이프라인을 Phase 1(최초 청구/검토)과 Phase 2(반려·감액 대응)로 분리하고 구현용 7개 묶음 Agent를 제안한 설계 초안.
+* [From Idea to MVP (Launchifier Framework)](sources/mvp-launchifier.md) - 아이디어 검증부터 출시 후 스케일/피벗 결정까지 MVP 개발 14단계를 정리한 Igor Royzis의 가이드.
 
 # 참고 자료 (references/)
 

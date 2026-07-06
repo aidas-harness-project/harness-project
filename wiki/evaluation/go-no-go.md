@@ -22,6 +22,12 @@ timestamp: 2026-07-06T00:00:00+09:00
 - 초안이 환각이 많아 검수 비용이 더 든다. → [Critic Agent](../agents/critic.md)
 - 전문가가 "실무 보조도구로 사용하기 어렵다"고 평가한다.
 
+# 제품 관점의 위치
+
+[MVP 프레임워크](../sources/mvp-launchifier.md)의 iterate / scale / pivot
+결정에 해당한다 — Go는 MVP 계획 단계(기능 컷·기술 스택·로드맵)로의 진행,
+No-Go는 문제 정의로 돌아가는 범위 재설계(pivot)다.
+
 # Citations
 
 [1] [PoC 가이드](../references/poc-guide.md)

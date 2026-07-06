@@ -39,6 +39,8 @@ timestamp: 2026-07-06T00:00:00+09:00
 - 전체 처리 흐름: [파이프라인 구조](pipeline.md)
 - 성공 판정: [평가 지표](evaluation/metrics.md), [Go/No-Go 기준](evaluation/go-no-go.md)
 - 입력 데이터: [케이스 목록](cases/index.md)
+- 제품 관점: 이 PoC는 [MVP 프레임워크](sources/mvp-launchifier.md)의
+  1~3단계(아이디어 검증)에 해당한다 — Go 판정 시 다음은 MVP 계획 단계.
 
 # Citations
 
