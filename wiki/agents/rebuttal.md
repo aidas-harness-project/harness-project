@@ -5,7 +5,7 @@ description: 감액사유별 반박 프레임에 따라 약관·의무기록 근
 tags: [agent, p1, rebuttal]
 priority: P1
 pipeline_order: 11
-timestamp: 2026-07-06T00:00:00+09:00
+timestamp: 2026-07-07T00:00:00+09:00
 ---
 
 # 역할
@@ -22,7 +22,15 @@ timestamp: 2026-07-06T00:00:00+09:00
 
 # 출력
 
-[반박 포인트 리포트](../templates/rebuttal-points.md) 형식의 케이스별 리포트.
+[반박 포인트 리포트](../templates/rebuttal-points.md) 형식의 케이스별 리포트
+(`rebuttal_points.json`·`.md`).
+
+# 구현
+
+`DenialResponseAgent` 묶음 소속 (2026-07-07 하네스 구축 시 확정) — 감액사유
+추출→분류→약관 매칭→반박 생성이 denial 도메인의 연속 작업이기 때문.
+근거 없는 반박 금지 규칙은 에이전트 정의(`.claude/agents/denial-response.md`)에
+반영되어 있다.
 
 # 다음 단계
 
