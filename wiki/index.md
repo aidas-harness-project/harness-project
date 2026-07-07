@@ -17,7 +17,7 @@ second brain. 운영 규칙은 [Wiki Schema](CLAUDE.md) 참고.
 # 에이전트 (agents/)
 
 * [Document Intake Agent](agents/document-intake.md) - 케이스 폴더의 파일을 수집·정렬해 문서 목록을 생성하는 파이프라인 진입점.
-* [OCR / Text Extraction Layer](agents/ocr-layer.md) - PDF·이미지에서 페이지 단위 텍스트를 추출하고 OCR 품질 로그를 남기는 계층.
+* [OCR / Text Extraction Layer](agents/ocr-layer.md) - PDF·이미지에서 페이지 단위 텍스트를 추출하고, 품질 로그와 불명확 영역(uncertain_regions)을 남기는 계층.
 * [Redaction Agent](agents/redaction.md) - OCR 텍스트에서 민감정보를 제거해 가명처리 텍스트를 만드는 에이전트.
 * [Document Classification Agent](agents/document-classification.md) - 문서를 진단서·의무기록·약관·안내문 등 유형으로 분류하고 confidence를 저장.
 * [Field Extraction Agent](agents/field-extraction.md) - 진단명, KCD, 사고일, 치료기간, 수술명, 병원명 등 핵심항목을 구조화 JSON으로 추출.

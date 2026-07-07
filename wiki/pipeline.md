@@ -24,7 +24,7 @@ Week 1→2→3 순으로 확정 예정 ([I/O 계약](sources/pipeline-io-contrac
 | 순서  | 컴포넌트                                                  | Input                                                         | Output                                                                                          | 관련 개념                                                                    |
 | --- | ----------------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | 1   | Case Intake                                           | `data/raw/CASE_XXX/` 폴더                                       | `case_manifest.json`, **`document_manifest.json`** (파일명·형식·크기)                                  | [Document Intake](agents/document-intake.md)                             |
-| 2   | OCR / Text Extraction                                 | manifest + 원본 문서                                              | `ocr_result.json`, `page_*.md` + manifest 갱신 (`pages`·`ocr_status`·`ocr_text_path`)             | [OCR Layer](agents/ocr-layer.md)                                         |
+| 2   | OCR / Text Extraction                                 | manifest + 원본 문서                                              | **`ocr_result.json`** (불명확 영역 `uncertain_regions` 포함), `page_*.md` + manifest 갱신 (`pages`·`ocr_status`·`ocr_text_path`·`ocr_quality`·`uncertain_region_count`) | [OCR Layer](agents/ocr-layer.md)                                         |
 | 3   | Redaction                                             | `page_*.md`                                                   | `redacted_text.md`, `redaction_result.json` + manifest 갱신 (`redacted_text_path`)                | [Redaction](agents/redaction.md)                                         |
 | 4   | Document Classification                               | `redacted_text.md`                                            | **`classification_result.json`** + manifest 갱신 (`document_type`·`classification_confidence`)    | [Document Classification](agents/document-classification.md)             |
 | 5   | Document Preprocessing                                | 분류된 문서 텍스트                                                    | `page_chunks.json`                                                                              | (신규 — 문서 처리 묶음에 포함)                                                      |
@@ -88,8 +88,11 @@ Phase 2 소속이지만, [스크리닝 리포트](templates/screening-report.md)
 `extracted_claim_fields.json` → `denial_reason_result.json` →
 `screening_report.json`.
 
-**JSON Schema 초안 v0.1이 `schemas/`에 있다** — 공통 계약
-(`common_component_output.schema.json`) + backbone 5개. 원자료 예시로
+**JSON Schema 초안이 `schemas/`에 있다** — 공통 계약
+(`common_component_output.schema.json`) + backbone 5개 + `ocr_result`
+(2026-07-07 추가: 불명확 영역 `uncertain_regions`와 임계값 기록, manifest
+v0.2에 `ocr_quality`·`uncertain_region_count` 요약 필드 —
+[OCR Layer](agents/ocr-layer.md)의 전파 규칙 참고). 원자료 예시로
 검증 완료. [agents/](agents/index.md) 요구조건 대조 검증(2026-07-07)에서
 4건 보완: ① manifest에 파일 형식·크기 필드 추가 (Document Intake 요구),
 ② `denial_reason_result`에 Top-3 평가용 `candidate_codes` 추가

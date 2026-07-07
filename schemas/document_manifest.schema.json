@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "document_manifest.schema.json",
-  "title": "document_manifest.json — 케이스 문서 목록표 v0.1",
+  "title": "document_manifest.json — 케이스 문서 목록표 v0.2",
   "description": "케이스 안의 모든 문서 목록과 처리 상태(목차이자 출석부). 컴포넌트 출력이 아니라 여러 단계가 이어 갱신하는 공유 상태 파일이므로 공통 출력 계약 envelope를 쓰지 않는다. 갱신 규율: 각 단계는 자기 owner 필드만 추가하고 기존 필드를 수정하지 않는다 (필드별 owner는 각 필드 description에 명시).",
   "type": "object",
   "properties": {
@@ -60,6 +60,18 @@
         "ocr_text_path": {
           "type": ["string", "null"],
           "description": "owner: OCR. data/processed/CASE_XXX/DOC_XXX/text.md"
+        },
+        "ocr_quality": {
+          "anyOf": [
+            { "enum": ["high", "medium", "low"] },
+            { "type": "null" }
+          ],
+          "description": "owner: OCR. ocr_result.json의 문서별 ocr_quality 요약 복사. OCR 전에는 null. 상세(불명확 영역 목록·위치)는 ocr_result.json에만 둔다 — manifest는 출석부로 가볍게 유지"
+        },
+        "uncertain_region_count": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "owner: OCR. ocr_result.json uncertain_regions의 문서 합계. OCR 전에는 null"
         },
         "redacted_text_path": {
           "type": ["string", "null"],
