@@ -112,11 +112,17 @@
     },
     "inconsistency": {
       "type": "object",
-      "description": "템플릿 §4 문서 간 불일치. 출처: evidence_validation_result",
+      "description": "템플릿 §4 문서 간 불일치. 출처: evidence_validation_result (상세 doc_a/doc_b 값 비교는 그쪽에 저장, 여기는 요약 + 문서 추적)",
       "properties": {
         "field": { "type": "string" },
         "description": { "type": "string" },
         "severity": { "$ref": "common_component_output.schema.json#/$defs/severity" },
+        "related_documents": {
+          "type": "array",
+          "minItems": 2,
+          "description": "불일치가 발생한 비교 대상 문서들 (Consistency Check의 doc_a/doc_b 추적용)",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/document_id" }
+        },
         "review_required": { "type": "boolean" }
       },
       "required": ["field", "description", "severity"]

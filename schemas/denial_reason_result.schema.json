@@ -34,6 +34,19 @@
           "type": "string",
           "description": "R코드의 한국어 표시명. 예: 기왕증 / 기존 질환 기여도"
         },
+        "candidate_codes": {
+          "type": "array",
+          "maxItems": 3,
+          "description": "Top-3 평가용 후보 R코드 (confidence 내림차순, 첫 항목은 taxonomy_code와 일치). 감액사유 Top-3 일치율 75% 지표(wiki/evaluation/metrics.md) 산정에 사용",
+          "items": {
+            "type": "object",
+            "properties": {
+              "taxonomy_code": { "$ref": "common_component_output.schema.json#/$defs/taxonomy_code" },
+              "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" }
+            },
+            "required": ["taxonomy_code", "confidence"]
+          }
+        },
         "raw_reason_text": {
           "type": "string",
           "description": "보험사 원문 표현 그대로"

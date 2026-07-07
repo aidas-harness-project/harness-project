@@ -39,6 +39,15 @@
           "description": "owner: CaseIntake. 원본 경로 (data/raw/CASE_XXX/...)",
           "pattern": "^data/raw/"
         },
+        "file_format": {
+          "enum": ["pdf", "image", "text", "spreadsheet", "other"],
+          "description": "owner: CaseIntake. Document Intake 요구사항(파일명·형식·크기)의 '형식'"
+        },
+        "file_size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "owner: CaseIntake. Document Intake 요구사항의 '크기'"
+        },
         "pages": {
           "type": ["integer", "null"],
           "minimum": 1,
@@ -71,7 +80,7 @@
           "description": "owner: DocumentClassification. 분류 전에는 null"
         }
       },
-      "required": ["document_id", "file_name", "file_path", "ocr_status"]
+      "required": ["document_id", "file_name", "file_path", "file_format", "file_size_bytes", "ocr_status"]
     }
   }
 }

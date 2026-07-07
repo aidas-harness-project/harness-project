@@ -11,7 +11,7 @@ second brain. 운영 규칙은 [Wiki Schema](CLAUDE.md) 참고.
 # 개요
 
 * [프로젝트 개요](overview.md) - PoC 정의, 핵심 질문, 포함/제외 범위.
-* [파이프라인 구조](pipeline.md) - Phase 1(최초 청구/검토)과 Phase 2(반려·감액 대응)로 나뉜 파이프라인 구조와 구현용 7개 묶음 Agent, 3주 일정 매핑.
+* [파이프라인 구조](pipeline.md) - Phase 1(최초 청구/검토)과 Phase 2(반려·감액 대응) 파이프라인의 컴포넌트별 input/output 파일, 구현용 7개 묶음 Agent, 3주 일정 매핑.
 
 # 에이전트 (agents/)
 
