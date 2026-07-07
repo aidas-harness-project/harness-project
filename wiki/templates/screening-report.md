@@ -3,7 +3,7 @@ type: Template
 title: 스크리닝 리포트 템플릿
 description: 핵심항목·청구담보·감액사유·불일치를 통합한 1차 스크리닝 리포트의 7개 섹션 구조.
 tags: [template, screening]
-timestamp: 2026-07-06T00:00:00+09:00
+timestamp: 2026-07-07T00:00:00+09:00
 ---
 
 파이프라인 1~9단계 결과를 통합해 자동 생성한다. 부족서류 후보와
@@ -60,7 +60,8 @@ timestamp: 2026-07-06T00:00:00+09:00
 
 > ⚠️ I/O 계약 초안의 예시에는 **§7 "1차 판단"이 빠져 있다.** JSON에
 > `preliminary_assessment`(진행 가능성·난이도·우선 검토 포인트) 블록을
-> 추가해서 이 템플릿의 7개 섹션을 모두 채울 것.
+> 추가해서 이 템플릿의 7개 섹션을 모두 채울 것 — 블록 정의와 처리
+> 시점은 [해결 계획](../answers/pipeline-understanding-and-gap-plan.md) 참고.
 
 # 섹션별 데이터 출처
 

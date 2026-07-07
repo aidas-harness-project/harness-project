@@ -3,7 +3,7 @@ type: Architecture
 title: Agent Harness 파이프라인
 description: Phase 1(최초 청구/검토)과 Phase 2(반려·감액 대응)로 나뉜 파이프라인 구조와 구현용 7개 묶음 Agent, 3주 일정 매핑.
 tags: [pipeline, agent-harness]
-timestamp: 2026-07-06T00:00:00+09:00
+timestamp: 2026-07-07T00:00:00+09:00
 ---
 
 파이프라인은 두 Phase로 나뉜다 — 실제 손해사정 업무 흐름(청구 → 보험사
@@ -83,6 +83,9 @@ Phase 2 소속이지만, [스크리닝 리포트](templates/screening-report.md)
 `document_manifest.json` → `classification_result.json` →
 `extracted_claim_fields.json` → `denial_reason_result.json` →
 `screening_report.json`.
+
+파이프라인을 처음 읽을 때의 관점 정리와 미해결 갭 2건의 해결 계획은
+[파이프라인 이해 가이드](answers/pipeline-understanding-and-gap-plan.md) 참고.
 
 # 3주 일정 매핑
 

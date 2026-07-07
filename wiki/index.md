@@ -63,6 +63,10 @@ second brain. 운영 규칙은 [Wiki Schema](CLAUDE.md) 참고.
 * [From Idea to MVP (Launchifier Framework)](sources/mvp-launchifier.md) - 아이디어 검증부터 출시 후 스케일/피벗 결정까지 MVP 개발 14단계를 정리한 Igor Royzis의 가이드.
 * [컴포넌트별 I/O 계약 초안 (GPT 정리)](sources/pipeline-io-contracts.md) - Phase 1 18개·Phase 2 13개 컴포넌트의 입출력 JSON 예시, 공통 필드, 파일 매핑, 우선 확정할 핵심 I/O 5개를 정의한 계약 초안.
 
+# 답변 (answers/)
+
+* [파이프라인 이해 가이드 + 미해결 갭 해결 계획](answers/pipeline-understanding-and-gap-plan.md) - 파이프라인을 3개 관점(Phase·묶음 Agent·backbone I/O)으로 읽는 법과, 소스 분석에서 나온 갭 2건의 해결 계획.
+
 # 참고 자료 (references/)
 
 * [PoC 가이드](references/poc-guide.md) - 스크리닝→약관 매핑→반박 포인트→손사서 초안 Agent Harness PoC의 기획·일정·평가 문서.

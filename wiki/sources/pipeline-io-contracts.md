@@ -4,7 +4,7 @@ title: 컴포넌트별 I/O 계약 초안 (GPT 정리)
 description: Phase 1 18개·Phase 2 13개 컴포넌트의 입출력 JSON 예시, 공통 필드, 파일 매핑, 우선 확정할 핵심 I/O 5개를 정의한 계약 초안.
 resource: ../../sources/pipeline_input-output.md
 tags: [source, pipeline, io-contract, schema]
-timestamp: 2026-07-06T00:00:00+09:00
+timestamp: 2026-07-07T00:00:00+09:00
 ---
 
 # 핵심 내용
@@ -55,6 +55,9 @@ optional 명시, Evidence Validation의 불일치 명시적 출력
 > ⚠️ 갭 2: `evaluation_result.json`은 케이스 단위다. PoC 성공 기준은
 > **전체 케이스 집계**(정확도 80% 등)이므로 케이스별 결과를 합산하는
 > aggregate 평가 리포트가 별도로 필요하다.
+
+갭 1·2의 해결 계획(주차 배치 포함)은
+[파이프라인 이해 가이드](../answers/pipeline-understanding-and-gap-plan.md)에 정리됨.
 
 구현 시 주의: ① `document_manifest.json`은 Intake가 만들고 OCR·분류가
 계속 갱신하는 공유 상태다 — 단계별로 자기 필드만 추가하는 규율이 없으면

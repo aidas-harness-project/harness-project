@@ -3,7 +3,7 @@ type: Decision Criteria
 title: Go / No-Go 기준
 description: 3주 PoC 종료 시 다음 단계 진행 여부를 판정하는 조건 목록.
 tags: [evaluation, decision]
-timestamp: 2026-07-06T00:00:00+09:00
+timestamp: 2026-07-07T00:00:00+09:00
 ---
 
 # Go — 아래를 만족하면 다음 단계 진행
@@ -21,6 +21,13 @@ timestamp: 2026-07-06T00:00:00+09:00
 - 약관 매핑이 무작위 수준이다. → [Policy Mapping](../agents/policy-mapping.md)
 - 초안이 환각이 많아 검수 비용이 더 든다. → [Critic Agent](../agents/critic.md)
 - 전문가가 "실무 보조도구로 사용하기 어렵다"고 평가한다.
+
+# 판정 자료
+
+케이스별 `evaluation_result.json`을 합산한 `evaluation_summary.json`이
+이 기준의 판정 자료가 된다 — 설계는
+[파이프라인 이해 가이드](../answers/pipeline-understanding-and-gap-plan.md)의
+갭 2 해결 계획 참고.
 
 # 제품 관점의 위치
 

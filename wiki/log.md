@@ -3,6 +3,10 @@
 엔트리 형식: `* **<op>** | <대상> — <설명>` (op: ingest / creation / update / answer / lint / deprecation).
 최근 5개 보기: `grep -E "^\* \*\*" wiki/log.md | head -5`
 
+## 2026-07-07
+
+* **answer** | 파이프라인 이해 + 갭 해결 계획 — 파이프라인을 3개 관점(Phase·묶음 Agent·backbone I/O)으로 읽는 가이드와 미해결 갭 2건(§7 `preliminary_assessment` 추가는 Week 2, aggregate 평가 리포트는 Week 3)의 해결 계획을 [answers/](answers/pipeline-understanding-and-gap-plan.md)에 파일링 (`answers/` 신설). [파이프라인](pipeline.md)·[스크리닝 리포트](templates/screening-report.md)·[I/O 계약](sources/pipeline-io-contracts.md)·[Go/No-Go](evaluation/go-no-go.md)에서 링크.
+
 ## 2026-07-06
 
 * **ingest** | 컴포넌트별 I/O 계약 초안 (GPT 정리) — `sources/pipeline_input-output.md` 검토 후 채택. [요약+평가 페이지](sources/pipeline-io-contracts.md) 생성, [표준 출력 계약](templates/component-output.md)을 실행 메타데이터(run_id·model_info 등) 포함으로 확장, [문서 유형](taxonomy/document-types.md)·[청구담보](taxonomy/claim-coverages.md)에 영어 표준 코드 열 추가, [스크리닝 리포트](templates/screening-report.md)에 JSON 병행 출력 규칙과 §7 누락 경고 추가. 갭 2건 기록(스크리닝 §7 1차 판단 누락, 케이스 집계 평가 리포트 부재).
