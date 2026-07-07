@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "denial_reason_result.schema.json",
+  "title": "denial_reason_result.json — 보험사 주장 요약표 v0.1",
+  "description": "보험사 안내문에서 반려·감액·부지급 사유를 추출하고 R코드 taxonomy로 분류한 결과. DenialResponseAgent가 생성 (아키텍처상 Phase 2 소속이나 PoC 일정에서는 Week 2에 당겨 실행). 판단성 출력이므로 안전 필드(source_grounded 등) 포함을 권장한다.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "denial_reasons": {
+          "type": "array",
+          "description": "추출된 사유 목록. 사유가 없으면 빈 배열 (부지급·감액 없음).",
+          "items": { "$ref": "#/$defs/denial_reason" }
+        }
+      },
+      "required": ["denial_reasons"]
+    }
+  ],
+  "$defs": {
+    "denial_reason": {
+      "type": "object",
+      "properties": {
+        "reason_id": {
+          "type": "string",
+          "pattern": "^DR_[0-9]+$"
+        },
+        "reason_type": {
+          "enum": ["denial", "reduction", "partial_payment", "document_request", "other"],
+          "description": "denial=부지급, reduction=감액, partial_payment=일부지급, document_request=서류요청"
+        },
+        "taxonomy_code": { "$ref": "common_component_output.schema.json#/$defs/taxonomy_code" },
+        "taxonomy_label": {
+          "type": "string",
+          "description": "R코드의 한국어 표시명. 예: 기왕증 / 기존 질환 기여도"
+        },
+        "raw_reason_text": {
+          "type": "string",
+          "description": "보험사 원문 표현 그대로"
+        },
+        "insurer_claim_summary": {
+          "type": "string",
+          "description": "보험사 주장 요약. 단정 대신 추정 표현 사용 (금지 표현 가이드 준수)"
+        },
+        "reduction_rate": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "감액률. 해당 없으면 null"
+        },
+        "reduction_amount": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "감액금액(원). 원문에 없으면 null"
+        },
+        "requested_documents": {
+          "type": "array",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/document_type" }
+        },
+        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        },
+        "review_required": { "type": "boolean" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+      },
+      "required": [
+        "reason_id",
+        "reason_type",
+        "taxonomy_code",
+        "raw_reason_text",
+        "confidence",
+        "evidence_references",
+        "review_required"
+      ]
+    }
+  }
+}

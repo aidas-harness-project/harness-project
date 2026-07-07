@@ -33,8 +33,8 @@ timestamp: 2026-07-07T00:00:00+09:00
 | --- | --- | --- |
 | 모순 1 | 파이프라인 초안에 사건 유형 분류 누락 | ✅ 해소 — Phase 1 #12 추가, I/O 계약에 `template_id`까지 반영 |
 | 모순 2 | 감액사유 추출이 Week 3으로 밀림 | ✅ 해소 — Week 2로 당김, I/O 계약에 반영 |
-| 갭 1 | `screening_report.json`에 §7 "1차 판단" 없음 | ⛔ 미해결 → 아래 계획 |
-| 갭 2 | 평가가 케이스 단위뿐, 성공 기준은 전체 집계 | ⛔ 미해결 → 아래 계획 |
+| 갭 1 | `screening_report.json`에 §7 "1차 판단" 없음 | ✅ 해소 (2026-07-07) — `schemas/screening_report.schema.json` v0.1에 `preliminary_assessment` 필수 필드로 반영 |
+| 갭 2 | 평가가 케이스 단위뿐, 성공 기준은 전체 집계 | ⛔ 미해결 → 아래 계획 (Week 3) |
 
 모순 1·2의 발견·해소 경위는 [파이프라인 초안 평가](../sources/pipeline-rough-gpt.md),
 갭 1·2의 발견 경위는 [I/O 계약 평가](../sources/pipeline-io-contracts.md) 참고.

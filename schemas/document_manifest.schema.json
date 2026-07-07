@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "document_manifest.schema.json",
+  "title": "document_manifest.json — 케이스 문서 목록표 v0.1",
+  "description": "케이스 안의 모든 문서 목록과 처리 상태(목차이자 출석부). 컴포넌트 출력이 아니라 여러 단계가 이어 갱신하는 공유 상태 파일이므로 공통 출력 계약 envelope를 쓰지 않는다. 갱신 규율: 각 단계는 자기 owner 필드만 추가하고 기존 필드를 수정하지 않는다 (필드별 owner는 각 필드 description에 명시).",
+  "type": "object",
+  "properties": {
+    "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "owner: CaseIntake"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "owner: 마지막으로 갱신한 단계가 기록"
+    },
+    "documents": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/document_entry" }
+    }
+  },
+  "required": ["case_id", "documents"],
+  "$defs": {
+    "document_entry": {
+      "type": "object",
+      "properties": {
+        "document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id",
+          "description": "owner: CaseIntake"
+        },
+        "file_name": {
+          "type": "string",
+          "description": "owner: CaseIntake"
+        },
+        "file_path": {
+          "type": "string",
+          "description": "owner: CaseIntake. 원본 경로 (data/raw/CASE_XXX/...)",
+          "pattern": "^data/raw/"
+        },
+        "pages": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "owner: OCR. OCR 전에는 null"
+        },
+        "ocr_status": {
+          "enum": ["pending", "completed", "failed"],
+          "description": "owner: OCR. CaseIntake가 pending으로 초기화"
+        },
+        "ocr_text_path": {
+          "type": ["string", "null"],
+          "description": "owner: OCR. data/processed/CASE_XXX/DOC_XXX/text.md"
+        },
+        "redacted_text_path": {
+          "type": ["string", "null"],
+          "description": "owner: Redaction. data/processed/CASE_XXX/DOC_XXX/redacted_text.md"
+        },
+        "document_type": {
+          "anyOf": [
+            { "$ref": "common_component_output.schema.json#/$defs/document_type" },
+            { "type": "null" }
+          ],
+          "description": "owner: DocumentClassification. 분류 전에는 null"
+        },
+        "classification_confidence": {
+          "anyOf": [
+            { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+            { "type": "null" }
+          ],
+          "description": "owner: DocumentClassification. 분류 전에는 null"
+        }
+      },
+      "required": ["document_id", "file_name", "file_path", "ocr_status"]
+    }
+  }
+}

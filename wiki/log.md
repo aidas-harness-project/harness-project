@@ -5,6 +5,7 @@
 
 ## 2026-07-07
 
+* **creation** | `schemas/` JSON Schema 초안 v0.1 — 공통 계약 + backbone 5개(manifest·classification·claim_fields·denial_reason·screening_report)를 [I/O 계약](sources/pipeline-io-contracts.md) 원자료 예시 기반으로 작성, jsonschema로 예시 통과·위반 거부까지 검증. 갭 1 해소: `screening_report.schema.json`에 `preliminary_assessment` 필수 블록 추가. 구현 주의 반영: [필드 타입 3종 고정](templates/component-output.md), manifest 필드별 owner 명시, `source_grounded→review_required` 규칙 스키마 강제. [스크리닝 리포트](templates/screening-report.md)·[해결 계획](answers/pipeline-understanding-and-gap-plan.md)의 갭 1 상태 갱신.
 * **answer** | 파이프라인 이해 + 갭 해결 계획 — 파이프라인을 3개 관점(Phase·묶음 Agent·backbone I/O)으로 읽는 가이드와 미해결 갭 2건(§7 `preliminary_assessment` 추가는 Week 2, aggregate 평가 리포트는 Week 3)의 해결 계획을 [answers/](answers/pipeline-understanding-and-gap-plan.md)에 파일링 (`answers/` 신설). [파이프라인](pipeline.md)·[스크리닝 리포트](templates/screening-report.md)·[I/O 계약](sources/pipeline-io-contracts.md)·[Go/No-Go](evaluation/go-no-go.md)에서 링크.
 
 ## 2026-07-06

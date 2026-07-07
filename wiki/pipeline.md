@@ -16,24 +16,24 @@ timestamp: 2026-07-07T00:00:00+09:00
 케이스 원자료 입력 → 문서 구조화 → 약관 매핑 → **스크리닝 리포트 +
 손사서 초안 v1**.
 
-| 순서 | 컴포넌트 | 산출물 | 관련 개념 |
-| --- | --- | --- | --- |
-| 1 | Case Intake | case/document manifest | [Document Intake](agents/document-intake.md) |
-| 2 | OCR / Text Extraction | 페이지별 텍스트, 품질 로그 | [OCR Layer](agents/ocr-layer.md) |
-| 3 | Redaction | 가명처리 텍스트, redaction log | [Redaction](agents/redaction.md) |
-| 4 | Document Classification | 문서 유형 + confidence | [Document Classification](agents/document-classification.md) |
-| 5 | Document Preprocessing | cleaned text, page chunks | (신규 — 문서 처리 묶음에 포함) |
-| 6 | (optional) Vector Indexing | 검색 인덱스 | 케이스 수 적은 PoC에서는 보류 |
-| 7~9 | Policy Processing → Clause Extraction → Normalization | 정규화된 약관 조항 JSON | [Policy Mapping](agents/policy-mapping.md)의 전처리 세분화 |
-| 10 | Claim Field Extraction | 핵심항목 JSON | [Field Extraction](agents/field-extraction.md) |
-| 11 | Coverage Identification | 청구담보 + 근거 | [Claim Coverage](agents/claim-coverage.md) |
-| 12 | **Case Type Classification** | 사건 유형 | [Case Type](agents/case-type.md) — 초안에 누락돼 있어 추가 (P0, 템플릿 선택 기준) |
-| 13 | Requirement Matching | 담보별 지급요건-자료 매칭 | [Policy Mapping](agents/policy-mapping.md) 확장 |
-| 14 | Evidence Validation | 근거 검증 + **문서 간 불일치**(명시적 출력 유지) | [Consistency Check](agents/consistency-check.md) |
-| 15 | Screening Report Generation | 스크리닝 리포트 | [템플릿](templates/screening-report.md) |
-| 16 | Draft Report Generation v1 | 손사서 초안 v1 | [Draft Writer](agents/draft-writer.md), [템플릿](templates/draft-report.md) |
-| 17 | Critic Agent | 검수 태그, reviewed 초안 | [Critic](agents/critic.md) |
-| 18 | Human Review → Evaluation | 전문가 검수, 평가 리포트 | [Evaluation Harness](agents/evaluation-harness.md) |
+| 순서  | 컴포넌트                                                  | 산출물                             | 관련 개념                                                                    |
+| --- | ----------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------ |
+| 1   | Case Intake                                           | case/document manifest          | [Document Intake](agents/document-intake.md)                             |
+| 2   | OCR / Text Extraction                                 | 페이지별 텍스트, 품질 로그                 | [OCR Layer](agents/ocr-layer.md)                                         |
+| 3   | Redaction                                             | 가명처리 텍스트, redaction log         | [Redaction](agents/redaction.md)                                         |
+| 4   | Document Classification                               | 문서 유형 + confidence              | [Document Classification](agents/document-classification.md)             |
+| 5   | Document Preprocessing                                | cleaned text, page chunks       | (신규 — 문서 처리 묶음에 포함)                                                      |
+| 6   | (optional) Vector Indexing                            | 검색 인덱스                          | 케이스 수 적은 PoC에서는 보류                                                       |
+| 7~9 | Policy Processing → Clause Extraction → Normalization | 정규화된 약관 조항 JSON                 | [Policy Mapping](agents/policy-mapping.md)의 전처리 세분화                      |
+| 10  | Claim Field Extraction                                | 핵심항목 JSON                       | [Field Extraction](agents/field-extraction.md)                           |
+| 11  | Coverage Identification                               | 청구담보 + 근거                       | [Claim Coverage](agents/claim-coverage.md)                               |
+| 12  | **Case Type Classification**                          | 사건 유형                           | [Case Type](agents/case-type.md) — 초안에 누락돼 있어 추가 (P0, 템플릿 선택 기준)         |
+| 13  | Requirement Matching                                  | 담보별 지급요건-자료 매칭                  | [Policy Mapping](agents/policy-mapping.md) 확장                            |
+| 14  | Evidence Validation                                   | 근거 검증 + **문서 간 불일치**(명시적 출력 유지) | [Consistency Check](agents/consistency-check.md)                         |
+| 15  | Screening Report Generation                           | 스크리닝 리포트                        | [템플릿](templates/screening-report.md)                                     |
+| 16  | Draft Report Generation v1                            | 손사서 초안 v1                       | [Draft Writer](agents/draft-writer.md), [템플릿](templates/draft-report.md) |
+| 17  | Critic Agent                                          | 검수 태그, reviewed 초안              | [Critic](agents/critic.md)                                               |
+| 18  | Human Review → Evaluation                             | 전문가 검수, 평가 리포트                  | [Evaluation Harness](agents/evaluation-harness.md)                       |
 
 # Phase 2 — 보험사 반려/감액 이후 대응
 
@@ -83,6 +83,11 @@ Phase 2 소속이지만, [스크리닝 리포트](templates/screening-report.md)
 `document_manifest.json` → `classification_result.json` →
 `extracted_claim_fields.json` → `denial_reason_result.json` →
 `screening_report.json`.
+
+**JSON Schema 초안 v0.1이 `schemas/`에 있다** — 공통 계약
+(`common_component_output.schema.json`) + backbone 5개. 원자료 예시로
+검증 완료 (`preliminary_assessment` 필수화, 필드 타입 3종 고정,
+manifest 필드별 owner 명시 포함).
 
 파이프라인을 처음 읽을 때의 관점 정리와 미해결 갭 2건의 해결 계획은
 [파이프라인 이해 가이드](answers/pipeline-understanding-and-gap-plan.md) 참고.

@@ -3,7 +3,7 @@ type: Template
 title: 컴포넌트 표준 출력 계약
 description: 파이프라인의 모든 컴포넌트 출력이 공통으로 포함해야 하는 필드 — 실행 메타데이터, confidence, 근거 참조, 검수 플래그, 환각·금지표현 체크.
 tags: [template, pipeline, contract]
-timestamp: 2026-07-06T00:00:00+09:00
+timestamp: 2026-07-07T00:00:00+09:00
 ---
 
 [파이프라인](../pipeline.md)의 모든 컴포넌트 출력 JSON은 아래 공통 필드를
@@ -67,6 +67,10 @@ timestamp: 2026-07-06T00:00:00+09:00
   위반 여부. [Critic Agent](../agents/critic.md)가 최종 검증한다.
 - 공통 계약은 `schemas/common_component_output.schema.json`으로 먼저
   고정하고, 개별 컴포넌트 schema를 Week 1 → 2 → 3 순으로 확정한다.
+  **v0.1 초안 작성됨** (2026-07-07) — 공통 계약 + backbone 5개.
+  공통 스키마는 `source_grounded: false → review_required: true`,
+  `review_required: true → reviewer_role 필수` 규칙을 스키마 수준에서
+  강제한다.
 
 # Citations
 

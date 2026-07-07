@@ -58,10 +58,11 @@ timestamp: 2026-07-07T00:00:00+09:00
 `screening_report.json`(machine-readable)과 `screening_report.md`(사람용)를
 함께 생성한다 — 형식은 [I/O 계약](../sources/pipeline-io-contracts.md) 참고.
 
-> ⚠️ I/O 계약 초안의 예시에는 **§7 "1차 판단"이 빠져 있다.** JSON에
+> ⚠️(해소됨 2026-07-07) I/O 계약 초안의 예시에는 §7 "1차 판단"이 빠져
+> 있었으나, `schemas/screening_report.schema.json` v0.1에서
 > `preliminary_assessment`(진행 가능성·난이도·우선 검토 포인트) 블록을
-> 추가해서 이 템플릿의 7개 섹션을 모두 채울 것 — 블록 정의와 처리
-> 시점은 [해결 계획](../answers/pipeline-understanding-and-gap-plan.md) 참고.
+> **필수 필드**로 추가해 해소 — 경위는
+> [해결 계획](../answers/pipeline-understanding-and-gap-plan.md) 참고.
 
 # 섹션별 데이터 출처
 

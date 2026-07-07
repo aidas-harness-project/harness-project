@@ -47,10 +47,11 @@ optional 명시, Evidence Validation의 불일치 명시적 출력
 
 발견된 보완점 (반영 완료 또는 구현 시 주의):
 
-> ⚠️ 갭 1: screening_report 예시(JSON·md 모두)에 위키
+> ⚠️ 갭 1 (해소됨 2026-07-07): screening_report 예시(JSON·md 모두)에 위키
 > [스크리닝 리포트 템플릿](../templates/screening-report.md)의
 > **§7 "1차 판단"(진행 가능성·난이도·우선 검토 포인트)이 없다.**
-> JSON에 `preliminary_assessment` 블록을 추가해야 한다.
+> → `schemas/screening_report.schema.json` v0.1에서
+> `preliminary_assessment` 블록을 필수 필드로 추가해 해소.
 
 > ⚠️ 갭 2: `evaluation_result.json`은 케이스 단위다. PoC 성공 기준은
 > **전체 케이스 집계**(정확도 80% 등)이므로 케이스별 결과를 합산하는

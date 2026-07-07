@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "screening_report.schema.json",
+  "title": "screening_report.json — 1차 스크리닝 브리핑 v0.1",
+  "description": "앞 단계 결과를 모은 machine-readable 스크리닝 리포트. ReportGenerationAgent가 생성하고 이 JSON에서 screening_report.md(사람용)를 렌더링한다. 섹션 구성은 wiki/templates/screening-report.md의 7개 섹션과 1:1 대응 — 원문 계약 초안에 없던 §7 '1차 판단'을 preliminary_assessment 블록으로 추가했다 (갭 1 해소).",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "report_path": {
+          "type": "string",
+          "description": "렌더링된 md 리포트 경로. outputs/CASE_XXX/screening_report.md"
+        },
+        "case_summary": { "$ref": "#/$defs/case_summary" },
+        "insurer_position": { "$ref": "#/$defs/insurer_position" },
+        "key_issues": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/key_issue" }
+        },
+        "inconsistencies": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/inconsistency" }
+        },
+        "missing_documents": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/missing_document" }
+        },
+        "review_points": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/review_point" }
+        },
+        "preliminary_assessment": { "$ref": "#/$defs/preliminary_assessment" },
+        "draft_writer_input_summary": { "$ref": "#/$defs/draft_writer_input_summary" }
+      },
+      "required": [
+        "report_path",
+        "case_summary",
+        "insurer_position",
+        "key_issues",
+        "inconsistencies",
+        "missing_documents",
+        "review_points",
+        "preliminary_assessment"
+      ]
+    }
+  ],
+  "$defs": {
+    "case_summary": {
+      "type": "object",
+      "description": "템플릿 §1 사건 개요. 출처: extracted_claim_fields, coverage_result, case_type_result",
+      "properties": {
+        "case_type": {
+          "type": "string",
+          "description": "사건 유형 (wiki/taxonomy/case-types.md). 예: 후유장해, 진단·수술비, 실손, 배상책임, 기타"
+        },
+        "main_diagnosis": { "type": "string" },
+        "kcd_code": { "type": ["string", "null"] },
+        "accident_date": { "type": ["string", "null"], "format": "date" },
+        "onset_date": { "type": ["string", "null"], "format": "date" },
+        "treatment_period": {
+          "type": ["object", "null"],
+          "properties": {
+            "start_date": { "type": "string", "format": "date" },
+            "end_date": { "type": ["string", "null"], "format": "date" }
+          },
+          "required": ["start_date"]
+        },
+        "claim_coverages": {
+          "type": "array",
+          "description": "표준 담보명 목록 (wiki/taxonomy/claim-coverages.md)",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["case_type", "main_diagnosis", "claim_coverages"]
+    },
+    "insurer_position": {
+      "type": "object",
+      "description": "템플릿 §2 보험사 판단. 출처: denial_reason_result",
+      "properties": {
+        "has_denial_or_reduction": { "type": "boolean" },
+        "main_reason_code": {
+          "anyOf": [
+            { "$ref": "common_component_output.schema.json#/$defs/taxonomy_code" },
+            { "type": "null" }
+          ]
+        },
+        "main_reason_label": { "type": ["string", "null"] },
+        "summary": {
+          "type": ["string", "null"],
+          "description": "보험사 주장 요약. 단정 대신 추정 표현 사용"
+        },
+        "reduction_amount": { "type": ["number", "null"], "minimum": 0 }
+      },
+      "required": ["has_denial_or_reduction"]
+    },
+    "key_issue": {
+      "type": "object",
+      "description": "템플릿 §3 핵심 쟁점",
+      "properties": {
+        "issue_id": { "type": "string", "pattern": "^ISSUE_[0-9]+$" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "related_documents": {
+          "type": "array",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/document_id" }
+        },
+        "review_required": { "type": "boolean" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+      },
+      "required": ["issue_id", "title", "description"]
+    },
+    "inconsistency": {
+      "type": "object",
+      "description": "템플릿 §4 문서 간 불일치. 출처: evidence_validation_result",
+      "properties": {
+        "field": { "type": "string" },
+        "description": { "type": "string" },
+        "severity": { "$ref": "common_component_output.schema.json#/$defs/severity" },
+        "review_required": { "type": "boolean" }
+      },
+      "required": ["field", "description", "severity"]
+    },
+    "missing_document": {
+      "type": "object",
+      "description": "템플릿 §5 추가 필요 서류",
+      "properties": {
+        "document_type": {
+          "type": "string",
+          "description": "표준 코드 또는 세부 서류명. 예: disability_certificate"
+        },
+        "reason": { "type": "string" }
+      },
+      "required": ["document_type", "reason"]
+    },
+    "review_point": {
+      "type": "object",
+      "description": "템플릿 §6 전문가 검수 포인트",
+      "properties": {
+        "point": { "type": "string" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" },
+        "priority": { "$ref": "common_component_output.schema.json#/$defs/severity" }
+      },
+      "required": ["point", "reviewer_role", "priority"]
+    },
+    "preliminary_assessment": {
+      "type": "object",
+      "description": "템플릿 §7 1차 판단. 파이프라인에서 가장 판단성이 강한 출력이므로 근거 연결과 검수 라우팅을 강제한다 — 리포트 전체의 review_required를 true, reviewer_role을 손해사정사로 두는 것을 기본값으로 한다.",
+      "properties": {
+        "feasibility": {
+          "enum": ["high", "medium", "low"],
+          "description": "진행 가능성"
+        },
+        "difficulty": {
+          "enum": ["high", "medium", "low"],
+          "description": "난이도"
+        },
+        "priority_review_points": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "우선 검토 포인트"
+        },
+        "rationale_evidence_references": {
+          "type": "array",
+          "description": "판단 근거의 원문 연결. 비어 있으면 source_grounded: false로 간주",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        }
+      },
+      "required": ["feasibility", "difficulty", "priority_review_points"]
+    },
+    "draft_writer_input_summary": {
+      "type": "object",
+      "description": "Draft Writer로 넘기는 요약. template_id는 case_type 분류가 결정",
+      "properties": {
+        "recommended_template_id": { "type": "string" },
+        "sections_to_emphasize": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["recommended_template_id"]
+    }
+  }
+}
