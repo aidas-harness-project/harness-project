@@ -12,6 +12,7 @@ second brain. 운영 규칙은 [Wiki Schema](CLAUDE.md) 참고.
 
 * [프로젝트 개요](overview.md) - PoC 정의, 핵심 질문, 포함/제외 범위.
 * [파이프라인 구조](pipeline.md) - Phase 1(최초 청구/검토)과 Phase 2(반려·감액 대응) 파이프라인의 컴포넌트별 input/output 파일, 구현용 7개 묶음 Agent, 3주 일정 매핑.
+* [프로젝트 폴더 구조](project-structure.md) - 하네스 규약(.claude 에이전트·스킬)과 파이프라인 경로 규약(data → outputs)을 결합한 프로젝트 폴더 구조와 정답지 격리 설계.
 
 # 에이전트 (agents/)
 

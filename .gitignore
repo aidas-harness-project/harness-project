@@ -10,3 +10,9 @@ __pycache__/
 
 # Claude Code 로컬 설정
 .claude/settings.local.json
+
+# 파이프라인 실행 데이터 (POC/ 사본 + 중간 산출물 — 원본은 POC/에서 버전 관리)
+data/
+
+# 하네스 실행별 임시 조율 산출물
+_workspace/

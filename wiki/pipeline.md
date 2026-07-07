@@ -21,24 +21,24 @@ Week 1→2→3 순으로 확정 예정 ([I/O 계약](sources/pipeline-io-contrac
 케이스 원자료 입력 → 문서 구조화 → 약관 매핑 → **스크리닝 리포트 +
 손사서 초안 v1**.
 
-| 순서 | 컴포넌트 | Input | Output | 관련 개념 |
-| --- | --- | --- | --- | --- |
-| 1 | Case Intake | `data/raw/CASE_XXX/` 폴더 | `case_manifest.json`, **`document_manifest.json`** (파일명·형식·크기) | [Document Intake](agents/document-intake.md) |
-| 2 | OCR / Text Extraction | manifest + 원본 문서 | `ocr_result.json`, `page_*.md` + manifest 갱신 (`pages`·`ocr_status`·`ocr_text_path`) | [OCR Layer](agents/ocr-layer.md) |
-| 3 | Redaction | `page_*.md` | `redacted_text.md`, `redaction_result.json` + manifest 갱신 (`redacted_text_path`) | [Redaction](agents/redaction.md) |
-| 4 | Document Classification | `redacted_text.md` | **`classification_result.json`** + manifest 갱신 (`document_type`·`classification_confidence`) | [Document Classification](agents/document-classification.md) |
-| 5 | Document Preprocessing | 분류된 문서 텍스트 | `page_chunks.json` | (신규 — 문서 처리 묶음에 포함) |
-| 6 | (optional) Vector Indexing | `page_chunks.json` | `index_metadata.json` | 케이스 수 적은 PoC에서는 보류 |
-| 7~9 | Policy Processing → Clause Extraction → Normalization | 약관 문서 텍스트 (classification으로 선별) | `policy_clause.json` → `policy_clause_extraction_result.json` → `normalized_policy_clause.json` | [Policy Mapping](agents/policy-mapping.md)의 전처리 세분화 |
-| 10 | Claim Field Extraction | 진단서·의무기록 `redacted_text.md` (classification으로 선별) | **`extracted_claim_fields.json`** | [Field Extraction](agents/field-extraction.md) |
-| 11 | Coverage Identification | 보험증권·약관 텍스트 + claim fields | `coverage_result.json` | [Claim Coverage](agents/claim-coverage.md) |
-| 12 | **Case Type Classification** | `extracted_claim_fields` + `coverage_result` | `case_type_result.json` (`template_id` 포함) | [Case Type](agents/case-type.md) — 초안에 누락돼 있어 추가 (P0, 템플릿 선택 기준) |
-| 13 | Requirement Matching | `coverage_result` + `normalized_policy_clause` + claim fields | `requirement_matching_result.json` | [Policy Mapping](agents/policy-mapping.md) 확장 |
-| 14 | Evidence Validation | claim fields + matching + `page_chunks` | `evidence_validation_result.json` (**문서 간 불일치** `inconsistencies` 배열 포함) | [Consistency Check](agents/consistency-check.md) |
-| 15 | Screening Report Generation | 위 구조화 산출물 전체 + **`denial_reason_result.json`** (Week 2 당김) | **`screening_report.json`** (§7 `preliminary_assessment` 필수), `screening_report.md` | [템플릿](templates/screening-report.md) |
-| 16 | Draft Report Generation v1 | `screening_report` + `case_type_result`의 `template_id` | `draft_report_metadata.json`, `draft_report_v1.md` | [Draft Writer](agents/draft-writer.md), [템플릿](templates/draft-report.md) |
-| 17 | Critic Agent | `draft_report_v1.md` | `critic_result.json`, `draft_report_v1_reviewed.md` | [Critic](agents/critic.md) |
-| 18 | Human Review → Evaluation | 산출물 전체 + 정답지 (`POC/` 최종 손사서 — 모델 입력 금지, 평가 전용) | `expert_review.json`, `evaluation_result.json` | [Evaluation Harness](agents/evaluation-harness.md) |
+| 순서  | 컴포넌트                                                  | Input                                                         | Output                                                                                          | 관련 개념                                                                    |
+| --- | ----------------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| 1   | Case Intake                                           | `data/raw/CASE_XXX/` 폴더                                       | `case_manifest.json`, **`document_manifest.json`** (파일명·형식·크기)                                  | [Document Intake](agents/document-intake.md)                             |
+| 2   | OCR / Text Extraction                                 | manifest + 원본 문서                                              | `ocr_result.json`, `page_*.md` + manifest 갱신 (`pages`·`ocr_status`·`ocr_text_path`)             | [OCR Layer](agents/ocr-layer.md)                                         |
+| 3   | Redaction                                             | `page_*.md`                                                   | `redacted_text.md`, `redaction_result.json` + manifest 갱신 (`redacted_text_path`)                | [Redaction](agents/redaction.md)                                         |
+| 4   | Document Classification                               | `redacted_text.md`                                            | **`classification_result.json`** + manifest 갱신 (`document_type`·`classification_confidence`)    | [Document Classification](agents/document-classification.md)             |
+| 5   | Document Preprocessing                                | 분류된 문서 텍스트                                                    | `page_chunks.json`                                                                              | (신규 — 문서 처리 묶음에 포함)                                                      |
+| 6   | (optional) Vector Indexing                            | `page_chunks.json`                                            | `index_metadata.json`                                                                           | 케이스 수 적은 PoC에서는 보류                                                       |
+| 7~9 | Policy Processing → Clause Extraction → Normalization | 약관 문서 텍스트 (classification으로 선별)                               | `policy_clause.json` → `policy_clause_extraction_result.json` → `normalized_policy_clause.json` | [Policy Mapping](agents/policy-mapping.md)의 전처리 세분화                      |
+| 10  | Claim Field Extraction                                | 진단서·의무기록 `redacted_text.md` (classification으로 선별)             | **`extracted_claim_fields.json`**                                                               | [Field Extraction](agents/field-extraction.md)                           |
+| 11  | Coverage Identification                               | 보험증권·약관 텍스트 + claim fields                                    | `coverage_result.json`                                                                          | [Claim Coverage](agents/claim-coverage.md)                               |
+| 12  | **Case Type Classification**                          | `extracted_claim_fields` + `coverage_result`                  | `case_type_result.json` (`template_id` 포함)                                                      | [Case Type](agents/case-type.md) — 초안에 누락돼 있어 추가 (P0, 템플릿 선택 기준)         |
+| 13  | Requirement Matching                                  | `coverage_result` + `normalized_policy_clause` + claim fields | `requirement_matching_result.json`                                                              | [Policy Mapping](agents/policy-mapping.md) 확장                            |
+| 14  | Evidence Validation                                   | claim fields + matching + `page_chunks`                       | `evidence_validation_result.json` (**문서 간 불일치** `inconsistencies` 배열 포함)                        | [Consistency Check](agents/consistency-check.md)                         |
+| 15  | Screening Report Generation                           | 위 구조화 산출물 전체 + **`denial_reason_result.json`** (Week 2 당김)    | **`screening_report.json`** (§7 `preliminary_assessment` 필수), `screening_report.md`             | [템플릿](templates/screening-report.md)                                     |
+| 16  | Draft Report Generation v1                            | `screening_report` + `case_type_result`의 `template_id`        | `draft_report_metadata.json`, `draft_report_v1.md`                                              | [Draft Writer](agents/draft-writer.md), [템플릿](templates/draft-report.md) |
+| 17  | Critic Agent                                          | `draft_report_v1.md`                                          | `critic_result.json`, `draft_report_v1_reviewed.md`                                             | [Critic](agents/critic.md)                                               |
+| 18  | Human Review → Evaluation                             | 산출물 전체 + 정답지 (`POC/` 최종 손사서 — 모델 입력 금지, 평가 전용)                | `expert_review.json`, `evaluation_result.json`                                                  | [Evaluation Harness](agents/evaluation-harness.md)                       |
 
 # Phase 2 — 보험사 반려/감액 이후 대응
 
