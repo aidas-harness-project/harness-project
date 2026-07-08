@@ -1,0 +1,96 @@
+{
+  "case_id": "CASE_003",
+  "run_id": "RUN_20260708_001",
+  "component": "CriticEvaluationAgent",
+  "status": "success",
+  "created_at": "2026-07-08T23:55:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8",
+    "prompt_version": "template_compliance_v0.1"
+  },
+  "confidence": 0.9,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "schema_status": "스키마 미확정 — 신규 산출물. wiki/templates/component-output.md 공통 필드 수동 준수. validate_output.py는 SKIP.",
+  "target_artifact": "outputs/CASE_003/draft_report_v3_newtemplate.md",
+  "evaluation_scope": "form_only",
+  "scope_note": "양식(형식)·격리·문체·금지표현만 평가. 정답지 실제 수치/판단과의 내용 대조는 범위 외이며 수행하지 않음(평가 오염 방지).",
+  "reference_spec": "wiki/templates/draft-report.md (변형 A — 배상책임/후유장해형, 공통 0-1~0-3 + I~VII)",
+  "leak_flag": {
+    "leak_detected": false,
+    "priority": "none",
+    "note": "초안 내 data/ground_truth/에서만 알 수 있는 값(실명·병원명·보험사명·최종 사정금액·최종 판단) 미검출. 비-placeholder 서술은 전부 케이스 입력 DOC_XXX 근거 인용을 동반하여 정답지 유출이 아님."
+  },
+  "axis_results": {
+    "1_form_compliance": {
+      "verdict": "PASS",
+      "rationale": "변형 A 목차(공통 0-1~0-3 + 본문 I~VII) 전 섹션이 순서·번호체계·표 구조·서술 형식대로 존재. 누락·순서오류·표구조 불일치·번호오류 없음.",
+      "checked": [
+        { "section": "공통 0-1 표지", "location": "L19-27", "result": "PASS — 문서표제/성명칸/사정법인명 골격 준수" },
+        { "section": "공통 0-2 제출 공문", "location": "L29-51", "result": "PASS — 발신정보 블록 + 번호 문단 4개(인사/제출취지/정정보완/조정안내) + 별첨 + 직인 순서 일치" },
+        { "section": "공통 0-3 속표지", "location": "L53-58", "result": "PASS — {사정법인명}/CLAIM ADJUSTMENT/주소 골격" },
+        { "section": "I. 사정 요약", "location": "L62-86", "result": "PASS — 1.사정근거(가/나 개조식) · 2.사정금액(위자료/적극/소극/합계 4행 표, 백원미만 절사 라벨) · 3.보험금사정 의견 줄글 + 말미 작성일자·책임사정사·직인" },
+        { "section": "II. 위임 및 보험계약사항", "location": "L90-120", "result": "PASS — 1.위임(가~마) · 2.보험계약사항(가/나/라/마/바/사/아) 개조식. 템플릿과 동일하게 II.2에서 '다.' 항목이 없음(템플릿 원본 letter 체계와 일치)" },
+        { "section": "III. 사고 및 손해 발생", "location": "L124-136", "result": "PASS — 1.사고조사(가.사고일시/나.사고장소/다.사고내용) · 2.손해조사(가.주요상병명/나.치료관계내역/다.현상태)" },
+        { "section": "IV. 관계법규 및 보상책임", "location": "L140-151", "result": "PASS — 1.손해배상책임 · 2.보상책임(가/나/다) · 3.피해자 직접청구권" },
+        { "section": "V. 사정 기초", "location": "L155-178", "result": "PASS — 1.책임의 제한 ~ 7.가동연한 및 중간이자 전 7개 하위절 존재·순서 일치" },
+        { "section": "VI. 손해배상금 사정(계산)", "location": "L182-200", "result": "PASS — 1.위자료~4.손해배상금 산식 개조식, 5.사정금액 '一金 … 整 (₩ …)' 강조 표기, 6.사정결과 및 의견(가.사정의견/나.사정유보)" },
+        { "section": "VII. 증빙자료", "location": "L204-223", "result": "PASS — 테두리 박스 번호 목록(항목명) + 하단 책임사정사·직인" }
+      ]
+    },
+    "2_isolation_compliance": {
+      "verdict": "PASS",
+      "rationale": "정답지 격리 준수. 인적사항·기관명·보험사명·최종 사정금액·최종 판단 등 정답지 고유값이 초안에 유입되지 않음. 모든 해당 필드는 {정보 없음}/placeholder 유지.",
+      "checked": [
+        { "item": "인적사항(성명·생년월일·주소·연락처)", "location": "L96-105", "result": "PASS — 전부 {정보 없음}(가명처리/입력 부재 명시)" },
+        { "item": "보험회사·상품명·증권번호·보험기간", "location": "L109-113", "result": "PASS — 전부 {정보 없음}" },
+        { "item": "병원명", "location": "본문 전반", "result": "PASS — 실제 병원명 없음. '리드힐정형외과'는 DOC_005 p1 근거 인용 동반(케이스 입력값)이며 상급기관명 등은 미기재" },
+        { "item": "최종 사정금액/손해액", "location": "L72-75, L197", "result": "PASS — 위자료·적극·소극·합계·사정금액 전부 {정보 없음}. 정답지 값으로 채우지 않음(초안의 존재 이유 준수)" },
+        { "item": "비-placeholder 수치의 출처", "location": "L117-118, L170, L189", "result": "PASS — 담보한도(1인당 1억/1사고당 3억)·부분 치료비 3,102,000원 등은 DOC_012/DOC_008 케이스 입력 근거 인용 → 정답지 유출 아님" }
+      ]
+    },
+    "3_style_convention_compliance": {
+      "verdict": "PASS",
+      "rationale": "작성 규칙(어투·근거 인용 형식·단정 회피·금액 표기·계산 서식 순서) 준수. 인용 호수 표기 방식에 경미한 스타일 관찰이 있으나 초안 상단에서 인용 규약을 명시적으로 정의하여 관례 일탈이 아님.",
+      "checked": [
+        { "rule": "어투(개조식 판단 / 존칭 의견부)", "result": "PASS — 판단 '~함/~않는다' 개조식, 안내부 존칭 사용" },
+        { "rule": "근거 인용 형식", "result": "PASS(관찰) — 규칙2는 '[별첨 제{n}호]' 패턴을 예시하나 초안은 L12에서 인용 규약을 '[DOC_XXX pN] 유지'로 정의하고 [별첨 DOC_009 …]/[별첨 DOC_003 …] 형태로 자료를 연결. VII 증빙목록이 [DOC_0XX]와 1:1 매핑되어 추적 가능 → 관례 위반 아님. 향후 '제n호' 호수 병기는 스타일 개선 여지" },
+        { "rule": "단정 회피", "result": "PASS — 판단성 문장에 '[검수 필요: 손해사정사/의사]' 태그 및 완곡형 사용" },
+        { "rule": "금액 표기(천단위 콤마 + 一金 … 整 병기 + 백원미만 절사)", "result": "PASS — 100,000,000원 등 콤마 표기, I.2/VI에 백원미만 절사 라벨, VI.5 '一金 … 整 (₩ …)' 병기" },
+        { "rule": "계산 서식 순서(구간 분해 → 소계 → 과실/절사)", "result": "PASS — VI에서 위자료→적극→소극(구간별 소계, 과실 적용)→손해배상금→사정금액(절사) 순서 유지, 표 없이 개조식" }
+      ]
+    },
+    "4_prohibited_language": {
+      "verdict": "PASS",
+      "rationale": "forbidden-expressions.md 대조표 4개 위험 표현('보험사는 반드시 지급'/'의학적으로 명백'/'약관상 부당'/'승소 가능성이 높다') 및 유사 단정형 미검출.",
+      "issues": []
+    }
+  },
+  "findings": [],
+  "observations": [
+    {
+      "severity": "info",
+      "location": "L12, L126, L160, L166",
+      "note": "인용 호수 표기: 규칙2 예시의 '[별첨 제n호]' 대신 '[별첨 DOC_XXX]'/'[DOC_XXX pN]' 사용. 초안이 인용 규약을 자체 정의(L12)하고 DOC id↔증빙목록 매핑이 성립하여 위반 아님. 정답지 실제 양식과의 호수 표기 정합을 원하면 향후 '별첨 제n호' 병기 검토 가능(내용 무관, 표기 스타일 항목)."
+    }
+  ],
+  "evidence_references": [
+    { "document_id": "draft_report_v3_newtemplate.md", "page": 1, "quote": "본 문서는 wiki/templates/draft-report.md의 변형 A — 배상책임/후유장해형 (공통 앞부분 0-1~0-3 + 본문 I~VII) 구조를 따른 초안 골격이다." },
+    { "document_id": "draft_report_v3_newtemplate.md", "page": 1, "quote": "손해액 각 항목은 산정 전 단계로 값을 확정하지 않는다. (I.2 위자료/적극/소극/합계 = 금 {정보 없음}원)" },
+    { "document_id": "draft_report_v3_newtemplate.md", "page": 1, "quote": "5. 사정 금액 (백원미만 절사) : 一金 {정보 없음}整 (₩ {정보 없음})" }
+  ],
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "low",
+    "reason": "양식 준수 평가로, 초안의 비-placeholder 서술이 케이스 입력 DOC_XXX 인용에 연결되고 손해액·인적값은 placeholder 유지. 정답지 유출/환각 값 미검출."
+  },
+  "prohibited_language_check": {
+    "passed": true,
+    "issues": [],
+    "note": "위험 표현 및 유사 단정형 미검출."
+  },
+  "warnings": [
+    "스키마 미확정 상태로 생성(신규 산출물). 공통 필드 수동 준수, validate_output.py SKIP.",
+    "이번 평가는 form_only 범위. 정답지 실제 수치·판단과의 내용 일치 여부는 평가하지 않았으며, 초안의 {정보 없음} 항목을 정답지로 채우라는 권고는 범위상 금지되어 포함하지 않음."
+  ]
+}

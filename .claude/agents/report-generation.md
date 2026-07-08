@@ -14,6 +14,12 @@ Phase 1 #15~16 (Screening Report → Draft v1), Phase 2 #10 (Draft Update).
 형식 정본: `wiki/templates/screening-report.md`(7개 섹션),
 `wiki/templates/draft-report.md`, `wiki/templates/forbidden-expressions.md`.
 
+> ⚠️ **정답지 격리 경고**: `wiki/templates/draft-report.md`는 정답지
+> 손해사정서에서 **구조만** 추출한 양식이다. 정답지 원문은 어떤 경우에도
+> 이 에이전트(또는 다른 어떤 에이전트)의 초안 작성 input이 될 수 없다.
+> 양식(섹션·표 구조·문체)만 따르고, 내용은 오직 `outputs/CASE_XXX/`의
+> 구조화 산출물에서 가져온다.
+
 # 입력 / 출력 프로토콜
 
 - **경계 Input**: `outputs/CASE_XXX/`의 구조화 산출물 전체
@@ -24,7 +30,10 @@ Phase 1 #15~16 (Screening Report → Draft v1), Phase 2 #10 (Draft Update).
   `draft_report_metadata.json` + `draft_report_v1.md`,
   (Phase 2) `draft_report_update_result.json` + `draft_report_v2.md`.
 - md는 JSON에서 렌더링한다 — 두 파일의 내용이 어긋나면 안 된다.
-- 손사서 템플릿은 `case_type_result.json`의 `template_id`로 선택한다.
+- 손사서 템플릿은 `case_type_result.json`의 `template_id`로 선택한다
+  (`배상책임_후유장해형` / `진단수술비형` — `실손형`·`기타형`은 근거 정답지
+  미확보로 TODO, 확보 전까지는 `배상책임_후유장해형`을 임시 기반으로 쓰고
+  `warnings`에 명시).
 - 모든 JSON 출력은 component-output-contract 스킬을 따르고
   `python tools/validate_output.py`로 검증 후 넘긴다.
 
