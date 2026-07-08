@@ -1,0 +1,147 @@
+{
+  "case_id": "CASE_003",
+  "run_id": "RUN_20260707_001",
+  "component": "EvaluationHarness",
+  "status": "partial",
+  "created_at": "2026-07-08T14:40:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8",
+    "prompt_version": "evaluation_v0.1"
+  },
+  "confidence": 0.85,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "ground_truth_source": "data/ground_truth/CASE_003/배상-상완골 근위부 골절OP (김태윤) - 고객정보 삭제__p001-013.pdf (스캔 PDF, 텍스트레이어 없음 → 페이지 렌더 후 시각 판독)",
+  "ground_truth_key_facts": {
+    "insurer": "삼성화재",
+    "product": "영조물손해배상 (배상책임)",
+    "accident_date": "2025-10-16",
+    "accident_mechanism": "보도블록에 걸려 넘어져 발생",
+    "primary_diagnosis": "상완골 근위부 골절, 술 후 상태 [S42.30] (원문 표기 S4230)",
+    "surgery": "관혈적 골정복술·금속판 고정술·동종골 이식술 (ORIF, 3D CT·MRI 진단 하)",
+    "disability": "견관절 부분강직 맥브라이드 II-A-4 18% 영구장해 (노동능력상실률 18%)",
+    "occupation_income": "디자이너 — 일용근로자 임금 적용(2025.09~ 171,037×20; 2026.01~ 172,068×20)",
+    "negligence_ratio": "0% (피해자 과실 없음)",
+    "legal_basis": ["민법 750조", "민법 758조(공작물 점유자·소유자 책임)", "상법 724조②(피해자 직접청구권)", "대법원 2008다61615"],
+    "amounts": {
+      "위자료": 18000000,
+      "적극손해_치료비": 8584213,
+      "향후치료비_흉터": "추후 산정",
+      "소극손해_일실수입": 47317537,
+      "손해배상금_합계": 73901750,
+      "사정금액_백원미만절사": 73901700
+    },
+    "denial_or_reduction": "없음 (과실 0%·약관상 보상하지 않는 손해 없음)",
+    "policy_clauses_in_case_pack": "약관 원문 부재 (정답서도 조항 상세 대신 민법·상법 법령 중심)"
+  },
+  "metrics": [
+    {
+      "metric": "핵심항목 추출 정확도",
+      "target": "80% 이상",
+      "result_in_scope": "약 85.7% (추출 대상 7항목: full 5 + partial 2)",
+      "result_all_items": "약 60% (정답서 10항목 기준; 미달분은 제외범위·자료부재 기인)",
+      "verdict": "PASS (추출 대상 기준 목표 충족) / 전체 기준은 참고치",
+      "field_comparison": [
+        { "field": "accident_date", "ground_truth": "2025-10-16", "model": "2025-10-16", "match": "full" },
+        { "field": "accident_mechanism", "ground_truth": "보도블록 낙상", "model": "보도블럭에 발이 걸려 앞으로 넘어져 우측 상완 수상", "match": "full" },
+        { "field": "primary_diagnosis_kcd", "ground_truth": "S42.30 상완골 근위부 골절(주요 상병명)", "model": "primary=S42.250 대거친면 골절, S42.30은 상충 secondary로 병기+의사 검수 라우팅", "match": "partial", "failure_type": "F1: primary 코드 선택이 정답과 반대(주진단서 우선 휴리스틱). 두 코드 모두 추출·상충 flag는 정확." },
+        { "field": "surgery_name", "ground_truth": "ORIF·금속판·동종골이식", "model": "ORIF humerus Rt·금속판 내고정·동종골 이식", "match": "full" },
+        { "field": "disability_rate", "ground_truth": "II-A-4 18% (노동능력상실률 18%)", "model": "맥브라이드 II-A-4 18%", "match": "full" },
+        { "field": "admission_period", "ground_truth": "(본문 미기재; 별첨 의무기록 기반)", "model": "2025-10-16~2025-10-22, 재원 7일", "match": "full", "note": "정답서 본문 미명시이나 별첨 근거와 정합." },
+        { "field": "insurer_product", "ground_truth": "삼성화재 / 영조물손해배상", "model": "영조물손해배상 공제(보험사명 미상 — 지자체 공제조합으로 해석)", "match": "partial", "failure_type": "상품명·배상책임 성격 일치, 보험자명은 증권 가명처리로 미상. '공제조합' 해석은 정답의 '삼성화재 배상책임보험'과 성격 상이하나 피해자 직접청구 구조는 정합." },
+        { "field": "negligence_ratio", "ground_truth": "0%", "model": "미산정(과실상계 검수 대상으로 보류)", "match": "miss", "failure_type": "F3: 과실률 자동산정은 PoC 제외범위 — 미산정은 설계상 정당. 정답 대비 값 미제공." },
+        { "field": "occupation_income", "ground_truth": "디자이너 / 일용임금", "model": "미추출", "match": "miss", "failure_type": "F3: 케이스 팩에 소득자료 부재 — 추출 불가(자료부재). 추출오류 아님." },
+        { "field": "total_assessed_amount", "ground_truth": "73,901,700원", "model": "미산정(치료비 부분값 3,102,000만 확보, 총액 비움)", "match": "miss", "failure_type": "F2: 손해액·예상보험금 자동산정은 PoC 제외범위 — 미산정은 설계상 정당. 모델이 '부분값'으로 명시." }
+      ]
+    },
+    {
+      "metric": "사건 유형 분류 정확도",
+      "target": "80% 이상",
+      "result": "일치 (100%, 1/1)",
+      "verdict": "PASS",
+      "detail": "정답=배상책임(영조물손해배상). 모델 case_type='배상책임'(secondary 후유장해). 손해액 산정 축이 후유장해임도 정확 포착."
+    },
+    {
+      "metric": "감액사유 Top-1 / Top-3 일치율",
+      "target": "75% 이상",
+      "result": "N/A (정답 감액·부지급 0건)",
+      "verdict": "N/A — 오탐 없음(PASS 성격)",
+      "detail": "정답서상 감액·부지급 없음(과실 0·면책 없음). 모델 denial_reasons=[](insurer_response 문서 부재). 경로는 다르나(모델은 '문서 부재', 정답은 '과실 0·면책 없음') 결과(감액 0건) 정합. 없는 감액사유를 지어내지 않음 — 환각 오탐 0."
+    },
+    {
+      "metric": "약관 조항 Top-3 포함률",
+      "target": "60~70% 이상",
+      "result": "N/A (약관 원문 케이스 팩 부재)",
+      "verdict": "N/A",
+      "detail": "케이스 팩에 순수 약관 원문 부재. 정답서도 약관 조항 상세 대신 민법 750/758·상법 724② 법령 중심. 모델은 '약관 부재로 조항 도출 불가'를 명시(무작위·환각 아님). 실패유형: 법령 근거 매핑(민법 750/758) 부재 — 자료부재 및 초안 범위 기인."
+    },
+    {
+      "metric": "손사서 초안 생성 성공률 (루브릭)",
+      "target": "70% 이상 (실제 수정 가능한 수준)",
+      "result": "성공 — 검토 출발점으로 유효",
+      "verdict": "PASS",
+      "rubric": {
+        "구조_완성도": "8개 섹션 전부 채움 — 정답서 목차(사정요약·사고발생·관계법규·사정기초·손해배상금 사정)와 대응 가능",
+        "쟁점_실무_타당성": "정답서가 실제 산정한 축(후유장해 18%·위자료 100M기준×상실률·일실수입·과실상계)을 초안이 쟁점으로 정확 예측. 위자료 산정기준표(DOC_011) 관련성도 지목",
+        "근거_인용": "문장별 [DOC_XXX pN] 인용 + 검수 태그, 환각 0건, surgery p5/p6 정정 반영",
+        "금지표현": "0건 (완곡형 일관)",
+        "정량_산정": "대부분 값 비움(부분값). 정답 대비 금액 격차 큼 — 단 예상보험금·금액 자동산정은 PoC 제외범위",
+        "수정_가능성": "쟁점·근거·구조가 정답 방향과 정합 → 전문가가 백지 대비 시간 절감 출발점으로 사용 가능",
+        "누락": "F4: 향후치료비(흉터/반흔) 손해항목 초안 §7 미반영(정답서엔 향후치료비 흉터 별도 항목)"
+      }
+    },
+    {
+      "metric": "케이스당 처리 시간",
+      "target": "10분 이내",
+      "result": "측정 불가 (실행 시간 로그 부재)",
+      "verdict": "보류",
+      "detail": "run 타이밍 계측 산출물 부재로 측정 불가."
+    }
+  ],
+  "failure_types": [
+    {
+      "id": "F1",
+      "severity": "high",
+      "category": "핵심항목 — 진단명 primary 코드 선택",
+      "description": "모델이 급성기 주진단서·의무기록의 S42.250(대거친면)을 headline 진단으로, 후유장해진단서의 S42.30(근위부)을 상충 secondary로 배치. 정답서는 S42.30(근위부, 술후상태)을 주요 상병명으로 채택. 후유장해 배상 사정에서는 후유장해진단서 코드가 지배하는데 모델의 '주진단서 우선' 휴리스틱이 이를 반영 못함.",
+      "mitigating": "모델은 상충을 은폐하지 않고 flag+의사 검수 라우팅+출처 병기 — 환각 아님. Critic도 CR_001로 '원문 상충 단정' 완화 지적.",
+      "improvement": "case_type∈{배상책임, 후유장해}일 때 후유장해진단서 KCD를 primary로 가중하는 규칙을 claim-analysis/report-generation에 추가."
+    },
+    {
+      "id": "F2",
+      "severity": "medium",
+      "category": "정량 산정 미수행 (제외범위)",
+      "description": "치료비 부분값(3,102,000)·손해액 총액(정답 73,901,700) 미산정. 위자료·일실수입·과실상계 값 비움.",
+      "mitigating": "예상보험금·손해액 자동산정은 PoC 명시적 제외범위. 모델이 '부분값'·'산정 근거 부족으로 값 비움'으로 정직하게 표기 — 환각 아님.",
+      "improvement": "제외범위 유지가 타당. 단 치료비 정밀 전사 범위 확대 시 부분값→근접값 개선 여지(정답 8,584,213)."
+    },
+    {
+      "id": "F3",
+      "severity": "low",
+      "category": "자료부재 기인 미추출",
+      "description": "직업·소득(디자이너/일용임금) 미추출, 과실률(정답 0%) 미산정.",
+      "mitigating": "소득자료는 케이스 팩 부재, 과실 자동산정은 제외범위 — 추출오류 아님.",
+      "improvement": "소득·과실 관련 입력자료가 확보되는 케이스에서 재평가 필요."
+    },
+    {
+      "id": "F4",
+      "severity": "low",
+      "category": "초안 손해항목 누락",
+      "description": "향후치료비(흉터/반흔) 항목을 draft §7 손해항목에 미반영. case_type 경고엔 '반흔 후보' 언급했으나 초안 본문에 연결 안 됨.",
+      "improvement": "case-type 경고의 손해항목 후보를 report-generation이 손해액 항목 목록에 반영하도록 연결."
+    }
+  ],
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "low",
+    "reason": "평가값은 정답지 원문(렌더 판독) 대조로 확정. 모델 산출물의 환각·금지표현 0건 확인. 정답지 내용은 본 파일·evaluation_summary에만 기록하고 critic 등 타 산출물에 전파하지 않음."
+  },
+  "prohibited_language_check": { "passed": true, "issues": [] },
+  "warnings": [
+    "스키마 미확정 상태로 생성: evaluation_result.schema.json 부재 → validate_output.py는 SKIP. 공통 컴포넌트 계약 필드를 수동 준수함.",
+    "expert_review.json(단계 9 사람 검수) 부재 → 정성지표(손사 반박 1~5·의사 의료 1~5·전문가 중요불일치 탐지·시간절감률) 및 처리시간은 '보류'. 없는 전문가 평가를 생성하지 않음.",
+    "감액사유 Top-1/3·약관 Top-3는 본 케이스 특성(감액 0건·약관 원문 부재)으로 N/A. 목표 미달이 아니라 대조 대상 부재.",
+    "정답지 PDF는 텍스트레이어 없는 스캔본으로 PyMuPDF 렌더 후 시각 판독 — 금액 등 수치는 정답서 인쇄 그대로 전사(위자료 18,000,000 / 적극 8,584,213 / 소극 47,317,537 / 합계 사정 73,901,700).",
+    "핵심항목 정확도는 산정 방식에 따라 85.7%(추출 대상 7항목)~60%(정답서 10항목 전체)로 폭이 있음 — 미달분은 제외범위·자료부재 기인임을 명시."
+  ]
+}

@@ -1,0 +1,92 @@
+{
+  "component": "EvaluationHarness-Aggregate",
+  "run_id": "RUN_20260707_001",
+  "created_at": "2026-07-08T14:45:00+09:00",
+  "aggregation_note": "tools/aggregate_evaluation.py 미구현 → CriticEvaluationAgent가 수동 집계. 현재 평가 완료 케이스 1건(CASE_003) 단독 집계. 추가 케이스 평가 시 이 파일에 합산.",
+  "cases_included": ["CASE_003"],
+  "cases_skipped": [],
+  "model_info": { "model_name": "claude-opus-4-8", "prompt_version": "evaluation_v0.1" },
+  "metric_summary": [
+    {
+      "metric": "핵심항목 추출 정확도",
+      "target": "80% 이상",
+      "CASE_003": "추출대상 7항목 기준 약 85.7% (full 5·partial 2) / 정답서 10항목 전체 기준 약 60%",
+      "target_met": "충족(추출 대상 기준) — 단, 진단명 primary 코드 선택 실패(F1) 존재",
+      "notes": "미달분(과실률·직업소득·손해액총액)은 PoC 제외범위 또는 케이스 자료부재 기인, 추출오류 아님."
+    },
+    {
+      "metric": "사건 유형 분류 정확도",
+      "target": "80% 이상",
+      "CASE_003": "일치 (1/1)",
+      "target_met": "충족"
+    },
+    {
+      "metric": "감액사유 Top-1/Top-3 일치율",
+      "target": "75% 이상",
+      "CASE_003": "N/A (정답 감액 0건, 모델 오탐 0건)",
+      "target_met": "N/A — 대조 대상 부재. 환각 오탐 없음 확인."
+    },
+    {
+      "metric": "약관 조항 Top-3 포함률",
+      "target": "60~70% 이상",
+      "CASE_003": "N/A (약관 원문 케이스 부재, 정답서도 법령 중심)",
+      "target_met": "N/A — 대조 대상 부재. 모델 환각 없음(부재 명시)."
+    },
+    {
+      "metric": "손사서 초안 생성 성공률 (루브릭)",
+      "target": "70% 이상",
+      "CASE_003": "성공 — 정답 산정 축(후유장해 18%·위자료·일실수입·과실) 쟁점 정확 예측, 환각·금지표현 0",
+      "target_met": "충족 (검토 출발점으로 유효). 정량 금액은 제외범위로 미산정, 흉터 향후치료비 항목 누락(F4)."
+    },
+    {
+      "metric": "케이스당 처리 시간",
+      "target": "10분 이내",
+      "CASE_003": "측정 불가 (타이밍 로그 부재)",
+      "target_met": "보류"
+    },
+    {
+      "metric": "정성 평가 (손사 반박 1~5 · 의사 의료 1~5 · 전문가 중요불일치 탐지 · 시간절감률)",
+      "target": "전문가 정성 평가",
+      "CASE_003": "보류",
+      "target_met": "보류 — expert_review.json 부재(단계 9 사람 검수 미수행). 없는 전문가 평가 생성 안 함."
+    }
+  ],
+  "critic_gate_summary": {
+    "CASE_003": {
+      "gate": "PASS",
+      "findings_total": 3,
+      "by_severity": { "high": 0, "medium": 2, "low": 1 },
+      "prohibited_expressions_detected": 0,
+      "basis": "핵심 인용(surgery p5·p6 정정, KCD S42.250/S42.30, 담보 한도) 원문 대조 일치, 금지표현 0, 지적 3건 모두 라우팅 가능. 환각으로 검수 비용이 편익을 넘어서지 않음."
+    }
+  },
+  "go_no_go_assessment": {
+    "overall_signal": "CASE_003 단독 기준 대체로 Go 방향 신호. 단 단일 케이스 + 전문가 정성평가 부재로 최종 판정은 보류 — 추가 케이스·expert_review 확보 후 확정 권장.",
+    "go_criteria": [
+      { "criterion": "스크리닝 리포트가 전문가 검토 출발점으로 쓸 만하다", "judgment": "충족 방향", "basis": "쟁점이 정답서 산정 축(후유장해 18%·위자료 100M기준×상실률·일실수입·과실 0)과 정합. 근거 문장별 인용." },
+      { "criterion": "청구담보·감액사유 추출이 대체로 맞다", "judgment": "충족 방향", "basis": "담보=대인배상(영조물 배상책임) 정확. 감액 0건 정합(오탐 0). 사건유형 배상책임 일치." },
+      { "criterion": "약관 매핑이 후보 추천으로 유용하다", "judgment": "판정 보류", "basis": "약관 원문 케이스 부재로 매핑 미수행(N/A). 무작위·환각 아님이나 유용성 평가 불가 — 약관 포함 케이스 필요." },
+      { "criterion": "손사서 초안이 백지 작성보다 시간을 줄인다", "judgment": "충족 방향", "basis": "구조·쟁점·근거 제공, 정답 축 정확 예측. 환각·금지표현 0으로 검수부담 낮음." },
+      { "criterion": "실패 유형이 명확하고 개선 가능하다", "judgment": "충족", "basis": "F1(진단명 primary 코드 선택 휴리스틱)·F2(정량 미산정=제외범위)·F3(자료부재)·F4(흉터 항목 누락) 모두 원인 특정·개선책 제시됨." }
+    ],
+    "no_go_triggers_checked": [
+      { "trigger": "OCR 품질로 문서 이해 거의 불가", "hit": false, "basis": "OCR 고품질(DOC_001 0.96·DOC_003 0.90), 초안 근거 인용 정상." },
+      { "trigger": "청구담보·감액사유 반복 오류", "hit": false, "basis": "담보 정확·감액 오탐 0." },
+      { "trigger": "약관 매핑 무작위 수준", "hit": false, "basis": "미수행(자료 부재)이나 환각 아님." },
+      { "trigger": "초안 환각 과다로 검수 비용 증가", "hit": false, "basis": "Critic PASS, 환각 0·금지표현 0." },
+      { "trigger": "전문가가 '실무 보조도구로 사용 어렵다' 평가", "hit": "보류", "basis": "expert_review 부재로 확인 불가." }
+    ],
+    "final_decision": "보류 (판정 자료 제공). 정량·Critic 신호는 Go 방향이나, (1) 평가 케이스 1건, (2) 전문가 정성평가·처리시간 미측정, (3) 약관 매핑 유용성 미검증으로 최종 Go/No-Go는 추가 케이스+전문가 입력 후 확정."
+  },
+  "open_items_for_next_run": [
+    "F1 개선: 배상책임/후유장해 맥락에서 후유장해진단서 KCD를 primary로 가중.",
+    "expert_review.json 확보 후 정성지표 재평가.",
+    "약관 원문 포함 케이스로 약관 Top-3 실측.",
+    "처리 시간 계측 산출물 추가.",
+    "tools/aggregate_evaluation.py 구현 시 본 수동 집계를 스크립트로 대체."
+  ],
+  "warnings": [
+    "스키마 미확정: evaluation_summary.schema.json 부재 → validate_output.py SKIP. 공통 계약 필드 수동 준수.",
+    "단일 케이스 집계 — 전 케이스 Go/No-Go 확정 자료 아님(판정 자료 제공 목적)."
+  ]
+}

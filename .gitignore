@@ -18,5 +18,8 @@ data/
 _workspace/
 
 
-# 개인 wiki
+# 개인 wiki (독립 git repo로 별도 관리 — 메인 저장소는 추적 안 함)
 wiki/
+
+# 공유용 임시 zip (schemas/ 폴더가 정본)
+schemas.zip

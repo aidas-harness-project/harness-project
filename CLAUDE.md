@@ -40,3 +40,6 @@
 | 날짜 | 변경 내용 | 대상 | 사유 |
 |------|----------|------|------|
 | 2026-07-07 | 초기 구성 (에이전트 7 + 스킬 2 + 도구 2) | 전체 | - |
+| 2026-07-08 | 노트 먼저·증분 작성 규율 추가 | skills/component-output-contract | 관찰 1: claim-analysis가 노트 없이 종료(중단 유실) |
+| 2026-07-08 | 중단 이어받기(resume) + 노트 존재 검증 경로 | skills/loss-adjustment-pipeline | 관찰 2: 파일 스티칭 복원력을 의도된 기능으로 승격 |
+| 2026-07-08 | primary 진단코드 선택 규칙 (문서 성격 기반 우선순위) | agents/claim-analysis + wiki/field-extraction | 관찰 3: 후유장해 케이스에서 headline KCD 오선택(F1 실패유형) |

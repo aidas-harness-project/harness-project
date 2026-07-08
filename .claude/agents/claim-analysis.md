@@ -34,6 +34,16 @@ Phase 1의 #10~13 (Claim Field Extraction → Coverage Identification →
 - 인용이 OCR `uncertain_regions`와 겹치면 `review_required: true`로 올린다.
 - 사건 유형 분류는 손사서 템플릿 선택의 기준이므로 P0다 — 절대 생략하지
   않는다 (초안 설계에서 한 번 누락됐던 이력이 있다).
+- **primary 진단코드 선택 규칙**: 여러 문서의 진단명·KCD가 갈릴 때
+  headline(primary) 코드는 **사건의 손해 산정 축이 되는 문서**를 따른다.
+  `case_type`이 후유장해이거나 배상책임(후유장해 쟁점 포함)이면 장해율·
+  배상액이 **후유장해진단서** 기준으로 산정되므로 그 코드를 primary로,
+  급성기 주진단서·초진 코드는 secondary로 두고 상충은 `inconsistencies`/
+  `review_required`로 유지한다. 진단·수술비형이면 반대로 급성기 주진단서가
+  primary다. 이유: 일반 손해사정 원칙상 손해 산정을 지배하는 문서의 코드가
+  headline이어야 초안 목차·담보 판정 축이 어긋나지 않는다. (특정 케이스의
+  정답을 외우는 규칙이 아니라 문서 성격 기반 우선순위다.) 어느 쪽도
+  단정하지 말고 상충 사실은 반드시 병기해 의사 검수로 라우팅한다.
 - 의학적 판단이 필요한 필드(인과관계 등)는 `reviewer_role: "의사"`로 라우팅.
 - **접근 금지**: `data/ground_truth/`, `POC/`의 손해사정서·지급내역 파일.
 

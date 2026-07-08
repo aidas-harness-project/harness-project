@@ -26,6 +26,13 @@ subagent로 지정하고 `model: "opus"`를 명시한다.
    - 산출물 존재 + 새 실행 요청 → 기존 `_workspace/RUN_XXX/`는 그대로 두고
      새 RUN 폴더로 **전체 재실행** (outputs는 덮어씀 — run_id로 구분)
    - 산출물 없음 → **초기 실행**
+   - **중단 이어받기 (resume)**: 이전 실행이 세션 컴팩트·예산 한도·에러로
+     중간에 끊겼으면(일부 단계 산출물만 존재), 처음부터 다시 돌리지 말고
+     **마지막으로 검증 PASS한 단계의 다음 단계부터** 이어간다. 상태는
+     전부 파일 계약(`outputs/`·`data/processed/`·`_workspace/RUN_XXX/`)에
+     있으므로 이어받기가 가능하다 — 이게 파일 기반 스티칭의 핵심 이점이다.
+     이어받기 전에 마지막 산출물이 온전한지(validate PASS/공통계약) 확인하고,
+     끊긴 단계의 산출물이 반쪽이면 그 단계만 재실행한다.
 3. 입력 확인: `data/raw/CASE_XXX/`가 없으면 먼저 intake를 실행한다:
    `python tools/intake_case.py "<POC 케이스 폴더>" CASE_XXX` (dry-run 출력의
    정답지 분류를 **사용자에게 확인받은 뒤** `--yes`로 실행). 정답지 분류
@@ -65,6 +72,13 @@ subagent로 지정하고 `model: "opus"`를 명시한다.
 - **_workspace(보조)**: `_workspace/RUN_XXX/{순서}_{agent}_{artifact}.md`.
   오케스트레이터는 각 단계 후 노트의 warnings를 확인해 다음 에이전트
   프롬프트에 전달할 맥락을 뽑는다.
+- **노트 존재 검증(각 단계 후)**: 에이전트가 끝나면 그 단계의
+  `{순서}_{agent}_notes.md`가 실제로 생성됐는지 확인한다. 없으면(중단·
+  누락) 해당 산출물 JSON의 `warnings`에서 최소 맥락을 복원해 노트를 대신
+  작성하고, 그 사실을 로그에 남긴다. 노트는 다음 단계 프롬프트의 맥락
+  원천이므로 비면 인계 품질이 떨어진다 (에이전트는 노트를 먼저 만들고
+  증분 갱신하도록 component-output-contract가 규율하지만, 오케스트레이터가
+  최종 안전망이다).
 - 에이전트 호출 프롬프트에 반드시 포함: `case_id`, `run_id`, 담당 단계,
   이전 단계 warnings 요약, component-output-contract 스킬 준수 지시.
 
