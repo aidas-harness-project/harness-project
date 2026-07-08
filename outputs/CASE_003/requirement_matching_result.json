@@ -1,0 +1,103 @@
+{
+  "case_id": "CASE_003",
+  "run_id": "RUN_20260707_001",
+  "component": "RequirementMatching",
+  "status": "partial",
+  "created_at": "2026-07-07T17:50:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8",
+    "prompt_version": "requirement_matching_v0.1"
+  },
+  "confidence": 0.55,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "evidence_references": [
+    {
+      "document_id": "DOC_012",
+      "document_type": "insurance_certificate",
+      "page": 1,
+      "quote": "영조물손해배상 공제등록증권"
+    }
+  ],
+  "warnings": [
+    "약관(insurance_policy) 원문이 케이스에 부재하여 normalized_policy_clause.json의 payment_requirement_clauses/exclusion_clauses/reduction_clauses가 모두 빈 배열임. 따라서 담보별 '지급요건 충족 여부' 매칭은 수행 불가 — 본 산출은 담보 한도(C01~C04) 대조 수준으로 한정된다.",
+    "지급요건 매칭 정본(약관 조항 ↔ 청구자료)은 약관 확보 시 재실행 필요. 현재는 손해액이 대인 담보 한도 내인지, 자기부담금 공제 대상인지의 한도 대조만 제공한다.",
+    "확보된 치료비는 부분값이다: 입원중간금 3,000,000(전액 환자부담) + 외래(2025-12-05) 본인 94,200 + 약제비 본인 7,800 = 3,102,000원. DOC_008(75p) 중 정밀 전사 9p 외 66p 샘플링·입원 본청구 정산 총액 미확보 — 실제 손해액은 이보다 큼(누락 명시).",
+    "후유장해(맥브라이드 18%)로 인한 일실수입·위자료는 금액 산정 전 단계로, 대인 담보 한도(1인당 1억) 대비 충분 여유가 있는지는 산정 후 재확인 필요.",
+    "자기부담금 '1사고당 각 100,000'의 적용 방식(담보별 개별/합산)은 policy-pipeline에서 미확정(confidence 0.7) — 공제 방식 손해사정사 확인 필요.",
+    "정신과 상병·흉터의 손해 포함 여부는 인과관계·후유장해 평가(의사) 후 확정."
+  ],
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "low",
+    "reason": "대조에 사용한 한도·금액은 DOC_012 담보표와 DOC_008 영수증 원문 값에 직접 연결. 지급요건 매칭은 약관 부재로 수행하지 않고 한계를 명시."
+  },
+  "prohibited_language_check": {
+    "passed": true,
+    "issues": []
+  },
+  "policy_source": {
+    "document_id": "DOC_012",
+    "note": "지급요건 조항 부재 — 한도 대조만 가능. normalized_policy_clause.json(partial) 기준."
+  },
+  "requirement_matches": [],
+  "coverage_limit_checks": [
+    {
+      "coverage_type": "대인배상(신체상해 배상책임)",
+      "linked_clause_ids": ["CASE_003_DOC_012_C01", "CASE_003_DOC_012_C02"],
+      "limit_per_person_krw": 100000000,
+      "limit_per_accident_krw": 300000000,
+      "deductible_krw": 100000,
+      "confirmed_claimed_amount_krw": 3102000,
+      "confirmed_amount_note": "확보된 치료비 본인부담 부분합(입원중간금 3,000,000 + 외래 94,200 + 약제비 7,800). 후유장해 일실수입·위자료·미확보 입원정산액 미포함 — 실제 청구액은 상회.",
+      "within_limit": "확보분 기준 한도 내(1인당 1억 대비 충분). 단 총 손해액 미확정으로 최종 판단 보류.",
+      "match_status": "limit_only_partial",
+      "evidence_references": [
+        {
+          "document_id": "DOC_012",
+          "document_type": "insurance_certificate",
+          "page": 1,
+          "quote": "대인 | 1인당 | 100,000,000"
+        },
+        {
+          "document_id": "DOC_008",
+          "document_type": "receipt",
+          "page": 50,
+          "quote": "⑥ 진료비 총액: 3,000,000 / ⑧ 환자부담 총액: 3,000,000"
+        },
+        {
+          "document_id": "DOC_008",
+          "document_type": "receipt",
+          "page": 63,
+          "quote": "⑥ 진료비 총액: 188,430 / ⑧ 환자부담 총액: 94,200"
+        },
+        {
+          "document_id": "DOC_008",
+          "document_type": "receipt",
+          "page": 75,
+          "quote": "계 2건 | 26,470 | 18,670 | 7,800"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "coverage_type": "구내치료비(후보)",
+      "linked_clause_ids": ["CASE_003_DOC_012_C05"],
+      "limit_per_person_krw": null,
+      "limit_per_accident_krw": null,
+      "match_status": "limit_unknown",
+      "note": "증권상 한도 '(기재)' 플레이스홀더로 amount=null — 대조 불가.",
+      "evidence_references": [
+        {
+          "document_id": "DOC_012",
+          "document_type": "insurance_certificate",
+          "page": 1,
+          "quote": "구내치료비 | 1인당 / 1사고당 | (기재)"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "case_id": "CASE_003",
+  "run_id": "RUN_20260707_001",
+  "component": "DenialResponseAgent",
+  "status": "partial",
+  "created_at": "2026-07-07T16:55:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8",
+    "prompt_version": "denial_reason_v0.1"
+  },
+  "confidence": 1.0,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "denial_reasons": [],
+  "evidence_references": [],
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "low",
+    "reason": "케이스 팩에 insurer_response 유형 문서가 없어(classification_result.json 기준 0건) 추출 대상 자체가 존재하지 않음. 생성한 감액·부지급 사유가 없으므로 환각 여지 없음."
+  },
+  "prohibited_language_check": {
+    "passed": true,
+    "issues": []
+  },
+  "warnings": [
+    "보험사 안내문 부재 — 감액·부지급 사유 추출 불가, 스크리닝 §2는 '해당 자료 없음'으로 처리 필요",
+    "document-pipeline classification_result.json 기준 13개 문서 중 insurer_response 유형 0건 (직접 검증 완료). 지자체 영조물 배상책임 공제 건으로 보험사 판단 문서가 제출물에 미포함된 것으로 보임.",
+    "denial_reasons 빈 배열은 '감액 없음'이 아니라 '판단 근거 문서 부재'를 의미함 — 감액 없음과 문서 없음을 구분해 기록. 후속 단계에서 안내문이 확보되면 재실행 필요.",
+    "review_required=true: 손해사정사가 insurer_response 문서의 실제 부재(제출 누락 여부 포함)를 확인 권장."
+  ]
+}

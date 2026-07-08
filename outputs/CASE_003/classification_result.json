@@ -1,0 +1,321 @@
+{
+  "case_id": "CASE_003",
+  "run_id": "RUN_20260707_001",
+  "component": "DocumentClassification",
+  "status": "success",
+  "created_at": "2026-07-07T16:48:21+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8 (vision page transcription)",
+    "prompt_version": "document_pipeline_v0.1"
+  },
+  "confidence": 0.85,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "evidence_references": [],
+  "warnings": [
+    "DOC_004(입퇴원사실확인서)·DOC_006(의뢰서)·DOC_007(소견서)은 표준 문서유형 taxonomy에 정확히 대응되지 않아 medical_record로 분류하되 confidence 낮음·review 필요(후보에 other 병기).",
+    "DOC_011(위자료 산정기준표)·DOC_013(위임장)·DOC_009(사고경위서)는 taxonomy 표준코드 부재로 other 분류 — 손사서 산정 참고자료/절차문서.",
+    "DOC_012 영조물손해배상 공제등록증권은 가해자(지자체 영조물 관리주체, 공원녹지과) 측 배상책임 담보 증권 — insurance_certificate로 분류. 담보한도: 대인 1인당 1억/1사고당 3억, 대물 1사고당 5백만, 자기부담금 각 10만.",
+    "DOC_005는 진료기록사본 묶음으로 의무기록+영상판독지 혼재 — medical_record 대표분류, 영상검사결과(3D CT/MRI 판독) 섹션 포함(imaging_report 후보).",
+    "증빙 목차상 사업자등록증·신분증·통장사본은 제출 PDF에 부재(가명처리 시 제거 추정) — 하류 참고."
+  ],
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "low",
+    "reason": "분류는 각 문서 표제·핵심문구 근거. 애매 문서는 review_required로 라우팅."
+  },
+  "prohibited_language_check": {
+    "passed": true,
+    "issues": []
+  },
+  "documents": [
+    {
+      "document_id": "DOC_001",
+      "predicted_document_type": "diagnosis_certificate",
+      "document_type_label": "진단서",
+      "confidence": 0.97,
+      "candidate_types": [
+        {
+          "document_type": "diagnosis_certificate",
+          "confidence": 0.97
+        },
+        {
+          "document_type": "medical_record",
+          "confidence": 0.02
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 1,
+          "quote": "(주) Fracture of greater tuberosity of humerus, closed (상완골 대거친면의 골절, 폐쇄성) [S42.250]"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_002",
+      "predicted_document_type": "diagnosis_certificate",
+      "document_type_label": "진단서(정신건강의학과)",
+      "confidence": 0.96,
+      "candidate_types": [
+        {
+          "document_type": "diagnosis_certificate",
+          "confidence": 0.96
+        },
+        {
+          "document_type": "medical_record",
+          "confidence": 0.03
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 1,
+          "quote": "공황 장애 — F410"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_003",
+      "predicted_document_type": "diagnosis_certificate",
+      "document_type_label": "후유장해진단서",
+      "confidence": 0.92,
+      "candidate_types": [
+        {
+          "document_type": "diagnosis_certificate",
+          "confidence": 0.92
+        },
+        {
+          "document_type": "medical_record",
+          "confidence": 0.05
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 1,
+          "quote": "맥브라이드 II-A-4 18% 영구장해에 해당됨."
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_004",
+      "predicted_document_type": "medical_record",
+      "document_type_label": "입퇴원사실확인서",
+      "confidence": 0.58,
+      "candidate_types": [
+        {
+          "document_type": "medical_record",
+          "confidence": 0.58
+        },
+        {
+          "document_type": "other",
+          "confidence": 0.37
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 1,
+          "quote": "입퇴원사실 확인서"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "document_id": "DOC_005",
+      "predicted_document_type": "medical_record",
+      "document_type_label": "진료기록사본",
+      "confidence": 0.9,
+      "candidate_types": [
+        {
+          "document_type": "medical_record",
+          "confidence": 0.9
+        },
+        {
+          "document_type": "imaging_report",
+          "confidence": 0.08
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 1,
+          "quote": "응급초진기록 2025-10-[일자]"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_006",
+      "predicted_document_type": "medical_record",
+      "document_type_label": "의뢰서(심리상담)",
+      "confidence": 0.55,
+      "candidate_types": [
+        {
+          "document_type": "medical_record",
+          "confidence": 0.55
+        },
+        {
+          "document_type": "other",
+          "confidence": 0.4
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 1,
+          "quote": "PHQ-9검사에서 21점으로 심한 우울로 확인됨."
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "document_id": "DOC_007",
+      "predicted_document_type": "medical_record",
+      "document_type_label": "소견서(상담치료사)",
+      "confidence": 0.6,
+      "candidate_types": [
+        {
+          "document_type": "medical_record",
+          "confidence": 0.6
+        },
+        {
+          "document_type": "other",
+          "confidence": 0.35
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 1,
+          "quote": "상담치료사 소견"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "document_id": "DOC_008",
+      "predicted_document_type": "receipt",
+      "document_type_label": "진료비 세부내역서·계산서·영수증",
+      "confidence": 0.96,
+      "candidate_types": [
+        {
+          "document_type": "receipt",
+          "confidence": 0.96
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 50,
+          "quote": "진료비 계산서·영수증 (입원중간금)"
+        },
+        {
+          "page": 75,
+          "quote": "진료비(약제비) 납입 확인서"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_009",
+      "predicted_document_type": "other",
+      "document_type_label": "사고경위서",
+      "confidence": 0.9,
+      "candidate_types": [
+        {
+          "document_type": "other",
+          "confidence": 0.9
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 1,
+          "quote": "사고경위서 (자필 · 필기체)"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "document_id": "DOC_010",
+      "predicted_document_type": "other",
+      "document_type_label": "흉터 사진",
+      "confidence": 0.85,
+      "candidate_types": [
+        {
+          "document_type": "other",
+          "confidence": 0.85
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 1,
+          "quote": "흉터 사진 1/2 (사진 증빙 — 추출 텍스트 없음)"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "의사"
+    },
+    {
+      "document_id": "DOC_011",
+      "predicted_document_type": "other",
+      "document_type_label": "위자료 산정기준표",
+      "confidence": 0.9,
+      "candidate_types": [
+        {
+          "document_type": "other",
+          "confidence": 0.9
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 1,
+          "quote": "위자료 산정기준표"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_012",
+      "predicted_document_type": "insurance_certificate",
+      "document_type_label": "공제등록증권(영조물손해배상)",
+      "confidence": 0.9,
+      "candidate_types": [
+        {
+          "document_type": "insurance_certificate",
+          "confidence": 0.9
+        },
+        {
+          "document_type": "insurance_policy",
+          "confidence": 0.05
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 1,
+          "quote": "영조물손해배상 공제등록증권"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_013",
+      "predicted_document_type": "other",
+      "document_type_label": "위임장",
+      "confidence": 0.92,
+      "candidate_types": [
+        {
+          "document_type": "other",
+          "confidence": 0.92
+        }
+      ],
+      "evidence_references": [
+        {
+          "page": 1,
+          "quote": "위임장 (No. 000176)"
+        }
+      ],
+      "review_required": false
+    }
+  ]
+}

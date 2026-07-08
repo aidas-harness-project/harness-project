@@ -55,7 +55,8 @@ second brain. 운영 규칙은 [Wiki Schema](CLAUDE.md) 참고.
 
 * [골다공증 기여도 감액 케이스](cases/preexisting-condition.md) - 척추 장해지급률 50% 해당 사례에서 골다공증 기여도 10%p 공제로 40%가 인정된 기왕증 감액 케이스.
 * [뇌혈관질환진단비 분쟁 케이스](cases/coverage-dispute.md) - 뇌혈관질환진단비의 약관상 지급범위를 두고 KB·농협·삼성화재·한화 4개 보험사와 다툰 케이스.
-* [상완골 골절 후유장해 케이스](cases/permanent-disability.md) - 상완골 근위부 골절 수술(OP) 후 배상책임 손해사정으로 종결된 후유장해 케이스.
+* [상완골 골절 후유장해 케이스 (CASE_003)](cases/permanent-disability.md) - 보도블럭 전도사고로 인한 상완골 근위부 골절 수술(OP) 후 영조물 배상책임 공제로 손해사정된 후유장해 케이스.
+* [발목 삼복사 골절 케이스 (CASE_004)](cases/ankle-fracture.md) - 좌측 발목 삼복사 골절(S82.830)로 한화손보 상대 배상책임 손해사정(사정금액 약 1.03억)이 이뤄진 케이스.
 
 # 소스 (sources/)
 
@@ -67,6 +68,7 @@ second brain. 운영 규칙은 [Wiki Schema](CLAUDE.md) 참고.
 # 답변 (answers/)
 
 * [파이프라인 이해 가이드 + 미해결 갭 해결 계획](answers/pipeline-understanding-and-gap-plan.md) - 파이프라인을 3개 관점(Phase·묶음 Agent·backbone I/O)으로 읽는 법과, 소스 분석에서 나온 갭 2건의 해결 계획.
+* [OCR 정확도 벤치마크 — 모델별·영역별 기준 (2025 가이드 + 2026 최신)](answers/ocr-accuracy-benchmarks.md) - 모델별 OCR 정확도와 영역별 최소 요구 정확도를 2025년 LinkedIn 가이드 기준으로 정리하고, 2026년 신규 벤치마크(OmniDocBench·OCRBench)로 최신화한 리서치.
 
 # 참고 자료 (references/)
 

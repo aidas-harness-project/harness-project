@@ -16,3 +16,7 @@ data/
 
 # 하네스 실행별 임시 조율 산출물
 _workspace/
+
+
+# 개인 wiki
+wiki/
