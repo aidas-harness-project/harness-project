@@ -1,112 +1,62 @@
 ---
 name: loss-adjustment-pipeline
-description: 손해사정 Agent Harness 파이프라인의 오케스트레이터. 케이스 처리 실행("케이스 돌려줘", "CASE_001 처리", "파이프라인 실행", "스크리닝 리포트 만들어줘", "손사서 초안 생성"), 재실행·업데이트("다시 실행", "스크리닝만 다시", "초안 업데이트", "이전 결과 개선", "특정 단계만 재실행"), 평가 실행("평가 돌려줘", "정답지와 비교", "Go/No-Go 판정 자료") 요청 시 반드시 이 스킬을 사용할 것. 파이프라인 설계에 대한 단순 질문은 wiki/pipeline.md로 직접 답해도 된다.
+description: Orchestrator for the loss-adjustment agent harness. Use when the user asks to process a case, run/rerun the pipeline, generate a screening report or draft report, update a draft after an insurer denial, or run evaluation. Simple questions about pipeline design can be answered directly from pipeline.md.
 ---
 
-# 손해사정 파이프라인 오케스트레이터
+# Loss-Adjustment Pipeline Orchestrator
 
-7개 전문 에이전트를 조율해 케이스를 스크리닝 리포트·손사서 초안·평가까지
-처리한다. 설계 정본은 `wiki/pipeline.md`(단계별 I/O)와
-`wiki/project-structure.md`(폴더 규약)다.
+Coordinates 10 agents across two phases to turn case intake into a screening report, draft report, and evaluation. See `pipeline.md` for the full stage/agent table and I/O contracts. See `harness-guardrails` and `harness-guardrails-dev` for the rules every agent (including this orchestrator) must follow regardless of stage.
 
-**실행 모드: 서브 에이전트 파이프라인 (하이브리드 아님).**
-근거: 에이전트 간 통신이 전부 스키마 검증된 파일 계약으로 구조화되어
-있어 실시간 팀 통신(SendMessage)의 이득이 없다. 각 에이전트는 결과
-파일과 요약만 반환하면 되고, 병렬 구간은 `run_in_background`로 처리한다.
-모든 Agent 호출에 해당 에이전트 정의(`.claude/agents/{name}.md`)를
-subagent로 지정하고 `model: "opus"`를 명시한다.
+**Execution mode: sub-agent pipeline.** Every stage below is dispatched as a subagent call naming that agent's definition file (`.claude/agents/{name}.md`), with `model: opus`. All inter-agent data passes through the DAO as files — agent return values carry only a summary and warnings, never the actual contract data.
 
-## Phase 0: 컨텍스트 확인 (매 실행 시작 시)
+## Phase 0 — context and gating (every run)
 
-1. `run_id` 결정: 새 실행이면 `RUN_{YYYYMMDD}_{NNN}` 발급,
-   `_workspace/`의 기존 폴더로 순번 결정.
-2. 실행 모드 판별:
-   - `outputs/CASE_XXX/`에 산출물 존재 + 부분 수정 요청 → **부분 재실행**
-     (해당 에이전트만, 하류 영향 단계 목록을 사용자에게 확인)
-   - 산출물 존재 + 새 실행 요청 → 기존 `_workspace/RUN_XXX/`는 그대로 두고
-     새 RUN 폴더로 **전체 재실행** (outputs는 덮어씀 — run_id로 구분)
-   - 산출물 없음 → **초기 실행**
-   - **중단 이어받기 (resume)**: 이전 실행이 세션 컴팩트·예산 한도·에러로
-     중간에 끊겼으면(일부 단계 산출물만 존재), 처음부터 다시 돌리지 말고
-     **마지막으로 검증 PASS한 단계의 다음 단계부터** 이어간다. 상태는
-     전부 파일 계약(`outputs/`·`data/processed/`·`_workspace/RUN_XXX/`)에
-     있으므로 이어받기가 가능하다 — 이게 파일 기반 스티칭의 핵심 이점이다.
-     이어받기 전에 마지막 산출물이 온전한지(validate PASS/공통계약) 확인하고,
-     끊긴 단계의 산출물이 반쪽이면 그 단계만 재실행한다.
-3. 입력 확인: `data/raw/CASE_XXX/`가 없으면 먼저 intake를 실행한다:
-   `python tools/intake_case.py "<POC 케이스 폴더>" CASE_XXX` (dry-run 출력의
-   정답지 분류를 **사용자에게 확인받은 뒤** `--yes`로 실행). 정답지 분류
-   확인은 생략 불가 — 잘못 분류되면 평가가 오염된다.
+1. **Resolve `run_id`**: new run → issue `RUN_{YYYYMMDD}_{NNN}`. Resuming → read `_run_state.json` via the DAO's `get_last_passed_stage(case_id)` query; resume from the next stage after the last one that passed. Do not restart from scratch just because a run was interrupted — that's what P10's per-step backups exist for.
+2. **Intake check**: if `data/raw/CASE_XXX/` doesn't exist yet, run intake first (D2 — `_source_ledger.json` gate, every file `pending`→human sets `approved`/`rejected`, whole case blocks on any rejection). Never skip the human confirmation step.
+3. **Conflict-ledger check**: before dispatching *any* stage, call `check_conflicts_clear(case_id)`. If not clear, halt and report every pending entry (old and new) — do not proceed past an unresolved conflict, no matter which stage raised it.
+4. **Lock check**: if a stage's target file already has a `.lock` present at run start/resume, do not poll and do not assume it's stale — halt, report the lock's full contents, wait for human confirmation (P5).
 
-## 실행 단계
+## Phase 1 — initial claim review
 
-각 단계 완료 시 게이트: `python tools/validate_output.py`로 경계 Output
-검증 → PASS만 다음 단계 진행. 상세 I/O는 `wiki/pipeline.md`의 표 참조.
+| # | Stage | Agent | Internal checkpoints |
+|---|---|---|---|
+| 1 | Case Intake | (orchestrator + intake tool) | D2-gated `_source_ledger.json` |
+| 2 | Document Processing | `document-pipeline` | (a) OCR+cross-validation+classification, (b) redaction, (c) chunking — each a real DAO checkpoint |
+| 3 | Indexing (adapter, optional) | (tool, no agent) | pass-through by default; no-op unless enabled |
+| 4 | Policy Clause Processing | `policy-pipeline` | (a) clause boundary ID, (b) extraction, (c) normalization |
+| 5 | Claim Analysis | `claim-analysis` | (a) field extraction, (b) coverage ID, (c) case-type classification, (d) requirement matching |
+| 6 | Consistency Check | `consistency-check` | conflict-ledger-gated — any disagreement halts via `_conflict_ledger.json`, not an inline ad-hoc halt |
+| 7 | Screening Report | `screening-report` | consumes `denial-response`'s output as a dependency if an insurer-response document exists — not phase-gated |
+| 8 | Draft Report v1 | `draft-report` | same agent reused for v2 in Phase 2 |
+| 9 | Critic Pass (v1) | `critic` | blind — never touches ground truth |
+| 10 | Evaluation | `evaluation` | sole D1 exception, only after human review is marked complete |
 
-| 단계 | 에이전트 | 병렬 | 경계 Output (게이트 대상) |
-| --- | --- | --- | --- |
-| 0 | (스크립트) intake | - | `data/raw/`, `data/ground_truth/` 분리 |
-| 1 | document-pipeline | - | manifest 갱신, `classification_result.json`, `page_chunks.json` |
-| 2a | policy-pipeline | 2b와 병렬 | `normalized_policy_clause.json` |
-| 2b | denial-response (추출·분류만) | 2a와 병렬 | `denial_reason_result.json` |
-| 3 | claim-analysis | - | `extracted_claim_fields.json` 외 3개 |
-| 4 | evidence-validation | - | `evidence_validation_result.json` |
-| 5 | report-generation (스크리닝) | - | `screening_report.json`·`.md` |
-| 6 | denial-response (약관 매칭·반박) | - | `policy_to_denial_matching_result.json`, `rebuttal_points.json` |
-| 7 | report-generation (초안 v1→v2) | - | `draft_report_v1.md`, `draft_report_v2.md` |
-| 8 | critic-evaluation (검수) | - | `critic_result.json`, reviewed 초안 |
-| 9 | (사람) Human Review | - | `expert_review.json` |
-| 10 | critic-evaluation (평가·집계) | - | `evaluation_result.json`, `evaluation_summary.json` |
+`denial-response` is **not** a numbered Phase 1 stage — it's dependency-triggered. It runs whenever a flagged insurer-response document's processed text (from stage 2) is ready, whether that happens to be during Phase 1 (closed-case packs that bundle the insurer notice from the start) or later. Same agent, same mechanism, no phase-based scheduling exception needed.
 
-- 2a/2b 병렬은 `run_in_background: true`로 동시 실행하고 둘 다 완료 후
-  3으로 진행한다.
-- 단계 9는 자동화하지 않는다 — 전문가 입력 파일이 준비되면 사용자가
-  10을 요청한다.
-- 여러 케이스 처리 시 단계 0~8을 케이스별로 반복하고, 10의 집계는 전체
-  케이스 완료 후 1회 실행한다.
+## Phase 2 — insurer denial/reduction response
 
-## 데이터 전달 프로토콜
+Only two genuinely new stages — everything else is Phase 1's agents reused on new input.
 
-- **파일 기반(주)**: 계약 JSON은 `outputs/CASE_XXX/`, 중간 텍스트는
-  `data/processed/CASE_XXX/`. 에이전트 반환값에는 요약과 warnings만 담는다.
-- **_workspace(보조)**: `_workspace/RUN_XXX/{순서}_{agent}_{artifact}.md`.
-  오케스트레이터는 각 단계 후 노트의 warnings를 확인해 다음 에이전트
-  프롬프트에 전달할 맥락을 뽑는다.
-- **노트 존재 검증(각 단계 후)**: 에이전트가 끝나면 그 단계의
-  `{순서}_{agent}_notes.md`가 실제로 생성됐는지 확인한다. 없으면(중단·
-  누락) 해당 산출물 JSON의 `warnings`에서 최소 맥락을 복원해 노트를 대신
-  작성하고, 그 사실을 로그에 남긴다. 노트는 다음 단계 프롬프트의 맥락
-  원천이므로 비면 인계 품질이 떨어진다 (에이전트는 노트를 먼저 만들고
-  증분 갱신하도록 component-output-contract가 규율하지만, 오케스트레이터가
-  최종 안전망이다).
-- 에이전트 호출 프롬프트에 반드시 포함: `case_id`, `run_id`, 담당 단계,
-  이전 단계 warnings 요약, component-output-contract 스킬 준수 지시.
+| # | Stage | Agent | Internal checkpoints |
+|---|---|---|---|
+| 1 | Denial Validation | `denial-validation` | (a) evidence retrieval + validate denial reasons against it → `denial_validation_result.json`, (b) rebuttal point generation → `rebuttal_points.json`/`.md` |
+| 2 | Draft Report v2 | `draft-report` | second checkpoint of the same agent from Phase 1 stage 8 |
+| 3 | Critic Pass (v2) | `critic` | same agent as Phase 1 stage 9 |
+| 4 | Evaluation | `evaluation` | same agent as Phase 1 stage 10 |
 
-## 에러 핸들링
+**Important distinction for `denial-validation`**: insurer-vs-evidence disagreement is this stage's entire analytical purpose (that's what a rebuttal *is*), not a P6 conflict. P6 is for our own sources contradicting each other. Do not route denial-vs-evidence findings through the conflict ledger.
 
-| 상황 | 대응 |
-| --- | --- |
-| 스키마 검증 FAIL | 해당 에이전트에 오류 메시지를 주고 1회 재시도. 재실패 시 **파이프라인 중단** + 사용자 보고 (부분 결과로 하류를 오염시키지 않는다 — 기본 "누락 명시 후 진행" 원칙의 의도적 예외) |
-| 에이전트가 `status: "partial"` 반환 | warnings를 다음 단계에 전달하고 진행. 최종 보고에 partial 목록 명시 |
-| OCR 실패율 과다 (문서 절반 이상) | 즉시 사용자 보고 — Go/No-Go의 No-Go 신호이므로 계속 돌리는 것이 낭비일 수 있다 |
-| 정답지 접근 시도 감지 (critic 외) | 즉시 중단 + 보고. 해당 실행의 산출물은 평가에서 제외 |
-| 상충 데이터 | 삭제하지 않고 출처 병기 (`inconsistencies`로 명시) |
+## Error handling (see `harness-guardrails` for the full rules — this is the orchestrator-level summary)
 
-## 완료 보고
+| Situation | Response |
+|---|---|
+| Schema validation fails twice (P4) | Halt, present ignore-and-proceed / retry-N-times / fix-manually to the user |
+| Stage returns `partial` or fails (P9) | Retry the stage (from its last internal checkpoint, not from scratch) up to 3 fixed attempts, then halt for user audit |
+| Conflict-ledger has any `pending` entry (P6) | Halt before dispatching the next stage, list all pending entries |
+| Extraction cross-validation disagrees (P8) | Halt immediately, no tolerance threshold, even for one field on one document |
+| Human input pending (P7) | Wait — `human_input_status` in `_run_state.json` shows exactly what's pending; never fabricate a stand-in |
+| Unauthorized ground-truth access detected outside `evaluation` (D1) | Halt immediately, exclude the run's outputs from evaluation |
 
-실행 종료 시 사용자에게: 케이스별 산출물 경로, 검증 PASS/FAIL/SKIP 집계,
-`review_required` 항목 수와 검수 라우팅(손사/의사), partial·경고 목록,
-다음 행동(전문가 검수 대기 등). 실행 후 개선할 부분이 있는지 피드백을
-요청한다 (하네스는 피드백으로 진화한다 — 루트 CLAUDE.md 변경 이력 참조).
+## Completion report
 
-## 테스트 시나리오
-
-**정상 흐름**: `data/raw/CASE_001/`이 준비된 상태에서 "CASE_001 스크리닝
-리포트까지 실행" → 단계 1→2a/2b→3→4→5 실행, 각 게이트 PASS,
-`screening_report.json`이 §7 포함으로 검증 통과, 완료 보고에 검수 포인트
-요약이 포함되어야 한다.
-
-**에러 흐름**: claim-analysis가 `extracted_claim_fields.json`에 근거 없는
-필드(`evidence_references` 누락)를 쓰면 → 게이트 FAIL → 오류 메시지와
-함께 1회 재시도 → 수정본 PASS 시 진행, 재실패 시 4단계로 넘어가지 않고
-중단 보고가 나와야 한다.
+At the end of a run (or when halted), report to the user: per-stage pass/fail/pending status from `_run_state.json`, validation PASS/FAIL/SKIP tally, `review_required` count and routing (손사/의사), any partial/warning list, and next actions (e.g. awaiting human review). Ask for feedback — this harness evolves from it, see the root `CLAUDE.md` changelog.
