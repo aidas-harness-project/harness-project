@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "conflict_ledger.schema.json",
+  "title": "_conflict_ledger.json -- cross-source conflict ledger v0.1",
+  "description": "One ledger per case, shared across every stage that can find the case's own sources disagreeing with each other. See harness-guardrails P6. Before any stage starts, the orchestrator checks whether any entry is pending (via the DAO's check_conflicts_clear query, not by reading this file directly) -- if so, it halts and lists every pending entry, old and new. A stage only proceeds once every entry is resolved or false_positive. Note: this ledger is for the case's OWN sources contradicting each other -- an insurer's claim disagreeing with case evidence (denial-validation, Phase 2) is a different kind of comparison and does not belong here.",
+  "type": "object",
+  "properties": {
+    "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "conflicts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/conflict_entry" }
+    }
+  },
+  "required": ["case_id", "conflicts"],
+  "$defs": {
+    "conflict_entry": {
+      "type": "object",
+      "properties": {
+        "conflict_id": {
+          "type": "string",
+          "pattern": "^CONFLICT_[0-9]+$"
+        },
+        "raised_by_stage": {
+          "type": "string",
+          "description": "e.g. consistency-check, claim-analysis"
+        },
+        "field_or_topic": { "type": "string" },
+        "sources": {
+          "type": "array",
+          "minItems": 2,
+          "description": "Both (or all) disagreeing values, each attributed to its source. Never resolved by discarding an entry.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+              "page": { "type": "integer", "minimum": 1 },
+              "value": { "type": "string" },
+              "quote": { "type": "string" }
+            },
+            "required": ["document_id", "value", "quote"]
+          }
+        },
+        "verdict": {
+          "enum": ["pending", "resolved", "false_positive"],
+          "description": "Every entry starts pending. Only a human sets resolved/false_positive."
+        },
+        "resolution_note": {
+          "type": ["string", "null"],
+          "description": "Required when verdict is not pending -- what was decided and why."
+        },
+        "resolved_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      },
+      "required": ["conflict_id", "raised_by_stage", "field_or_topic", "sources", "verdict"]
+    }
+  }
+}

@@ -1,20 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "document_manifest.schema.json",
-  "title": "document_manifest.json — 케이스 문서 목록표 v0.2",
-  "description": "케이스 안의 모든 문서 목록과 처리 상태(목차이자 출석부). 컴포넌트 출력이 아니라 여러 단계가 이어 갱신하는 공유 상태 파일이므로 공통 출력 계약 envelope를 쓰지 않는다. 갱신 규율: 각 단계는 자기 owner 필드만 추가하고 기존 필드를 수정하지 않는다 (필드별 owner는 각 필드 description에 명시).",
+  "title": "document_manifest.json -- case document roster v0.2",
+  "description": "The list of every document in a case and its processing status. This is a shared state file updated by multiple stages in sequence, not a single component's output -- it does not use the common output envelope. Update discipline: each stage adds only its own owner fields and never modifies fields it doesn't own (owner is documented per field below). This discipline is enforced structurally by the DAO's write_contract lock (see harness-guardrails P5), not just by convention.",
   "type": "object",
   "properties": {
     "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
     "created_at": {
       "type": "string",
       "format": "date-time",
-      "description": "owner: CaseIntake"
+      "description": "owner: Case Intake"
     },
     "updated_at": {
       "type": "string",
       "format": "date-time",
-      "description": "owner: 마지막으로 갱신한 단계가 기록"
+      "description": "owner: whichever stage last updated this file"
     },
     "documents": {
       "type": "array",
@@ -28,68 +28,82 @@
       "properties": {
         "document_id": {
           "$ref": "common_component_output.schema.json#/$defs/document_id",
-          "description": "owner: CaseIntake"
+          "description": "owner: Case Intake"
         },
         "file_name": {
           "type": "string",
-          "description": "owner: CaseIntake"
+          "description": "owner: Case Intake"
         },
         "file_path": {
           "type": "string",
-          "description": "owner: CaseIntake. 원본 경로 (data/raw/CASE_XXX/...)",
+          "description": "owner: Case Intake. Original path (data/raw/CASE_XXX/...)",
           "pattern": "^data/raw/"
         },
         "file_format": {
           "enum": ["pdf", "image", "text", "spreadsheet", "other"],
-          "description": "owner: CaseIntake. Document Intake 요구사항(파일명·형식·크기)의 '형식'"
+          "description": "owner: Case Intake"
         },
         "file_size_bytes": {
           "type": "integer",
           "minimum": 0,
-          "description": "owner: CaseIntake. Document Intake 요구사항의 '크기'"
+          "description": "owner: Case Intake"
+        },
+        "pre_flagged_type": {
+          "anyOf": [
+            { "$ref": "common_component_output.schema.json#/$defs/document_type" },
+            { "type": "null" }
+          ],
+          "description": "owner: Case Intake. Set when a document's type is already known at intake (e.g. an insurer-response document flagged during the source-ledger review) -- classification trusts this instead of running inference. null if not pre-flagged."
         },
         "pages": {
           "type": ["integer", "null"],
           "minimum": 1,
-          "description": "owner: OCR. OCR 전에는 null"
+          "description": "owner: document-pipeline (checkpoint 1). null before OCR."
         },
         "ocr_status": {
           "enum": ["pending", "completed", "failed"],
-          "description": "owner: OCR. CaseIntake가 pending으로 초기화"
+          "description": "owner: document-pipeline (checkpoint 1). Initialized to pending by Case Intake."
         },
         "ocr_text_path": {
           "type": ["string", "null"],
-          "description": "owner: OCR. data/processed/CASE_XXX/DOC_XXX/text.md"
+          "description": "owner: document-pipeline (checkpoint 1). data/processed/CASE_XXX/DOC_XXX/text.md"
         },
         "ocr_quality": {
           "anyOf": [
             { "enum": ["high", "medium", "low"] },
             { "type": "null" }
           ],
-          "description": "owner: OCR. ocr_result.json의 문서별 ocr_quality 요약 복사. OCR 전에는 null. 상세(불명확 영역 목록·위치)는 ocr_result.json에만 둔다 — manifest는 출석부로 가볍게 유지"
+          "description": "owner: document-pipeline (checkpoint 1). Copied from ocr_result.json's per-document summary. null before OCR. Detail (uncertain-region list/positions, cross-validation outcome) lives only in ocr_result.json -- this manifest stays a lightweight roster."
         },
         "uncertain_region_count": {
           "type": ["integer", "null"],
           "minimum": 0,
-          "description": "owner: OCR. ocr_result.json uncertain_regions의 문서 합계. OCR 전에는 null"
+          "description": "owner: document-pipeline (checkpoint 1). Sum of ocr_result.json's uncertain_regions for this document. null before OCR."
+        },
+        "cross_validation_status": {
+          "anyOf": [
+            { "enum": ["agreed", "disagreed_pending_review", "not_run"] },
+            { "type": "null" }
+          ],
+          "description": "owner: document-pipeline (checkpoint 1). Result of P8's dual-path (OCR engine vs. blind vision-model read) cross-validation."
         },
         "redacted_text_path": {
           "type": ["string", "null"],
-          "description": "owner: Redaction. data/processed/CASE_XXX/DOC_XXX/redacted_text.md"
+          "description": "owner: document-pipeline (checkpoint 2). data/processed/CASE_XXX/DOC_XXX/redacted_text.md"
         },
         "document_type": {
           "anyOf": [
             { "$ref": "common_component_output.schema.json#/$defs/document_type" },
             { "type": "null" }
           ],
-          "description": "owner: DocumentClassification. 분류 전에는 null"
+          "description": "owner: document-pipeline (checkpoint 1). null before classification (or copied directly from pre_flagged_type when pre-flagged)."
         },
         "classification_confidence": {
           "anyOf": [
             { "$ref": "common_component_output.schema.json#/$defs/confidence" },
             { "type": "null" }
           ],
-          "description": "owner: DocumentClassification. 분류 전에는 null"
+          "description": "owner: document-pipeline (checkpoint 1). null before classification; null (not 1.0) when pre-flagged, since no inference confidence applies."
         }
       },
       "required": ["document_id", "file_name", "file_path", "file_format", "file_size_bytes", "ocr_status"]

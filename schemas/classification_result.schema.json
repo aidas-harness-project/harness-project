@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "classification_result.schema.json",
-  "title": "classification_result.json — 문서 유형 분류 결과 v0.1",
-  "description": "각 문서에 유형 이름표를 붙인 결과. DocumentPipelineAgent의 DocumentClassification 단계가 생성. Field Extraction·Policy·Denial Reason 단계가 문서 선별에 사용한다.",
+  "title": "classification_result.json -- document type classification result v0.1",
+  "description": "Assigns a type label to every document in a case. Produced by document-pipeline's checkpoint 1 (OCR + cross-validation + classification, in one vision-model call per document -- see pipeline.md). Consumed by claim-analysis, policy-pipeline, and denial-response for document selection.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -25,12 +25,16 @@
         "predicted_document_type": { "$ref": "common_component_output.schema.json#/$defs/document_type" },
         "document_type_label": {
           "type": "string",
-          "description": "한국어 표시명. 예: 진단서, 보험사 안내문"
+          "description": "Display label in Korean (the language of the source documents). e.g. 진단서, 보험사 안내문"
         },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "pre_flagged": {
+          "type": "boolean",
+          "description": "True if this document's type was already known at intake (e.g. a flagged insurer-response document) rather than inferred here. When true, classification skips inference and trusts the flag -- see harness-guardrails-dev and denial-response.md."
+        },
         "candidate_types": {
           "type": "array",
-          "description": "confidence 내림차순 후보 목록. 첫 항목은 predicted_document_type과 일치해야 한다.",
+          "description": "Candidates in descending confidence order. First entry must match predicted_document_type.",
           "items": {
             "type": "object",
             "properties": {
@@ -43,7 +47,7 @@
         "evidence_references": {
           "type": "array",
           "minItems": 1,
-          "description": "분류 근거 문장. 문서 컨텍스트가 자명하므로 document_id 생략 가능.",
+          "description": "Evidence for the classification. document_id may be omitted since document context is already unambiguous.",
           "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
         },
         "review_required": { "type": "boolean" },
