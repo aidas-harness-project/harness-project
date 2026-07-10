@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "extracted_claim_fields.schema.json",
-  "title": "extracted_claim_fields.json — 핵심 사실 카드 v0.1",
-  "description": "청구 검토에 필요한 핵심 사실관계를 문서에서 추출한 구조화 결과. ClaimAnalysisAgent의 Claim Field Extraction 단계가 생성. 필드 구조는 세 가지로 고정한다 — 단일 값형(value_field), 날짜형(date_field), 기간형(period_field). 이 외 구조 금지 (I/O 계약 평가의 구현 주의 ② 반영).",
+  "title": "extracted_claim_fields.json -- core claim fact card v0.1",
+  "description": "Structured core facts extracted from claim documents. Produced by claim-analysis's checkpoint 1 (Claim Field Extraction). Field structure is fixed to three shapes -- single-value (value_field), date (date_field), period (period_field). No other shape is permitted.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -21,7 +21,7 @@
             "admission_period": { "$ref": "#/$defs/period_field" }
           },
           "additionalProperties": {
-            "description": "새 필드를 추가할 때도 세 가지 고정 구조 중 하나를 쓴다.",
+            "description": "New fields also use one of the three fixed shapes.",
             "oneOf": [
               { "$ref": "#/$defs/value_field" },
               { "$ref": "#/$defs/date_field" },
@@ -44,12 +44,16 @@
           "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
         },
         "review_required": { "type": "boolean" },
-        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" },
+        "is_primary": {
+          "type": "boolean",
+          "description": "For fields where multiple documents disagree (e.g. diagnosis_name/kcd_code): whether this is the primary (headline) value per the document-character-based priority rule in claim-analysis.md, as opposed to a secondary value kept alongside it. Absent when there's no disagreement to label."
+        }
       },
       "required": ["confidence", "evidence_references", "review_required"]
     },
     "value_field": {
-      "description": "단일 값형: 진단명, KCD, 수술명, 병원명 등.",
+      "description": "Single-value shape: diagnosis name, KCD code, surgery name, hospital name, etc.",
       "allOf": [
         { "$ref": "#/$defs/field_common" },
         {
@@ -58,7 +62,7 @@
             "value": { "type": ["string", "null"] },
             "normalized_value": {
               "type": "string",
-              "description": "표준화 값(있는 경우). 예: lumbar_disc_herniation"
+              "description": "Normalized value, if applicable. e.g. lumbar_disc_herniation"
             }
           },
           "required": ["value"]
@@ -66,7 +70,7 @@
       ]
     },
     "date_field": {
-      "description": "날짜형: 사고일, 발병일 등. value는 YYYY-MM-DD.",
+      "description": "Date shape: accident date, onset date, etc. value is YYYY-MM-DD.",
       "allOf": [
         { "$ref": "#/$defs/field_common" },
         {
@@ -84,7 +88,7 @@
       ]
     },
     "period_field": {
-      "description": "기간형: 치료기간, 입원기간 등.",
+      "description": "Period shape: treatment period, admission period, etc.",
       "allOf": [
         { "$ref": "#/$defs/field_common" },
         {
@@ -95,7 +99,7 @@
             "days": {
               "type": ["integer", "null"],
               "minimum": 1,
-              "description": "양끝 포함 일수. end_date 미상이면 null"
+              "description": "Inclusive day count. null if end_date is unknown."
             }
           },
           "required": ["start_date", "end_date"]

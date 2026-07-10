@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "screening_report.schema.json",
-  "title": "screening_report.json — 1차 스크리닝 브리핑 v0.1",
-  "description": "앞 단계 결과를 모은 machine-readable 스크리닝 리포트. ReportGenerationAgent가 생성하고 이 JSON에서 screening_report.md(사람용)를 렌더링한다. 섹션 구성은 wiki/templates/screening-report.md의 7개 섹션과 1:1 대응 — 원문 계약 초안에 없던 §7 '1차 판단'을 preliminary_assessment 블록으로 추가했다 (갭 1 해소).",
+  "title": "screening_report.json -- initial screening briefing v0.1",
+  "description": "Machine-readable screening report assembled from prior-stage outputs. Produced by screening-report; screening_report.md (the human-facing render) is generated from this JSON via the document-assembly tool. Section structure: template rules are pending (see pipeline.md's note) -- this schema's current sections are a placeholder shape carried over from the original design and may change once the real template arrives.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -10,7 +10,7 @@
       "properties": {
         "report_path": {
           "type": "string",
-          "description": "렌더링된 md 리포트 경로. outputs/CASE_XXX/screening_report.md"
+          "description": "Path to the rendered .md report. outputs/CASE_XXX/screening_report.md"
         },
         "case_summary": { "$ref": "#/$defs/case_summary" },
         "insurer_position": { "$ref": "#/$defs/insurer_position" },
@@ -48,11 +48,11 @@
   "$defs": {
     "case_summary": {
       "type": "object",
-      "description": "템플릿 §1 사건 개요. 출처: extracted_claim_fields, coverage_result, case_type_result",
+      "description": "Case overview section. Source: extracted_claim_fields, coverage_result, case_type_result.",
       "properties": {
         "case_type": {
           "type": "string",
-          "description": "사건 유형 (wiki/taxonomy/case-types.md). 예: 후유장해, 진단·수술비, 실손, 배상책임, 기타"
+          "description": "Case type -- e.g. permanent-disability, diagnosis/surgery-cost, out-of-pocket medical, liability, other. See pipeline.md's taxonomy."
         },
         "main_diagnosis": { "type": "string" },
         "kcd_code": { "type": ["string", "null"] },
@@ -68,7 +68,7 @@
         },
         "claim_coverages": {
           "type": "array",
-          "description": "표준 담보명 목록 (wiki/taxonomy/claim-coverages.md)",
+          "description": "Standard coverage names -- see pipeline.md's taxonomy.",
           "items": { "type": "string" }
         }
       },
@@ -76,7 +76,7 @@
     },
     "insurer_position": {
       "type": "object",
-      "description": "템플릿 §2 보험사 판단. 출처: denial_reason_result",
+      "description": "Insurer's determination section. Source: denial_reason_result (from denial-response, consumed as a dependency -- see pipeline.md).",
       "properties": {
         "has_denial_or_reduction": { "type": "boolean" },
         "main_reason_code": {
@@ -88,7 +88,7 @@
         "main_reason_label": { "type": ["string", "null"] },
         "summary": {
           "type": ["string", "null"],
-          "description": "보험사 주장 요약. 단정 대신 추정 표현 사용"
+          "description": "Summary of the insurer's position -- hedged, non-definitive phrasing."
         },
         "reduction_amount": { "type": ["number", "null"], "minimum": 0 }
       },
@@ -96,7 +96,7 @@
     },
     "key_issue": {
       "type": "object",
-      "description": "템플릿 §3 핵심 쟁점",
+      "description": "A core issue for review.",
       "properties": {
         "issue_id": { "type": "string", "pattern": "^ISSUE_[0-9]+$" },
         "title": { "type": "string" },
@@ -112,7 +112,7 @@
     },
     "inconsistency": {
       "type": "object",
-      "description": "템플릿 §4 문서 간 불일치. 출처: evidence_validation_result (상세 doc_a/doc_b 값 비교는 그쪽에 저장, 여기는 요약 + 문서 추적)",
+      "description": "A cross-document inconsistency. Source: evidence_validation_result / the conflict ledger (see harness-guardrails P6) -- detailed doc_a/doc_b value comparison and resolution live there; this is a summary plus document tracing.",
       "properties": {
         "field": { "type": "string" },
         "description": { "type": "string" },
@@ -120,7 +120,7 @@
         "related_documents": {
           "type": "array",
           "minItems": 2,
-          "description": "불일치가 발생한 비교 대상 문서들 (Consistency Check의 doc_a/doc_b 추적용)",
+          "description": "The documents being compared where the inconsistency was found.",
           "items": { "$ref": "common_component_output.schema.json#/$defs/document_id" }
         },
         "review_required": { "type": "boolean" }
@@ -129,11 +129,11 @@
     },
     "missing_document": {
       "type": "object",
-      "description": "템플릿 §5 추가 필요 서류",
+      "description": "A document recommended for follow-up request.",
       "properties": {
         "document_type": {
           "type": "string",
-          "description": "표준 코드 또는 세부 서류명. 예: disability_certificate"
+          "description": "Standard code or specific document name. e.g. disability_certificate"
         },
         "reason": { "type": "string" }
       },
@@ -141,7 +141,7 @@
     },
     "review_point": {
       "type": "object",
-      "description": "템플릿 §6 전문가 검수 포인트",
+      "description": "A point flagged for expert review.",
       "properties": {
         "point": { "type": "string" },
         "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" },
@@ -151,25 +151,22 @@
     },
     "preliminary_assessment": {
       "type": "object",
-      "description": "템플릿 §7 1차 판단. 파이프라인에서 가장 판단성이 강한 출력이므로 근거 연결과 검수 라우팅을 강제한다 — 리포트 전체의 review_required를 true, reviewer_role을 손해사정사로 두는 것을 기본값으로 한다.",
+      "description": "Preliminary judgment. This is the pipeline's most judgment-heavy output, so evidence-linking and review routing are mandatory here -- review_required defaults to true and reviewer_role to 손해사정사 for this section.",
       "properties": {
         "feasibility": {
-          "enum": ["high", "medium", "low"],
-          "description": "진행 가능성"
+          "enum": ["high", "medium", "low"]
         },
         "difficulty": {
-          "enum": ["high", "medium", "low"],
-          "description": "난이도"
+          "enum": ["high", "medium", "low"]
         },
         "priority_review_points": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string" },
-          "description": "우선 검토 포인트"
+          "items": { "type": "string" }
         },
         "rationale_evidence_references": {
           "type": "array",
-          "description": "판단 근거의 원문 연결. 비어 있으면 source_grounded: false로 간주",
+          "description": "Evidence backing this assessment. Empty is treated as source_grounded: false.",
           "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
         }
       },
@@ -177,7 +174,7 @@
     },
     "draft_writer_input_summary": {
       "type": "object",
-      "description": "Draft Writer로 넘기는 요약. template_id는 case_type 분류가 결정",
+      "description": "Summary handed to draft-report. template_id is decided by case-type classification.",
       "properties": {
         "recommended_template_id": { "type": "string" },
         "sections_to_emphasize": {

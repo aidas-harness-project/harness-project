@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ocr_result.schema.json",
-  "title": "ocr_result.json — OCR 품질 로그 v0.1",
-  "description": "문서별·페이지별 텍스트 추출 결과와 불명확 영역(uncertain_regions) 목록. DocumentPipelineAgent의 OCR / Text Extraction 단계가 생성. I/O 계약 초안의 low_confidence_blocks를 문자 오프셋 위치 정보를 갖는 uncertain_regions로 확장했다. 전파 규칙: 뒤 단계의 evidence_reference 인용 구간이 uncertain_region과 겹치면 해당 필드는 review_required: true로 라우팅한다. manifest에는 문서별 요약(ocr_quality, uncertain_region_count)만 복사한다.",
+  "title": "ocr_result.json -- OCR quality + cross-validation log v0.2",
+  "description": "Per-document, per-page text extraction results, uncertain regions, and the P8 dual-path cross-validation outcome. Produced by document-pipeline's checkpoint 1. Propagation rule: if a later stage's evidence_reference quote overlaps an uncertain_region, that field is routed review_required: true. Only a per-document summary (ocr_quality, uncertain_region_count, cross_validation_status) is copied into document_manifest.json.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -10,11 +10,15 @@
       "properties": {
         "ocr_engine": {
           "type": "string",
-          "description": "사용한 OCR 엔진/추출기. 예: upstage_ocr, pdfplumber"
+          "description": "OCR engine/extractor used. e.g. upstage_ocr, pdfplumber"
+        },
+        "vision_model_name": {
+          "type": "string",
+          "description": "The vision-capable model used for P8's independent blind read (harness-guardrails P8). Its output is never shown the OCR text before reading -- see cross_validation per page."
         },
         "uncertain_confidence_threshold": {
           "$ref": "common_component_output.schema.json#/$defs/confidence",
-          "description": "이 값 미만인 블록을 uncertain_region으로 기록한다. 엔진마다 confidence 분포가 달라 스키마에 고정하지 않고, 실행 시 사용한 값을 여기 기록한다."
+          "description": "Blocks below this confidence are recorded as uncertain_region. Not fixed in the schema since confidence distributions vary by engine -- record whatever value was actually used for this run."
         },
         "documents": {
           "type": "array",
@@ -22,7 +26,7 @@
           "items": { "$ref": "#/$defs/ocr_document" }
         }
       },
-      "required": ["ocr_engine", "uncertain_confidence_threshold", "documents"]
+      "required": ["ocr_engine", "vision_model_name", "uncertain_confidence_threshold", "documents"]
     }
   ],
   "$defs": {
@@ -32,19 +36,19 @@
         "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
         "extraction_method": {
           "enum": ["embedded_text", "ocr", "mixed"],
-          "description": "PDF 내장 텍스트 추출인지 이미지 OCR인지. embedded_text면 confidence 계열 필드는 null 허용"
+          "description": "Whether text came from a PDF's embedded text layer or image OCR. If embedded_text, confidence-related fields may be null."
         },
         "encoding_detected": {
           "type": ["string", "null"],
-          "description": "텍스트 파일 입력일 때 감지된 인코딩. 케이스 원자료 중 CP949가 있으므로 기록 (wiki/agents/ocr-layer.md 주의사항)"
+          "description": "Detected encoding for text-file inputs. Some source-cases files use CP949 -- record it."
         },
         "ocr_status": {
           "enum": ["completed", "failed"],
-          "description": "manifest의 ocr_status와 동일 값으로 갱신"
+          "description": "Kept in sync with document_manifest.json's ocr_status for this document."
         },
         "pages": {
           "type": "array",
-          "description": "페이지별 추출 결과. ocr_status가 failed면 빈 배열 허용",
+          "description": "Per-page results. May be empty if ocr_status is failed.",
           "items": { "$ref": "#/$defs/page_result" }
         },
         "document_mean_confidence": {
@@ -52,16 +56,20 @@
             { "$ref": "common_component_output.schema.json#/$defs/confidence" },
             { "type": "null" }
           ],
-          "description": "페이지 mean_confidence의 평균. embedded_text 문서는 null"
+          "description": "Mean of per-page mean_confidence. null for embedded_text documents."
         },
         "ocr_quality": {
           "enum": ["high", "medium", "low"],
-          "description": "문서 단위 품질 요약. manifest의 ocr_quality 요약 필드와 동일 값. 산정 규칙(예: uncertain_region 비율·실패 페이지 유무)은 구현에서 정하되 run 간 일관되게 유지하고, low가 다수면 Go/No-Go의 OCR 품질 No-Go 조건 검토 대상"
+          "description": "Document-level quality summary, mirrored in document_manifest.json. Derivation (e.g. uncertain-region ratio, presence of failed pages) is an implementation detail but must stay consistent across runs; a majority of 'low' documents is a No-Go signal to check."
+        },
+        "cross_validation_status": {
+          "enum": ["agreed", "disagreed_pending_review", "not_run"],
+          "description": "Document-level rollup of the per-page cross_validation results below. 'disagreed_pending_review' on any page means the whole document is blocked from downstream use per harness-guardrails P8 until a human resolves it."
         },
         "review_required": { "type": "boolean" },
         "review_reason": { "type": "string" }
       },
-      "required": ["document_id", "extraction_method", "ocr_status", "pages", "ocr_quality"]
+      "required": ["document_id", "extraction_method", "ocr_status", "pages", "ocr_quality", "cross_validation_status"]
     },
     "page_result": {
       "type": "object",
@@ -70,40 +78,60 @@
         "text_path": {
           "type": "string",
           "pattern": "^data/processed/",
-          "description": "페이지 텍스트 파일 경로. data/processed/CASE_XXX/DOC_XXX/page_NNN.md"
+          "description": "Path to this page's extracted text. data/processed/CASE_XXX/DOC_XXX/page_NNN.md"
         },
         "mean_confidence": {
           "anyOf": [
             { "$ref": "common_component_output.schema.json#/$defs/confidence" },
             { "type": "null" }
           ],
-          "description": "페이지 평균 confidence. embedded_text면 null"
+          "description": "Mean confidence for this page. null if embedded_text."
         },
         "uncertain_regions": {
           "type": "array",
-          "description": "threshold 미만 블록 목록. 없으면 빈 배열 (필수 — 생략 금지, '검사 안 함'과 '없음'을 구분)",
+          "description": "Blocks below threshold. Required -- omission is not allowed; an empty array means 'checked, none found', distinct from 'not checked'.",
           "items": { "$ref": "#/$defs/uncertain_region" }
-        }
+        },
+        "cross_validation": { "$ref": "#/$defs/cross_validation_result" }
       },
-      "required": ["page", "text_path", "uncertain_regions"]
+      "required": ["page", "text_path", "uncertain_regions", "cross_validation"]
     },
     "uncertain_region": {
       "type": "object",
-      "description": "불명확 영역 1건. 오프셋은 해당 페이지 text_path 파일 내 문자 위치(0-base, end는 exclusive). 뒤 단계가 인용(quote) 구간과의 겹침 판정에 사용한다.",
+      "description": "One uncertain region. Offsets are character positions (0-based, end exclusive) within this page's text_path file. Used by later stages to check whether a quoted evidence_reference overlaps an uncertain region.",
       "properties": {
         "text_as_read": {
           "type": "string",
-          "description": "엔진이 읽어낸 텍스트 그대로 (오독 가능성 있음)"
+          "description": "The engine's raw reading, verbatim (may be a misread)."
         },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
         "char_offset_start": { "type": "integer", "minimum": 0 },
         "char_offset_end": { "type": "integer", "minimum": 1 },
         "note": {
           "type": "string",
-          "description": "선택. 예: 도장·손글씨 겹침, 표 경계 잘림"
+          "description": "Optional. e.g. stamp/handwriting overlap, table boundary cut off."
         }
       },
       "required": ["text_as_read", "confidence", "char_offset_start", "char_offset_end"]
+    },
+    "cross_validation_result": {
+      "type": "object",
+      "description": "P8's dual-path cross-validation for this page: the OCR engine's text (above) vs. a vision-capable model reading the same raw page blind, without seeing the OCR output. Diffed for material-content agreement (same names/dates/numbers/diagnoses present) -- not verbatim match.",
+      "properties": {
+        "vision_model_reading": {
+          "type": "string",
+          "description": "The vision model's independent transcription/content summary of this page, produced before it ever saw the OCR text."
+        },
+        "agreement": {
+          "enum": ["agreed", "disagreed"]
+        },
+        "disagreement_details": {
+          "type": "array",
+          "description": "Populated only when agreement is 'disagreed' -- what specifically differs between the two readings.",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["vision_model_reading", "agreement"]
     }
   }
 }

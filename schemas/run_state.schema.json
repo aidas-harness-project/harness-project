@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "run_state.schema.json",
+  "title": "_run_state.json -- pipeline run-state and backup tracker v0.1",
+  "description": "The single source of truth for where a run stopped -- see harness-guardrails P7 and P10. Every stage's status is recorded here with timestamps; a crash or resume reads this file (via the DAO's get_last_passed_stage query) instead of re-deriving progress from scattered output files. After every stage passes, the orchestrator takes a full cumulative snapshot and records its path here -- one snapshot per passed stage, kept for the life of the run, never overwritten.",
+  "type": "object",
+  "properties": {
+    "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
+    "run_id": { "type": "string", "pattern": "^RUN_[0-9]{8}_[0-9]+$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "stages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/stage_entry" }
+    },
+    "human_input_status": {
+      "type": "array",
+      "description": "Tracks P7's human-input waits. Entries are never deleted, only updated in place (waiting -> received), so the full history of what was waited on stays visible.",
+      "items": { "$ref": "#/$defs/human_input_entry" }
+    }
+  },
+  "required": ["case_id", "run_id", "stages"],
+  "$defs": {
+    "stage_entry": {
+      "type": "object",
+      "properties": {
+        "stage_name": { "type": "string" },
+        "status": { "enum": ["pending", "in_progress", "passed", "failed"] },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "completed_at": { "type": ["string", "null"], "format": "date-time" },
+        "attempt_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Fixed retries under P9 -- max 3 for a partial/failed stage before it halts for user audit."
+        },
+        "backup_path": {
+          "type": ["string", "null"],
+          "description": "outputs/CASE_XXX/_backups/step_<N>_<stage_name>/ -- null until this stage has passed."
+        }
+      },
+      "required": ["stage_name", "status", "attempt_count"]
+    },
+    "human_input_entry": {
+      "type": "object",
+      "properties": {
+        "stage_name": { "type": "string" },
+        "status": { "enum": ["waiting", "received"] },
+        "description": {
+          "type": "string",
+          "description": "What input is/was pending -- e.g. 'expert review of draft_report_v1'."
+        },
+        "requested_at": { "type": "string", "format": "date-time" },
+        "received_at": { "type": ["string", "null"], "format": "date-time" }
+      },
+      "required": ["stage_name", "status", "description", "requested_at"]
+    }
+  }
+}

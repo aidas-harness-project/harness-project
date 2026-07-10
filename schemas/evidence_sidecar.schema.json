@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evidence_sidecar.schema.json",
+  "title": "*.evidence.json -- narrative document citation sidecar v0.1",
+  "description": "Maps [E#] tags in a narrative document (screening_report.md, draft_report_v*.md, rebuttal_points.md) to their full citations. See harness-guardrails P1. Generated entirely by the document-assembly tool from an agent's per-field {content, evidence_references} -- no agent ever hand-writes a tag number or edits this file directly, which is what prevents a tag and its citation from drifting out of sync.",
+  "type": "object",
+  "properties": {
+    "document_path": {
+      "type": "string",
+      "description": "The .md file this sidecar belongs to, e.g. outputs/CASE_003/draft_report_v1.md"
+    },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "citations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/citation" }
+    }
+  },
+  "required": ["document_path", "citations"],
+  "$defs": {
+    "citation": {
+      "type": "object",
+      "properties": {
+        "tag": {
+          "type": "string",
+          "pattern": "^E[0-9]+$",
+          "description": "Matches the inline [E#] tag in the document, assigned sequentially by the document-assembly tool."
+        },
+        "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+        "page": { "type": "integer", "minimum": 1 },
+        "quote": { "type": "string", "minLength": 1 }
+      },
+      "required": ["tag", "document_id", "quote"]
+    }
+  }
+}

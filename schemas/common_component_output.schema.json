@@ -1,25 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "common_component_output.schema.json",
-  "title": "공통 컴포넌트 출력 계약 v0.1",
-  "description": "파이프라인의 모든 컴포넌트 출력 JSON이 공통으로 포함하는 필드. 판단성 출력은 안전 필드(source_grounded, hallucination_risk_check, prohibited_language_check)를 추가한다. 근거: wiki/templates/component-output.md",
+  "title": "Common component output contract v0.2",
+  "description": "Fields every pipeline component's output JSON includes in common. Judgment-type outputs add the safety fields (source_grounded, hallucination_risk_check, prohibited_language_check). See harness-guardrails (P1) for the rules this schema enforces.",
   "type": "object",
   "properties": {
     "case_id": { "$ref": "#/$defs/case_id" },
     "run_id": {
       "type": "string",
-      "description": "실행 단위 ID. 예: RUN_20260706_001",
+      "description": "Run identifier. e.g. RUN_20260706_001",
       "pattern": "^RUN_[0-9]{8}_[0-9]+$"
     },
     "component": {
       "type": "string",
-      "description": "출력을 생성한 컴포넌트 이름. 예: FieldExtractionAgent"
+      "description": "Name of the agent/component that produced this output. e.g. claim-analysis"
     },
     "status": { "enum": ["success", "partial", "failed"] },
     "created_at": {
       "type": "string",
       "format": "date-time",
-      "description": "ISO 8601, KST(+09:00)"
+      "description": "ISO 8601, KST (+09:00)"
     },
     "model_info": { "$ref": "#/$defs/model_info" },
     "confidence": { "$ref": "#/$defs/confidence" },
@@ -35,7 +35,7 @@
     },
     "source_grounded": {
       "type": "boolean",
-      "description": "안전 필드(판단성 출력): 모든 주장이 원문 근거와 연결되는지. false면 review_required는 반드시 true."
+      "description": "Safety field (judgment-type outputs): whether every claim traces to a source quote. If false, review_required must be true (see harness-guardrails P1)."
     },
     "hallucination_risk_check": {
       "type": "object",
@@ -47,7 +47,7 @@
     },
     "prohibited_language_check": {
       "type": "object",
-      "description": "금지 표현 가이드(wiki/templates/forbidden-expressions.md) 위반 여부. Critic Agent가 최종 검증.",
+      "description": "Whether the output violates the forbidden-expression guide (see pipeline.md). CriticAgent performs the final check.",
       "properties": {
         "passed": { "type": "boolean" },
         "issues": {
@@ -61,7 +61,7 @@
   "required": ["case_id", "component", "status"],
   "allOf": [
     {
-      "description": "규칙: source_grounded가 false면 review_required는 true여야 한다.",
+      "description": "Rule: if source_grounded is false, review_required must be true.",
       "if": {
         "properties": { "source_grounded": { "const": false } },
         "required": ["source_grounded"]
@@ -72,7 +72,7 @@
       }
     },
     {
-      "description": "규칙: review_required가 true면 reviewer_role을 지정한다.",
+      "description": "Rule: if review_required is true, reviewer_role must be set.",
       "if": {
         "properties": { "review_required": { "const": true } },
         "required": ["review_required"]
@@ -95,10 +95,11 @@
       "maximum": 1
     },
     "reviewer_role": {
+      "description": "Kept in Korean -- these are the actual routing values used by the real-world review workflow (a Korean-speaking loss adjuster / doctor / legal specialist), not documentation.",
       "enum": ["손해사정사", "의사", "법률전문가"]
     },
     "document_type": {
-      "description": "문서 유형 표준 코드. 근거: wiki/taxonomy/document-types.md",
+      "description": "Standard document-type code. See pipeline.md's taxonomy section.",
       "enum": [
         "insurance_certificate",
         "insurance_policy",
@@ -111,7 +112,7 @@
       ]
     },
     "taxonomy_code": {
-      "description": "감액사유 R코드. 근거: wiki/taxonomy/reduction-reasons.md",
+      "description": "Denial/reduction-reason R-code. See pipeline.md's taxonomy section.",
       "enum": ["R01", "R02", "R03", "R04", "R05", "R06", "R07", "R08", "R09", "R99"]
     },
     "severity": {
@@ -123,14 +124,14 @@
         "model_name": { "type": "string" },
         "prompt_version": {
           "type": "string",
-          "description": "평가 결과를 프롬프트 변경과 연결하기 위해 기록. 예: field_extraction_v0.1"
+          "description": "Recorded to tie evaluation results to a specific prompt version. e.g. field_extraction_v0.1"
         }
       },
       "required": ["model_name", "prompt_version"]
     },
     "evidence_reference": {
       "type": "object",
-      "description": "원문 근거 참조. 문서 컨텍스트가 자명한 경우(문서 단위 배열 내부) document_id는 생략 가능.",
+      "description": "A reference to a source quote. document_id may be omitted when the document context is already unambiguous (e.g. inside a per-document array).",
       "properties": {
         "document_id": { "$ref": "#/$defs/document_id" },
         "document_type": { "$ref": "#/$defs/document_type" },

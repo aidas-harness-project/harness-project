@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "denial_reason_result.schema.json",
-  "title": "denial_reason_result.json — 보험사 주장 요약표 v0.1",
-  "description": "보험사 안내문에서 반려·감액·부지급 사유를 추출하고 R코드 taxonomy로 분류한 결과. DenialResponseAgent가 생성 (아키텍처상 Phase 2 소속이나 PoC 일정에서는 Week 2에 당겨 실행). 판단성 출력이므로 안전 필드(source_grounded 등) 포함을 권장한다.",
+  "title": "denial_reason_result.json -- insurer's stated position, extracted and classified v0.1",
+  "description": "Extracts denial/reduction/non-payment reasons from an insurer-response document and classifies each against the R-code taxonomy. Produced by denial-response, which is dependency-triggered (runs whenever a flagged insurer-response document's processed text exists) rather than phase-gated -- see pipeline.md. Judgment-type output; include the safety fields (source_grounded etc.) from common_component_output.schema.json.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -10,7 +10,7 @@
       "properties": {
         "denial_reasons": {
           "type": "array",
-          "description": "추출된 사유 목록. 사유가 없으면 빈 배열 (부지급·감액 없음).",
+          "description": "Extracted reasons. Empty array means no denial/reduction found.",
           "items": { "$ref": "#/$defs/denial_reason" }
         }
       },
@@ -27,17 +27,17 @@
         },
         "reason_type": {
           "enum": ["denial", "reduction", "partial_payment", "document_request", "other"],
-          "description": "denial=부지급, reduction=감액, partial_payment=일부지급, document_request=서류요청"
+          "description": "denial=non-payment, reduction=reduced payout, partial_payment=partial payout, document_request=additional documents requested"
         },
         "taxonomy_code": { "$ref": "common_component_output.schema.json#/$defs/taxonomy_code" },
         "taxonomy_label": {
           "type": "string",
-          "description": "R코드의 한국어 표시명. 예: 기왕증 / 기존 질환 기여도"
+          "description": "R-code display label, in Korean. e.g. 기왕증 / 기존 질환 기여도"
         },
         "candidate_codes": {
           "type": "array",
           "maxItems": 3,
-          "description": "Top-3 평가용 후보 R코드 (confidence 내림차순, 첫 항목은 taxonomy_code와 일치). 감액사유 Top-3 일치율 75% 지표(wiki/evaluation/metrics.md) 산정에 사용",
+          "description": "Top-3 candidate R-codes (descending confidence, first entry matches taxonomy_code). Used for the denial-reason Top-3 agreement metric.",
           "items": {
             "type": "object",
             "properties": {
@@ -49,22 +49,22 @@
         },
         "raw_reason_text": {
           "type": "string",
-          "description": "보험사 원문 표현 그대로"
+          "description": "The insurer's original wording, verbatim."
         },
         "insurer_claim_summary": {
           "type": "string",
-          "description": "보험사 주장 요약. 단정 대신 추정 표현 사용 (금지 표현 가이드 준수)"
+          "description": "Summary of the insurer's position. Use hedged, non-definitive phrasing (see the forbidden-expression guide in pipeline.md)."
         },
         "reduction_rate": {
           "type": ["number", "null"],
           "minimum": 0,
           "maximum": 1,
-          "description": "감액률. 해당 없으면 null"
+          "description": "Reduction rate. null if not applicable."
         },
         "reduction_amount": {
           "type": ["number", "null"],
           "minimum": 0,
-          "description": "감액금액(원). 원문에 없으면 null"
+          "description": "Reduction amount (KRW). null if not stated in the source."
         },
         "requested_documents": {
           "type": "array",
