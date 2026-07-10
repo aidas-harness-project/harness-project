@@ -8,23 +8,22 @@
 __pycache__/
 *.pyc
 
-# Claude Code 로컬 설정
+# Claude Code local settings
 .claude/settings.local.json
 
-# 파이프라인 실행 데이터 (POC/ 사본 + 중간 산출물 — 원본은 POC/에서 버전 관리)
+# Pipeline execution data (copy of source-cases/ + intermediate outputs -- originals version-controlled in source-cases/)
 data/
 
-# 하네스 실행별 임시 조율 산출물
-_workspace/
+# Per-step run backups (P10) -- regenerable snapshots, not source of truth
+outputs/*/_backups/
 
-# 파이프라인 케이스 산출물 (실행 결과물 — 버전 관리 대상 아님. CASE_003는 이미 커밋되어 예외 유지)
+# Pipeline case outputs (run artifacts -- not version-controlled. CASE_003 already committed, kept as exception)
 outputs/*
 !outputs/.gitkeep
 !outputs/CASE_003/
 
+# Transient file locks (P5) -- must never be committed
+*.lock
 
-# 개인 wiki (독립 git repo로 별도 관리 — 메인 저장소는 추적 안 함)
-wiki/
-
-# 공유용 임시 zip (schemas/ 폴더가 정본)
+# Shared temp zip (schemas/ is the source of truth)
 schemas.zip
