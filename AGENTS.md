@@ -1,42 +1,42 @@
-# 손해사정 Agent Harness PoC + LLM Wiki (Second Brain)
+# Loss-Adjustment Agent Harness PoC
 
-이 vault는 두 가지를 담는다:
+A 3-week experiment validating an agent harness that takes pseudonymized,
+closed insurance-claim cases and produces a screening report plus a draft
+loss-adjustment report, evaluated against the real final report. Full
+pipeline/agent/taxonomy reference: `pipeline.md`. Original 3-week plan
+(success criteria, Go/No-Go): `POC guide.md` (Korean, not yet reviewed for
+accuracy against the current design -- treat as historical planning
+material, not a live spec).
 
-1. **손해사정 Agent Harness PoC** — 가명처리된 종결 케이스로 스크리닝
-   리포트·손해사정서 초안 생성을 검증하는 3주 실험. 기획 문서는
-   `POC guide.md`, 케이스 원자료는 `POC/`.
-2. **LLM Wiki** (`wiki/`) — LLM이 작성·유지보수하는 사용자의 second brain.
-   PoC 지식에서 시작했지만 모든 주제로 확장된다.
+## Hard rules
 
-## 반드시 지킬 것
+- **Every session follows the rules in `.agents/skills/harness-guardrails/SKILL.md` and `.agents/skills/harness-guardrails-dev/SKILL.md`.** These are the non-negotiable constraints every agent follows in every stage -- read them before touching anything in this pipeline. The `-dev` rules only apply while a ground-truth answer key exists in this repo (the PoC/evaluation phase); they stop applying once there's no ground truth to isolate.
+- **Raw sources are immutable**: `source-cases/`, `case_qna.pdf`, `archive/sources/` are read-only. Never modify or delete.
+- **No agent reads or writes `outputs/`, `data/`, or a ledger/run-state file directly.** Everything goes through `tools/dao.py` -- see the guardrail rules referenced above (P2/P5/P7/P10/D1/D2). Direct file access bypassing the DAO is exactly the kind of thing these rules exist to prevent.
+- The final loss-adjustment report inside `source-cases/` is the evaluation answer key. Never feed it to a model as input.
+- Documentation, code, and agent/skill definitions are English. The two exceptions: raw source material (Korean, as collected) and the actual deliverable documents the pipeline produces (screening report, draft report -- Korean, since they're submitted to Korean-speaking professionals).
 
-- **모든 세션은 `wiki/AGENTS.md`의 스키마를 따른다.** 위키 구조, 폴더
-  규약, ingest/query/lint 워크플로, index/log 형식이 모두 거기 정의되어
-  있다. 위키를 읽거나 쓰기 전에 해당 스키마를 먼저 확인할 것.
-- **Raw sources는 불변**: `POC/`, `case_qna.pdf`, `sources/`는 읽기 전용.
-  수정·삭제 금지.
-- 프로젝트 파일을 만들거나 바꾼 뒤, 그 변경이 위키가 다루는 지식에
-  해당하면 위키를 함께 갱신한다 (스키마의 "갱신 시 공통 체크리스트" 참고).
-- `POC/` 안의 최종 손해사정서는 평가용 정답지다. 모델 입력으로 쓰지 말 것.
-- 한국어 텍스트 파일 중 CP949 인코딩이 있으니 읽을 때 주의.
+## Tools
 
-## 도구
+- `python tools/dao.py <subcommand>` -- the sole data-access path (locking, ledgers, run-state, conflict tracking, schema-validated writes). See its module docstring for the full subcommand list.
+- `python tools/validate_output.py <file.json>` -- standalone schema validation (also used internally by `dao.py write-contract`).
+- `python tools/intake_case.py <source-cases folder> <CASE_ID>` -- case intake with the D2 per-file review ledger.
+- `python tools/document_assembly.py --sections-file <spec.json>` -- renders narrative reports and auto-generates `[E#]` citation tags + sidecar (P1).
+- `python tools/sync_agents.py` -- regenerates this directory's copies (`.agents/skills/*/SKILL.md`) and the Codex copies (`.codex/agents/*.toml`) from the canonical `.claude/` definitions. Run this after editing any `.claude/agents/*.md` or `.claude/skills/*/SKILL.md` -- never hand-edit the generated copies.
+- Version-controlled with git. Propose a commit when the user asks, or when a meaningful unit of change is complete.
 
-- 위키 무결성 검사: `python tools/wiki_lint.py`
-- 산출물 스키마 검증: `python tools/validate_output.py <파일.json>`
-- git으로 버전 관리한다. 커밋은 사용자가 요청할 때 또는 의미 있는 위키
-  변경 단위가 완료됐을 때 제안한다.
+## Harness: loss-adjustment case pipeline
 
-## 하네스: 손해사정 케이스 파이프라인
+**Goal:** closed-case input → screening report + draft report + evaluation, via 10 specialized agents across 2 phases. See `pipeline.md` for the full stage/agent map, and `.agents/skills/loss-adjustment-pipeline/SKILL.md` for the orchestration logic -- consult these directly for case processing, reruns/updates, or evaluation requests. Simple questions about pipeline design can be answered directly from `pipeline.md`.
 
-**목표:** 종결 케이스 입력 → 스크리닝 리포트 + 손사서 초안 + 평가를
-7개 전문 에이전트로 자동 생성한다.
+**Changelog:**
 
-**트리거:** 케이스 처리·파이프라인 실행·재실행·평가 요청 시
-`loss-adjustment-pipeline` 스킬을 사용하라. 파이프라인 설계에 대한 단순
-질문은 `wiki/pipeline.md`로 직접 응답 가능.
+| Date | Change | Scope | Reason |
+|---|---|---|---|
+| 2026-07-07 | Initial setup (7 agents + 2 skills + 2 tools) | project-wide | -- |
+| 2026-07-08 | Notes-first, incremental-write discipline added | skills/component-output-contract | Observation 1: claim-analysis exited without notes (context lost on interruption) |
+| 2026-07-08 | Resume-from-interruption + notes-existence check | skills/loss-adjustment-pipeline | Observation 2: promoted file-based-stitching resilience to an intended feature |
+| 2026-07-08 | Primary-diagnosis-code selection rule (document-character-based priority) | agents/claim-analysis + wiki/field-extraction | Observation 3: headline KCD misselected in a permanent-disability case (failure type F1) |
+| 2026-07-10 | Full restructure: English throughout, root taxonomy cleanup (`source-cases/`, `archive/`), old `component-output-contract`/`loss-adjustment-pipeline` skills replaced by `harness-guardrails` (11 universal rules) + `harness-guardrails-dev` (4 PoC-only rules), entire pipeline redesigned (18+13-step draft → 10+2 stages) with a fresh 10-agent landscape (split from the old 7 to fix 3 identities that bundled unrelated jobs, most notably separating the ground-truth-blind critic pass from the ground-truth-sighted evaluation pass), and a DAO (`tools/dao.py`) making the guardrails structurally enforced rather than prompted. `outputs/` wiped -- CASE_003's old run predates all of this and isn't a valid baseline. | project-wide | Coworker brought a rough pipeline reference; review surfaced that the old skills leaned on dead `wiki/` cross-references (wiki now lives in a separate repo) and several rules were duplicated across files and already drifting between the Claude/Codex/generic copies |
 
-**변경 이력:**
-| 날짜 | 변경 내용 | 대상 | 사유 |
-|------|----------|------|------|
-| 2026-07-07 | 초기 구성 (에이전트 7 + 스킬 2 + 도구 2) | 전체 | - |
+**Open decisions deferred for later:** see `open-decisions.md` -- redaction model choice, document-assembly template rules (pending from the user), and the vision-model PII-exposure risk in P8's cross-validation.
