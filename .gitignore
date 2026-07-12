@@ -17,11 +17,6 @@ data/
 # Per-step run backups (P10) -- regenerable snapshots, not source of truth
 outputs/*/_backups/
 
-# Pipeline case outputs (run artifacts -- not version-controlled. CASE_003 already committed, kept as exception)
-outputs/*
-!outputs/.gitkeep
-!outputs/CASE_003/
-
 # Transient file locks (P5) -- must never be committed
 *.lock
 
