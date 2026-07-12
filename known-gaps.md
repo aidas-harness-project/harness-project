@@ -289,3 +289,79 @@ completeness in this pass.
 **To resolve:** a dedicated pass once the schema gap (item 1) stops blocking
 real end-to-end runs -- reviewing a frontend against a pipeline that can't
 finish yet has limited value.
+
+## 8. End-to-end pipeline audit -- 4 real blockers found, all RESOLVED 2026-07-13
+
+A full re-check ("does this actually run end-to-end") after items 1-4, 6-7
+were closed, prompted by nothing having ever run far enough to reach
+stages 9-10 (every real test run so far stopped by stage 2-6). Found four
+structural gaps that mechanical schema/lock fixes hadn't touched, all now
+fixed and tested (25 new tests, `tests/test_dao_write_text.py`,
+`tests/test_dao_human_review.py`, `tests/test_chunk_text.py`):
+
+1. **`critic`'s `draft_report_v{version}_reviewed.md` had no write path at
+   all** -- not JSON (`write-contract` doesn't fit), not section-assembled
+   narrative content (`document_assembly.py` doesn't fit either). Fixed:
+   `dao.py` gained a generic `write-text` (locked+atomic, unschema'd, for
+   `outputs/`) and a narrow `write-reviewed-draft` wrapper built on it that
+   critic actually calls, per the user's direction to build both, layered.
+2. **No write path existed for `human_input_status`** (P7's tracked
+   human-wait mechanism) or for creating `_human_review_complete.flag`
+   (D1's actual evaluation gate) -- `evaluation` could never be legitimately
+   unblocked, for any case, ever; nothing had ever exercised this far to
+   notice. Fixed: `set-human-input-status` (generic) + `request-expert-review`
+   (narrow wrapper, same layered pattern as #1) for the wait-tracking side;
+   `mark-human-review-complete` for the gate, which (a) requires
+   `expert_review_v{version}.json` to already exist and pass schema
+   validation first -- you cannot claim review is complete without real
+   recorded review content backing it, closing the same class of gap as the
+   CASE_002 incident (item 2) at a different point in the pipeline -- and
+   (b) requires an explicit `--reviewer` name, same accountability pattern
+   as `set-ledger-status`. The flag is versioned
+   (`_human_review_complete_v1.flag` / `_v2.flag`) so a stale v1 flag can't
+   look valid during v2's later review; `read-ground-truth` now takes
+   `--version` to check the matching one. `evaluation.md` rewritten to
+   describe the real two-phase flow this revealed: writing
+   `expert_review_v{version}.json` needs no ground truth at all (just
+   `critic_result` + the human's live disposition) -- only the actual
+   answer-key comparison does, so evaluation splits into a pre-gate phase
+   and a post-gate phase. Also load-bearing: evaluation never calls
+   `mark-human-review-complete` itself -- that's a genuine human action,
+   same discipline as CASE_002's ledger rejections requiring a real
+   reviewer name, not an agent self-certifying its own gate.
+3. **`normalized_policy_clause.json` had no per-document filename or
+   `document_id` field** -- a case with 2+ policy documents (very plausible;
+   CASE_002 alone has up to 4 separate insurer policies) would have each
+   `policy-pipeline` invocation silently overwrite the previous one's
+   output. Worse than the other three: doesn't halt, just quietly destroys
+   data. The schema's own description already said "one file per policy
+   document" when written (item 1) -- this was a spec-to-schema wiring gap,
+   not a fresh design question. Fixed: `normalized_policy_clause_{document_id}.json`,
+   threaded through `policy-pipeline.md`, `claim-analysis.md`,
+   `denial-response.md`. Also found and fixed while verifying this:
+   `_validation.py`'s `schema_name_for()` didn't strip a `_DOC_\d+$` suffix
+   either, so `validate_output.py` would have silently `SKIP`ped every one
+   of these files (mirrors the exact `*.evidence.json` bug from item 6,
+   just a different suffix pattern this time).
+4. **No chunking tool for checkpoint 3** -- relied on the agent re-typing
+   "verbatim" text itself, which the schema explicitly requires
+   (`page_chunks.schema.json`: "not re-summarized") but nothing enforced.
+   Building this surfaced a second, prerequisite gap: `redacted_text.md`
+   had no page-boundary markers at all, so no deterministic tool could
+   ever have recovered `page_start`/`page_end` from it regardless. Fixed
+   both together: checkpoint 2 now assembles redaction output with a fixed
+   `<<<PAGE page=N>>>` marker between pages, and a new `tools/chunk_text.py`
+   (no LLM call -- pure string slicing on the markers) produces one chunk
+   per page, guaranteeing byte-identical verbatim text structurally rather
+   than by prompting instruction. Runs once per case across every document
+   with a `redacted_text.md` (not once per document) since
+   `page_chunks.json` is one combined file for the whole case, per its own
+   schema -- `document-pipeline.md`'s opening framing updated to state this
+   scope difference explicitly (checkpoints 1-2 are per-document, 3 is
+   case-scoped).
+
+**Not found to be a problem, checked and confirmed fine:** `draft_report_v1`/`v2`
+and `critic_result_v1`/`v2` etc.'s versioned-filename fix from item 1 was
+already correct — no new collision found there. `document_manifest.json`'s
+read-modify-write scope boundary (item 7) is unchanged by this pass, still
+open, still theoretical under the current single-writer-per-run design.

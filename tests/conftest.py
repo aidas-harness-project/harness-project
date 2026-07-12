@@ -55,7 +55,7 @@ def make_args():
             page=None, text_file=None, file_name=None, status=None,
             reviewer=None, reason=None, doc_path=None,
             topic=None, sources_file=None, conflict_id=None, verdict=None, note=None,
-            caller_stage=None,
+            caller_stage=None, description=None, version=None,
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)

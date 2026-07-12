@@ -33,6 +33,8 @@ Coordinates 10 agents across two phases to turn case intake into a screening rep
 
 `denial-response` is **not** a numbered Phase 1 stage — it's dependency-triggered. It runs whenever a flagged insurer-response document's processed text (from stage 2) is ready, whether that happens to be during Phase 1 (closed-case packs that bundle the insurer notice from the start) or later. Same agent, same mechanism, no phase-based scheduling exception needed.
 
+**Between stage 9 and stage 10**: once `critic` passes, call `dao.py request-expert-review CASE_ID {v1|v2}` to mark `human_input_status: waiting` (P7) and hand the reviewed draft + `critic_result_v{version}.json` to a human. Once that human's disposition genuinely exists, `evaluation` writes `expert_review_v{version}.json` from it (this part needs no ground truth, see evaluation.md). Then — **not by any agent, a genuine human action** — `dao.py mark-human-review-complete CASE_ID {v1|v2} --reviewer NAME` creates the D1 gate flag (it independently requires `expert_review_v{version}.json` to already exist and be schema-valid, so this can't be rubber-stamped). Only then does `evaluation`'s `read-ground-truth` call stop being denied.
+
 ## Phase 2 — insurer denial/reduction response
 
 Only two genuinely new stages — everything else is Phase 1's agents reused on new input.
@@ -54,7 +56,7 @@ Only two genuinely new stages — everything else is Phase 1's agents reused on 
 | Stage returns `partial` or fails (P9) | Retry the stage (from its last internal checkpoint, not from scratch) up to 3 fixed attempts, then halt for user audit |
 | Conflict-ledger has any `pending` entry (P6) | Halt before dispatching the next stage, list all pending entries |
 | Extraction cross-validation disagrees (P8) | Halt immediately, no tolerance threshold, even for one field on one document |
-| Human input pending (P7) | Wait — `human_input_status` in `_run_state.json` shows exactly what's pending; never fabricate a stand-in |
+| Human input pending (P7) | Wait — `human_input_status` in `_run_state.json` (written via `dao.py set-human-input-status`/`request-expert-review`) shows exactly what's pending; never fabricate a stand-in, and never call `mark-human-review-complete` yourself |
 | Unauthorized ground-truth access detected outside `evaluation` (D1) | Halt immediately, exclude the run's outputs from evaluation |
 
 ## Completion report
