@@ -48,26 +48,82 @@ schemas yet -- real-world shape mismatches (a field an agent naturally wants
 to produce that the schema doesn't have, or vice versa) will only surface on
 first use.
 
-## 2. Live D1 near-miss sitting on disk -- CASE_002
+## 2. Live D1 near-miss -- CASE_002 -- PARTIALLY RESOLVED 2026-07-13
 
 `data/processed/CASE_002/DOC_002/*.md` (19 pages) and
 `DOC_005/page_00{1,2,3}.md` were written before a document-pipeline subagent
 run caught that DOC_002/DOC_003 (filenames looked like plain claim docs)
-actually contain 손해사정서/보험금사정서 content -- including a stated
-payout figure -- the answer-key document class this harness exists to
-isolate. Intake's filename-only pattern match didn't catch it; an
-orchestrator-agent "approved" the file in `_source_ledger.json`, which isn't
-valid D2 human consent.
+actually contain 손해사정서/보험금사정서 content -- an orchestrator-agent
+had "approved" both in `_source_ledger.json`, which isn't valid D2 human
+consent.
 
-**Problem:** these processed-layer files may contain answer-key content and
-haven't been quarantined or deleted. `_source_ledger.json` still shows both
-files `approved`/`raw`.
+**Verified directly, not just taken on the prior investigation's word:**
+- DOC_002: read in full (already-processed text, `data/processed/`, not a
+  raw-file read). Confirmed: a completed loss-adjustment report by a
+  licensed independent adjuster (바른결 손해사정, 김태윤, BD00001058),
+  submitted to NH농협손해보험, stating a final payout determination of
+  20,000,000원 (page 9).
+- DOC_003: had never actually been OCR'd -- the original claim came from a
+  prior agent's summary only. Ran the real dual-path OCR tool
+  (`tools/ocr_extract.py`, 21 pages, output kept in job scratch, never
+  written to `data/processed/`) to verify before deciding. Confirmed on an
+  *agreed* (trustworthy) page: same firm, same adjuster, submitted to
+  삼성화재, stating a 20,000,000원 payout determination (10M + 10M, page 4).
+  3 of 21 pages disagreed under P8 -- moot, since the document is rejected
+  regardless of OCR quality.
 
-**To resolve:** a human needs to (a) confirm/reject DOC_002 and DOC_003 as
-ground truth, (b) decide whether to purge the already-written processed
-pages, (c) decide whether this run is excluded from evaluation regardless of
-outcome (D1), and (d) fix intake's classification so content, not just
-filename, is checked before something lands in `raw`.
+**Resolved:** both files rejected in `_source_ledger.json` with reviewer
+`Dev` and a documented reason each (`set-ledger-status ... rejected`).
+`check-source-ledger-clear CASE_002` now correctly returns `clear: false`,
+listing both under `rejected` -- the case is structurally blocked from
+proceeding until resolved further, which is D2 working as intended.
+
+**Still open, deliberately not acted on without a human call:**
+- **Processed pages** (`data/processed/CASE_002/DOC_002/*.md`) -- left
+  as-is on explicit instruction, not purged/quarantined.
+- **The raw files themselves** (`data/raw/CASE_002/DOC_002.pdf`,
+  `DOC_003.pdf`) -- untouched. What "resolved" means for a *rejected raw
+  classification* isn't fully defined by the current tooling: `classification`
+  in `_source_ledger.json` is `raw` | `ground_truth`, and rejecting a file
+  is meant to flag "the proposed classification is wrong" -- but
+  `dao.py set-ledger-status` has no path to actually change `classification`
+  from `raw` to `ground_truth` (only `review_status`). So there's currently
+  no tool-supported way to "correctly reclassify and re-approve" these
+  files even if that were the right call -- the only supported action was
+  reject. Whether the case should be re-run with these two files simply
+  excluded from raw input, or something else, is still an open call.
+- **Evaluation exclusion (D1)** -- not formally recorded anywhere yet (no
+  run currently being evaluated to exclude from); the blocked ledger state
+  itself is the practical safeguard for now.
+- **Item (d), intake's content-blind classification -- RESOLVED 2026-07-13.**
+  `tools/intake_case.py` now runs a content pre-check on every `raw`-proposed
+  PDF before writing the ledger (`scan_for_answer_key_content` -- one vision
+  call over the document's first 5 pages, not a full read; document-pipeline
+  still owns real OCR/P8). Design constraint discovered while building this:
+  the case's PDFs have **zero embedded text layer** (confirmed directly --
+  `fitz`'s `get_text()` returns empty on all four), so a cheap keyword-scan
+  wasn't possible -- any content check has to be vision-based, which is why
+  this couldn't be a free/instant fix and needed a real design call (made
+  with the user: check first 3-5 pages, one call per file; flag rather than
+  auto-reject, so a false positive doesn't lock out a legitimate file).
+  A flagged file gets `content_warning` on its ledger entry
+  (`source_ledger.schema.json` updated, v0.1 -> v0.2, to add the field);
+  human review is still mandatory either way, this just makes the risk
+  impossible to miss going in. Parsing fails safe toward `flagged=True` on
+  an unparseable model response, same discipline as `ocr_extract.compare()`.
+  Scope, deliberately narrow: PDFs only, `raw`-proposed files only (a file
+  already headed for `ground_truth` isn't the risk this catches), and does
+  NOT cover `--split`-derived files (reviewed via their page ranges instead).
+  10 new tests (`tests/test_intake_content_scan.py`) cover the verdict
+  parser and `build_ledger`'s wiring without needing a real PDF or `claude`
+  call. `harness-guardrails-dev` D2 updated to describe this, synced to
+  Codex/generic copies.
+
+  **Would this have caught CASE_002?** DOC_002 and DOC_003 both had a
+  giveaway title on page 1 (literally "보험금사정서") -- yes, a 5-page scan
+  would have caught both. A document that buries its conclusion beyond page
+  5 without an early giveaway would still slip through; this raises the bar,
+  it doesn't make the check exhaustive.
 
 ## 3. `tools/ocr_extract.py` -- two known bugs -- RESOLVED 2026-07-12
 

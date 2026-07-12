@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "source_ledger.schema.json",
-  "title": "_source_ledger.json -- per-file intake review ledger v0.1",
+  "title": "_source_ledger.json -- per-file intake review ledger v0.2",
   "description": "Per-file classification (raw vs. ground_truth) and human review status for a case's intake. See harness-guardrails-dev D2. Every file starts pending; intake will not copy any file while any entry is pending, and a single rejected entry blocks the whole case's intake. This is a shared state file, not a component output -- it does not use the common output envelope. Written/read only through the DAO (read_ledger / set_ledger_status).",
   "type": "object",
   "properties": {
@@ -43,6 +43,26 @@
         "rejection_reason": {
           "type": ["string", "null"],
           "description": "Required when review_status is rejected -- why the proposed classification looks wrong."
+        },
+        "content_warning": {
+          "type": "object",
+          "description": "Set by intake's content pre-check (tools/intake_case.py) when a file proposed as 'raw' shows signs of answer-key-class content (a completed loss-adjustment report, a stated payout determination) despite a filename that didn't flag it -- see harness-guardrails-dev D2 and known-gaps.md item 2's CASE_002 incident, which this exists to catch. Does not block approval by itself -- surfaces the risk so the human review this file still requires doesn't miss it. Absent (not present at all, not null) when the file wasn't flagged or wasn't eligible for the scan (non-PDF, or a --split-derived file, which isn't scanned -- see the tool's docstring).",
+          "properties": {
+            "evidence": {
+              "type": "string",
+              "description": "The vision model's stated reasoning/quoted text for flagging this file. An unparseable model response is recorded here too, flagged for safety rather than silently passed."
+            },
+            "pages_checked": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "How many pages from the start of the document were examined (a signal check, not a full read -- document-pipeline's checkpoint 1 still owns the real OCR/P8 cross-validation)."
+            },
+            "checked_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": ["evidence", "pages_checked", "checked_at"]
         }
       },
       "required": ["file_name", "classification", "review_status"]
