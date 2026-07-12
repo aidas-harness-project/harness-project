@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "denial_reason_result.schema.json",
-  "title": "denial_reason_result.json -- insurer's stated position, extracted and classified v0.1",
+  "title": "denial_reason_result.json -- insurer's stated position, extracted and classified v0.2",
   "description": "Extracts denial/reduction/non-payment reasons from an insurer-response document and classifies each against the R-code taxonomy. Produced by denial-response, which is dependency-triggered (runs whenever a flagged insurer-response document's processed text exists) rather than phase-gated -- see pipeline.md. Judgment-type output; include the safety fields (source_grounded etc.) from common_component_output.schema.json.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
@@ -70,6 +70,22 @@
           "type": "array",
           "items": { "$ref": "common_component_output.schema.json#/$defs/document_type" }
         },
+        "policy_matches": {
+          "type": "array",
+          "description": "Policy clauses this denial reason was matched to (denial-response.md step 5). Empty array if no matching clause could be found -- record why in warnings.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+              "clause_id": { "type": "string" },
+              "relevance_note": {
+                "type": "string",
+                "description": "Why this clause was matched to this reason, if not self-evident."
+              }
+            },
+            "required": ["document_id", "clause_id"]
+          }
+        },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
         "evidence_references": {
           "type": "array",
@@ -84,6 +100,7 @@
         "reason_type",
         "taxonomy_code",
         "raw_reason_text",
+        "policy_matches",
         "confidence",
         "evidence_references",
         "review_required"

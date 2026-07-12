@@ -41,7 +41,7 @@ The pipeline does not pick one of these on its own — it's a human decision eve
 
 ## P5. Shared-file editing requires an exclusive lock
 
-Before writing to any file, an agent creates a sidecar lock file — `<filename>.lock` — before making any edit, and deletes it immediately after the edit is validated and complete. This applies to any file an agent touches, not just files known to be shared.
+Every write path in `tools/dao.py` (`write-contract`, `write-page-text`, `write-redacted-text`, `add-conflict-entry`, `set-conflict-verdict`, `update-run-state`, `snapshot-backup`, `set-ledger-status`) creates a sidecar lock file — `<filename>.lock` — before making any edit, and deletes it immediately after the edit is complete. This is structural, not something an agent has to remember to do itself — an agent never writes to a shared file by any path other than these DAO subcommands.
 
 Lock file contents (required):
 
@@ -54,7 +54,7 @@ Lock file contents (required):
 }
 ```
 
-**Mid-run conflict handling:** if an agent needs to write to a file and finds a lock already held, it does not fail immediately. It sleeps 30 seconds, then rechecks. Repeats on a fixed 30-second interval (no exponential backoff) up to 15 minutes total. If the lock clears within that window, the agent re-reads the file fresh before making its edit — the file may have changed while it waited, so it assesses the current state rather than acting on stale assumptions. If 15 minutes pass with the lock still held, the agent stops polling and escalates: halts, reports the lock's full contents to the user, and waits for explicit human confirmation before proceeding.
+**Mid-run conflict handling:** if a DAO write subcommand finds a lock already held, it does not fail immediately. It sleeps 30 seconds, then rechecks. Repeats on a fixed 30-second interval (no exponential backoff) up to 15 minutes total, *inside the same CLI call* — the calling agent doesn't implement this loop itself, it just waits for the one call to return. For the DAO's own read-modify-write subcommands (`add-conflict-entry`, `set-conflict-verdict`, `update-run-state`, `set-ledger-status`), the lock is held across the *entire* read+modify+write, not just the final write, so the read those calls act on is always fresh once the lock clears — nothing else could have written to that file while this call was waiting. `write-contract` is the one caller-driven exception: the data it writes was already assembled by the calling agent *before* the call (via an earlier, separate `read-contract`), so waiting for the lock here prevents write/write corruption but does not by itself guarantee the agent's read was fresh — an agent updating a shared multi-writer file (e.g. `document_manifest.json`) is still responsible for re-reading right before building what it hands to `write-contract`. If 15 minutes pass with the lock still held, the call gives up and reports the lock's full contents; the calling agent halts and waits for explicit human confirmation before proceeding.
 
 **Run-start/resume conflict handling (deliberately different from mid-run):** if the orchestrator finds a lock file already present when a run starts or resumes, it does not poll and does not assume the lock is stale — a lock present at that point means the previous run ended abnormally. It halts immediately, reports the lock's full contents, and waits for human confirmation before anything touches that file.
 
@@ -76,16 +76,13 @@ If a stage depends on human input that hasn't arrived, the pipeline waits — it
 
 A single process, however many times it checks itself, can be confidently wrong. This runs at the document-processing stage (document-pipeline), before document type is known — not at claim-field extraction, which trusts this stage's already-validated text and does not re-cross-validate.
 
-Every page is read independently by two paths: the OCR engine, and a vision-capable model reading the raw page blind (without seeing the OCR output). Since document type isn't known yet at this point, the two reads are diffed on raw page-text material-content agreement (same names/dates/numbers/diagnoses present) — not a document-type-specific field schema, and not verbatim match, since two independent transcriptions will differ in formatting even when both are correct.
+Every page is read independently by two paths (`tools/ocr_extract.py`): two separate Claude CLI invocations, fresh process, no shared context — reading the raw page blind, neither seeing the other's output. Since document type isn't known yet at this point, the two reads are diffed on raw page-text material-content agreement (same names/dates/numbers/diagnoses present) — not verbatim match, since two independent transcriptions will differ in formatting even when both are correct.
 
-A page/document is marked extraction-failed if either:
+A page/document is marked extraction-failed if the two independent reads materially disagree. This blocks that document from downstream use until a human verifies which reading is correct — a hard gate, not a queued-for-later flag, since everything downstream depends on this being right. Any single failure — even one document, even one page — is reported immediately. There is no tolerance threshold here; accuracy at extraction is the foundation everything downstream depends on, so nothing waits for a batch or a percentage to accumulate before surfacing.
 
-- (a) the OCR engine's own confidence signal falls below threshold (existing `ocr_quality` mechanism), or
-- (b) the two independent reads materially disagree.
-
-Either condition blocks that document from downstream use until a human verifies which reading is correct — a hard gate, not a queued-for-later flag, since everything downstream depends on this being right. Any single failure — even one document, even one page — is reported immediately. There is no tolerance threshold here; accuracy at extraction is the foundation everything downstream depends on, so nothing waits for a batch or a percentage to accumulate before surfacing.
-
-**Known open risk (deferred, not resolved):** the vision-model path requires seeing the raw, unredacted page image. If that model isn't under an equivalent no-data-retention arrangement as the OCR engine, this is a real PII exposure gap. Not yet resolved — flag it, don't treat it as handled.
+**Known open risk (deferred, not resolved), two parts:**
+- No dedicated OCR engine exists — both reading paths are the same underlying model (Claude), not genuinely different technologies. This reduces one-off transient misreads but not systematic blind spots the same model would hit both times; a real second engine would be stronger. See `open-decisions.md`.
+- Both reads require seeing the raw, unredacted page image, before redaction. If the model used isn't under a no-data-retention arrangement, this is a real PII exposure gap. Not yet resolved — flag it, don't treat it as handled.
 
 ## P9. Partial or failed stages retry 3 times, then halt for audit
 

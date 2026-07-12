@@ -43,7 +43,11 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-from dao import case_dir, atomic_write_json, now_iso, source_ledger_path, load_json
+from dao import (
+    case_dir, atomic_write_json, now_iso, source_ledger_path, load_json,
+    acquire_lock_blocking, release_lock,
+)
+from _validation import load_registry, validate_instance
 
 ROOT = Path(__file__).resolve().parent.parent
 KST = timezone(timedelta(hours=9))
@@ -95,6 +99,41 @@ def split_output_name(src, start, end):
     return f"{src.stem}__p{start:03d}-{end:03d}{src.suffix}"
 
 
+FORMAT_BY_EXT = {
+    ".pdf": "pdf", ".png": "image", ".jpg": "image", ".jpeg": "image", ".tiff": "image",
+    ".txt": "text", ".md": "text", ".xlsx": "spreadsheet", ".csv": "spreadsheet",
+}
+
+
+def file_format_for(ext: str) -> str:
+    return FORMAT_BY_EXT.get(ext.lower(), "other")
+
+
+def write_manifest(case_id: str, run_id: str, documents: list[dict]) -> Path:
+    """Writes document_manifest.json the same way dao.py write-contract does
+    -- lock, schema-validate, atomic write, release -- reusing its helpers
+    directly rather than shelling out to itself."""
+    target = case_dir(case_id) / "document_manifest.json"
+    manifest = {
+        "case_id": case_id, "created_at": now_iso(), "updated_at": now_iso(),
+        "documents": documents,
+    }
+    existing_lock = acquire_lock_blocking(target, "intake_case.py", run_id, "write document_manifest.json")
+    if existing_lock is not None:
+        sys.exit(f"error: {target} is locked by {existing_lock['held_by']} (run {existing_lock['run_id']}) -- "
+                  f"not writing the manifest.")
+    try:
+        schemas, registry = load_registry()
+        errors = validate_instance(manifest, "document_manifest.schema.json", schemas, registry)
+        if errors:
+            sys.exit("error: document_manifest failed its own schema validation -- this is an intake_case.py "
+                      "bug, not a data problem:\n" + "\n".join(f"  - {e}" for e in errors))
+        atomic_write_json(target, manifest)
+        return target
+    finally:
+        release_lock(target)
+
+
 def build_ledger(case_id, case_dir_path, plan, splits):
     files = []
     for f, dest in plan:
@@ -124,6 +163,7 @@ def main():
                     help="Page-range split: 'filename:1-13=ground_truth,14-110=raw'")
     ap.add_argument("--init-ledger", action="store_true", help="Write _source_ledger.json with the proposed plan (all pending)")
     ap.add_argument("--execute", action="store_true", help="Copy files, but only if the ledger is fully approved")
+    ap.add_argument("--run-id", help="Only used for lock metadata on document_manifest.json; a fresh one is generated if omitted")
     args = ap.parse_args()
 
     src_dir = Path(args.case_dir)
@@ -216,10 +256,35 @@ def main():
     dest_dirs = {"raw": raw_dir, "ground_truth": gt_dir}
     for d in (raw_dir, gt_dir):
         d.mkdir(parents=True, exist_ok=True)
-    for f in raw:
-        shutil.copy2(f, raw_dir / f.name)
-    for f in gt:
-        shutil.copy2(f, gt_dir / f.name)
+
+    # Original filenames often carry PII (e.g. the claimant's name) even
+    # though content redaction happens later -- renaming to a sequential
+    # document_id here, at copy time, is what actually keeps that PII out
+    # of data/raw/ and everything downstream (manifest, evidence citations)
+    # that references files by document_id from this point on.
+    raw_id_map = {}   # original file name -> (doc_id, dest_path)
+    gt_id_map = {}
+    manifest_documents = []
+
+    for i, f in enumerate(sorted(raw, key=lambda p: p.name), start=1):
+        doc_id = f"DOC_{i:03d}"
+        dest = raw_dir / f"{doc_id}{f.suffix.lower()}"
+        shutil.copy2(f, dest)
+        raw_id_map[f.name] = (doc_id, dest)
+        manifest_documents.append({
+            "document_id": doc_id, "file_name": dest.name, "file_path": f"data/raw/{args.case_id}/{dest.name}",
+            "file_format": file_format_for(f.suffix), "file_size_bytes": dest.stat().st_size,
+            "pre_flagged_type": None, "pages": None, "ocr_status": "pending",
+            "ocr_text_path": None, "ocr_quality": None, "uncertain_region_count": None,
+            "cross_validation_status": None, "redacted_text_path": None,
+            "document_type": None, "classification_confidence": None,
+        })
+
+    for i, f in enumerate(sorted(gt, key=lambda p: p.name), start=1):
+        gt_id = f"GT_{i:03d}"
+        dest = gt_dir / f"{gt_id}{f.suffix.lower()}"
+        shutil.copy2(f, dest)
+        gt_id_map[f.name] = (gt_id, dest)
 
     split_records = []
     for fname, (src, ranges, page_count) in splits.items():
@@ -228,16 +293,46 @@ def main():
         for start, end, dest in ranges:
             out = fitz.open()
             out.insert_pdf(doc, from_page=start - 1, to_page=end - 1)
-            out_name = split_output_name(src, start, end)
-            out.save(dest_dirs[dest] / out_name)
+            if dest == "raw":
+                doc_id = f"DOC_{len(raw_id_map) + 1:03d}"
+                out_path = raw_dir / f"{doc_id}.pdf"
+                raw_id_map[split_output_name(src, start, end)] = (doc_id, out_path)
+                manifest_documents.append({
+                    "document_id": doc_id, "file_name": out_path.name,
+                    "file_path": f"data/raw/{args.case_id}/{out_path.name}",
+                    "file_format": "pdf", "file_size_bytes": None,  # filled in after save() below
+                    "pre_flagged_type": None, "pages": None, "ocr_status": "pending",
+                    "ocr_text_path": None, "ocr_quality": None, "uncertain_region_count": None,
+                    "cross_validation_status": None, "redacted_text_path": None,
+                    "document_type": None, "classification_confidence": None,
+                })
+            else:
+                gt_id = f"GT_{len(gt_id_map) + 1:03d}"
+                out_path = gt_dir / f"{gt_id}.pdf"
+                gt_id_map[split_output_name(src, start, end)] = (gt_id, out_path)
+            out.save(out_path)
             out.close()
-            split_records.append({"source": fname, "pages": f"{start}-{end}", "dest": dest, "output": out_name})
+            if dest == "raw":
+                manifest_documents[-1]["file_size_bytes"] = out_path.stat().st_size
+            split_records.append({"source": fname, "pages": f"{start}-{end}", "dest": dest, "output": out_path.name})
         doc.close()
 
+    manifest_path = write_manifest(args.case_id, args.run_id or f"RUN_{datetime.now(KST).strftime('%Y%m%d')}_INTAKE", manifest_documents)
+    print(f"Wrote {manifest_path} ({len(manifest_documents)} document(s), sequential DOC_XXX ids -- "
+          f"original filenames are not preserved past this point, see _intake_record.json for the crosswalk).")
+
+    # This crosswalk (original filename -> assigned id) is the ONLY place the
+    # original, potentially PII-bearing filenames are recorded past intake --
+    # kept here for audit traceability, not read by any agent during normal
+    # pipeline operation the way document_manifest.json is.
     record = {
         "case_id": args.case_id, "source": str(src_dir), "copied_at": now_iso(),
         "ground_truth_patterns": args.ground_truth, "file_patterns": args.files,
-        "raw": [f.name for f in raw], "ground_truth": [f.name for f in gt], "splits": split_records,
+        "raw": [{"original_file_name": name, "document_id": doc_id, "file_name": dest.name}
+                for name, (doc_id, dest) in raw_id_map.items()],
+        "ground_truth": [{"original_file_name": name, "document_id": gt_id, "file_name": dest.name}
+                         for name, (gt_id, dest) in gt_id_map.items()],
+        "splits": split_records,
     }
     (raw_dir / "_intake_record.json").write_text(
         json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -19,7 +19,7 @@ The intermediate artifacts from sub-phases 1-2 are working state for this one ag
 
 # Output
 
-`normalized_policy_clause.json` — every clause's fields carry `evidence_references` (P1). Any field requiring judgment beyond direct restatement (e.g. inferring whether a clause's exclusion applies to this case's facts) gets hedged and flagged per P3, not asserted outright.
+`normalized_policy_clause.json` — one file per policy document, `clauses: []` in extraction order. Each clause gets a sequential `clause_id` (`C-1`, `C-2`, ...) — stable regardless of the source policy's own article/paragraph numbering, and what `claim-analysis` and `denial-response` reference by `{document_id, clause_id}` downstream. `payout_conditions`/`exclusions`/`reduction_conditions` are itemized lists, not a single blob — each item carries its own `evidence_references` (P1) at the actual granularity `requirement-matching` needs to check condition-by-condition. An empty list means none found, not an omission. Any field requiring judgment beyond direct restatement (e.g. inferring whether a clause's exclusion applies to this case's facts) gets hedged and flagged per P3, not asserted outright.
 
 # Access rules
 

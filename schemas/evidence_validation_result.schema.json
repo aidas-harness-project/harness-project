@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evidence_validation_result.schema.json",
+  "title": "evidence_validation_result.json -- internal cross-document consistency log v0.1",
+  "description": "Produced by consistency-check. Historical record of what was checked, not something downstream stages read past on their own -- the conflict-ledger gate (_conflict_ledger.json, check_conflicts_clear) is what actually controls progression, see harness-guardrails P6. PoC dev-phase decision: logs every field checked, consistent or not, not just findings -- narrow to findings-only once the harness is past PoC (see known-gaps.md).",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/check" }
+        }
+      },
+      "required": ["checks"]
+    }
+  ],
+  "$defs": {
+    "check": {
+      "type": "object",
+      "properties": {
+        "check_id": {
+          "type": "string",
+          "pattern": "^CHK-[0-9]+$"
+        },
+        "topic": {
+          "type": "string",
+          "description": "What was compared. e.g. \"accident_date across DOC_001/DOC_002\""
+        },
+        "values_compared": {
+          "type": "array",
+          "description": "Each source's stated value for this topic, with attribution.",
+          "minItems": 1,
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        },
+        "result": { "enum": ["consistent", "inconsistent"] },
+        "conflict_id": {
+          "type": ["string", "null"],
+          "description": "The _conflict_ledger.json entry this check raised. Required (non-null) when result is inconsistent; must be null when consistent."
+        }
+      },
+      "required": ["check_id", "topic", "values_compared", "result", "conflict_id"],
+      "allOf": [
+        {
+          "if": { "properties": { "result": { "const": "inconsistent" } } },
+          "then": { "properties": { "conflict_id": { "type": "string" } } }
+        },
+        {
+          "if": { "properties": { "result": { "const": "consistent" } } },
+          "then": { "properties": { "conflict_id": { "const": null } } }
+        }
+      ]
+    }
+  }
+}

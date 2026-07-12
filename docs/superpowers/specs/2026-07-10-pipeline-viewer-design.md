@@ -15,10 +15,14 @@ In scope:
 - Rendering the source ledger and conflict ledger as readable UI, not raw JSON
 - Reading real case data from `outputs/CASE_XXX/` -- no fabricated/sample data baked into the frontend
 
-Out of scope (explicitly not building now):
-- Live/streaming updates while a run is actively executing (this reads state on request/refresh, not via websockets or polling)
+**Revised from the original read-only design** -- three capabilities added after initial build, per direct request:
+- **Human-audit actions are interactive in the UI**: approve/reject source-ledger files (D2), resolve/mark-false-positive conflict-ledger entries (P6). Every action requires a reviewer name and (for reject/resolution) a note -- these are real audit-trail writes, not cosmetic. The backend does not import `dao.py` for these; it shells out to `tools/dao.py`'s own CLI exactly as a terminal user would, so the write path and its validation are identical either way.
+- **Running a new case from the UI**: upload documents + a case ID, launch Claude Code (`claude -p`, one-shot print mode, via `subprocess.Popen` tracked by PID + log file) with a SCOPED tool allowlist (`--allowedTools "Read Write Edit Glob Grep Task Agent Bash(python3 tools/*) Bash(python tools/*)"`) to drive intake through draft report v1, unattended. Replaced an earlier `--dangerously-skip-permissions` version -- full bypass wasn't needed once the actual blocker (an argument-ordering bug where `--allowedTools` silently swallowed the prompt string) was found and fixed. No disclaimer, no full tool bypass; anything outside the allowlist is refused rather than skipped. Residual risk, not eliminated: Write/Edit aren't path-scoped by this flag, so a prompt-injected instruction from a malicious case document could still write outside the intended case directory -- acceptable for this use (trusted, redacted, known-source data), would need tightening before ever accepting untrusted uploads.
+- **Memory isolation for launched runs**: the launch prompt explicitly instructs the agent not to write to its persistent auto-memory store during a case run (case content must not become a memory entry; unrelated dev memories must not shape case processing). This is a prompted rule, not a hard technical block -- no flag was found that disables auto-memory without also disabling CLAUDE.md auto-discovery (`--bare` does both, which would break skill/guardrail discovery too).
+
+Still out of scope:
+- Live/streaming updates while a run is actively executing (state is read on request/refresh/poll, not pushed)
 - Authentication, multi-user access, or deployment beyond local use
-- Editing capability (approving ledger entries, resolving conflicts) from the UI -- this is a read-only viewer; those actions still go through `dao.py` from the terminal
 - Template-rule-aware rendering (task pending in `open-decisions.md` #2) -- the viewer renders whatever sections exist in a report file today
 
 ## Architecture

@@ -24,14 +24,24 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 ## 3. Vision-model PII exposure in cross-validation
 
-**Where:** `document-pipeline`, checkpoint 1 (P8's dual-path cross-validation).
+**Where:** `document-pipeline`, checkpoint 1 (P8's dual-path cross-validation, `tools/ocr_extract.py`).
 
 **Current:** accepted as a known, unresolved risk -- flagged inline in `harness-guardrails` P8, not fixed.
 
-**Problem:** the cross-validation step requires a vision-capable model to read the raw, unredacted page image (that's the point -- it has to see what the OCR engine saw, before redaction). If that model isn't under an equivalent no-data-retention arrangement as the trusted OCR engine, every cross-validation run sends PII to a less-trusted destination.
+**Problem:** both cross-validation reads require a Claude CLI invocation to see the raw, unredacted page image (that's the point -- it has to see what's actually on the page, before redaction). If the model isn't under a no-data-retention arrangement, every cross-validation run sends PII to that destination.
 
 **Options on the table (see conversation history for the full discussion):**
-- Extend an equivalent no-retention trust arrangement to the vision-model deployment (procurement/vendor question, not an architecture change).
-- Replace the vision-model path with a second independent OCR engine instead -- avoids needing a new "vision-capable trust tier" at all.
+- Establish a no-retention trust arrangement for the deployment running these reads (procurement/vendor question, not an architecture change).
+- Replace one or both Claude reads with a real OCR engine once #4 below is resolved.
 
 **To resolve:** a deployment/vendor decision, not something to default on silently.
+
+## 4. No dedicated OCR engine -- Claude CLI stands in for both cross-validation reads
+
+**Where:** `tools/ocr_extract.py`, used by `document-pipeline` checkpoint 1.
+
+**Current:** per explicit direction, both of P8's independent reads are Claude CLI invocations (fresh process, no shared context) rather than one being a real OCR engine and the other a vision model. `ocr_result.json`'s `ocr_engine`/`uncertain_confidence_threshold` fields say so honestly rather than implying a real engine exists; there's no per-block numeric confidence, only a binary agreed/disagreed verdict per page.
+
+**Problem:** two invocations of the *same* underlying model share more failure modes than two genuinely different technologies would. This catches transient/one-off misreads (the two calls disagreeing by chance) but not systematic blind spots (both calls confidently misreading the same unusual layout/handwriting the same way). P8's protection is real but weaker than the original design intended.
+
+**To resolve:** integrate an actual OCR engine (e.g. Upstage OCR, Tesseract, or similar -- see the original schema comments for candidates) as one of the two reading paths, keeping Claude as the second, genuinely independent, path.

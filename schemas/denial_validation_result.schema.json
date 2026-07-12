@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "denial_validation_result.schema.json",
+  "title": "denial_validation_result.json -- denial reasons validated against case evidence v0.1",
+  "description": "Produced by denial-validation's checkpoint 1 (Evidence retrieval + validation). For each denial reason in denial_reason_result.json, whether the case's own evidence actually supports the insurer's stated reason.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "validations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/validation" }
+        }
+      },
+      "required": ["validations"]
+    }
+  ],
+  "$defs": {
+    "validation": {
+      "type": "object",
+      "properties": {
+        "reason_id": {
+          "type": "string",
+          "pattern": "^DR_[0-9]+$",
+          "description": "References denial_reason_result.json's reason_id."
+        },
+        "verdict": {
+          "enum": ["supported", "not_supported", "partially_supported", "insufficient_evidence"],
+          "description": "insufficient_evidence is distinct from not_supported: the evidence contradicts the insurer's reason (not_supported) vs. there isn't enough evidence either way (insufficient_evidence, likely not rebuttal-worthy)."
+        },
+        "verdict_explanation": {
+          "type": "string",
+          "description": "Hedged reasoning per P3 -- this is an inference, not a restatement."
+        },
+        "retrieved_chunk_ids": {
+          "type": "array",
+          "description": "PoC dev-phase requirement: every chunk id (from page_chunks.json) retrieval surfaced for this reason, not just what got cited below. Revisit whether this stays required post-PoC.",
+          "items": { "type": "string" }
+        },
+        "evidence_references": {
+          "type": "array",
+          "description": "Final cited evidence backing the verdict. May be empty only when verdict is insufficient_evidence.",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        },
+        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "review_required": { "type": "boolean" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+      },
+      "required": ["reason_id", "verdict", "verdict_explanation", "retrieved_chunk_ids", "evidence_references", "confidence", "review_required"],
+      "allOf": [
+        {
+          "description": "Rule: any verdict other than insufficient_evidence must cite at least one evidence_reference.",
+          "if": {
+            "not": { "properties": { "verdict": { "const": "insufficient_evidence" } }, "required": ["verdict"] }
+          },
+          "then": {
+            "properties": { "evidence_references": { "minItems": 1 } }
+          }
+        }
+      ]
+    }
+  }
+}

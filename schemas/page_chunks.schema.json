@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "page_chunks.schema.json",
+  "title": "page_chunks.json -- retrievable text chunks v0.1",
+  "description": "Chunked redacted text for a case's documents, consumed by later stages that need chunk-level access instead of full-document text (denial-validation's retrieval sub-phase, screening-report). Produced by document-pipeline's checkpoint 3. At PoC scale this is direct chunking, not vector-indexed -- see the Step 3 indexing adapter in pipeline.md, which stays a no-op unless real indexing is enabled.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "chunks": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/chunk" }
+        }
+      },
+      "required": ["chunks"]
+    }
+  ],
+  "$defs": {
+    "chunk": {
+      "type": "object",
+      "properties": {
+        "chunk_id": {
+          "type": "string",
+          "pattern": "^CHUNK_[0-9]+$"
+        },
+        "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+        "page_start": { "type": "integer", "minimum": 1 },
+        "page_end": { "type": "integer", "minimum": 1 },
+        "text": {
+          "type": "string",
+          "description": "The chunk's redacted text, verbatim from redacted_text.md -- not re-summarized."
+        }
+      },
+      "required": ["chunk_id", "document_id", "page_start", "page_end", "text"]
+    }
+  }
+}

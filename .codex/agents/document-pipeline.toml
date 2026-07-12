@@ -11,11 +11,15 @@ Read and follow `harness-guardrails` (always) and `harness-guardrails-dev` (duri
 
 # Internal checkpoints
 
-**Checkpoint 1 — OCR + cross-validation + classification.** Per page: (a) the OCR engine extracts text with its own confidence signal (`mean_confidence`, `uncertain_regions` — existing mechanism), and (b) a vision-capable model reads the same raw page blind, without seeing the OCR output. Diff the two for material-content agreement (same names/dates/numbers/diagnoses present — not verbatim match). A page or document is extraction-failed if either the OCR confidence falls below threshold or the two reads materially disagree — report immediately, no tolerance threshold, and block that document from downstream use until a human verifies (P8). Once per document — on its first page's vision-model call — the same call also emits the document-type classification, unless the document arrived pre-flagged (e.g. a known insurer-response document), in which case trust the flag and skip inference for that one document. Write via the DAO: `ocr_result.json`, `classification_result.json`, manifest update.
+**Checkpoint 1 — OCR + cross-validation + classification.** Run `python tools/ocr_extract.py CASE_ID DOC_ID <path to the document under data/raw/>` — it splits the document into per-page images, reads each page twice independently (fresh Claude CLI invocation each time, no shared context), and prints per-page JSON: `reading_a`, `reading_b`, `agreement`, `disagreement_details`. **Known limitation, not resolved**: both reading paths are Claude, not a genuinely different OCR technology — this reduces one-off misreads but not systematic blind spots the way a real second engine would (see `open-decisions.md`). Do not describe this as a true independent-engine cross-check in your own output; it's a stand-in.
 
-**Checkpoint 2 — Redaction.** Strip PII (names, resident registration numbers, etc.) from the validated text. General LLM for now (OpenMed — self-hosted PHI/PII NER — is a flagged candidate replacement, not yet adopted). Write: `redacted_text.md`, `redaction_result.json`, manifest update.
+For each page that reads `agreed`: write its text via `python tools/dao.py write-page-text CASE_ID DOC_ID <page> --text-file <path> --held-by document-pipeline --run-id RUN_ID`. For any page that reads `disagreed`: do not write it, do not pick one reading over the other — that page's document is extraction-failed, per P8, immediately, no tolerance threshold.
 
-**Checkpoint 3 — Chunking.** Split redacted text into retrievable chunks for downstream stages. Write: `page_chunks.json`.
+Once per document — reasoning over its first page's content — also produce the document-type classification, unless the document arrived pre-flagged (`document_manifest.json`'s `pre_flagged_type`), in which case trust the flag and skip inference. Assemble and write via the DAO: `ocr_result.json` (`ocr_engine` and `vision_model_name` should both honestly say the Claude CLI is standing in for a dedicated engine, not imply one exists), `classification_result.json`, and update `document_manifest.json`'s `ocr_status`/`ocr_quality`/`cross_validation_status`/`document_type` fields for this document.
+
+**Checkpoint 2 — Redaction.** Strip PII (names, resident registration numbers, etc.) from the validated per-page text using a general LLM call for now (OpenMed — self-hosted PHI/PII NER — is a flagged candidate replacement, not yet adopted). Write the redacted result via `python tools/dao.py write-redacted-text CASE_ID DOC_ID --text-file <path> --held-by document-pipeline --run-id RUN_ID`. Content redaction alone does not fix a PII-bearing filename — intake already renames raw files to `DOC_XXX`/`GT_XXX` before you ever see them, so this checkpoint only needs to handle text content. Assemble and write `redaction_result.json`.
+
+**Checkpoint 3 — Chunking.** Split redacted text into retrievable chunks for downstream stages (`denial-validation`'s retrieval sub-phase, `screening-report`). Write: `page_chunks.json`.
 
 Each checkpoint is a real DAO `write_contract` call — locked, schema-validated, run-state updated, backed up. Do not treat these as internal scratch state; they are the actual resumability mechanism.
 
@@ -23,7 +27,7 @@ Each checkpoint is a real DAO `write_contract` call — locked, schema-validated
 
 - Never read a raw source file directly if a processed result already exists — call the DAO's `read_document_text`, which enforces this for you.
 - Never open `source-cases/` or `data/ground_truth/` (D1).
-- PII exposure from the vision-model cross-validation path (checkpoint 1) seeing raw, unredacted images is a known, currently-deferred risk — do not treat it as resolved; flag it in your run notes if you have reason to believe the deployed model isn't under an equivalent no-retention arrangement as the OCR engine.
+- PII exposure from checkpoint 1's two Claude CLI reads seeing raw, unredacted page images is a known, currently-deferred risk (see `open-decisions.md`) — both reads happen before redaction, by necessity. Do not treat it as resolved.
 
 # Error handling
 
