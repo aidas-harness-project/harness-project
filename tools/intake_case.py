@@ -4,9 +4,32 @@ truth via a per-file, human-approved ledger (harness-guardrails-dev D2).
 Workflow:
     1. Dry run (default): propose a raw/ground_truth classification per file,
        by filename pattern. Nothing is written yet.
-    2. --init-ledger: write outputs/CASE_XXX/_source_ledger.json with every
+    2. --init-ledger: for every file proposed as 'raw' (PDFs only -- see
+       below), run a cheap content pre-check (one vision call over the
+       document's first few pages) before writing the ledger -- filename
+       patterns alone missed a real case (see known-gaps.md item 2:
+       CASE_002's DOC_002/DOC_003, filenames looked like plain claim docs
+       but were actually completed third-party loss-adjustment reports with
+       stated payout figures). A flagged file gets `content_warning` set in
+       its ledger entry -- this does NOT auto-reject it, it makes the risk
+       visible for the human review step below, which is still mandatory
+       either way. Writes outputs/CASE_XXX/_source_ledger.json with every
        file's proposed classification and review_status: pending.
-    3. A human reviews the plan and sets each file's status via
+
+       Scope of the content pre-check, deliberately narrow: only files
+       proposed as 'raw' (a file already proposed as ground_truth is
+       already headed for isolation, not the risk this catches), only PDFs
+       (the only format this project's raw case files come in; a .txt/.md
+       file's content is already inspectable directly if that becomes
+       relevant later), and NOT --split-derived files (those are carved
+       from a source PDF only at --execute time, after ledger approval --
+       a --split spec needs to be reviewed with its page ranges in mind
+       regardless, so this check doesn't apply to them). This is a
+       classification SIGNAL over the first few pages, not a full read --
+       document-pipeline's checkpoint 1 still owns real OCR + P8
+       cross-validation over the whole document.
+    3. A human reviews the plan (and any content_warning) and sets each
+       file's status via
        `python tools/dao.py set-ledger-status CASE_XXX <file> approved --reviewer <name>`
        (or rejected --reason "...").
     4. --execute: copies files to data/raw/CASE_XXX/ and
@@ -36,7 +59,9 @@ Usage:
 import argparse
 import fnmatch
 import json
+import re
 import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -48,6 +73,7 @@ from dao import (
     acquire_lock_blocking, release_lock,
 )
 from _validation import load_registry, validate_instance
+from ocr_extract import scratch_dir, split_to_page_images
 
 ROOT = Path(__file__).resolve().parent.parent
 KST = timezone(timedelta(hours=9))
@@ -55,6 +81,69 @@ KST = timezone(timedelta(hours=9))
 # Default filename patterns treated as ground truth (evaluation-only, never model input)
 DEFAULT_GT_PATTERNS = ["*손해사정서*", "*지급 근거*", "*지급내역*"]
 IGNORE = {".DS_Store", "Thumbs.db"}
+
+# --------------------------------------------------- content pre-check --
+
+CONTENT_SCAN_PAGES = 5
+
+CONTENT_SCAN_PROMPT = (
+    "You are given up to {n} page images from the START of a document -- a "
+    "candidate input file for an insurance loss-adjustment pipeline. Determine "
+    "whether this document is, or contains, a COMPLETED, submitted professional "
+    "loss-adjustment report -- i.e. a document where a licensed adjuster "
+    "(손해사정사) has already reached and stated a final conclusion and/or "
+    "payout amount for an insurance claim. Typical indicators: titles like "
+    "보험금사정서/손해사정서, section headers like 사정 결과, 사정 요약, "
+    "보험금 사정내역, 사정 의견, an adjuster's license number or stamp, a "
+    "위임장 granting loss-adjustment authority to a firm, a stated 지급 금액 "
+    "or 사정금액 in 원 with a specific figure. This is DIFFERENT from an "
+    "ordinary claim document (diagnosis certificate, medical record, "
+    "insurance policy, plain claim form, denial notice) which does NOT "
+    "contain a professional's own completed adjustment conclusion.\n\n"
+    "Reply with exactly one line: FLAGGED: <brief reason, quoting the "
+    "specific text you saw> or CLEAR."
+)
+
+FLAGGED_RE = re.compile(r"\bFLAGGED\b")
+CLEAR_RE = re.compile(r"\bCLEAR\b")
+
+
+def _parse_content_scan_verdict(response_text: str) -> dict:
+    """Pure parsing, kept separate from the subprocess call so it's testable
+    without real page images or a real claude CLI. Fails safe toward
+    flagged=True on anything unparseable -- this is a safety check, not a
+    productivity one, so an ambiguous response should mean "a human looks
+    at this," not "silently wave it through." Same discipline as
+    ocr_extract.compare()'s fail-toward-disagreed rule."""
+    text = response_text.strip()
+    text_upper = text.upper()
+    flagged_match = FLAGGED_RE.search(text_upper)
+    clear_match = CLEAR_RE.search(text_upper)
+    if flagged_match:
+        return {"flagged": True, "evidence": text}
+    if clear_match:
+        return {"flagged": False, "evidence": None}
+    return {"flagged": True, "evidence": f"unparseable content-scan response, flagged for safety: {text!r}"}
+
+
+def scan_for_answer_key_content(pdf_path: Path, case_id: str, index: int, n_pages: int = CONTENT_SCAN_PAGES) -> dict:
+    """One cheap vision call over the document's first n_pages -- a
+    classification SIGNAL for intake's human reviewer, not a full read.
+    See known-gaps.md item 2 (the CASE_002 incident this exists to catch)
+    and this module's docstring for scope."""
+    with scratch_dir(case_id, f"INTAKE_{index:03d}") as tmp_dir:
+        page_paths = split_to_page_images(pdf_path, tmp_dir, max_pages=n_pages)
+        image_refs = "\n".join(f"Page {i + 1} image: {p}" for i, p in enumerate(page_paths))
+        prompt = f"{CONTENT_SCAN_PROMPT.format(n=n_pages)}\n\n{image_refs}"
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--allowedTools", "Read"],
+            capture_output=True, text=True, timeout=180, cwd=str(ROOT),
+        )
+        if result.returncode != 0:
+            sys.exit(f"error: content-scan claude call failed for {pdf_path.name}: {result.stderr.strip()}")
+        verdict = _parse_content_scan_verdict(result.stdout)
+        verdict["pages_checked"] = len(page_paths)
+        return verdict
 
 
 def classify(files, gt_patterns):
@@ -134,11 +223,19 @@ def write_manifest(case_id: str, run_id: str, documents: list[dict]) -> Path:
         release_lock(target)
 
 
-def build_ledger(case_id, case_dir_path, plan, splits):
+def build_ledger(case_id, case_dir_path, plan, splits, content_warnings=None):
+    content_warnings = content_warnings or {}
     files = []
     for f, dest in plan:
-        files.append({"file_name": f.name, "classification": dest, "review_status": "pending",
-                      "reviewed_by": None, "reviewed_at": None, "rejection_reason": None})
+        entry = {"file_name": f.name, "classification": dest, "review_status": "pending",
+                 "reviewed_by": None, "reviewed_at": None, "rejection_reason": None}
+        warning = content_warnings.get(f.name)
+        if warning is not None:
+            entry["content_warning"] = {
+                "evidence": warning["evidence"], "pages_checked": warning["pages_checked"],
+                "checked_at": now_iso(),
+            }
+        files.append(entry)
     for fname, (src, ranges, _pc) in splits.items():
         for start, end, dest in ranges:
             out_name = split_output_name(src, start, end)
@@ -225,7 +322,26 @@ def main():
         if ledger_path.exists():
             sys.exit(f"error: ledger already exists at {ledger_path} -- resolve/clear existing entries via "
                       f"`python tools/dao.py set-ledger-status` rather than overwriting it.")
-        ledger = build_ledger(args.case_id, src_dir, plan, splits)
+
+        pdf_raw = [f for f in raw if f.suffix.lower() == ".pdf"]
+        content_warnings = {}
+        if pdf_raw:
+            print(f"\nContent pre-check: scanning {len(pdf_raw)} 'raw'-proposed PDF(s) for "
+                  f"answer-key-class content (harness-guardrails-dev D2, known-gaps.md item 2) ...")
+            for i, f in enumerate(pdf_raw, start=1):
+                verdict = scan_for_answer_key_content(f, args.case_id, i)
+                if verdict["flagged"]:
+                    content_warnings[f.name] = verdict
+                    print(f"  FLAGGED: {f.name}\n    {verdict['evidence']}")
+            if content_warnings:
+                print(f"\n*** {len(content_warnings)} file(s) proposed as 'raw' show signs of "
+                      f"answer-key-class content -- see content_warning in the ledger. This does "
+                      f"NOT auto-reject them; a human still reviews every file, but this one needs "
+                      f"real attention before approving, not a rubber stamp. ***")
+            else:
+                print("  clear -- no answer-key-class content detected in the scanned pages.")
+
+        ledger = build_ledger(args.case_id, src_dir, plan, splits, content_warnings)
         case_dir(args.case_id)
         atomic_write_json(ledger_path, ledger)
         print(f"\nWrote {ledger_path} -- every file is 'pending'. "

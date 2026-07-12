@@ -115,14 +115,19 @@ def scratch_dir(case_id: str, doc_id: str):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def split_to_page_images(doc_path: Path, out_dir: Path) -> list[Path]:
+def split_to_page_images(doc_path: Path, out_dir: Path, max_pages: int | None = None) -> list[Path]:
+    """max_pages caps how many pages get rendered (from the start) -- used by
+    intake_case.py's content pre-check, which only needs the first few pages,
+    not a full render. None (default) renders every page, unchanged from
+    this function's original behavior."""
     try:
         import fitz  # pymupdf
     except ImportError:
         sys.exit("error: pymupdf required -- pip install pymupdf")
     doc = fitz.open(doc_path)
+    page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
     paths = []
-    for i in range(doc.page_count):
+    for i in range(page_count):
         page = doc.load_page(i)
         pix = page.get_pixmap(dpi=200)
         out_path = out_dir / f"page_{i + 1:03d}.png"
