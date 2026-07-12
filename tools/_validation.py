@@ -29,12 +29,20 @@ def schema_name_for(json_path: Path) -> str | None:
 
     e.g. critic_result_v2.json -> critic_result.schema.json
          draft_report_v1.evidence.json -> evidence_sidecar.schema.json
+         normalized_policy_clause_DOC_004.json -> normalized_policy_clause.schema.json
 
     *.evidence.json is special-cased: Path.stem only strips one suffix, so
     for a name like "draft_report_v1.evidence.json" it yields
     "draft_report_v1.evidence" -- the _v\\d+ stripping below never reaches
     it, and every sidecar (whatever document it belongs to) maps to the
     same evidence_sidecar.schema.json regardless.
+
+    _DOC_\\d+$ stripping is for policy-pipeline's one-file-per-policy-document
+    output (normalized_policy_clause_{document_id}.json) -- without it this
+    always returned None for those files, meaning validate_output.py would
+    silently SKIP every one of them instead of validating. write-contract
+    itself isn't affected (it takes --schema-name explicitly), but the
+    standalone CLI tool's auto-derivation needs this too.
     """
     if json_path.name.endswith(".evidence.json"):
         candidate = "evidence_sidecar.schema.json"
@@ -42,6 +50,7 @@ def schema_name_for(json_path: Path) -> str | None:
     stem = json_path.stem
     stem = re.sub(r"_v\d+$", "", stem)
     stem = re.sub(r"_CASE_\d+$", "", stem)
+    stem = re.sub(r"_DOC_\d+$", "", stem)
     candidate = f"{stem}.schema.json"
     return candidate if (SCHEMA_DIR / candidate).exists() else None
 

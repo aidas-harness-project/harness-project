@@ -33,12 +33,14 @@ cannot do; the orchestrator/agent owns that loop.
 
 Subcommands:
     read-document-text CASE_ID DOC_ID
-    read-ground-truth CASE_ID --caller-stage STAGE
+    read-ground-truth CASE_ID --caller-stage STAGE --version {v1|v2}
     read-contract CASE_ID FILENAME
     write-contract CASE_ID FILENAME --data-file PATH --schema-name NAME
         [--run-id RUN_ID] [--stage STAGE]
     write-page-text CASE_ID DOC_ID PAGE --text-file PATH --held-by NAME --run-id RUN_ID
     write-redacted-text CASE_ID DOC_ID --text-file PATH --held-by NAME --run-id RUN_ID
+    write-text CASE_ID FILENAME --text-file PATH --held-by NAME --run-id RUN_ID
+    write-reviewed-draft CASE_ID {v1|v2} --text-file PATH --held-by NAME --run-id RUN_ID
     check-lock CASE_ID FILENAME
     read-ledger CASE_ID
     set-ledger-status CASE_ID FILE_NAME STATUS --held-by NAME --run-id RUN_ID
@@ -46,6 +48,10 @@ Subcommands:
     check-source-ledger-clear CASE_ID
     read-evidence-tags DOC_PATH
     update-run-state CASE_ID RUN_ID STAGE STATUS --held-by NAME
+    set-human-input-status CASE_ID STAGE {waiting|received} --held-by NAME --run-id RUN_ID
+        [--description TEXT]  (required when status is waiting)
+    request-expert-review CASE_ID {v1|v2} --held-by NAME --run-id RUN_ID
+    mark-human-review-complete CASE_ID {v1|v2} --reviewer NAME --held-by NAME --run-id RUN_ID
     get-last-passed-stage CASE_ID
     snapshot-backup CASE_ID RUN_ID STAGE --held-by NAME
     read-conflict-ledger CASE_ID
@@ -194,15 +200,20 @@ def cmd_read_document_text(args):
     return 1
 
 
+def human_review_flag_path(case_id: str, version: str) -> Path:
+    return case_dir(case_id) / f"_human_review_complete_{version}.flag"
+
+
 def cmd_read_ground_truth(args):
     if args.caller_stage != "evaluation":
         print(f"DENIED: ground truth may only be read by the evaluation stage (harness-guardrails-dev D1). "
               f"caller_stage={args.caller_stage!r} is not permitted. This is logged as a potential violation.")
         return 1
-    review_flag = case_dir(args.case_id) / "_human_review_complete.flag"
+    review_flag = human_review_flag_path(args.case_id, args.version)
     if not review_flag.exists():
-        print("DENIED: human review is not yet marked complete for this case. "
-              "evaluation may not read ground truth until review is confirmed (D1).")
+        print(f"DENIED: human review is not yet marked complete for {args.version} of this case. "
+              f"evaluation may not read ground truth until review is confirmed (D1) -- "
+              f"see dao.py mark-human-review-complete.")
         return 1
     gt_dir = DATA / "ground_truth" / args.case_id
     print(str(gt_dir))
@@ -296,6 +307,46 @@ def cmd_write_redacted_text(args):
         return 0
     finally:
         release_lock(target)
+
+
+def _write_text_locked(case_id, filename, text_file, held_by, run_id, purpose=None):
+    """Locked+atomic text write to outputs/CASE_XXX/FILENAME -- no schema
+    validation, since there's nothing to validate a free-form text file
+    against. Shared by cmd_write_text and cmd_write_reviewed_draft, same
+    pattern as _update_run_state being shared by cmd_update_run_state and
+    cmd_snapshot_backup."""
+    target = case_dir(case_id) / filename
+    existing_lock = acquire_lock_blocking(target, held_by, run_id, purpose or f"write {filename}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        text = Path(text_file).read_text(encoding="utf-8")
+        atomic_write_text(target, text)
+        print(f"PASS: wrote {target}")
+        return 0
+    finally:
+        release_lock(target)
+
+
+def cmd_write_text(args):
+    """Generic locked+atomic text write to outputs/CASE_XXX/FILENAME.
+    Symmetric to write-contract's arbitrary-filename JSON write, for a
+    free-form text artifact instead (e.g. an annotated document -- there's
+    nothing to schema-validate)."""
+    return _write_text_locked(args.case_id, args.filename, args.text_file, args.held_by, args.run_id, args.purpose)
+
+
+def cmd_write_reviewed_draft(args):
+    """Purpose-built wrapper around _write_text_locked for critic's
+    annotated draft_report_v{version}_reviewed.md -- keeps that filename
+    convention defined in exactly one place rather than every caller
+    constructing it by hand."""
+    if args.version not in ("v1", "v2"):
+        sys.exit(f"error: version must be v1 or v2 -- got {args.version!r}")
+    filename = f"draft_report_{args.version}_reviewed.md"
+    return _write_text_locked(args.case_id, filename, args.text_file, args.held_by, args.run_id, args.purpose)
 
 
 # ------------------------------------------------------------ src ledger --
@@ -428,6 +479,110 @@ def cmd_update_run_state(args):
     return 0
 
 
+def _set_human_input_status(case_id, stage, status, description, held_by, run_id):
+    """P7's human-input wait tracking, in _run_state.json's human_input_status
+    array. Holds the run-state lock across the whole read+modify+write, same
+    discipline as _update_run_state. Entries are never deleted -- 'waiting'
+    appends a new entry, 'received' finds and updates the most recent
+    matching 'waiting' entry in place, so the full history of what was
+    waited on stays visible (P7)."""
+    target = run_state_path(case_id)
+    existing_lock = acquire_lock_blocking(target, held_by, run_id or "unknown", f"set human_input_status: {stage} -> {status}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        state = load_run_state(case_id)
+        entries = state.setdefault("human_input_status", [])
+        if status == "waiting":
+            if not description:
+                print("ERROR: a description is required when status is waiting")
+                return 1
+            entries.append({
+                "stage_name": stage, "status": "waiting",
+                "description": description, "requested_at": now_iso(), "received_at": None,
+            })
+        else:  # received
+            entry = next((e for e in reversed(entries) if e["stage_name"] == stage and e["status"] == "waiting"), None)
+            if entry is None:
+                print(f"NOT_FOUND: no 'waiting' human_input_status entry for stage {stage!r}")
+                return 1
+            entry["status"] = "received"
+            entry["received_at"] = now_iso()
+        save_run_state(case_id, state)
+        print(f"OK: {stage} -> {status}")
+        return 0
+    finally:
+        release_lock(target)
+
+
+def cmd_set_human_input_status(args):
+    """Generic write path for P7 -- see harness-guardrails P7. Usable by any
+    stage that needs to wait on a human, not just the critic->evaluation
+    handoff (that handoff has its own narrow wrapper, request-expert-review,
+    built on this)."""
+    return _set_human_input_status(args.case_id, args.stage, args.status, args.description, args.held_by, args.run_id)
+
+
+def cmd_request_expert_review(args):
+    """Purpose-built wrapper around set-human-input-status for the
+    critic -> human review -> evaluation handoff. stage_name is
+    'evaluation' -- that's the stage actually blocked/pending, matching P7's
+    'naming exactly which stage... is pending.' Keeps the description
+    convention defined in one place rather than every caller constructing
+    it by hand."""
+    description = f"expert review of draft_report_{args.version}_reviewed.md"
+    return _set_human_input_status(args.case_id, "evaluation", "waiting", description, args.held_by, args.run_id)
+
+
+def cmd_mark_human_review_complete(args):
+    """Creates the versioned D1 gate (_human_review_complete_v{version}.flag)
+    that read-ground-truth checks -- the actual mechanism letting evaluation
+    access ground truth for that version. Requires expert_review_v{version}.json
+    to already exist and pass schema validation first: you cannot claim
+    review is complete without real recorded review content backing it --
+    an actor self-certifying "reviewed" without real evidence is exactly the
+    CASE_002 failure shape (see known-gaps.md item 2), just at a different
+    gate. --reviewer is required for the same accountability reason
+    set-ledger-status's approved status requires one."""
+    expert_review_path = case_dir(args.case_id) / f"expert_review_{args.version}.json"
+    data = load_json(expert_review_path)
+    if data is None:
+        print(f"BLOCKED: {expert_review_path} does not exist yet -- write it first "
+              f"(the transcribed human review content, via write-contract) before marking review complete.")
+        return 1
+    schemas, registry = load_registry()
+    errors = validate_instance(data, "expert_review.schema.json", schemas, registry)
+    if errors:
+        print(f"BLOCKED: {expert_review_path} exists but fails its own schema validation -- fix it first:")
+        for e in errors:
+            print(f"  - {e}")
+        return 1
+
+    target = human_review_flag_path(args.case_id, args.version)
+    existing_lock = acquire_lock_blocking(target, args.held_by, args.run_id, f"mark human review complete ({args.version})")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        atomic_write_json(target, {
+            "case_id": args.case_id, "version": args.version, "reviewer": args.reviewer,
+            "marked_complete_at": now_iso(),
+        })
+    finally:
+        release_lock(target)
+
+    status_rc = _set_human_input_status(args.case_id, "evaluation", "received", None, args.held_by, args.run_id)
+    if status_rc != 0:
+        print("note: no matching 'waiting' human_input_status entry was found to flip to 'received' -- "
+              "the flag was still created (that's the actual D1 gate), but the wait-tracking history "
+              "is incomplete for this version.")
+    print(f"OK: {target} created -- evaluation may now read ground truth for {args.version} (D1 exception unlocked).")
+    return 0
+
+
 def cmd_get_last_passed_stage(args):
     state = load_run_state(args.case_id)
     passed = [s["stage_name"] for s in state["stages"] if s["status"] == "passed"]
@@ -548,6 +703,7 @@ def main():
     p.set_defaults(fn=cmd_read_document_text)
 
     p = sub.add_parser("read-ground-truth"); p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)
+    p.add_argument("--version", required=True, choices=["v1", "v2"])
     p.set_defaults(fn=cmd_read_ground_truth)
 
     p = sub.add_parser("read-contract"); p.add_argument("case_id"); p.add_argument("filename")
@@ -572,6 +728,18 @@ def main():
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True); p.add_argument("--purpose")
     p.set_defaults(fn=cmd_write_redacted_text)
 
+    p = sub.add_parser("write-text")
+    p.add_argument("case_id"); p.add_argument("filename")
+    p.add_argument("--text-file", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True); p.add_argument("--purpose")
+    p.set_defaults(fn=cmd_write_text)
+
+    p = sub.add_parser("write-reviewed-draft")
+    p.add_argument("case_id"); p.add_argument("version", choices=["v1", "v2"])
+    p.add_argument("--text-file", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True); p.add_argument("--purpose")
+    p.set_defaults(fn=cmd_write_reviewed_draft)
+
     p = sub.add_parser("check-lock"); p.add_argument("case_id"); p.add_argument("filename")
     p.set_defaults(fn=cmd_check_lock)
 
@@ -595,6 +763,24 @@ def main():
     p.add_argument("status", choices=["pending", "in_progress", "passed", "failed"])
     p.add_argument("--held-by", required=True)
     p.set_defaults(fn=cmd_update_run_state)
+
+    p = sub.add_parser("set-human-input-status")
+    p.add_argument("case_id"); p.add_argument("stage")
+    p.add_argument("status", choices=["waiting", "received"])
+    p.add_argument("--description")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_set_human_input_status)
+
+    p = sub.add_parser("request-expert-review")
+    p.add_argument("case_id"); p.add_argument("version", choices=["v1", "v2"])
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_request_expert_review)
+
+    p = sub.add_parser("mark-human-review-complete")
+    p.add_argument("case_id"); p.add_argument("version", choices=["v1", "v2"])
+    p.add_argument("--reviewer", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_mark_human_review_complete)
 
     p = sub.add_parser("get-last-passed-stage"); p.add_argument("case_id")
     p.set_defaults(fn=cmd_get_last_passed_stage)

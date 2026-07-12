@@ -20,6 +20,15 @@ def test_case_suffixed_filename_strips_suffix():
     assert schema_name_for(Path("extracted_claim_fields_CASE_009.json")) == "extracted_claim_fields.schema.json"
 
 
+def test_doc_suffixed_filename_strips_suffix():
+    """Regression: normalized_policy_clause_{document_id}.json (policy-pipeline's
+    one-file-per-policy-document convention, fixed in the end-to-end pipeline
+    review) used to resolve to None -- validate_output.py would silently
+    SKIP every one of these instead of validating them."""
+    assert schema_name_for(Path("normalized_policy_clause_DOC_004.json")) == "normalized_policy_clause.schema.json"
+    assert schema_name_for(Path("normalized_policy_clause_DOC_001.json")) == "normalized_policy_clause.schema.json"
+
+
 def test_evidence_sidecar_resolves_regardless_of_base_document_name():
     for name in ["draft_report_v1.evidence.json", "screening_report.evidence.json", "rebuttal_points.evidence.json"]:
         assert schema_name_for(Path(name)) == "evidence_sidecar.schema.json", name
