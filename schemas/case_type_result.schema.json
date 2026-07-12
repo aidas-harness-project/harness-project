@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "case_type_result.schema.json",
+  "title": "case_type_result.json -- case-type classification v0.1",
+  "description": "Produced by claim-analysis's checkpoint 3 (Case Type Classification). Determines template_id for the report template downstream -- a mandatory, independently schema-validated gate, see claim-analysis.md.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "case_type": { "$ref": "#/$defs/case_type" },
+        "secondary_case_types": {
+          "type": "array",
+          "description": "Additional case types that also genuinely apply to this claim (e.g. a claim that is both a surgery-cost case and a permanent-disability case), beyond the primary. Empty array if the claim is a single, clean case type.",
+          "items": { "$ref": "#/$defs/case_type" }
+        },
+        "candidate_types": {
+          "type": "array",
+          "description": "Alternative case types considered and their confidence, descending. First entry should match case_type. Recorded for audit even though evaluation.md only ever compares Top-1 against ground truth.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "case_type": { "$ref": "#/$defs/case_type" },
+              "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" }
+            },
+            "required": ["case_type", "confidence"]
+          }
+        },
+        "template_id": {
+          "type": "string",
+          "description": "Report template identifier. Section/template rules are pending (see open-decisions.md #2) -- document-assembly does not yet enforce anything against this value, it is recorded for when that material arrives."
+        },
+        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        },
+        "review_required": { "type": "boolean" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+      },
+      "required": ["case_type", "template_id", "confidence", "evidence_references", "review_required"]
+    }
+  ],
+  "$defs": {
+    "case_type": {
+      "description": "Kept in Korean -- matches pipeline.md's case-type taxonomy, the real-world classification vocabulary that determines report template selection.",
+      "enum": ["후유장해", "진단·수술비", "실손", "배상책임", "기타"]
+    }
+  }
+}

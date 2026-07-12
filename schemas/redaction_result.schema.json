@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "redaction_result.schema.json",
+  "title": "redaction_result.json -- PII redaction record v0.1",
+  "description": "Per-document record of what was redacted from the OCR'd text before it entered the processed layer. Produced by document-pipeline's checkpoint 2. Mechanism is a general LLM for now (see open-decisions.md #1 -- OpenMed, a self-hosted PHI/PII NER suite, is a flagged candidate replacement, not yet adopted).",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string",
+          "description": "e.g. 'general_llm' or 'openmed_ner' once adopted"
+        },
+        "documents": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/redacted_document" }
+        }
+      },
+      "required": ["method", "documents"]
+    }
+  ],
+  "$defs": {
+    "redacted_document": {
+      "type": "object",
+      "properties": {
+        "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+        "redacted_text_path": {
+          "type": "string",
+          "pattern": "^data/processed/",
+          "description": "data/processed/CASE_XXX/DOC_XXX/redacted_text.md"
+        },
+        "items_redacted": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of PII items redacted from this document's text (names, resident registration numbers, etc.)."
+        },
+        "categories": {
+          "type": "array",
+          "description": "Kinds of PII found. e.g. person_name, resident_registration_number, phone_number, address",
+          "items": { "type": "string" }
+        },
+        "filename_pii_flagged": {
+          "type": "boolean",
+          "description": "True if the ORIGINAL filename (before intake renamed it to a document_id-based name) appeared to contain PII. Content redaction alone doesn't fix a leaking filename -- intake's rename to DOC_XXX.<ext> is what actually prevents this; this field is a diagnostic flag, not a fix applied here."
+        },
+        "review_required": { "type": "boolean" }
+      },
+      "required": ["document_id", "redacted_text_path", "items_redacted", "review_required"]
+    }
+  }
+}

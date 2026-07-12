@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "draft_report_metadata.schema.json",
+  "title": "draft_report_metadata.json -- draft report generation record v0.1",
+  "description": "Produced by draft-report, once per version (v1 in Phase 1, v2 in Phase 2). Lean by design: the actual citations already live in draft_report_v{n}.evidence.json (the document-assembly sidecar) and pipeline-progression status (has critic run, has human reviewed) already lives in _run_state.json / human_input_status -- this file does not duplicate either, it just records what was generated and from what.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "version": { "enum": ["v1", "v2"] },
+        "template_id": {
+          "type": "string",
+          "description": "From case_type_result.json. Template rules pending, see open-decisions.md #2."
+        },
+        "case_type": { "$ref": "case_type_result.schema.json#/$defs/case_type" },
+        "section_count": { "type": "integer", "minimum": 1 },
+        "evidence_tag_count": { "type": "integer", "minimum": 0 },
+        "source_refs": {
+          "type": "array",
+          "description": "Which upstream contract files this version was generated from. e.g. [\"screening_report.json\", \"case_type_result.json\"] for v1, [\"draft_report_v1.md\", \"rebuttal_points.json\"] for v2.",
+          "items": { "type": "string" }
+        },
+        "output_md_path": { "type": "string" },
+        "output_sidecar_path": { "type": "string" }
+      },
+      "required": ["version", "template_id", "case_type", "section_count", "evidence_tag_count", "source_refs", "output_md_path", "output_sidecar_path"]
+    }
+  ]
+}

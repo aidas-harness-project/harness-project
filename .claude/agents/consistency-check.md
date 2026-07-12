@@ -24,7 +24,7 @@ Anything already resolved by `claim-analysis`'s primary/secondary diagnosis-code
 
 # Output
 
-`evidence_validation_result.json` — a record of what was found and, once the user has weighed in via the ledger, how it was resolved. This file is historical record, not something downstream stages read past on their own; the ledger gate is what actually controls progression.
+`evidence_validation_result.json` — `checks: []`, one entry per comparison actually performed. PoC dev-phase decision: log every check, consistent or not, not just the ones that turned out inconsistent — a full audit trail of this stage's coverage while the harness is still being validated; narrow to findings-only later (see `known-gaps.md`). Each check's `conflict_id` is set (and required) when its `result` is `inconsistent` — pointing at the `_conflict_ledger.json` entry it raised — and must be `null` when `result` is `consistent`. This file is historical record, not something downstream stages read past on their own; the ledger gate is what actually controls progression.
 
 # Collaboration
 

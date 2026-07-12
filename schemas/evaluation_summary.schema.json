@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation_summary.schema.json",
+  "title": "evaluation_summary.json -- cross-case evaluation aggregate v0.1",
+  "description": "Produced by evaluation, once after all included cases are individually evaluated (not incrementally per case). References each case's key scores rather than embedding full evaluation_result.json content -- full detail stays in each case's own file, this is for cross-case comparison.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "case_count": { "type": "integer", "minimum": 0 },
+        "per_case": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
+              "status": {
+                "enum": ["evaluated", "excluded", "na"],
+                "description": "excluded covers runs disqualified from evaluation regardless of outcome (e.g. a D1 ground-truth-isolation violation)."
+              },
+              "exclusion_reason": {
+                "type": ["string", "null"],
+                "description": "Required (non-null) when status is excluded."
+              },
+              "key_scores": {
+                "type": "object",
+                "properties": {
+                  "core_field_accuracy": { "type": ["number", "null"] },
+                  "case_type_correct": { "type": ["boolean", "null"] },
+                  "denial_reason_top1_correct": { "type": ["boolean", "null"] },
+                  "denial_reason_top3_correct": { "type": ["boolean", "null"] },
+                  "policy_mapping_included": { "type": ["boolean", "null"] },
+                  "draft_quality_rating": { "enum": ["poor", "fair", "good", "excellent", null] }
+                }
+              }
+            },
+            "required": ["case_id", "status", "exclusion_reason"],
+            "allOf": [
+              {
+                "if": {
+                  "properties": { "status": { "const": "excluded" } },
+                  "required": ["status"]
+                },
+                "then": { "properties": { "exclusion_reason": { "type": "string" } } }
+              }
+            ]
+          }
+        },
+        "aggregate": {
+          "type": "object",
+          "properties": {
+            "core_field_accuracy": { "$ref": "#/$defs/rate_stat" },
+            "case_type_accuracy": { "$ref": "#/$defs/rate_stat" },
+            "denial_reason_top1_agreement": { "$ref": "#/$defs/rate_stat" },
+            "denial_reason_top3_agreement": { "$ref": "#/$defs/rate_stat" },
+            "policy_mapping_top3_inclusion": { "$ref": "#/$defs/rate_stat" },
+            "draft_quality": {
+              "type": "object",
+              "properties": {
+                "rating_distribution": {
+                  "type": "object",
+                  "properties": {
+                    "poor": { "type": "integer", "minimum": 0 },
+                    "fair": { "type": "integer", "minimum": 0 },
+                    "good": { "type": "integer", "minimum": 0 },
+                    "excellent": { "type": "integer", "minimum": 0 }
+                  },
+                  "required": ["poor", "fair", "good", "excellent"]
+                },
+                "n": { "type": "integer", "minimum": 0 },
+                "na_count": { "type": "integer", "minimum": 0 }
+              },
+              "required": ["rating_distribution", "n", "na_count"]
+            }
+          },
+          "required": [
+            "core_field_accuracy",
+            "case_type_accuracy",
+            "denial_reason_top1_agreement",
+            "denial_reason_top3_agreement",
+            "policy_mapping_top3_inclusion",
+            "draft_quality"
+          ]
+        },
+        "generated_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601, KST (+09:00)"
+        }
+      },
+      "required": ["case_count", "per_case", "aggregate", "generated_at"]
+    }
+  ],
+  "$defs": {
+    "rate_stat": {
+      "type": "object",
+      "description": "mean for a 0-1 score metric (core_field_accuracy), rate (fraction correct) for a boolean-agreement metric -- same shape either way.",
+      "properties": {
+        "mean": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "n": { "type": "integer", "minimum": 0 },
+        "na_count": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["mean", "n", "na_count"]
+    }
+  }
+}

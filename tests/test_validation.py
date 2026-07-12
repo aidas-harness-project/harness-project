@@ -1,0 +1,44 @@
+"""_validation.py -- schema_name_for()'s filename-to-schema derivation.
+Regression coverage for the *.evidence.json bug: Path.stem only strips one
+suffix, so every sidecar was silently unresolvable (always SKIP, never
+PASS/FAIL) until this was special-cased.
+"""
+from pathlib import Path
+
+from _validation import schema_name_for, load_registry, validate_instance
+
+
+def test_plain_filename():
+    assert schema_name_for(Path("extracted_claim_fields.json")) == "extracted_claim_fields.schema.json"
+
+
+def test_versioned_filename_strips_suffix():
+    assert schema_name_for(Path("critic_result_v2.json")) == "critic_result.schema.json"
+
+
+def test_case_suffixed_filename_strips_suffix():
+    assert schema_name_for(Path("extracted_claim_fields_CASE_009.json")) == "extracted_claim_fields.schema.json"
+
+
+def test_evidence_sidecar_resolves_regardless_of_base_document_name():
+    for name in ["draft_report_v1.evidence.json", "screening_report.evidence.json", "rebuttal_points.evidence.json"]:
+        assert schema_name_for(Path(name)) == "evidence_sidecar.schema.json", name
+
+
+def test_unknown_filename_returns_none():
+    assert schema_name_for(Path("totally_made_up_thing.json")) is None
+
+
+def test_registry_loads_every_schema_and_resolves_cross_file_refs():
+    schemas, registry = load_registry()
+    assert len(schemas) >= 25
+    # a schema that $refs another file -- confirms the registry actually wires cross-file refs, not just parses JSON
+    sample = {
+        "case_id": "CASE_009", "component": "claim-analysis", "status": "success",
+        "coverages": [{
+            "coverage_name": "a", "standardized_coverage_name": "b", "applicable": True,
+            "confidence": 0.9, "evidence_references": [{"document_id": "DOC_001", "quote": "q"}],
+            "review_required": False,
+        }],
+    }
+    assert validate_instance(sample, "coverage_result.schema.json", schemas, registry) == []

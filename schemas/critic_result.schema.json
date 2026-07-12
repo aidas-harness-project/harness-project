@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "critic_result.schema.json",
+  "title": "critic_result.json -- blind draft review findings v0.1",
+  "description": "Produced by critic, on every draft report version (draft_report_v1.md in Phase 1, draft_report_v2.md in Phase 2). Structurally never reads ground truth -- see critic.md.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "reviewed_document": {
+          "type": "string",
+          "description": "Path to the draft version reviewed. e.g. outputs/CASE_003/draft_report_v1.md"
+        },
+        "passed": {
+          "type": "boolean",
+          "description": "Explicit rollup, not inferred from findings.length -- lets critic mark passed:false on a severity judgment call even alongside minor-only findings."
+        },
+        "orphaned_tag_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "[E#] tags in the document with no matching .evidence.json sidecar entry."
+        },
+        "unused_citation_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sidecar entries never referenced by a tag in the document."
+        },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" }
+        }
+      },
+      "required": ["reviewed_document", "passed", "orphaned_tag_count", "unused_citation_count", "findings"]
+    }
+  ],
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "properties": {
+        "finding_id": {
+          "type": "string",
+          "pattern": "^CF-[0-9]+$"
+        },
+        "finding_type": {
+          "enum": ["fabrication_unlinked_claim", "unhedged_inference", "forbidden_expression"],
+          "description": "The three checks critic.md defines."
+        },
+        "location": {
+          "type": "object",
+          "properties": {
+            "heading": { "type": "string" },
+            "tag": {
+              "type": "string",
+              "description": "The [E#] tag involved, if applicable."
+            }
+          }
+        },
+        "description": { "type": "string" },
+        "severity": { "$ref": "common_component_output.schema.json#/$defs/severity" },
+        "suggested_fix": { "type": "string" }
+      },
+      "required": ["finding_id", "finding_type", "description", "severity"]
+    }
+  }
+}

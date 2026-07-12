@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "requirement_matching_result.schema.json",
+  "title": "requirement_matching_result.json -- payout requirement matches per coverage v0.1",
+  "description": "Produced by claim-analysis's checkpoint 4 (Requirement Matching). Grouped per coverage, joining on coverage_result.json's coverage_name/standardized_coverage_name.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "coverage_requirements": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/coverage_requirements" }
+        }
+      },
+      "required": ["coverage_requirements"]
+    }
+  ],
+  "$defs": {
+    "coverage_requirements": {
+      "type": "object",
+      "properties": {
+        "coverage_name": { "type": "string" },
+        "standardized_coverage_name": { "type": "string" },
+        "requirements": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/requirement" }
+        }
+      },
+      "required": ["standardized_coverage_name", "requirements"]
+    },
+    "requirement": {
+      "type": "object",
+      "properties": {
+        "requirement_id": {
+          "type": "string",
+          "pattern": "^REQ-[0-9]+$"
+        },
+        "requirement_text": {
+          "type": "string",
+          "description": "The payout condition being checked, from the matched policy clause."
+        },
+        "clause_ref": {
+          "type": ["object", "null"],
+          "description": "Pointer into policy-pipeline's normalized_policy_clause.json. null if the requirement couldn't be tied to a specific clause.",
+          "properties": {
+            "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+            "clause_id": { "type": "string" }
+          },
+          "required": ["document_id", "clause_id"]
+        },
+        "status": {
+          "enum": ["met", "not_met", "uncertain"],
+          "description": "uncertain covers missing/ambiguous evidence -- pair with review_required:true."
+        },
+        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "evidence_references": {
+          "type": "array",
+          "description": "May be empty only when status is uncertain due to genuinely absent evidence.",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        },
+        "review_required": { "type": "boolean" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+      },
+      "required": ["requirement_id", "requirement_text", "status", "confidence", "evidence_references", "review_required"],
+      "allOf": [
+        {
+          "description": "Rule: met/not_met requirements must cite at least one piece of evidence.",
+          "if": {
+            "properties": { "status": { "enum": ["met", "not_met"] } }
+          },
+          "then": {
+            "properties": { "evidence_references": { "minItems": 1 } }
+          }
+        }
+      ]
+    }
+  }
+}

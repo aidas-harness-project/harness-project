@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evaluation_result.schema.json",
+  "title": "evaluation_result.json -- per-case evaluation against ground truth v0.1",
+  "description": "Produced by evaluation, the sole agent permitted to read ground truth. One fixed named field per metric evaluation.md lists -- not a generic metrics array -- so each metric keeps its own shape (a Top-3 metric needs a rank, a boolean-agreement metric needs a match flag, etc). Every metric self-contains applicable/na_reason so a genuinely unavailable comparison (e.g. \"대조 대상 부재\") is recorded, not skipped silently -- see evaluation.md's error-handling note.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "core_field_accuracy": {
+          "type": "object",
+          "properties": {
+            "applicable": { "type": "boolean" },
+            "na_reason": { "type": ["string", "null"] },
+            "score": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+            "field_comparisons": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "field_name": { "type": "string" },
+                  "predicted_value": { "type": ["string", "null"] },
+                  "actual_value": { "type": ["string", "null"] },
+                  "match": { "type": "boolean" }
+                },
+                "required": ["field_name", "predicted_value", "actual_value", "match"]
+              }
+            }
+          },
+          "required": ["applicable", "na_reason", "score", "field_comparisons"]
+        },
+        "case_type_accuracy": {
+          "type": "object",
+          "properties": {
+            "applicable": { "type": "boolean" },
+            "na_reason": { "type": ["string", "null"] },
+            "correct": { "type": ["boolean", "null"] },
+            "predicted_case_type": { "type": ["string", "null"] },
+            "actual_case_type": { "type": ["string", "null"] }
+          },
+          "required": ["applicable", "na_reason", "correct", "predicted_case_type", "actual_case_type"]
+        },
+        "denial_reason_top1_agreement": {
+          "type": "object",
+          "properties": {
+            "applicable": { "type": "boolean" },
+            "na_reason": { "type": ["string", "null"] },
+            "correct": { "type": ["boolean", "null"] },
+            "predicted_code": { "type": ["string", "null"] },
+            "actual_code": { "type": ["string", "null"] }
+          },
+          "required": ["applicable", "na_reason", "correct", "predicted_code", "actual_code"]
+        },
+        "denial_reason_top3_agreement": {
+          "type": "object",
+          "properties": {
+            "applicable": { "type": "boolean" },
+            "na_reason": { "type": ["string", "null"] },
+            "correct": { "type": ["boolean", "null"] },
+            "candidate_codes": { "type": "array", "items": { "type": "string" } },
+            "actual_code": { "type": ["string", "null"] }
+          },
+          "required": ["applicable", "na_reason", "correct", "candidate_codes", "actual_code"]
+        },
+        "policy_mapping_top3_inclusion": {
+          "type": "object",
+          "properties": {
+            "applicable": { "type": "boolean" },
+            "na_reason": { "type": ["string", "null"] },
+            "included": { "type": ["boolean", "null"] },
+            "matched_rank": { "type": ["integer", "null"], "minimum": 1, "maximum": 3 }
+          },
+          "required": ["applicable", "na_reason", "included", "matched_rank"]
+        },
+        "draft_quality": {
+          "type": "object",
+          "description": "Qualitative, not a numeric score -- forcing a precise number onto a judgment-based comparison against the real outcome implies false precision.",
+          "properties": {
+            "applicable": { "type": "boolean" },
+            "na_reason": { "type": ["string", "null"] },
+            "rating": { "enum": ["poor", "fair", "good", "excellent", null] },
+            "narrative": {
+              "type": ["string", "null"],
+              "description": "Comparison of the draft against the real adjuster's report."
+            }
+          },
+          "required": ["applicable", "na_reason", "rating", "narrative"]
+        }
+      },
+      "required": [
+        "core_field_accuracy",
+        "case_type_accuracy",
+        "denial_reason_top1_agreement",
+        "denial_reason_top3_agreement",
+        "policy_mapping_top3_inclusion",
+        "draft_quality"
+      ]
+    }
+  ]
+}

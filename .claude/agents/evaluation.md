@@ -16,7 +16,13 @@ Compare the human-reviewed draft (`draft_report_v1_reviewed.md` or `draft_report
 
 # Output
 
-`expert_review.json` (if a structured human-review input exists — you don't fabricate this, see P7) and `evaluation_result.json`. If evaluating across multiple cases, aggregate into `evaluation_summary.json` once, after all included cases are individually evaluated — not incrementally per case.
+Evaluation runs once per draft version that reaches human review — once after v1 (Phase 1), and again after v2 if the case ever reaches Phase 2. Version both output filenames (`_v1`/`_v2`) accordingly; a flat filename would let the v2 run silently overwrite the v1 evaluation, destroying it.
+
+`expert_review_v{version}.json` (only if a structured human-review input genuinely exists for that version — you don't fabricate this, see P7): transcribe the human reviewer's `reviewer_id`/`reviewer_role`, `overall_approved`, and a `findings_disposition` entry per `critic_result_v{version}.json` finding (`finding_ref` back to its `finding_id`, `disposition`: `accepted` / `rejected` / `corrected` — a `note` is required whenever it's not a plain `accepted`).
+
+`evaluation_result_v{version}.json` — one fixed field per metric, not a generic list, so each keeps its own shape: `core_field_accuracy` (score + per-field comparisons), `case_type_accuracy`, `denial_reason_top1_agreement`, `denial_reason_top3_agreement` (booleans + the predicted/actual codes), `policy_mapping_top3_inclusion` (`included` + `matched_rank`), and `draft_quality` — qualitative, not a numeric score (a `rating` band of `poor`/`fair`/`good`/`excellent` plus narrative comparing the draft against the real outcome; forcing a precise number onto that judgment implies false precision). Every metric carries `applicable`/`na_reason` — set `applicable: false` with a reason (e.g. "대조 대상 부재") rather than skipping a metric silently or forcing a comparison that doesn't exist.
+
+If evaluating across multiple cases, aggregate into `evaluation_summary.json` once, after all included cases are individually evaluated — not incrementally per case. `per_case` references each case's key scores rather than re-embedding its full `evaluation_result.json`; `status` is `evaluated` / `excluded` / `na` — `excluded` is for a run disqualified regardless of outcome (e.g. a D1 ground-truth-isolation violation like CASE_002's contaminated documents, see `known-gaps.md` #2) and requires an `exclusion_reason`.
 
 # Access rules
 

@@ -10,15 +10,15 @@
       "properties": {
         "ocr_engine": {
           "type": "string",
-          "description": "OCR engine/extractor used. e.g. upstage_ocr, pdfplumber"
+          "description": "OCR engine/extractor used. No dedicated engine exists yet (see open-decisions.md) -- tools/ocr_extract.py uses the Claude CLI as a stand-in for both reading paths. Record that honestly here (e.g. 'claude-cli (no dedicated OCR engine, see open-decisions.md)') rather than implying a real engine exists."
         },
         "vision_model_name": {
           "type": "string",
-          "description": "The vision-capable model used for P8's independent blind read (harness-guardrails P8). Its output is never shown the OCR text before reading -- see cross_validation per page."
+          "description": "The vision-capable model used for P8's independent blind read (harness-guardrails P8). Its output is never shown the other read before comparing -- see cross_validation per page."
         },
         "uncertain_confidence_threshold": {
           "$ref": "common_component_output.schema.json#/$defs/confidence",
-          "description": "Blocks below this confidence are recorded as uncertain_region. Not fixed in the schema since confidence distributions vary by engine -- record whatever value was actually used for this run."
+          "description": "Blocks below this confidence are recorded as uncertain_region. Not fixed in the schema since confidence distributions vary by engine -- record whatever value was actually used for this run. tools/ocr_extract.py's Claude-CLI stand-in does not produce a real per-block confidence signal (no dedicated OCR engine) -- when using it, set this to 1.0 and leave uncertain_regions empty per page rather than fabricating a number; P8's actual failure signal from that tool is the agreed/disagreed cross-validation outcome, not a confidence threshold."
         },
         "documents": {
           "type": "array",

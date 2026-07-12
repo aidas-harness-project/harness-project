@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "expert_review.schema.json",
+  "title": "expert_review.json -- structured human review of a draft version v0.1",
+  "description": "Produced by evaluation, transcribing an actual human reviewer's disposition of critic_result.json's findings -- never fabricated (P7), and only written once that human review genuinely exists. Ties back to critic_result.json by finding_id so what was and wasn't addressed is unambiguous.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "reviewer_id": {
+          "type": "string",
+          "description": "Identifier for the human reviewer (name or id), not the agent."
+        },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" },
+        "reviewed_document": {
+          "type": "string",
+          "description": "Path to the draft version reviewed. e.g. outputs/CASE_003/draft_report_v1_reviewed.md"
+        },
+        "overall_approved": { "type": "boolean" },
+        "findings_disposition": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "finding_ref": {
+                "type": "string",
+                "pattern": "^CF-[0-9]+$",
+                "description": "References critic_result.json's finding_id."
+              },
+              "disposition": { "enum": ["accepted", "rejected", "corrected"] },
+              "note": {
+                "type": "string",
+                "description": "Required context when disposition is rejected or corrected -- why the reviewer disagreed or what they changed."
+              }
+            },
+            "required": ["finding_ref", "disposition"],
+            "allOf": [
+              {
+                "if": {
+                  "properties": { "disposition": { "enum": ["rejected", "corrected"] } },
+                  "required": ["disposition"]
+                },
+                "then": { "required": ["note"] }
+              }
+            ]
+          }
+        },
+        "general_comments": { "type": "string" },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601, KST (+09:00)"
+        }
+      },
+      "required": ["reviewer_id", "reviewer_role", "reviewed_document", "overall_approved", "findings_disposition", "reviewed_at"]
+    }
+  ]
+}

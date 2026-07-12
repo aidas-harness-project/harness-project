@@ -28,7 +28,17 @@ def schema_name_for(json_path: Path) -> str | None:
     """Derive the schema filename from a contract filename.
 
     e.g. critic_result_v2.json -> critic_result.schema.json
+         draft_report_v1.evidence.json -> evidence_sidecar.schema.json
+
+    *.evidence.json is special-cased: Path.stem only strips one suffix, so
+    for a name like "draft_report_v1.evidence.json" it yields
+    "draft_report_v1.evidence" -- the _v\\d+ stripping below never reaches
+    it, and every sidecar (whatever document it belongs to) maps to the
+    same evidence_sidecar.schema.json regardless.
     """
+    if json_path.name.endswith(".evidence.json"):
+        candidate = "evidence_sidecar.schema.json"
+        return candidate if (SCHEMA_DIR / candidate).exists() else None
     stem = json_path.stem
     stem = re.sub(r"_v\d+$", "", stem)
     stem = re.sub(r"_CASE_\d+$", "", stem)

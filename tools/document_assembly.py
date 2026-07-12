@@ -14,6 +14,14 @@ note) -- this tool renders whatever sections it's given, in the order
 given. Template enforcement (which sections a given template_id requires)
 gets layered on once that material arrives.
 
+This writes into outputs/ like any other DAO write path -- locked
+(held-by/run-id, same convention as dao.py write-contract, so dao.py
+check-lock correctly sees a render in progress) and atomic. The generated
+sidecar is schema-validated against evidence_sidecar.schema.json before
+either file touches disk; a failure there is this tool's own bug (the
+agent's evidence_references were already well-formed going in), not a data
+problem to route around.
+
 Input (--sections-file), one JSON object:
 {
   "output_path": "outputs/CASE_003/draft_report_v1.md",
@@ -24,18 +32,20 @@ Input (--sections-file), one JSON object:
 }
 
 Usage:
-    python tools/document_assembly.py --sections-file /tmp/sections.json
+    python tools/document_assembly.py --sections-file /tmp/sections.json \\
+        --held-by draft-report --run-id RUN_20260710_001
 """
 import argparse
 import json
 import sys
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+from dao import acquire_lock_blocking, release_lock, atomic_write_text, atomic_write_json, now_iso
+from _validation import load_registry, validate_instance
+
 ROOT = Path(__file__).resolve().parent.parent
-KST = timezone(timedelta(hours=9))
 
 
 def render(spec: dict) -> tuple[str, dict]:
@@ -59,12 +69,17 @@ def render(spec: dict) -> tuple[str, dict]:
             tag_n += 1
             tag = f"E{tag_n}"
             content = content.replace("{{E}}", f"[{tag}]", 1)
-            citations.append({
+            citation = {
                 "tag": tag,
                 "document_id": ref["document_id"],
-                "page": ref.get("page"),
                 "quote": ref["quote"],
-            })
+            }
+            # evidence_sidecar.schema.json's page is integer-typed with no
+            # null option -- omit the key entirely rather than writing
+            # page: null when a reference doesn't have one.
+            if ref.get("page") is not None:
+                citation["page"] = ref["page"]
+            citations.append(citation)
         lines.append(content)
         lines.append("")
 
@@ -79,18 +94,32 @@ def render(spec: dict) -> tuple[str, dict]:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sections-file", required=True, help="Path to the section-spec JSON described above")
+    ap.add_argument("--held-by", required=True, help="Calling agent name, e.g. draft-report")
+    ap.add_argument("--run-id", required=True)
     args = ap.parse_args()
 
     spec = json.loads(Path(args.sections_file).read_text(encoding="utf-8"))
     doc_text, sidecar = render(spec)
 
     out_path = ROOT / spec["output_path"]
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(doc_text, encoding="utf-8")
-
     sidecar_path = out_path.with_suffix(".evidence.json")
-    sidecar["generated_at"] = datetime.now(KST).isoformat()
-    sidecar_path.write_text(json.dumps(sidecar, ensure_ascii=False, indent=2), encoding="utf-8")
+    sidecar["generated_at"] = now_iso()
+
+    schemas, registry = load_registry()
+    errors = validate_instance(sidecar, "evidence_sidecar.schema.json", schemas, registry)
+    if errors:
+        sys.exit("error: generated sidecar failed evidence_sidecar.schema.json -- this is a "
+                  "document_assembly.py bug, not a data problem:\n" + "\n".join(f"  - {e}" for e in errors))
+
+    existing_lock = acquire_lock_blocking(out_path, args.held_by, args.run_id, f"document-assembly render {out_path.name}")
+    if existing_lock is not None:
+        sys.exit(f"error: {out_path} is locked by {existing_lock['held_by']} (run {existing_lock['run_id']}) -- "
+                  f"not rendering.")
+    try:
+        atomic_write_text(out_path, doc_text)
+        atomic_write_json(sidecar_path, sidecar)
+    finally:
+        release_lock(out_path)
 
     print(f"OK: wrote {out_path} + {sidecar_path} ({len(sidecar['citations'])} citations)")
 

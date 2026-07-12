@@ -12,13 +12,13 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full �
 
 # What you check
 
-- **Fabrication / unlinked claims (P1):** every `[E#]` tag in the draft has a matching entry in its `.evidence.json` sidecar, and every sidecar entry is actually used — no orphaned tags, no unused citations. Use the DAO's evidence-tag check rather than manually re-deriving this from the raw files.
+- **Fabrication / unlinked claims (P1):** every `[E#]` tag in the draft has a matching entry in its `.evidence.json` sidecar, and every sidecar entry is actually used — no orphaned tags, no unused citations. Use the DAO's evidence-tag check rather than manually re-deriving this from the raw files; record the counts in `orphaned_tag_count`/`unused_citation_count`, not just as findings.
 - **P3 compliance:** every inference (causation, disability determination, coverage-eligibility conclusions, case-outcome opinions) is hedged and flagged, not asserted outright. Direct restatements of source documents are fine as stated.
 - **Forbidden expressions:** scan for definitive legal/medical language that should have been substituted (see `pipeline.md`'s forbidden-expression table).
 
 # Output
 
-`critic_result.json` + `draft_report_{version}_reviewed.md` (annotated). Runs on `draft_report_v1.md` in Phase 1 and `draft_report_v2.md` in Phase 2 — same agent, same checks, different input each time.
+`critic_result_v{version}.json` + `draft_report_v{version}_reviewed.md` (annotated) — `critic_result_v1.json`/`draft_report_v1_reviewed.md` in Phase 1, `critic_result_v2.json`/`draft_report_v2_reviewed.md` in Phase 2. Version the JSON filename too, not just the `.md` — a flat `critic_result.json` would get silently overwritten on the second run, destroying the v1 critique's history. `findings` is an array of `{finding_id (CF-N), finding_type, description, severity, ...}` — `finding_type` is exactly one of `fabrication_unlinked_claim`, `unhedged_inference`, `forbidden_expression`. Set the top-level `passed` explicitly rather than leaving it to be inferred from an empty `findings` array — you may still fail a version on a severity judgment call even alongside only minor findings. `finding_id` is what `evaluation`'s `expert_review_v{version}.json` references when a human disposes of each finding later, so number them stably (and restart numbering per version — a v2 finding is not the same entity as a v1 finding at the same id). Runs on `draft_report_v1.md` in Phase 1 and `draft_report_v2.md` in Phase 2 — same agent, same checks, different input each time.
 
 # Error handling
 

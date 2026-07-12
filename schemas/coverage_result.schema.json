@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "coverage_result.schema.json",
+  "title": "coverage_result.json -- identified coverage(s) for the claim v0.1",
+  "description": "Produced by claim-analysis's checkpoint 2 (Coverage Identification). Matches claim fields against normalized policy clauses. A claim can trigger more than one coverage at once (e.g. a diagnosis benefit and a surgery benefit both applying) -- coverages is an array, not a single value, for that reason.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "coverages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/coverage" }
+        }
+      },
+      "required": ["coverages"]
+    }
+  ],
+  "$defs": {
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "coverage_name": {
+          "type": "string",
+          "description": "Coverage name as stated in the policy document. e.g. \"뇌혈관질환진단비\""
+        },
+        "standardized_coverage_name": {
+          "type": "string",
+          "description": "Normalized coverage code/name for cross-case comparison. e.g. cerebrovascular_diagnosis_benefit"
+        },
+        "applicable": {
+          "type": "boolean",
+          "description": "Whether this coverage's conditions are met by the claim's facts, per the matched clause -- not whether the claim mentions the coverage."
+        },
+        "matched_clause_ref": {
+          "type": ["object", "null"],
+          "description": "Pointer into policy-pipeline's normalized_policy_clause.json. null if no clause could be matched (record why in warnings).",
+          "properties": {
+            "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+            "clause_id": { "type": "string" }
+          },
+          "required": ["document_id", "clause_id"]
+        },
+        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        },
+        "review_required": { "type": "boolean" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+      },
+      "required": ["coverage_name", "standardized_coverage_name", "applicable", "confidence", "evidence_references", "review_required"]
+    }
+  }
+}

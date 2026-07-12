@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "rebuttal_points.schema.json",
+  "title": "rebuttal_points.json -- structured rebuttal arguments v0.1",
+  "description": "Produced by denial-validation's checkpoint 2 (Rebuttal point generation). One entry per denial reason where denial_validation_result.json found not_supported or partially_supported -- reasons the insurer's position held up are not included. Read downstream by draft-report's v2 checkpoint. rebuttal_points.md (the narrative) is assembled from this via tools/document_assembly.py; this file is the structured content, not a lean pointer to it.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "rebuttal_points": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/rebuttal_point" }
+        }
+      },
+      "required": ["rebuttal_points"]
+    }
+  ],
+  "$defs": {
+    "rebuttal_point": {
+      "type": "object",
+      "properties": {
+        "point_id": {
+          "type": "string",
+          "pattern": "^RB-[0-9]+$"
+        },
+        "reason_id": {
+          "type": "string",
+          "pattern": "^DR_[0-9]+$",
+          "description": "References denial_reason_result.json's reason_id -- the denial reason this rebuts."
+        },
+        "verdict": {
+          "enum": ["not_supported", "partially_supported"],
+          "description": "The denial_validation_result.json verdict that made this rebuttal point exist."
+        },
+        "rebuttal_argument": {
+          "type": "string",
+          "description": "The argument itself. Hedged per P3 -- use the forbidden-expression substitutions from pipeline.md (e.g. \"분쟁 대응 여지가 있다\" rather than an outright win claim)."
+        },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        },
+        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "review_required": { "type": "boolean" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+      },
+      "required": ["point_id", "reason_id", "verdict", "rebuttal_argument", "evidence_references", "confidence", "review_required"]
+    }
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "normalized_policy_clause.schema.json",
+  "title": "normalized_policy_clause.json -- normalized policy clauses for one policy document v0.1",
+  "description": "Produced by policy-pipeline. One file per policy document, array of every clause identified in it, normalized into standard fields (coverage type, payout conditions, exclusions, reduction conditions).",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "clauses": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/clause" }
+        }
+      },
+      "required": ["clauses"]
+    }
+  ],
+  "$defs": {
+    "condition_item": {
+      "type": "object",
+      "properties": {
+        "text": { "type": "string", "minLength": 1 },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        }
+      },
+      "required": ["text", "evidence_references"]
+    },
+    "clause": {
+      "type": "object",
+      "properties": {
+        "clause_id": {
+          "type": "string",
+          "pattern": "^C-[0-9]+$",
+          "description": "Assigned by policy-pipeline in extraction order -- stable regardless of the source policy's own article/paragraph numbering."
+        },
+        "coverage_type": {
+          "type": "string",
+          "description": "The coverage this clause pertains to, as named in the policy. e.g. \"뇌혈관질환진단비\""
+        },
+        "payout_conditions": {
+          "type": "array",
+          "description": "Itemized. Empty array if the clause states no conditions beyond the base coverage trigger.",
+          "items": { "$ref": "#/$defs/condition_item" }
+        },
+        "exclusions": {
+          "type": "array",
+          "description": "Itemized. Empty array if none.",
+          "items": { "$ref": "#/$defs/condition_item" }
+        },
+        "reduction_conditions": {
+          "type": "array",
+          "description": "Itemized. Empty array if none.",
+          "items": { "$ref": "#/$defs/condition_item" }
+        },
+        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Clause-level source location (e.g. the clause heading/quote), independent of the per-condition references above.",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        },
+        "review_required": { "type": "boolean" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+      },
+      "required": ["clause_id", "coverage_type", "payout_conditions", "exclusions", "reduction_conditions", "confidence", "evidence_references", "review_required"]
+    }
+  }
+}
