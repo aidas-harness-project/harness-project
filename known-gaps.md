@@ -777,3 +777,49 @@ divergence, not a no-op), both `passed` with real classification
 (`document_type: insurer_response`), and all 21 real schema-validatable
 files across the three forks passed (`_fork_record.json` correctly `SKIP`s
 -- it was never meant to be a schema-validated contract).
+
+## 13. `frontend/backend/main.py` -- argument-injection via unvalidated positionals into a subprocess argv -- RESOLVED 2026-07-13
+
+Found by an automated background security review of the commit that first
+added `frontend/` (item 5). Two endpoints shell out to `tools/dao.py`'s
+CLI via `_run_dao_cli` (`subprocess.run` with a list, not `shell=True` --
+no shell-metacharacter risk, but a real argv-level one): `set_ledger_status`
+placed `body.file_name` (a request-body field) as a bare positional
+argument, and `set_conflict_verdict` placed `conflict_id` (a URL path
+parameter) the same way. Neither was validated before use. Since
+`subprocess.run([...])` passes each Python list element as exactly one
+argv token (no shell word-splitting), the injection vector isn't "smuggle
+multiple tokens from one string" -- it's narrower but still real: a value
+that exactly matches one of `dao.py`'s own defined flags for that
+subcommand (e.g. `file_name="--held-by"`, `conflict_id="--held-by"`) gets
+consumed by argparse as that OPTION instead of the intended positional,
+desyncing every argument after it (the next token becomes that flag's
+value, the real positional goes unfilled, etc.).
+
+Verified the exact attack before fixing anything, not just reasoned about
+it in the abstract: called `set_ledger_status`/`set_conflict_verdict`
+directly with `file_name="--held-by"` / `conflict_id="--held-by"` --
+confirmed both reached `_run_dao_cli` and would have altered the argv
+`dao.py` actually parses.
+
+**Fixed with two validators, run before either endpoint's request body is
+ever used to build argv:**
+- `_valid_conflict_id` -- pattern match against `^CONFLICT_[0-9]+$`,
+  mirroring `conflict_ledger.schema.json`'s own pattern (a real identity
+  check, not just a leading-dash blocklist), rejecting on mismatch with a
+  clean 400 rather than a deep `dao.py` error.
+- `_known_ledger_file_name` -- `file_name` has no fixed pattern to check
+  against (real filenames vary), so instead it must already be a real
+  entry in the case's own `_source_ledger.json` before being used at all.
+  This closes the injection path (a crafted `--held-by` value is never a
+  real ledger entry) and gives a clear error for a genuine typo too,
+  instead of `dao.py`'s own deeper `NOT_FOUND`.
+
+15 new tests (`tests/test_frontend_main.py`, 202 total): both validators
+directly (attack values rejected, legitimate values still pass), plus two
+full-endpoint-level tests that call `set_ledger_status`/
+`set_conflict_verdict` with the exact crafted payloads and confirm they
+raise before `_run_dao_cli` is ever reached. Re-verified the same crafted
+attacks are now blocked, and that the real, previously-approved `CASE_020`
+filename and a real `CONFLICT_1`-shaped id both still pass -- no
+regression on the legitimate path this same commit had just fixed (item 5).

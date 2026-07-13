@@ -52,6 +52,7 @@ app.add_middleware(
 
 CASE_ID_RE = re.compile(r"^CASE_[A-Za-z0-9_-]+$")
 SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9_.-]+\.(json|md)$")
+CONFLICT_ID_RE = re.compile(r"^CONFLICT_[0-9]+$")  # matches conflict_ledger.schema.json's own pattern
 UPLOAD_EXTENSIONS = {".pdf", ".txt", ".md", ".png", ".jpg", ".jpeg", ".tiff", ".xlsx", ".csv"}
 UPLOAD_FORBIDDEN_CHARS = set("/\\\0")
 UPLOAD_DIR = Path(__file__).resolve().parent / "_uploads"
@@ -72,6 +73,35 @@ def _valid_upload_filename(name: str) -> bool:
 def _valid_case_id(case_id: str):
     if not CASE_ID_RE.fullmatch(case_id):
         raise HTTPException(400, "invalid case_id -- must match CASE_<alnum/-/_>")
+
+
+def _valid_conflict_id(conflict_id: str):
+    """conflict_id is a URL path parameter, so it's attacker-controlled and,
+    unvalidated, flows straight into a subprocess argv as a positional
+    argument (see _run_dao_cli) -- a value like '--held-by' would be
+    consumed by dao.py's argparse as that OPTION instead of the intended
+    positional, desyncing the rest of the parse (argument-injection /
+    flag-smuggling). Validated against the same pattern
+    conflict_ledger.schema.json itself requires, so this also fails fast
+    with a clean 400 instead of a deep dao.py error for a genuinely
+    malformed id."""
+    if not CONFLICT_ID_RE.fullmatch(conflict_id):
+        raise HTTPException(400, "invalid conflict_id -- must match CONFLICT_<digits>")
+
+
+def _known_ledger_file_name(case_id: str, file_name: str):
+    """file_name comes from the request body, so it's just as attacker-
+    controlled as conflict_id above and hits the same subprocess-argv
+    positional slot -- same injection risk. Unlike conflict_id there's no
+    fixed pattern to check it against, so instead require it to already be
+    a real entry in this case's own ledger before it's ever handed to
+    dao.py; this closes the injection path (a crafted '--held-by' value
+    won't be a real ledger entry) and gives a clear error for a genuine
+    typo instead of dao.py's deeper NOT_FOUND."""
+    ledger = dao.load_json(dao.source_ledger_path(case_id))
+    known = {e["file_name"] for e in (ledger or {}).get("files", [])}
+    if file_name not in known:
+        raise HTTPException(400, f"{file_name!r} is not a file in this case's ledger")
 
 
 def _require_case(case_id: str) -> Path:
@@ -156,6 +186,7 @@ def _run_dao_cli(args: list[str], held_by: str) -> dict:
 @app.post("/api/cases/{case_id}/ledger/status")
 def set_ledger_status(case_id: str, body: LedgerStatusBody):
     _require_case(case_id)
+    _known_ledger_file_name(case_id, body.file_name)
     if body.status not in ("approved", "rejected"):
         raise HTTPException(400, "status must be approved or rejected")
     if not body.reviewer.strip():
@@ -171,6 +202,7 @@ def set_ledger_status(case_id: str, body: LedgerStatusBody):
 @app.post("/api/cases/{case_id}/conflicts/{conflict_id}/verdict")
 def set_conflict_verdict(case_id: str, conflict_id: str, body: ConflictVerdictBody):
     _require_case(case_id)
+    _valid_conflict_id(conflict_id)
     if body.verdict not in ("resolved", "false_positive"):
         raise HTTPException(400, "verdict must be resolved or false_positive")
     if not body.note.strip():
