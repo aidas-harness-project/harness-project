@@ -9,8 +9,13 @@ CLI or API surface.
 from __future__ import annotations
 
 import argparse
+import base64
+import json
+import mimetypes
 import os
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -21,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SUPPORTED_PROVIDERS = ("claude-cli", "anthropic-api", "openai-api", "fixture")
 DEFAULT_PROVIDER = "claude-cli"
 DEFAULT_ENV_PREFIX = "HARNESS_LLM"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
 class ProviderConfigError(RuntimeError):
@@ -160,6 +166,85 @@ class OpenAIApiProvider(_ApiProviderStub):
     provider_name = "openai-api"
     required_key_env = "OPENAI_API_KEY"
     model_env_names = ("HARNESS_OPENAI_MODEL", "OPENAI_MODEL")
+    default_model_name = "gpt-4.1"
+
+    def __init__(
+        self,
+        *,
+        model_name: str | None,
+        env: Mapping[str, str],
+        base_url: str | None = None,
+    ):
+        super().__init__(model_name=model_name, env=env)
+        self.model_name = model_name or self._default_model_name(env)
+        self.base_url = (base_url or env.get("OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL).rstrip("/")
+
+    def _default_model_name(self, env: Mapping[str, str]) -> str:
+        for env_name in self.model_env_names:
+            if env.get(env_name):
+                return env[env_name]
+        return self.default_model_name
+
+    def _post_responses(self, input_payload, *, prompt_version: str, timeout: int) -> ProviderResult:
+        payload = {"model": self.model_name, "input": input_payload}
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}/responses",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                response_body = response.read().decode("utf-8")
+                status_code = getattr(response, "status", None)
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise ProviderExecutionError(f"openai-api call failed ({exc.code}): {error_body}") from exc
+        except urllib.error.URLError as exc:
+            raise ProviderExecutionError(f"openai-api call failed: {exc.reason}") from exc
+
+        try:
+            parsed = json.loads(response_body)
+        except json.JSONDecodeError as exc:
+            raise ProviderExecutionError(f"openai-api returned non-JSON response: {response_body!r}") from exc
+
+        text = _extract_openai_output_text(parsed)
+        if text is None:
+            raise ProviderExecutionError("openai-api response did not contain output_text")
+        return self._result(
+            text.strip(),
+            prompt_version,
+            {
+                "response_id": parsed.get("id"),
+                "status": parsed.get("status"),
+                "http_status": status_code,
+                "usage": parsed.get("usage"),
+            },
+        )
+
+    def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
+        image_url = _image_data_url(image_path)
+        input_payload = [{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {"type": "input_image", "image_url": image_url, "detail": "high"},
+            ],
+        }]
+        return self._post_responses(input_payload, prompt_version=prompt_version, timeout=180)
+
+    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._post_responses(prompt, prompt_version=prompt_version, timeout=60)
+
+    def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._post_responses(prompt, prompt_version=prompt_version, timeout=120)
+
+    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._post_responses(prompt, prompt_version=prompt_version, timeout=180)
 
 
 class FixtureProvider(BaseProvider):
@@ -244,3 +329,27 @@ def _normalize_provider_name(provider_name: str) -> str:
             f"unsupported provider {provider_name!r}; expected one of {', '.join(SUPPORTED_PROVIDERS)}"
         )
     return normalized
+
+
+def _image_data_url(image_path: Path) -> str:
+    mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
+    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _extract_openai_output_text(response: Mapping[str, Any]) -> str | None:
+    if isinstance(response.get("output_text"), str):
+        return response["output_text"]
+
+    parts: list[str] = []
+    for item in response.get("output", []) or []:
+        if not isinstance(item, Mapping):
+            continue
+        for content in item.get("content", []) or []:
+            if not isinstance(content, Mapping):
+                continue
+            if content.get("type") == "output_text" and isinstance(content.get("text"), str):
+                parts.append(content["text"])
+    if parts:
+        return "".join(parts)
+    return None

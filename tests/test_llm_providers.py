@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 from types import SimpleNamespace
 from unittest import mock
 
@@ -81,14 +82,14 @@ def test_openai_provider_can_read_model_from_provider_specific_environment():
     assert provider.model_name == "configured-model"
 
 
-def test_api_provider_stub_execution_error_is_clear():
-    config = providers.ProviderConfig(provider_name="openai-api")
-    provider = providers.build_provider(config, env={"OPENAI_API_KEY": "secret"})
+def test_anthropic_provider_stub_execution_error_is_clear():
+    config = providers.ProviderConfig(provider_name="anthropic-api")
+    provider = providers.build_provider(config, env={"ANTHROPIC_API_KEY": "secret"})
 
     with pytest.raises(providers.ProviderExecutionError) as excinfo:
         provider.classify_document("prompt", "classification_v0.1")
 
-    assert "openai-api" in str(excinfo.value)
+    assert "anthropic-api" in str(excinfo.value)
     assert "not implemented" in str(excinfo.value)
 
 
@@ -141,6 +142,83 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
     assert captured["kwargs"]["timeout"] == 180
     assert result.text == "transcribed text"
     assert result.metadata()["provider_name"] == "claude-cli"
+
+
+def test_openai_provider_posts_text_to_responses_api(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"id": "resp_1", "status": "completed", "output_text": "AGREE: same"}'
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.header_items())
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="openai-api", model_name="gpt-test"),
+        env={"OPENAI_API_KEY": "secret"},
+    )
+
+    result = provider.compare_text("compare prompt", "ocr_compare_v0.1")
+
+    assert captured["url"].endswith("/responses")
+    assert captured["headers"]["Authorization"] == "Bearer secret"
+    assert captured["payload"] == {"model": "gpt-test", "input": "compare prompt"}
+    assert captured["timeout"] == 60
+    assert result.text == "AGREE: same"
+    assert result.raw_metadata["response_id"] == "resp_1"
+
+
+def test_openai_provider_posts_base64_image_to_responses_api(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"id": "resp_2", "status": "completed", "output_text": "page text"}'
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"fake png")
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="openai-api", model_name="gpt-test"),
+        env={"OPENAI_API_KEY": "secret"},
+    )
+
+    result = provider.transcribe_image(image_path, "transcribe prompt", "ocr_extraction_v0.1")
+
+    content = captured["payload"]["input"][0]["content"]
+    assert content[0] == {"type": "input_text", "text": "transcribe prompt"}
+    assert content[1]["type"] == "input_image"
+    assert content[1]["detail"] == "high"
+    assert content[1]["image_url"].startswith("data:image/png;base64,")
+    assert captured["timeout"] == 180
+    assert result.text == "page text"
 
 
 def test_unknown_provider_fails_before_any_execution():
