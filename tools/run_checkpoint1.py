@@ -4,10 +4,10 @@ Automates the mechanical sequence a document-pipeline subagent normally
 performs: run dual-path OCR (ocr_extract.run_ocr, in-process, not a
 subprocess-of-a-subprocess), write each agreed page (dao.py's
 write-page-text logic, called directly), classify the document from its
-first agreed page's already-transcribed TEXT (one real claude -p call --
-reasoning over text, not re-viewing the raw image, which is a smaller PII
-exposure footprint than the original design's "same vision-model call that
-read the page" -- see open-decisions.md #3), assemble and write
+first agreed page's already-transcribed TEXT (reasoning over text, not
+re-viewing the raw image, which is a smaller PII exposure footprint than
+the original design's "same vision-model call that read the page" -- see
+open-decisions.md #3), assemble and write
 ocr_result_{doc_id}.json + classification_result_{doc_id}.json, and update
 document_manifest.json's per-document fields.
 
@@ -45,8 +45,8 @@ scenario/branch-testing script) can inspect the outcome programmatically.
 """
 import argparse
 import json
+import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -55,12 +55,21 @@ sys.stdout.reconfigure(encoding="utf-8")
 from dao import case_dir, atomic_write_json, now_iso, load_registry, validate_instance
 from dao import acquire_lock_blocking, release_lock, atomic_write_text, processed_dir
 import dao as _dao
-from ocr_extract import run_ocr
+from llm_providers import (
+    DEFAULT_PROVIDER,
+    ProviderConfig,
+    ProviderConfigError,
+    ProviderExecutionError,
+    SUPPORTED_PROVIDERS,
+    build_provider,
+)
+from ocr_extract import build_ocr_providers, run_ocr
 
 ROOT = Path(__file__).resolve().parent.parent
 
 DOCUMENT_TYPES = ["insurance_certificate", "insurance_policy", "diagnosis_certificate",
                    "medical_record", "imaging_report", "receipt", "insurer_response", "other"]
+CLASSIFICATION_PROMPT_VERSION = "classification_v0.1"
 
 CLASSIFY_PROMPT_TEMPLATE = """You are classifying an insurance claim document by its type, from its
 already-transcribed text (not the raw image). Choose exactly one of these types:
@@ -104,15 +113,19 @@ def _write_contract(case_id, filename, data, schema_name, held_by, run_id):
     return target
 
 
-def classify_document(text: str) -> dict:
-    """One real claude -p call, reasoning over already-transcribed text
-    (no raw image view). Fails loud on an unparseable response -- same
-    fail-safe discipline as ocr_extract.compare(), not a silent guess."""
+def classify_document(text: str, classifier=None) -> dict:
+    """Classify already-transcribed text through the configured provider.
+
+    Fails loud on an unparseable response -- same fail-safe discipline as
+    ocr_extract.compare(), not a silent guess.
+    """
+    selected_classifier = classifier or build_provider(ProviderConfig(DEFAULT_PROVIDER), root=ROOT)
     prompt = CLASSIFY_PROMPT_TEMPLATE.format(types=", ".join(DOCUMENT_TYPES), text=text[:3000])
-    result = subprocess.run(["claude", "-p", prompt], capture_output=True, text=True, timeout=120, cwd=str(ROOT))
-    if result.returncode != 0:
-        sys.exit(f"error: classification claude call failed: {result.stderr.strip()}")
-    raw = result.stdout.strip()
+    try:
+        provider_result = selected_classifier.classify_document(prompt, CLASSIFICATION_PROMPT_VERSION)
+    except ProviderExecutionError as exc:
+        sys.exit(f"error: classification provider failed: {exc}")
+    raw = provider_result.text.strip()
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if not m:
         sys.exit(f"error: classification response wasn't parseable JSON, refusing to guess: {raw!r}")
@@ -122,10 +135,77 @@ def classify_document(text: str) -> dict:
         sys.exit(f"error: classification response wasn't valid JSON, refusing to guess: {raw!r}")
     if parsed.get("predicted_document_type") not in DOCUMENT_TYPES:
         sys.exit(f"error: classification returned an unknown document_type {parsed.get('predicted_document_type')!r}")
+    parsed["_provider_metadata"] = provider_result.metadata()
     return parsed
 
 
+def build_classifier_provider(
+    *,
+    classifier_provider_name: str | None = None,
+    classifier_model: str | None = None,
+    comparator_provider=None,
+    env=None,
+):
+    source_env = env if env is not None else os.environ
+    provider_name = (
+        classifier_provider_name
+        or source_env.get("HARNESS_CLASSIFIER_PROVIDER")
+        or (comparator_provider.provider_name if comparator_provider is not None else None)
+        or source_env.get("HARNESS_OCR_COMPARATOR_PROVIDER")
+        or source_env.get("HARNESS_LLM_PROVIDER")
+        or DEFAULT_PROVIDER
+    )
+    env_comparator_provider = source_env.get("HARNESS_OCR_COMPARATOR_PROVIDER")
+    comparator_model_name = (
+        comparator_provider.model_name
+        if comparator_provider is not None and provider_name == comparator_provider.provider_name
+        else None
+    )
+    env_comparator_model = (
+        source_env.get("HARNESS_OCR_COMPARATOR_MODEL")
+        if env_comparator_provider is not None and provider_name == env_comparator_provider
+        else None
+    )
+    model_name = (
+        classifier_model
+        or source_env.get("HARNESS_CLASSIFIER_MODEL")
+        or comparator_model_name
+        or env_comparator_model
+        or source_env.get("HARNESS_LLM_MODEL")
+    )
+    if comparator_provider is not None and provider_name == comparator_provider.provider_name and (
+        classifier_provider_name is None
+        and classifier_model is None
+        and not source_env.get("HARNESS_CLASSIFIER_PROVIDER")
+        and not source_env.get("HARNESS_CLASSIFIER_MODEL")
+    ):
+        return comparator_provider
+    return build_provider(ProviderConfig(provider_name, model_name), env=source_env, root=ROOT)
+
+
+def _provider_label(provider_info: dict | None) -> str:
+    if not provider_info:
+        return "claude-cli"
+    provider_name = provider_info.get("provider_name") or "unknown-provider"
+    model_name = provider_info.get("model_name") or "unknown-model"
+    return f"{provider_name}:{model_name}"
+
+
+def _classification_model_info(provider_metadata: dict) -> dict:
+    info = {
+        "model_name": _provider_label(provider_metadata),
+        "prompt_version": provider_metadata.get("prompt_version", CLASSIFICATION_PROMPT_VERSION),
+    }
+    if provider_metadata.get("provider_name"):
+        info["provider_name"] = provider_metadata["provider_name"]
+    return info
+
+
 def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
+    providers = ocr_data.get("providers", {})
+    reader_a_label = _provider_label(providers.get("reader_a"))
+    reader_b_label = _provider_label(providers.get("reader_b"))
+    comparator_label = _provider_label(providers.get("comparator"))
     pages_out = []
     for p in ocr_data["pages"]:
         agreed = p["agreement"] == "agreed"
@@ -143,10 +223,14 @@ def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
     any_disagreement = any(p["agreement"] == "disagreed" for p in ocr_data["pages"])
     result = {
         "case_id": case_id, "run_id": run_id, "component": "document-pipeline", "status": "success",
-        "created_at": now_iso(), "model_info": {"model_name": "claude-cli", "prompt_version": "ocr_extraction_v0.1"},
+        "created_at": now_iso(),
+        "model_info": {
+            "model_name": f"reader_a={reader_a_label}; reader_b={reader_b_label}; comparator={comparator_label}",
+            "prompt_version": "ocr_extraction_v0.1",
+        },
         "document_id": doc_id,
-        "ocr_engine": "claude-cli (no dedicated OCR engine, see open-decisions.md)",
-        "vision_model_name": "claude-cli (stand-in for a dedicated second engine, see open-decisions.md)",
+        "ocr_engine": reader_a_label,
+        "vision_model_name": f"{reader_b_label}; comparator={comparator_label}",
         "uncertain_confidence_threshold": 1.0,
         "extraction_method": "ocr", "ocr_status": "completed", "pages": pages_out,
         "document_mean_confidence": None,
@@ -186,9 +270,55 @@ def _reset_manifest_for_blocked_ocr(case_id, doc_id, ocr_result, held_by, run_id
         sys.exit(f"error: {message}")
 
 
-def run_checkpoint1(case_id: str, doc_id: str, pdf_path: str, held_by: str, run_id: str, progress=None) -> dict:
+def run_checkpoint1(
+    case_id: str,
+    doc_id: str,
+    pdf_path: str,
+    held_by: str,
+    run_id: str,
+    progress=None,
+    reader_a=None,
+    reader_b=None,
+    comparator=None,
+    classifier=None,
+    reader_a_name: str | None = None,
+    reader_b_name: str | None = None,
+    comparator_name: str | None = None,
+    classifier_provider_name: str | None = None,
+    reader_a_model: str | None = None,
+    reader_b_model: str | None = None,
+    comparator_model: str | None = None,
+    classifier_model: str | None = None,
+) -> dict:
     pdf_path = Path(pdf_path)
-    ocr_data = run_ocr(case_id, doc_id, pdf_path, progress=progress)
+    if reader_a is None or reader_b is None or comparator is None:
+        providers = build_ocr_providers(
+            reader_a_name=reader_a_name,
+            reader_b_name=reader_b_name,
+            comparator_name=comparator_name,
+            reader_a_model=reader_a_model,
+            reader_b_model=reader_b_model,
+            comparator_model=comparator_model,
+        )
+        reader_a = reader_a or providers["reader_a"]
+        reader_b = reader_b or providers["reader_b"]
+        comparator = comparator or providers["comparator"]
+    if classifier is None:
+        classifier = build_classifier_provider(
+            classifier_provider_name=classifier_provider_name,
+            classifier_model=classifier_model,
+            comparator_provider=comparator,
+        )
+
+    ocr_data = run_ocr(
+        case_id,
+        doc_id,
+        pdf_path,
+        progress=progress,
+        reader_a=reader_a,
+        reader_b=reader_b,
+        comparator=comparator,
+    )
 
     for p in ocr_data["pages"]:
         if p["agreement"] == "agreed":
@@ -219,20 +349,21 @@ def run_checkpoint1(case_id: str, doc_id: str, pdf_path: str, held_by: str, run_
                 "ocr_result_path": str(case_dir(case_id) / f"ocr_result_{doc_id}.json"),
                 "raw_ocr_path": str(raw_ocr_path)}
 
-    return _finish_checkpoint1(case_id, doc_id, run_id, held_by, ocr_data["pages"][0]["reading_a"])
+    return _finish_checkpoint1(case_id, doc_id, run_id, held_by, ocr_data["pages"][0]["reading_a"], classifier=classifier)
 
 
-def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text):
+def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, classifier=None):
     """Shared tail: classify from page 1's text, write
     classification_result_{doc_id}.json, update document_manifest.json.
     Called both by run_checkpoint1() (no disagreement) and
     apply_disagreement_resolution() (once every page is resolved)."""
-    classification = classify_document(first_page_text)
+    classification = classify_document(first_page_text, classifier) if classifier is not None else classify_document(first_page_text)
     ocr_result = json.loads((case_dir(case_id) / f"ocr_result_{doc_id}.json").read_text(encoding="utf-8"))
+    provider_metadata = classification.get("_provider_metadata", {})
 
     classification_result = {
         "case_id": case_id, "run_id": run_id, "component": "document-pipeline", "status": "success",
-        "created_at": now_iso(), "model_info": {"model_name": "claude-cli", "prompt_version": "classification_v0.1"},
+        "created_at": now_iso(), "model_info": _classification_model_info(provider_metadata),
         "document_id": doc_id,
         "predicted_document_type": classification["predicted_document_type"],
         "document_type_label": classification.get("document_type_label", ""),
@@ -265,7 +396,8 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text):
 
 
 def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, chosen_reading: str,
-                          resolved_by: str, note: str, held_by: str, run_id: str) -> dict:
+                          resolved_by: str, note: str, held_by: str, run_id: str,
+                          classifier=None) -> dict:
     """Resolves one disagreed page using the original run_ocr() result
     (which has both reading_a and reading_b) plus a human's decision of
     which one is correct and why. Writes that page's text, updates
@@ -305,7 +437,7 @@ def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, c
 
     first_page_agreed_or_resolved = ocr_result["pages"][0]
     first_page_text = Path(ROOT / first_page_agreed_or_resolved["text_path"]).read_text(encoding="utf-8")
-    return _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text)
+    return _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, classifier=classifier)
 
 
 def main():
@@ -315,9 +447,37 @@ def main():
     ap.add_argument("pdf_path")
     ap.add_argument("--held-by", required=True)
     ap.add_argument("--run-id", required=True)
+    ap.add_argument("--reader-a", choices=SUPPORTED_PROVIDERS, help="Provider for the first independent OCR read")
+    ap.add_argument("--reader-b", choices=SUPPORTED_PROVIDERS, help="Provider for the second independent OCR read")
+    ap.add_argument("--comparator", choices=SUPPORTED_PROVIDERS, help="Provider for OCR read comparison")
+    ap.add_argument("--classifier-provider", choices=SUPPORTED_PROVIDERS,
+                    help="Provider for document classification; defaults to the comparator provider")
+    ap.add_argument("--reader-a-model", help="Model name for --reader-a")
+    ap.add_argument("--reader-b-model", help="Model name for --reader-b")
+    ap.add_argument("--comparator-model", help="Model name for --comparator")
+    ap.add_argument("--classifier-model", help="Model name for --classifier-provider")
     args = ap.parse_args()
 
-    result = run_checkpoint1(args.case_id, args.doc_id, args.pdf_path, args.held_by, args.run_id)
+    try:
+        result = run_checkpoint1(
+            args.case_id,
+            args.doc_id,
+            args.pdf_path,
+            args.held_by,
+            args.run_id,
+            reader_a_name=args.reader_a,
+            reader_b_name=args.reader_b,
+            comparator_name=args.comparator,
+            classifier_provider_name=args.classifier_provider,
+            reader_a_model=args.reader_a_model,
+            reader_b_model=args.reader_b_model,
+            comparator_model=args.comparator_model,
+            classifier_model=args.classifier_model,
+        )
+    except ProviderConfigError as exc:
+        sys.exit(f"error: {exc}")
+    except ProviderExecutionError as exc:
+        sys.exit(f"error: {exc}")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if result["status"] == "blocked_disagreement":
         sys.exit(1)
