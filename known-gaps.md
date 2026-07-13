@@ -317,9 +317,24 @@ test runs against a `tmp_path`, with `dao.py`'s `OUTPUTS`/`DATA` and
 tests run against the real `schemas/` dir, since that's the actual contract
 being tested, not a fake one.
 
-**Not covered yet:** `intake_case.py` (the DOC_XXX/GT_XXX rename +
-manifest-write path) and `sync_agents.py`. Lower priority -- neither has a
-proven-bug history the way the tools above did this session.
+**RESOLVED 2026-07-13:** `intake_case.py` -- 25 new tests
+(`tests/test_intake_case.py`) covering the previously-untested pure
+helpers (`classify`, `parse_split_spec`, `split_output_name`,
+`file_format_for`), `write_manifest`'s DAO-backed write (success +
+schema-failure), and the `--execute` path end to end: DOC_XXX/GT_XXX
+sequential renaming, `document_manifest.json` only ever containing raw
+documents (never ground truth), the `_intake_record.json` crosswalk being
+the sole place original filenames survive, and D2's "any rejected or
+pending entry blocks the whole case" rule under `--execute`. `sync_agents.py`
+-- 14 new tests (`tests/test_sync_agents.py`) covering `parse_frontmatter`,
+`toml_escape` (including the adversarial case a body containing a literal
+`"""` would otherwise break the TOML's own triple-quoted delimiters),
+`sync_skills`, and `sync_agents` (default model, multi-file processing,
+halting on a malformed source file before finishing the batch). 187 tests
+total. Neither tool had a proven-bug history before this pass and none
+was found while writing these -- this was pure coverage debt, not a live
+gap, closed for completeness now that the higher-severity items above are
+done.
 
 ## 5. Frontend (`frontend/`) unreviewed
 
