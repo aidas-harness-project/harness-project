@@ -98,7 +98,10 @@ class ClaudeCliProvider(BaseProvider):
         cmd = [self.command, "-p", prompt]
         if allowed_read:
             cmd.extend(["--allowedTools", "Read"])
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(self.root))
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(self.root))
+        except FileNotFoundError as exc:
+            raise ProviderExecutionError(f"claude-cli command not found: {self.command}") from exc
         raw_metadata = {
             "command": cmd[0],
             "returncode": result.returncode,
@@ -312,7 +315,11 @@ def build_provider(
     provider_name = _normalize_provider_name(selected.provider_name)
 
     if provider_name == "claude-cli":
-        return ClaudeCliProvider(model_name=selected.model_name, root=root)
+        return ClaudeCliProvider(
+            model_name=selected.model_name,
+            root=root,
+            command=source_env.get("HARNESS_CLAUDE_COMMAND") or "claude",
+        )
     if provider_name == "anthropic-api":
         return AnthropicApiProvider(model_name=selected.model_name, env=source_env)
     if provider_name == "openai-api":
