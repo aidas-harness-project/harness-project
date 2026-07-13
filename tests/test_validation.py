@@ -29,6 +29,26 @@ def test_doc_suffixed_filename_strips_suffix():
     assert schema_name_for(Path("normalized_policy_clause_DOC_001.json")) == "normalized_policy_clause.schema.json"
 
 
+def test_ocr_result_doc_suffixed_filename_resolves():
+    """ocr_result.json was found to have the exact same silent-overwrite
+    risk as normalized_policy_clause.json -- fixed the same way, one file
+    per document."""
+    assert schema_name_for(Path("ocr_result_DOC_001.json")) == "ocr_result.schema.json"
+    assert schema_name_for(Path("ocr_result_DOC_004.json")) == "ocr_result.schema.json"
+
+
+def test_classification_result_doc_suffixed_filename_resolves():
+    """Same silent-overwrite risk found in classification_result.json,
+    fixed the same way."""
+    assert schema_name_for(Path("classification_result_DOC_001.json")) == "classification_result.schema.json"
+
+
+def test_redaction_result_doc_suffixed_filename_resolves():
+    """Same silent-overwrite risk found in redaction_result.json, fixed the
+    same way -- the third and last of the three files sharing this bug."""
+    assert schema_name_for(Path("redaction_result_DOC_001.json")) == "redaction_result.schema.json"
+
+
 def test_evidence_sidecar_resolves_regardless_of_base_document_name():
     for name in ["draft_report_v1.evidence.json", "screening_report.evidence.json", "rebuttal_points.evidence.json"]:
         assert schema_name_for(Path(name)) == "evidence_sidecar.schema.json", name

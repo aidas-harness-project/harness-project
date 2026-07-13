@@ -365,3 +365,52 @@ and `critic_result_v1`/`v2` etc.'s versioned-filename fix from item 1 was
 already correct — no new collision found there. `document_manifest.json`'s
 read-modify-write scope boundary (item 7) is unchanged by this pass, still
 open, still theoretical under the current single-writer-per-run design.
+
+## 9. `ocr_result.json`/`classification_result.json`/`redaction_result.json` -- same silent-overwrite bug as `normalized_policy_clause.json`, wider blast radius -- RESOLVED 2026-07-13
+
+Found by grepping every schema for a top-level `documents: [...]` array (the
+shape that made `normalized_policy_clause.json`'s bug possible) and
+checking which ones are written by a per-document stage. Four matched:
+`document_manifest.json` (already known -- item 7, genuinely needs to stay
+shared, multi-stage-owned) and three that didn't need to be shared at all:
+`ocr_result.json`, `classification_result.json`, `redaction_result.json`.
+`document-pipeline`'s checkpoints 1/2 run once per document; none of the
+three had a per-document filename or a merge instruction, and
+`write-contract` has no merge logic -- it overwrites whatever it's given.
+Concretely: process DOC_001 -> `ocr_result.json` gets
+`documents: [DOC_001]`. Process DOC_002 -> the file gets **overwritten**
+with `documents: [DOC_002]`, silently destroying DOC_001's OCR record. Same
+for the other two.
+
+This is worse than `normalized_policy_clause.json`'s risk (only bites
+cases with 2+ *policy* documents) -- **this bites every case with 2+
+documents of any kind**, which is nearly all of them (CASE_002 and
+CASE_009 each have 5). Nothing had caught it because no real run has yet
+gotten far enough into checkpoint 1 across multiple documents in one
+session to observe it.
+
+**Fixed, one at a time, same treatment for all three (per-user
+confirmation each round, not assumed):** renamed to
+`ocr_result_{document_id}.json` / `classification_result_{document_id}.json`
+/ `redaction_result_{document_id}.json`, and flattened each schema's
+`documents: [single_entry]` wrapper away entirely (not just kept as a
+length-1 array) -- `document_id` is now a top-level field in each,
+matching the filename. `ocr_result.schema.json` v0.2->v0.3,
+`classification_result.schema.json` v0.1->v0.2,
+`redaction_result.schema.json` v0.1->v0.2. `document_manifest.schema.json`'s
+doc-comment references to `ocr_result.json` updated to match.
+`document-pipeline.md` updated for all three. 3 new regression tests in
+`test_validation.py` confirming `schema_name_for()` resolves each new
+suffix (same `_DOC_\d+$` stripping added for `normalized_policy_clause.json`
+already covers these automatically -- confirmed, not assumed).
+
+**Also flagged, RESOLVED same day:** `document_assembly.py` requires
+`--held-by`/`--run-id` (fixed earlier). `document-pipeline.md` and
+`critic.md` showed the literal CLI invocation with those flags;
+`screening-report.md`, `draft-report.md`, `denial-validation.md` used to
+just say "the document-assembly tool" abstractly. Not a hard blocker (an
+agent can infer `--held-by=<its own name>` from context), but inconsistent
+with the precedent set elsewhere -- all three now show the literal
+`python tools/document_assembly.py --sections-file <spec.json> --held-by
+<agent-name> --run-id RUN_ID` invocation, matching `document-pipeline.md`/
+`critic.md`.

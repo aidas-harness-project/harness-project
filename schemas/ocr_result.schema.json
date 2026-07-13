@@ -1,13 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ocr_result.schema.json",
-  "title": "ocr_result.json -- OCR quality + cross-validation log v0.2",
-  "description": "Per-document, per-page text extraction results, uncertain regions, and the P8 dual-path cross-validation outcome. Produced by document-pipeline's checkpoint 1. Propagation rule: if a later stage's evidence_reference quote overlaps an uncertain_region, that field is routed review_required: true. Only a per-document summary (ocr_quality, uncertain_region_count, cross_validation_status) is copied into document_manifest.json.",
+  "title": "ocr_result_{document_id}.json -- OCR quality + cross-validation log, one file per document v0.3",
+  "description": "Per-page text extraction results, uncertain regions, and the P8 dual-path cross-validation outcome for ONE document. Produced by document-pipeline's checkpoint 1 -- one file per document (ocr_result_{document_id}.json), since checkpoint 1 runs once per document and a single shared file across documents would get silently overwritten by each subsequent document's write (write-contract replaces the whole file; see known-gaps.md's audit of this exact failure mode). v0.2 nested everything under a documents: [] array to cover multiple documents in one file -- v0.3 flattens that away since each file now covers exactly one document; document_id is a top-level field here, matching the filename. Propagation rule: if a later stage's evidence_reference quote overlaps an uncertain_region, that field is routed review_required: true. Only a per-document summary (ocr_quality, uncertain_region_count, cross_validation_status) is copied into document_manifest.json.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
       "type": "object",
       "properties": {
+        "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
         "ocr_engine": {
           "type": "string",
           "description": "OCR engine/extractor used. No dedicated engine exists yet (see open-decisions.md) -- tools/ocr_extract.py uses the Claude CLI as a stand-in for both reading paths. Record that honestly here (e.g. 'claude-cli (no dedicated OCR engine, see open-decisions.md)') rather than implying a real engine exists."
@@ -20,20 +21,6 @@
           "$ref": "common_component_output.schema.json#/$defs/confidence",
           "description": "Blocks below this confidence are recorded as uncertain_region. Not fixed in the schema since confidence distributions vary by engine -- record whatever value was actually used for this run. tools/ocr_extract.py's Claude-CLI stand-in does not produce a real per-block confidence signal (no dedicated OCR engine) -- when using it, set this to 1.0 and leave uncertain_regions empty per page rather than fabricating a number; P8's actual failure signal from that tool is the agreed/disagreed cross-validation outcome, not a confidence threshold."
         },
-        "documents": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "$ref": "#/$defs/ocr_document" }
-        }
-      },
-      "required": ["ocr_engine", "vision_model_name", "uncertain_confidence_threshold", "documents"]
-    }
-  ],
-  "$defs": {
-    "ocr_document": {
-      "type": "object",
-      "properties": {
-        "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
         "extraction_method": {
           "enum": ["embedded_text", "ocr", "mixed"],
           "description": "Whether text came from a PDF's embedded text layer or image OCR. If embedded_text, confidence-related fields may be null."
@@ -69,8 +56,10 @@
         "review_required": { "type": "boolean" },
         "review_reason": { "type": "string" }
       },
-      "required": ["document_id", "extraction_method", "ocr_status", "pages", "ocr_quality", "cross_validation_status"]
-    },
+      "required": ["document_id", "ocr_engine", "vision_model_name", "uncertain_confidence_threshold", "extraction_method", "ocr_status", "pages", "ocr_quality", "cross_validation_status"]
+    }
+  ],
+  "$defs": {
     "page_result": {
       "type": "object",
       "properties": {

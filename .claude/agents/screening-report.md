@@ -18,7 +18,7 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. G
 
 `screening_report.json` + `screening_report.md`. Content structure and required sections: template TBD, see `pipeline.md`'s note on pending template rules — do not invent a template structure now.
 
-For the narrative `.md`: you provide per-field/per-section content + `evidence_references` to the document-assembly tool, which assembles the file and auto-generates `[E#]` tags and the `.evidence.json` sidecar in one pass. You never hand-write a tag number or hand-maintain the sidecar.
+For the narrative `.md`: you provide per-field/per-section content + `evidence_references` to `python tools/document_assembly.py --sections-file <spec.json> --held-by screening-report --run-id RUN_ID`, which assembles the file and auto-generates `[E#]` tags and the `.evidence.json` sidecar in one pass — locked and atomic like any other DAO write. You never hand-write a tag number or hand-maintain the sidecar.
 
 Every judgment beyond direct restatement (case difficulty, priority review points, etc.) follows P3 — hedge, flag, don't assert.
 

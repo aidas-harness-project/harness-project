@@ -73,12 +73,12 @@
             { "enum": ["high", "medium", "low"] },
             { "type": "null" }
           ],
-          "description": "owner: document-pipeline (checkpoint 1). Copied from ocr_result.json's per-document summary. null before OCR. Detail (uncertain-region list/positions, cross-validation outcome) lives only in ocr_result.json -- this manifest stays a lightweight roster."
+          "description": "owner: document-pipeline (checkpoint 1). Copied from ocr_result_{document_id}.json's summary. null before OCR. Detail (uncertain-region list/positions, cross-validation outcome) lives only in ocr_result_{document_id}.json -- this manifest stays a lightweight roster."
         },
         "uncertain_region_count": {
           "type": ["integer", "null"],
           "minimum": 0,
-          "description": "owner: document-pipeline (checkpoint 1). Sum of ocr_result.json's uncertain_regions for this document. null before OCR."
+          "description": "owner: document-pipeline (checkpoint 1). Sum of ocr_result_{document_id}.json's uncertain_regions for this document. null before OCR."
         },
         "cross_validation_status": {
           "anyOf": [
