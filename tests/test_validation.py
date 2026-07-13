@@ -49,6 +49,20 @@ def test_redaction_result_doc_suffixed_filename_resolves():
     assert schema_name_for(Path("redaction_result_DOC_001.json")) == "redaction_result.schema.json"
 
 
+def test_leading_underscore_shared_state_files_resolve():
+    """Regression: _source_ledger.json / _run_state.json / _conflict_ledger.json
+    have always returned None from schema_name_for() -- their on-disk names
+    carry a leading underscore but their schema files don't. Found by
+    actually running validate_output.py against a real forked case's
+    ledger and getting SKIP instead of PASS. These three files have never
+    been validated by anything, ever, as a result (write-contract isn't
+    used for them -- they have their own dedicated DAO write paths that
+    don't call validate_instance at all)."""
+    assert schema_name_for(Path("_source_ledger.json")) == "source_ledger.schema.json"
+    assert schema_name_for(Path("_run_state.json")) == "run_state.schema.json"
+    assert schema_name_for(Path("_conflict_ledger.json")) == "conflict_ledger.schema.json"
+
+
 def test_evidence_sidecar_resolves_regardless_of_base_document_name():
     for name in ["draft_report_v1.evidence.json", "screening_report.evidence.json", "rebuttal_points.evidence.json"]:
         assert schema_name_for(Path(name)) == "evidence_sidecar.schema.json", name
@@ -56,6 +70,29 @@ def test_evidence_sidecar_resolves_regardless_of_base_document_name():
 
 def test_unknown_filename_returns_none():
     assert schema_name_for(Path("totally_made_up_thing.json")) is None
+
+
+def test_ocr_result_page_text_path_nullable_for_disagreed_pages():
+    """Regression: found by actually running a real 4-page document through
+    checkpoint 1 (CASE_012/DOC_001) -- 3 pages agreed, 1 disagreed. A
+    disagreed page is never written (P8, no tolerance threshold), so it has
+    no text_path -- the schema used to require text_path as a non-null,
+    pattern-matched string unconditionally, which made a real mixed-result
+    document's own ocr_result.json unwritable."""
+    schemas, registry = load_registry()
+    page_disagreed = {
+        "page": 4, "text_path": None, "uncertain_regions": [],
+        "cross_validation": {"vision_model_reading": "x", "agreement": "disagreed",
+                              "disagreement_details": ["DISAGREE: diagnosis code differ"]},
+    }
+    instance = {
+        "case_id": "CASE_012", "run_id": "RUN_20260713_001", "component": "document-pipeline", "status": "success",
+        "document_id": "DOC_001", "ocr_engine": "x", "vision_model_name": "x", "uncertain_confidence_threshold": 1.0,
+        "extraction_method": "ocr", "ocr_status": "completed", "pages": [page_disagreed],
+        "ocr_quality": "medium", "cross_validation_status": "disagreed_pending_review",
+        "review_required": True, "reviewer_role": "손해사정사",
+    }
+    assert validate_instance(instance, "ocr_result.schema.json", schemas, registry) == []
 
 
 def test_registry_loads_every_schema_and_resolves_cross_file_refs():

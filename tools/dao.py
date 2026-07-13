@@ -395,6 +395,12 @@ def cmd_set_ledger_status(args):
             print(f"NOT_FOUND: no entry for file {args.file_name!r} in ledger")
             return 1
         ledger["updated_at"] = now_iso()
+        errors = _schema_check(ledger, "source_ledger.schema.json")
+        if errors:
+            print(f"FAIL: schema validation errors for {p} -- not written:")
+            for e in errors:
+                print(f"  - {e}")
+            return 1
         atomic_write_json(p, ledger)
         print(f"OK: {args.file_name} -> {args.status}")
         return 0
@@ -436,6 +442,19 @@ def cmd_read_evidence_tags(args):
     return 0 if ok else 1
 
 
+def _schema_check(data: dict, schema_name: str) -> list:
+    """Validates data against schema_name, returning error strings (empty
+    means valid). Used by the shared-state write paths (source ledger,
+    run-state, conflict ledger) -- these build their own structures rather
+    than accepting arbitrary agent-supplied JSON the way write-contract
+    does, so a failure here means a bug in this file's own construction
+    logic or a pre-existing malformed file, not bad agent output. No P4
+    self-correction-retry step, just fail loud and don't persist -- same
+    contract as write-contract's own validation failure path."""
+    schemas, registry = load_registry()
+    return validate_instance(data, schema_name, schemas, registry)
+
+
 # ---------------------------------------------------------------- run state ops --
 
 def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None):
@@ -465,6 +484,12 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None)
         entry["status"] = status
         if backup_path:
             entry["backup_path"] = backup_path
+        errors = _schema_check(state, "run_state.schema.json")
+        if errors:
+            print(f"FAIL: schema validation errors for {target} -- not written:")
+            for e in errors:
+                print(f"  - {e}")
+            return None
         save_run_state(case_id, state)
         return state
     finally:
@@ -654,6 +679,12 @@ def cmd_add_conflict_entry(args):
             "resolved_at": None,
         })
         ledger["updated_at"] = now_iso()
+        errors = _schema_check(ledger, "conflict_ledger.schema.json")
+        if errors:
+            print(f"FAIL: schema validation errors for {target} -- not written:")
+            for e in errors:
+                print(f"  - {e}")
+            return 1
         atomic_write_json(target, ledger)
         print(f"OK: added CONFLICT_{n}")
         return 0
@@ -678,6 +709,12 @@ def cmd_set_conflict_verdict(args):
         entry["resolution_note"] = args.note
         entry["resolved_at"] = now_iso()
         ledger["updated_at"] = now_iso()
+        errors = _schema_check(ledger, "conflict_ledger.schema.json")
+        if errors:
+            print(f"FAIL: schema validation errors for {target} -- not written:")
+            for e in errors:
+                print(f"  - {e}")
+            return 1
         atomic_write_json(target, ledger)
         print(f"OK: {args.conflict_id} -> {args.verdict}")
         return 0

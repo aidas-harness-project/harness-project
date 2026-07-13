@@ -137,19 +137,19 @@ def split_to_page_images(doc_path: Path, out_dir: Path, max_pages: int | None = 
     return paths
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("case_id")
-    ap.add_argument("doc_id")
-    ap.add_argument("doc_path")
-    args = ap.parse_args()
-
-    doc_path = Path(args.doc_path)
+def run_ocr(case_id: str, doc_id: str, doc_path: Path, progress=None) -> dict:
+    """The actual dual-path OCR loop, extracted out of main() so callers
+    (run_checkpoint1.py) can invoke it in-process instead of shelling out
+    to this script as a subprocess. Pure extraction -- main() below calls
+    this and does exactly what it always did (print JSON to stdout, exit
+    1 on any disagreement). progress(msg) is called per page if given,
+    instead of always printing to stderr, so a library caller can route it
+    (or silence it) rather than inheriting main()'s CLI-only behavior."""
     if not doc_path.exists():
         sys.exit(f"error: document not found -- {doc_path}")
 
     pages_out = []
-    with scratch_dir(args.case_id, args.doc_id) as tmp_dir:
+    with scratch_dir(case_id, doc_id) as tmp_dir:
         if doc_path.suffix.lower() == ".pdf":
             page_images = split_to_page_images(doc_path, tmp_dir)
         else:
@@ -166,10 +166,22 @@ def main():
                 "agreement": result["agreement"],
                 "disagreement_details": result["disagreement_details"],
             })
-            print(f"page {i}/{len(page_images)}: {result['agreement']}", file=sys.stderr)
+            msg = f"page {i}/{len(page_images)}: {result['agreement']}"
+            progress(msg) if progress else print(msg, file=sys.stderr)
 
-    print(json.dumps({"document_path": str(doc_path), "pages": pages_out}, ensure_ascii=False))
-    any_disagreement = any(p["agreement"] == "disagreed" for p in pages_out)
+    return {"document_path": str(doc_path), "pages": pages_out}
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("case_id")
+    ap.add_argument("doc_id")
+    ap.add_argument("doc_path")
+    args = ap.parse_args()
+
+    result = run_ocr(args.case_id, args.doc_id, Path(args.doc_path))
+    print(json.dumps(result, ensure_ascii=False))
+    any_disagreement = any(p["agreement"] == "disagreed" for p in result["pages"])
     sys.exit(1 if any_disagreement else 0)
 
 

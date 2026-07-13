@@ -414,3 +414,208 @@ with the precedent set elsewhere -- all three now show the literal
 `python tools/document_assembly.py --sections-file <spec.json> --held-by
 <agent-name> --run-id RUN_ID` invocation, matching `document-pipeline.md`/
 `critic.md`.
+
+## 10. `tools/fork_case.py` added -- reuse expensive OCR/redaction work across branching test runs
+
+Built to support testing the pipeline in pieces rather than one all-in-one
+run: P10's `snapshot-backup` only versions `outputs/` (never `data/`), and
+`case_id` is the primary key almost everywhere in the DAO (locks, ledgers,
+run-state, conflict ledger) -- there's no run_id-scoped branching. A real
+branch needs its own `case_id`. `case_id` is schema-pattern-locked to
+`^CASE_[0-9]+$` (no letters/suffix), so a branch is just the next free
+`CASE_NNN`, auto-assigned, with the actual fork relationship (source case,
+step, label) recorded in `_fork_record.json` instead of the id itself.
+
+Copies `outputs/` (case_id fields inside every JSON rewritten, then
+re-validated against each file's own schema) and `data/processed/` by
+default; `data/raw/` and `data/ground_truth/` are opt-in
+(`--include-raw`/`--include-ground-truth` -- the latter prints a loud
+warning, since it duplicates real answer-key material under a second
+case_id). Can fork from current state or a specific P10 backup step
+(`--from-step N`). Refuses to fork if any `.lock` file is present under the
+source (mirrors P5's "don't poll, don't assume stale" discipline for a
+lock found unexpectedly). The forked `_source_ledger.json` keeps the
+source's approved/rejected statuses as-is, not reset to pending -- it's a
+copy of already-reviewed content, not new raw input.
+
+18 tests (`tests/test_fork_case.py`), plus a real smoke test against actual
+repo data (forked `CASE_009` -> `CASE_010`, verified the ledger/run-state
+case_id rewrite and schema validity for real, then cleaned up the
+throwaway artifact).
+
+**Found while verifying the real smoke test, not part of the tool itself:**
+`schema_name_for()` never resolved `_source_ledger.json` / `_run_state.json`
+/ `_conflict_ledger.json` -- their on-disk names carry a leading underscore
+(the project's "shared state, not a component's own output" convention)
+but their schema files don't. `validate_output.py` had been silently
+`SKIP`ping all three, always, project-wide -- not something specific to
+forking. Fixed with a leading-underscore strip in `schema_name_for()`.
+
+**More serious, found by the same check -- RESOLVED 2026-07-13.** None of
+`_source_ledger.json`/`_run_state.json`/`_conflict_ledger.json`'s own DAO
+write paths (`cmd_set_ledger_status`, `_update_run_state`,
+`cmd_add_conflict_entry`, `cmd_set_conflict_verdict`) ever called
+`validate_instance()` -- confirmed by grepping every call site in `dao.py`;
+the only two were `write-contract` (explicit `--schema-name`) and
+`mark-human-review-complete`'s `expert_review.json` check. These three
+files -- the D2 intake gate, the run-state resume mechanism, and the P6
+conflict gate -- had **no schema enforcement anywhere**, at write time or
+otherwise.
+
+Fixed: added a shared `_schema_check()` helper (mirrors `write-contract`'s
+own failure contract exactly -- print `FAIL` + the errors, don't persist,
+return the function's existing failure sentinel: `1` for the ledger/
+conflict-ledger commands, `None` for `_update_run_state`, matching what
+each already returned on a lock failure) and wired it into all four
+functions, validating the fully-modified structure right before the write.
+No P4 self-correction-retry loop added -- these functions build their own
+structures rather than accepting arbitrary agent-supplied content the way
+`write-contract` does, so a failure here means a bug in this file's own
+construction logic or a pre-existing malformed file, not bad agent output
+to retry.
+
+Verified this isn't just "nothing broke" (all 118 pre-existing tests still
+passed unchanged, meaning existing fixtures were already valid -- that
+alone doesn't prove the new checks do anything): added 3 adversarial tests
+that seed genuinely schema-invalid state and confirm each function now
+actually rejects it and writes nothing, rather than silently persisting
+garbage. 121 tests total.
+
+## 11. P8's `compare()` has a real blind spot: it catches conflicting facts, not fabricated additions -- found running a real document through checkpoint 1, NOT YET FIXED
+
+Running `CASE_012`/DOC_001 (a real 4-page document) through checkpoint 1 for
+real surfaced this directly. Page 3's two independent reads were marked
+`agreed` by `compare()` -- but `reading_a` contained a fabricated appendix
+after the real document content ended: English meta-commentary referencing
+this project's own internal terminology (`D2`, `harness-guardrails-dev`),
+telling the (simulated) downstream process how to route the document.
+`reading_b` had no trace of it. Verified directly against the raw page
+image (rendered at 250dpi): the actual page ends cleanly at
+"KB손해보험주식회사" with nothing after -- the fabricated text does not
+exist in the source document at all. It was hallucinated by whichever
+`claude -p` call produced `reading_a`, in direct violation of
+`ocr_extract.py`'s own transcription prompt ("Output ONLY the
+transcription -- no commentary").
+
+**Why `compare()` missed it:** its prompt asks whether the two readings
+"materially agree -- same names, dates, numbers, diagnoses." That's a
+check for *conflicting* core facts. It has no check for *extra* content
+one reading has that the other doesn't -- a whole fabricated paragraph can
+pass as "agreed" as long as it doesn't touch the specific fields being
+compared. This is a real methodology gap in P8 as currently prompted, not
+a one-off fluke: the exact same blind spot would let a hallucinated
+addition slip through on any page, on any document, silently.
+
+**What this could have meant if unnoticed:** `page_003.md` was already
+written to the trusted processed layer with the fabricated content
+attached (since "agreed" pages get written without further scrutiny) --
+every downstream stage (`claim-analysis`, `screening-report`,
+`draft-report`, etc.) would have read this as real document content. This
+is exactly the P1 fabrication risk the whole harness exists to prevent,
+and it came from the harness's own extraction tooling, not from a
+malicious source document.
+
+**Fixed for this one real occurrence:** re-verified against the raw page
+image, corrected `page_003.md` to the clean `reading_b` content, recorded
+the finding in `ocr_result_DOC_001.json`'s page-3 `cross_validation
+.resolution` (the same field built for genuine disagreements -- broadened,
+since this is a legitimate second use case: "agreed" but a human found a
+problem `compare()` missed) and flagged `review_required: true` at the
+document level with an explicit note.
+
+**NOT fixed -- the actual methodology gap in `compare()` itself.** This
+needs a real design decision (e.g. asking `compare()` to also flag
+material differing in *length or content scope*, not just conflicting
+specific facts; or a stricter prompt; or a separate "does this reading
+contain anything the other doesn't" pass) before it can be trusted not to
+recur. Every "agreed" page written by every prior real OCR run in this
+project (CASE_002's DOC_002/DOC_005, CASE_012's pages 1/2/4) has **not**
+been re-checked for this specific failure mode -- this was only caught
+because a human happened to read page 3's full text while preparing it for
+redaction, not because any structural check would have caught it.
+
+## 12. `tools/run_checkpoint1.py` and `tools/run_scenario_matrix.py` added
+
+Built after manually running checkpoint 1 step-by-step (item 11's real run)
+made clear how many separate commands that actually took. Two scripts,
+composable:
+
+- **`run_checkpoint1.py`** -- automates the mechanical sequence: real
+  dual-path OCR (`ocr_extract.run_ocr`, called in-process now, not
+  subprocess-of-a-subprocess -- `ocr_extract.py` was refactored to expose
+  `run_ocr()` as a reusable function, pure extraction from `main()`, no
+  behavior change, confirmed by the existing 11 `test_ocr_extract.py` tests
+  still passing unchanged), write each agreed page, classify from page 1's
+  transcribed text (one real `claude -p` call -- reasoning over text, not
+  re-viewing the raw image, a smaller PII-exposure footprint than the
+  original design), assemble + write `ocr_result_{doc_id}.json` +
+  `classification_result_{doc_id}.json`, update `document_manifest.json`.
+  Stops cold at a P8 disagreement -- resolving one is still a human
+  decision, not something this script does on its own.
+
+  Real gap found while building this, fixed before it shipped:
+  `ocr_result.json` only retains `reading_b` (as `vision_model_reading`) --
+  `reading_a`'s full text was never persisted anywhere. If a disagreement
+  blocked the run and someone came back *later*, in a separate process, to
+  resolve it, `reading_a` would already be gone, forcing a wasteful
+  real-OCR re-run just to recover it. Fixed: the full dual-read data (both
+  readings, every page) is now saved to `_ocr_scratch/{case_id}_{doc_id}
+  _raw.json` (gitignored, not a schema-validated contract) whenever a
+  disagreement blocks the run, so `resolve_from_raw_ocr()` can act on it
+  later without repeating the expensive part.
+
+- **`run_scenario_matrix.py`** -- built on top of `run_checkpoint1.py` and
+  `fork_case.py`. Runs real OCR exactly once; if a real disagreement comes
+  back, forks the blocked case three ways (`reading_a` / `reading_b` /
+  left unresolved) and reports each branch's outcome. Deliberately scoped
+  to this one gate, not literal all-combinations -- see the module
+  docstring for why: this is the one decision point whose outcome depends
+  on real, non-deterministic LLM output and is genuinely expensive to
+  re-derive per branch. Every other gate (D2 approve/reject, P6
+  resolved/false_positive, P4's three-way schema-failure handling) is
+  structural DAO logic already covered exhaustively and cheaply by
+  `tests/test_dao_*.py` -- forking real cases to re-prove that would just
+  be a slower, costlier way to reach the same conclusion. Each forked
+  branch's resolution note is explicitly marked as an automated scenario
+  probe, not a genuine verified resolution (distinct from the real I67/
+  I67.8 resolution in item 11's run) -- so nobody mistakes a scenario fork
+  for a trustworthy case later.
+
+16 new tests (138 total), all claude subprocess calls mocked -- no real
+LLM cost in the test suite itself.
+
+**Run for real, RESOLVED 2026-07-13.** Forked `CASE_012` (with `--include-raw`)
+into `CASE_013` and ran `run_scenario_matrix.py` against it for real, twice.
+Confirmed real, non-deterministic OCR variance between the two runs (first
+run: pages 1/3/4 disagreed; second run, same document: only page 4
+disagreed) -- genuine evidence this isn't a scripted/fixed test fixture.
+
+**First real run found a genuine bug, not a mocking gap:** the `unresolved`
+scenario's fork showed `document_manifest.json` with `ocr_status:
+completed, stages: ['passed']` -- stale values inherited from `CASE_012`'s
+earlier successful run. `run_checkpoint1()`'s blocked-disagreement path
+wrote `ocr_result_{doc_id}.json` correctly but never touched
+`document_manifest.json` or `_run_state.json` at all -- if a case
+previously had `completed`/`passed` values (exactly this fork scenario,
+but *not* fork-specific: the same staleness would hit any genuine
+production re-run that newly fails after a prior success), those stale
+values just sat there, directly contradicting the fresh `ocr_result.json`.
+Fixed: `_reset_manifest_for_blocked_ocr()` now resets every field
+checkpoint 1 owns (`ocr_status: failed`, `redacted_text_path`/
+`document_type`/`classification_confidence`/etc. all nulled -- nothing
+downstream should trust stale values after a fresh extraction failure) and
+`_update_run_state(..., "failed", ...)` marks the run-state stage
+correctly, both on the blocked path. 1 new regression test seeds exactly
+this stale-prior-success scenario and confirms the reset (139 tests
+total); a second real run against the same document then re-confirmed the
+fix works on genuine non-deterministic data, not just the mocked test:
+`CASE_019`'s (unresolved) manifest correctly showed
+`ocr_status: failed, cross_validation_status: disagreed_pending_review,
+redacted_text_path: null, document_type: null`.
+
+Also confirmed for real: `reading_a`/`reading_b` forks (`CASE_017`/
+`CASE_018`) produced genuinely different page 4 text (real branch
+divergence, not a no-op), both `passed` with real classification
+(`document_type: insurer_response`), and all 21 real schema-validatable
+files across the three forks passed (`_fork_record.json` correctly `SKIP`s
+-- it was never meant to be a schema-validated contract).

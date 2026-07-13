@@ -1,0 +1,24 @@
+{
+  "case_id": "CASE_019",
+  "created_at": "2026-07-13T10:35:23.342048+09:00",
+  "updated_at": "2026-07-13T10:35:23.342066+09:00",
+  "documents": [
+    {
+      "document_id": "DOC_001",
+      "file_name": "DOC_001.pdf",
+      "file_path": "data/raw/CASE_012/DOC_001.pdf",
+      "file_format": "pdf",
+      "file_size_bytes": 296532,
+      "pre_flagged_type": null,
+      "pages": 4,
+      "ocr_status": "failed",
+      "ocr_text_path": null,
+      "ocr_quality": null,
+      "uncertain_region_count": null,
+      "cross_validation_status": "disagreed_pending_review",
+      "redacted_text_path": null,
+      "document_type": null,
+      "classification_confidence": null
+    }
+  ]
+}

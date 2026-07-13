@@ -71,3 +71,18 @@ def test_conflict_sources_never_discarded_on_resolution(isolated_dao, make_args,
 
     ledger = dao.load_conflict_ledger("CASE_009")
     assert len(ledger["conflicts"][0]["sources"]) == 2
+
+
+def test_schema_invalid_sources_rejected_and_not_written(isolated_dao, make_args, tmp_path):
+    """Regression: cmd_add_conflict_entry used to write whatever it built
+    with zero schema enforcement (found via a real fork_case.py smoke
+    test). A malformed source (missing required 'quote') must block the
+    write -- conflict_ledger.schema.json requires quote on every source."""
+    bad_sources = [{"document_id": "DOC_001", "value": "a"}, {"document_id": "DOC_002", "value": "b", "quote": "q2"}]
+    args = make_args(stage="claim-analysis", topic="t", sources_file=_sources_file(tmp_path, bad_sources))
+
+    rc = dao.cmd_add_conflict_entry(args)
+
+    assert rc == 1
+    ledger = dao.load_conflict_ledger("CASE_009")
+    assert ledger["conflicts"] == [], "nothing should have been written"

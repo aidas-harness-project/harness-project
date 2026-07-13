@@ -43,11 +43,21 @@ def schema_name_for(json_path: Path) -> str | None:
     silently SKIP every one of them instead of validating. write-contract
     itself isn't affected (it takes --schema-name explicitly), but the
     standalone CLI tool's auto-derivation needs this too.
+
+    Leading-underscore stripping is for the shared-state files
+    (_source_ledger.json, _run_state.json, _conflict_ledger.json) -- their
+    on-disk names carry a leading underscore (the project's convention for
+    "internal/shared state, not a component's own output") but their
+    schema files don't (source_ledger.schema.json, not
+    _source_ledger.schema.json). Without this, all three always returned
+    None -- found by actually running validate_output.py against a real
+    forked case's ledger and getting SKIP instead of PASS.
     """
     if json_path.name.endswith(".evidence.json"):
         candidate = "evidence_sidecar.schema.json"
         return candidate if (SCHEMA_DIR / candidate).exists() else None
     stem = json_path.stem
+    stem = stem.lstrip("_")
     stem = re.sub(r"_v\d+$", "", stem)
     stem = re.sub(r"_CASE_\d+$", "", stem)
     stem = re.sub(r"_DOC_\d+$", "", stem)

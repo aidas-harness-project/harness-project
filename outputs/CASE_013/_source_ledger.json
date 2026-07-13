@@ -1,0 +1,16 @@
+{
+  "case_id": "CASE_013",
+  "source_dir": "frontend/backend/_uploads/CASE_009",
+  "created_at": "2026-07-13T10:34:22.109397+09:00",
+  "updated_at": "2026-07-13T10:35:22.986286+09:00",
+  "files": [
+    {
+      "file_name": "보험사 면책 공문 - 고객정보 삭제.pdf",
+      "classification": "raw",
+      "review_status": "approved",
+      "reviewed_by": "Dev",
+      "reviewed_at": "2026-07-13T10:35:22.986266+09:00",
+      "rejection_reason": null
+    }
+  ]
+}

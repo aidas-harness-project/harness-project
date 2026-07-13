@@ -70,3 +70,18 @@ def test_failed_stage_does_not_count_as_passed(isolated_dao, make_args, run_id):
     assert state["stages"][0]["completed_at"] is not None
     passed = [s["stage_name"] for s in state["stages"] if s["status"] == "passed"]
     assert passed == []
+
+
+def test_schema_invalid_state_is_rejected_and_not_written(isolated_dao, run_id):
+    """Regression: _update_run_state used to build+save whatever it was
+    given with zero schema enforcement (found via a real fork_case.py
+    smoke test -- validate_output.py had been silently unable to check
+    _run_state.json at all due to a separate schema_name_for() bug).
+    Calling the module function directly bypasses cmd_update_run_state's
+    argparse choices= restriction, the way a bug in this file's own future
+    edits could."""
+    result = dao._update_run_state("CASE_009", run_id, "some-stage", "not_a_real_status", "tester")
+
+    assert result is None, "schema failure returns None, same sentinel as a lock failure"
+    state = dao.load_run_state("CASE_009")
+    assert state["stages"] == [], "nothing should have been written"
