@@ -1,28 +1,55 @@
-"""ocr_extract.py -- compare()'s verdict parsing and scratch_dir's
-placement/cleanup. Regression coverage for the two known-gaps.md item 3
-bugs: startswith("AGREE") false-failing sentence-form verdicts, and page
-images staging under system /tmp where the nested claude CLI can't read
-them.
+"""ocr_extract.py -- compare() verdict parsing, scratch_dir placement, and
+provider-agnostic P8 wiring.
 
-subprocess.run is mocked throughout -- these tests never shell out to a
-real `claude` binary.
+Provider calls are faked throughout -- these tests never shell out to a
+real `claude` binary and never call an external API.
 """
 import tempfile
-from unittest import mock
+from pathlib import Path
 
 import pytest
 
+import llm_providers
 import ocr_extract as oe
+from llm_providers import ProviderConfig, ProviderConfigError, ProviderResult
 
 
-def _mock_run(verdict_text):
-    def _run(cmd, **kw):
-        r = mock.Mock()
-        r.returncode = 0
-        r.stdout = verdict_text
-        r.stderr = ""
-        return r
-    return _run
+class FakeComparator:
+    provider_name = "fixture"
+    model_name = "fixture-comparator"
+
+    def __init__(self, verdict):
+        self.verdict = verdict
+        self.prompts = []
+
+    def compare_text(self, prompt, prompt_version):
+        self.prompts.append((prompt, prompt_version))
+        return ProviderResult(self.provider_name, self.model_name, prompt_version, self.verdict)
+
+
+class FakeReader:
+    def __init__(self, provider_name, model_name, readings):
+        self.provider_name = provider_name
+        self.model_name = model_name
+        self.readings = list(readings)
+        self.calls = []
+
+    def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str):
+        self.calls.append((image_path, prompt, prompt_version))
+        return ProviderResult(self.provider_name, self.model_name, prompt_version, self.readings.pop(0))
+
+
+def test_transcribe_once_returns_text_and_provider_metadata(tmp_path):
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"fake image")
+    reader = FakeReader("openai-api", "test-model", ["page text"])
+
+    result = oe.transcribe_once(image_path, reader)
+
+    assert result["text"] == "page text"
+    assert result["metadata"]["provider_name"] == "openai-api"
+    assert result["metadata"]["model_name"] == "test-model"
+    assert result["metadata"]["prompt_version"] == oe.OCR_PROMPT_VERSION
 
 
 @pytest.mark.parametrize("verdict,expected", [
@@ -32,34 +59,43 @@ def _mock_run(verdict_text):
     ("I have to say these transcriptions DISAGREE on the diagnosis code.", "disagreed"),
     ("completely garbled output with neither token", "disagreed"),
 ])
-def test_compare_word_boundary_parsing(monkeypatch, verdict, expected):
-    monkeypatch.setattr(oe.subprocess, "run", _mock_run(verdict))
-    result = oe.compare("text A", "text B")
+def test_compare_word_boundary_parsing(verdict, expected):
+    result = oe.compare("text A", "text B", FakeComparator(verdict))
+
     assert result["agreement"] == expected
 
 
-def test_compare_identical_texts_short_circuits_without_subprocess(monkeypatch):
-    def _fail_if_called(*a, **kw):
-        raise AssertionError("subprocess.run should not be called for identical texts")
-    monkeypatch.setattr(oe.subprocess, "run", _fail_if_called)
+def test_compare_identical_texts_still_runs_comparator_for_audit_metadata():
+    comparator = FakeComparator("AGREE: identical text")
 
-    result = oe.compare("same text", "same text")
+    result = oe.compare("same text", "same text", comparator)
+
     assert result["agreement"] == "agreed"
+    assert len(comparator.prompts) == 1
+    assert result["metadata"]["provider_name"] == "fixture"
 
 
-def test_compare_disagree_substring_inside_word_does_not_false_trigger(monkeypatch):
+def test_compare_disagree_substring_inside_word_does_not_false_trigger():
     """'DISAGREE' contains 'AGREE' as a substring but not on a word
     boundary -- must not be misread as an AGREE verdict."""
-    monkeypatch.setattr(oe.subprocess, "run", _mock_run("DISAGREE"))
-    result = oe.compare("a", "b")
+    result = oe.compare("a", "b", FakeComparator("DISAGREE"))
+
     assert result["agreement"] == "disagreed"
 
 
-def test_unparseable_verdict_records_the_raw_text_for_audit(monkeypatch):
-    monkeypatch.setattr(oe.subprocess, "run", _mock_run("???"))
-    result = oe.compare("a", "b")
+def test_unparseable_verdict_records_the_raw_text_for_audit():
+    result = oe.compare("a", "b", FakeComparator("???"))
+
     assert result["agreement"] == "disagreed"
     assert "???" in result["disagreement_details"][0]
+
+
+def test_compare_records_comparator_metadata():
+    result = oe.compare("a", "b", FakeComparator("AGREE: same"))
+
+    assert result["metadata"]["provider_name"] == "fixture"
+    assert result["metadata"]["model_name"] == "fixture-comparator"
+    assert result["metadata"]["prompt_version"] == oe.COMPARE_PROMPT_VERSION
 
 
 def test_scratch_dir_is_project_local_not_system_tmp():
@@ -100,3 +136,97 @@ def test_scratch_dir_distinct_per_process_id(monkeypatch):
     with oe.scratch_dir("CASE_009", "DOC_001") as d2:
         path2 = d2
     assert path1 != path2
+
+
+def test_build_ocr_providers_supports_same_openai_provider_twice(monkeypatch):
+    created = []
+
+    class BuiltProvider:
+        def __init__(self, config):
+            self.provider_name = config.provider_name
+            self.model_name = config.model_name or "fake-model"
+
+    def fake_build_provider(config, **kwargs):
+        created.append(config)
+        return BuiltProvider(config)
+
+    monkeypatch.setattr(oe, "build_provider", fake_build_provider)
+
+    providers = oe.build_ocr_providers(
+        reader_a_name="openai-api",
+        reader_b_name="openai-api",
+        comparator_name="openai-api",
+        env={"OPENAI_API_KEY": "secret"},
+    )
+
+    assert [c.provider_name for c in created] == ["openai-api", "openai-api", "openai-api"]
+    assert providers["reader_a"] is not providers["reader_b"]
+    assert providers["reader_a"].provider_name == "openai-api"
+    assert providers["reader_b"].provider_name == "openai-api"
+
+
+def test_build_ocr_providers_missing_openai_credentials_fail_clearly():
+    with pytest.raises(ProviderConfigError) as excinfo:
+        oe.build_ocr_providers(
+            reader_a_name="openai-api",
+            reader_b_name="openai-api",
+            comparator_name="openai-api",
+            env={},
+        )
+
+    assert "openai-api" in str(excinfo.value)
+    assert "OPENAI_API_KEY" in str(excinfo.value)
+
+
+def test_run_ocr_with_api_style_providers_does_not_require_claude_cli(monkeypatch, tmp_path):
+    def fail_if_claude_cli_called(*args, **kwargs):
+        raise AssertionError("claude CLI must not be used when providers are supplied")
+
+    monkeypatch.setattr(llm_providers.subprocess, "run", fail_if_claude_cli_called)
+
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"fake image")
+    reader_a = FakeReader("openai-api", "same-model", ["reader A text"])
+    reader_b = FakeReader("openai-api", "same-model", ["reader B text"])
+    comparator = FakeComparator("AGREE: same material facts")
+
+    result = oe.run_ocr("CASE_009", "DOC_001", image_path, reader_a=reader_a, reader_b=reader_b, comparator=comparator)
+
+    assert len(reader_a.calls) == 1
+    assert len(reader_b.calls) == 1
+    assert result["providers"]["reader_a"] == {"provider_name": "openai-api", "model_name": "same-model"}
+    assert result["providers"]["reader_b"] == {"provider_name": "openai-api", "model_name": "same-model"}
+    assert result["pages"][0]["agreement"] == "agreed"
+    assert result["pages"][0]["reading_a"] == "reader A text"
+    assert result["pages"][0]["reading_b"] == "reader B text"
+    assert result["pages"][0]["provider_metadata"]["reader_a"]["provider_name"] == "openai-api"
+
+
+def test_build_ocr_providers_env_defaults_reader_b_and_comparator_to_reader_a(monkeypatch):
+    created: list[ProviderConfig] = []
+
+    def fake_build_provider(config, **kwargs):
+        created.append(config)
+        return FakeReader(config.provider_name, config.model_name or "model", ["x"])
+
+    monkeypatch.setattr(oe, "build_provider", fake_build_provider)
+
+    oe.build_ocr_providers(env={"HARNESS_OCR_READER_A_PROVIDER": "fixture", "HARNESS_OCR_READER_A_MODEL": "fixture-v1"})
+
+    assert [c.provider_name for c in created] == ["fixture", "fixture", "fixture"]
+    assert [c.model_name for c in created] == ["fixture-v1", "fixture-v1", "fixture-v1"]
+
+
+def test_build_ocr_providers_can_fall_back_to_common_llm_environment(monkeypatch):
+    created: list[ProviderConfig] = []
+
+    def fake_build_provider(config, **kwargs):
+        created.append(config)
+        return FakeReader(config.provider_name, config.model_name or "model", ["x"])
+
+    monkeypatch.setattr(oe, "build_provider", fake_build_provider)
+
+    oe.build_ocr_providers(env={"HARNESS_LLM_PROVIDER": "fixture", "HARNESS_LLM_MODEL": "common-model"})
+
+    assert [c.provider_name for c in created] == ["fixture", "fixture", "fixture"]
+    assert [c.model_name for c in created] == ["common-model", "common-model", "common-model"]

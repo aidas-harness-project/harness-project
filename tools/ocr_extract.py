@@ -1,26 +1,18 @@
-"""Per-page text extraction with P8 dual-path cross-validation, using the
-Claude CLI as the reading engine on both paths (per-project direction --
-no dedicated OCR engine exists yet).
+"""Per-page text extraction with P8 dual-path cross-validation.
 
 Splits the source document into per-page images (pymupdf), then for each
-page runs two independent `claude -p` transcriptions -- fresh subprocess,
-no shared context between them -- and asks a third, cheap text-only call
-to judge whether they materially agree (same names/dates/numbers/
+page runs two independent transcriptions and asks a third, cheap text-only
+call to judge whether they materially agree (same names/dates/numbers/
 diagnoses), not verbatim match. That third call also flags any one-sided
 extraneous content (a fabricated appendix, meta-commentary, anything one
-reading has that the other lacks entirely) as a disagreement even when
-the core facts otherwise match -- known-gaps.md item 11: a real
-hallucinated appendix on an otherwise-agreeing page slipped through
-before this was added, since the original prompt only checked for
-conflicting facts.
+reading has that the other lacks entirely) as a disagreement even when the
+core facts otherwise match.
 
-Known limitation (see open-decisions.md #3, now also #4): both reading
-paths are the same underlying model. Two isolated invocations do reduce
-transient/one-off misreads, but they don't reduce SYSTEMATIC blind spots
-the way a genuinely different technology (a real OCR engine) would --
-this is a "for now" stand-in, not a full solution to P8's intent. Flag
-this in ocr_result.json's ocr_engine/vision_model_name fields honestly
-rather than implying a real second engine exists.
+The reader/comparator backends are provider-configurable. The default
+remains claude-cli for backward compatibility, but Codex-compatible runs
+can select openai-api for reader_a, reader_b, and comparator. Using the
+same provider twice is still two isolated calls; it is not a true
+independent-engine cross-check, which is deferred to a later issue.
 
 This tool does not write any contract file itself -- it prints page-level
 results as JSON. document-pipeline reads that JSON, writes each page's
@@ -28,11 +20,12 @@ text via `dao.py write-page-text`, and assembles/writes ocr_result.json
 via `dao.py write-contract` itself, same as any other DAO write.
 
 Page images are staged under a project-local `_ocr_scratch/` (gitignored,
-cleaned up on exit), not system /tmp -- the nested `claude` reads used for
-transcription can only see files inside the project dir.
+cleaned up on exit), not system /tmp.
 
 Usage:
     python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf
+    python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf \
+        --reader-a openai-api --reader-b openai-api --comparator openai-api
 """
 import argparse
 import contextlib
@@ -40,14 +33,24 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+from llm_providers import (
+    DEFAULT_PROVIDER,
+    ProviderConfig,
+    ProviderConfigError,
+    ProviderExecutionError,
+    SUPPORTED_PROVIDERS,
+    build_provider,
+)
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRATCH_ROOT = ROOT / "_ocr_scratch"
+OCR_PROMPT_VERSION = "ocr_extraction_v0.1"
+COMPARE_PROMPT_VERSION = "ocr_compare_v0.1"
 
 TRANSCRIBE_PROMPT = (
     "Transcribe every piece of text visible in this page/image exactly as written, "
@@ -70,31 +73,24 @@ COMPARE_PROMPT_TEMPLATE = (
     "--- Transcription A ---\n{a}\n\n--- Transcription B ---\n{b}"
 )
 
-
-def transcribe_once(image_path: Path) -> str:
-    # cwd=ROOT: the nested claude CLI's --allowedTools Read is scoped to its
-    # project dir, so image_path (under SCRATCH_ROOT, inside ROOT) must be
-    # reachable from there -- a path under system /tmp would not be.
-    result = subprocess.run(
-        ["claude", "-p", f"{TRANSCRIBE_PROMPT}\n\nImage: {image_path}", "--allowedTools", "Read"],
-        capture_output=True, text=True, timeout=180, cwd=str(ROOT),
-    )
-    if result.returncode != 0:
-        sys.exit(f"error: claude transcription failed for {image_path}: {result.stderr.strip()}")
-    return result.stdout.strip()
-
-
 DISAGREE_RE = re.compile(r"\bDISAGREE\b")
 AGREE_RE = re.compile(r"\bAGREE\b")
 
 
-def compare(text_a: str, text_b: str) -> dict:
-    if text_a.strip() == text_b.strip():
-        return {"agreement": "agreed", "disagreement_details": []}
+def transcribe_once(image_path: Path, provider=None) -> dict:
+    selected_provider = provider or build_provider(root=ROOT)
+    result = selected_provider.transcribe_image(image_path, TRANSCRIBE_PROMPT, OCR_PROMPT_VERSION)
+    return {"text": result.text, "metadata": result.metadata()}
+
+
+def compare(text_a: str, text_b: str, comparator=None) -> dict:
     prompt = COMPARE_PROMPT_TEMPLATE.format(a=text_a, b=text_b)
-    result = subprocess.run(["claude", "-p", prompt], capture_output=True, text=True, timeout=60, cwd=str(ROOT))
-    verdict = result.stdout.strip()
+    selected_comparator = comparator or build_provider(root=ROOT)
+    provider_result = selected_comparator.compare_text(prompt, COMPARE_PROMPT_VERSION)
+    verdict = provider_result.text.strip()
+    metadata = provider_result.metadata()
     verdict_upper = verdict.upper()
+
     # Word-boundary search, not startswith -- the model doesn't always lead
     # with the bare token despite the prompt asking for exactly that (e.g. a
     # full sentence like "The two transcriptions AGREE on..."). Check
@@ -102,24 +98,25 @@ def compare(text_a: str, text_b: str) -> dict:
     # for correctness since "AGREE" as a substring of "DISAGREE" doesn't sit
     # on a word boundary and won't match AGREE_RE.
     if DISAGREE_RE.search(verdict_upper):
-        return {"agreement": "disagreed", "disagreement_details": [verdict]}
+        return {"agreement": "disagreed", "disagreement_details": [verdict], "metadata": metadata}
     if AGREE_RE.search(verdict_upper):
-        return {"agreement": "agreed", "disagreement_details": []}
+        return {"agreement": "agreed", "disagreement_details": [], "metadata": metadata}
+
     # Neither token found -- the model didn't follow the expected format.
     # Fail safe as disagreed (P8: no tolerance, never silently assume
     # agreement) rather than crashing the whole multi-page run.
     return {
         "agreement": "disagreed",
         "disagreement_details": [f"unparseable compare() verdict, treated as disagreement: {verdict!r}"],
+        "metadata": metadata,
     }
 
 
 @contextlib.contextmanager
 def scratch_dir(case_id: str, doc_id: str):
-    # Project-local, not system /tmp -- see transcribe_once's cwd note.
-    # Session-tagged (pid) instead of a bare case/doc directory so concurrent
-    # runs against the same document (e.g. a retry racing a stale process)
-    # can't collide on one path.
+    # Project-local, not system /tmp. Session-tagged (pid) instead of a bare
+    # case/doc directory so concurrent runs against the same document cannot
+    # collide on one path.
     d = SCRATCH_ROOT / f"{case_id}_{doc_id}_{os.getpid()}"
     d.mkdir(parents=True, exist_ok=True)
     try:
@@ -150,7 +147,48 @@ def split_to_page_images(doc_path: Path, out_dir: Path, max_pages: int | None = 
     return paths
 
 
-def run_ocr(case_id: str, doc_id: str, doc_path: Path, progress=None) -> dict:
+def build_ocr_providers(
+    *,
+    reader_a_name: str | None = None,
+    reader_b_name: str | None = None,
+    comparator_name: str | None = None,
+    reader_a_model: str | None = None,
+    reader_b_model: str | None = None,
+    comparator_model: str | None = None,
+    env=None,
+) -> dict:
+    source_env = env if env is not None else os.environ
+    default_provider = source_env.get("HARNESS_LLM_PROVIDER") or DEFAULT_PROVIDER
+    default_model = source_env.get("HARNESS_LLM_MODEL")
+
+    reader_a_provider = reader_a_name or source_env.get("HARNESS_OCR_READER_A_PROVIDER") or default_provider
+    reader_b_provider = reader_b_name or source_env.get("HARNESS_OCR_READER_B_PROVIDER") or reader_a_provider
+    comparator_provider = comparator_name or source_env.get("HARNESS_OCR_COMPARATOR_PROVIDER") or reader_a_provider
+
+    reader_a_model = reader_a_model or source_env.get("HARNESS_OCR_READER_A_MODEL") or default_model
+    reader_b_model = reader_b_model or source_env.get("HARNESS_OCR_READER_B_MODEL") or reader_a_model
+    comparator_model = comparator_model or source_env.get("HARNESS_OCR_COMPARATOR_MODEL") or reader_a_model
+
+    return {
+        "reader_a": build_provider(ProviderConfig(reader_a_provider, reader_a_model), env=source_env, root=ROOT),
+        "reader_b": build_provider(ProviderConfig(reader_b_provider, reader_b_model), env=source_env, root=ROOT),
+        "comparator": build_provider(ProviderConfig(comparator_provider, comparator_model), env=source_env, root=ROOT),
+    }
+
+
+def _metadata_for(provider) -> dict:
+    return {"provider_name": provider.provider_name, "model_name": provider.model_name}
+
+
+def run_ocr(
+    case_id: str,
+    doc_id: str,
+    doc_path: Path,
+    progress=None,
+    reader_a=None,
+    reader_b=None,
+    comparator=None,
+) -> dict:
     """The actual dual-path OCR loop, extracted out of main() so callers
     (run_checkpoint1.py) can invoke it in-process instead of shelling out
     to this script as a subprocess. Pure extraction -- main() below calls
@@ -161,6 +199,12 @@ def run_ocr(case_id: str, doc_id: str, doc_path: Path, progress=None) -> dict:
     if not doc_path.exists():
         sys.exit(f"error: document not found -- {doc_path}")
 
+    if reader_a is None or reader_b is None or comparator is None:
+        providers = build_ocr_providers()
+        reader_a = reader_a or providers["reader_a"]
+        reader_b = reader_b or providers["reader_b"]
+        comparator = comparator or providers["comparator"]
+
     pages_out = []
     with scratch_dir(case_id, doc_id) as tmp_dir:
         if doc_path.suffix.lower() == ".pdf":
@@ -169,20 +213,33 @@ def run_ocr(case_id: str, doc_id: str, doc_path: Path, progress=None) -> dict:
             page_images = [doc_path]  # already a single image
 
         for i, img_path in enumerate(page_images, start=1):
-            reading_a = transcribe_once(img_path)
-            reading_b = transcribe_once(img_path)
-            result = compare(reading_a, reading_b)
+            reading_a = transcribe_once(img_path, reader_a)
+            reading_b = transcribe_once(img_path, reader_b)
+            result = compare(reading_a["text"], reading_b["text"], comparator)
             pages_out.append({
                 "page": i,
-                "reading_a": reading_a,
-                "reading_b": reading_b,
+                "reading_a": reading_a["text"],
+                "reading_b": reading_b["text"],
                 "agreement": result["agreement"],
                 "disagreement_details": result["disagreement_details"],
+                "provider_metadata": {
+                    "reader_a": reading_a["metadata"],
+                    "reader_b": reading_b["metadata"],
+                    "comparator": result["metadata"],
+                },
             })
             msg = f"page {i}/{len(page_images)}: {result['agreement']}"
             progress(msg) if progress else print(msg, file=sys.stderr)
 
-    return {"document_path": str(doc_path), "pages": pages_out}
+    return {
+        "document_path": str(doc_path),
+        "providers": {
+            "reader_a": _metadata_for(reader_a),
+            "reader_b": _metadata_for(reader_b),
+            "comparator": _metadata_for(comparator),
+        },
+        "pages": pages_out,
+    }
 
 
 def main():
@@ -190,9 +247,36 @@ def main():
     ap.add_argument("case_id")
     ap.add_argument("doc_id")
     ap.add_argument("doc_path")
+    ap.add_argument("--reader-a", choices=SUPPORTED_PROVIDERS, help="Provider for the first independent page read")
+    ap.add_argument("--reader-b", choices=SUPPORTED_PROVIDERS, help="Provider for the second independent page read")
+    ap.add_argument("--comparator", choices=SUPPORTED_PROVIDERS, help="Provider for comparing the two page reads")
+    ap.add_argument("--reader-a-model", help="Model name for --reader-a")
+    ap.add_argument("--reader-b-model", help="Model name for --reader-b")
+    ap.add_argument("--comparator-model", help="Model name for --comparator")
     args = ap.parse_args()
 
-    result = run_ocr(args.case_id, args.doc_id, Path(args.doc_path))
+    try:
+        providers = build_ocr_providers(
+            reader_a_name=args.reader_a,
+            reader_b_name=args.reader_b,
+            comparator_name=args.comparator,
+            reader_a_model=args.reader_a_model,
+            reader_b_model=args.reader_b_model,
+            comparator_model=args.comparator_model,
+        )
+        result = run_ocr(
+            args.case_id,
+            args.doc_id,
+            Path(args.doc_path),
+            reader_a=providers["reader_a"],
+            reader_b=providers["reader_b"],
+            comparator=providers["comparator"],
+        )
+    except ProviderConfigError as exc:
+        sys.exit(f"error: {exc}")
+    except ProviderExecutionError as exc:
+        sys.exit(f"error: {exc}")
+
     print(json.dumps(result, ensure_ascii=False))
     any_disagreement = any(p["agreement"] == "disagreed" for p in result["pages"])
     sys.exit(1 if any_disagreement else 0)
