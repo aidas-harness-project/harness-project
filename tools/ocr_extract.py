@@ -6,7 +6,13 @@ Splits the source document into per-page images (pymupdf), then for each
 page runs two independent `claude -p` transcriptions -- fresh subprocess,
 no shared context between them -- and asks a third, cheap text-only call
 to judge whether they materially agree (same names/dates/numbers/
-diagnoses), not verbatim match.
+diagnoses), not verbatim match. That third call also flags any one-sided
+extraneous content (a fabricated appendix, meta-commentary, anything one
+reading has that the other lacks entirely) as a disagreement even when
+the core facts otherwise match -- known-gaps.md item 11: a real
+hallucinated appendix on an otherwise-agreeing page slipped through
+before this was added, since the original prompt only checked for
+conflicting facts.
 
 Known limitation (see open-decisions.md #3, now also #4): both reading
 paths are the same underlying model. Two isolated invocations do reduce
@@ -52,8 +58,15 @@ TRANSCRIBE_PROMPT = (
 COMPARE_PROMPT_TEMPLATE = (
     "Two independent transcriptions of the same document page follow. Judge whether "
     "they materially agree -- same names, dates, numbers, diagnoses -- even if wording "
-    "or formatting differs. Verbatim match is not required. Reply with exactly one line: "
-    "AGREE or DISAGREE: <brief reason>.\n\n"
+    "or formatting differs. Verbatim match is not required.\n\n"
+    "Separately, also check: does EITHER transcription contain any content the other "
+    "one lacks entirely -- an extra paragraph, appended commentary, notes, a summary, "
+    "or anything resembling meta-commentary about the transcription task itself -- even "
+    "if that extra content doesn't conflict with any specific fact in the other reading? "
+    "One transcription containing text the source page doesn't actually have (hallucinated "
+    "content) is exactly the failure this check exists to catch. Treat any such one-sided "
+    "addition as a disagreement, not just conflicting facts.\n\n"
+    "Reply with exactly one line: AGREE or DISAGREE: <brief reason>.\n\n"
     "--- Transcription A ---\n{a}\n\n--- Transcription B ---\n{b}"
 )
 

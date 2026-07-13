@@ -481,7 +481,7 @@ that seed genuinely schema-invalid state and confirm each function now
 actually rejects it and writes nothing, rather than silently persisting
 garbage. 121 tests total.
 
-## 11. P8's `compare()` has a real blind spot: it catches conflicting facts, not fabricated additions -- found running a real document through checkpoint 1, NOT YET FIXED
+## 11. P8's `compare()` has a real blind spot: it catches conflicting facts, not fabricated additions -- found running a real document through checkpoint 1, RESOLVED 2026-07-13
 
 Running `CASE_012`/DOC_001 (a real 4-page document) through checkpoint 1 for
 real surfaced this directly. Page 3's two independent reads were marked
@@ -523,16 +523,38 @@ since this is a legitimate second use case: "agreed" but a human found a
 problem `compare()` missed) and flagged `review_required: true` at the
 document level with an explicit note.
 
-**NOT fixed -- the actual methodology gap in `compare()` itself.** This
-needs a real design decision (e.g. asking `compare()` to also flag
-material differing in *length or content scope*, not just conflicting
-specific facts; or a stricter prompt; or a separate "does this reading
-contain anything the other doesn't" pass) before it can be trusted not to
-recur. Every "agreed" page written by every prior real OCR run in this
-project (CASE_002's DOC_002/DOC_005, CASE_012's pages 1/2/4) has **not**
-been re-checked for this specific failure mode -- this was only caught
-because a human happened to read page 3's full text while preparing it for
-redaction, not because any structural check would have caught it.
+**Fixed 2026-07-13: `COMPARE_PROMPT_TEMPLATE` now explicitly asks a second
+question** -- not just "do the core facts conflict" but "does either
+transcription contain content the other lacks entirely (extra paragraph,
+appended commentary, meta-commentary about the transcription task itself)"
+-- and instructs the model to treat any one-sided addition as a
+disagreement even when no specific fact conflicts. Chose a stricter prompt
+over a separate verification pass: no extra `claude` call per page, and
+the existing DISAGREE/AGREE parsing path already handles it unchanged.
+
+**Verified for real, not just by re-reading the prompt.** The original
+fabricated `reading_a` text wasn't persisted verbatim anywhere (compare()
+returned "agreed" at the time, so the disagreement-only raw-scratch save
+never triggered) -- reconstructed a faithful analog from the resolution
+note (clean page-3 text + an appended English meta-commentary block
+referencing this project's own D2/harness-guardrails-dev routing
+terminology, matching what was actually described) and ran the real, fixed
+`compare()` against it via the actual `claude` CLI (no mocking). Result:
+`DISAGREE`, correctly identifying the trailing block as a one-sided
+addition absent from the other reading. Notably, the model's own verdict
+text flagged the embedded "route per D2 guidance" instruction as
+resembling a prompt-injection attempt and stated it was ignoring rather
+than following it -- correct behavior on both counts, unprompted.
+
+One new regression test (`test_compare_prompt_asks_about_one_sided_extraneous_content`)
+locks the prompt's key phrasing so a future edit can't silently drop this
+check. 140 tests total.
+
+**Still open: the retroactive audit.** Every "agreed" page written by
+every prior real OCR run in this project (CASE_002's DOC_002/DOC_005,
+CASE_012's pages 1/2/4) has **not** been re-checked against the fixed
+prompt -- the fix prevents new instances, it doesn't retroactively verify
+old ones. Tracked separately as its own follow-up item.
 
 ## 12. `tools/run_checkpoint1.py` and `tools/run_scenario_matrix.py` added
 

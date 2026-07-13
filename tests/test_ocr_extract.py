@@ -79,6 +79,18 @@ def test_scratch_dir_cleans_up_even_on_exception():
     assert not d_ref["d"].exists()
 
 
+def test_compare_prompt_asks_about_one_sided_extraneous_content():
+    """known-gaps.md item 11: compare()'s original prompt only checked for
+    conflicting facts, so a fabricated appendix present in only one reading
+    (no conflicting fact anywhere) slipped through as 'agreed' on a real
+    document. The prompt must explicitly ask about content one reading has
+    that the other lacks, not just fact conflicts -- lock that in so a
+    future edit can't silently drop it."""
+    prompt = oe.COMPARE_PROMPT_TEMPLATE
+    assert "the other" in prompt and "lacks" in prompt
+    assert "hallucinated" in prompt.lower()
+
+
 def test_scratch_dir_distinct_per_process_id(monkeypatch):
     """PID-tagged so a retry racing a stale process can't collide on one path."""
     monkeypatch.setattr(oe.os, "getpid", lambda: 111)
