@@ -16,11 +16,15 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `screening-report`, `draft-report`, `denial-validation` (rebuttal points) -- everything that produces a narrative document via `tools/document_assembly.py`.
 
-**Current:** the tool works generically -- it renders whatever sections it's given, in the order given, and auto-generates `[E#]` tags + the `.evidence.json` sidecar regardless of content.
+**Status: partially resolved (2026-07-13).** The structure itself is now defined -- `templates/draft-report.md`, `templates/screening-report.md`, `templates/rebuttal-points.md`, `templates/forbidden-expressions.md`, `templates/component-output.md`, adopted from `wiki/templates/` (which had extracted the real section structure from the 4 ground-truth reports back on 2026-07-08, but that never made it into this repo or into `pipeline.md`/these schemas until now). `templates/` is the go-forward authoritative copy; wiki's copy will be caught up separately and may drift.
 
-**Undecided:** the actual required sections/fields per `case_type`'s `template_id` for `screening_report.md`, `draft_report_v1.md`/`v2.md`, and `rebuttal_points.md`.
+**What's covered:** `template_id` values `배상책임_후유장해형` (변형 A, sections I~VII) and `진단수술비형` (변형 B, sections I~VI), both grounded in real ground-truth cases (CASE_003/004/005/006).
 
-**To resolve:** waiting on the user to provide the rules/structure for these target documents. Once provided, encode them as template definitions the document-assembly tool (or a wrapper around it) validates section presence/order against -- see `pipeline.md`'s note.
+**Still undecided:**
+- `실손형`/`기타형` `template_id`s have no ground-truth basis yet -- no case in `data/ground_truth/` is that case type. `templates/draft-report.md` flags this as TODO; 변형 A is the interim fallback with a `warnings` entry from draft-report until real material arrives.
+- `tools/document_assembly.py` itself still renders whatever sections it's given, in order, with no validation against a `template_id`'s required section list. Encoding `templates/draft-report.md`'s structure into something the tool (or a wrapper) checks section presence/order against is still a follow-up -- not done as part of this pass, which only adopted the structure as reference documentation.
+
+**To resolve fully:** (a) obtain or construct ground-truth-backed structure for 실손형/기타형, (b) build the document-assembly enforcement wrapper described above.
 
 ## 3. Vision-model PII exposure in cross-validation
 

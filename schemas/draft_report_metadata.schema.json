@@ -11,7 +11,7 @@
         "version": { "enum": ["v1", "v2"] },
         "template_id": {
           "type": "string",
-          "description": "From case_type_result.json. Template rules pending, see open-decisions.md #2."
+          "description": "From case_type_result.json. Structure defined in templates/draft-report.md (배상책임_후유장해형 / 진단수술비형; 실손형/기타형 still TODO -- see open-decisions.md #2)."
         },
         "case_type": { "$ref": "case_type_result.schema.json#/$defs/case_type" },
         "section_count": { "type": "integer", "minimum": 1 },

@@ -28,7 +28,7 @@
         },
         "template_id": {
           "type": "string",
-          "description": "Report template identifier. Section/template rules are pending (see open-decisions.md #2) -- document-assembly does not yet enforce anything against this value, it is recorded for when that material arrives."
+          "description": "Report template identifier. One of 배상책임_후유장해형, 진단수술비형 (실손형/기타형 still TODO, no ground-truth basis yet) -- see templates/draft-report.md for the full section structure per template_id (see open-decisions.md #2 for status). document-assembly does not yet enforce section presence/order against this value -- that wrapper is still a follow-up."
         },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
         "evidence_references": {

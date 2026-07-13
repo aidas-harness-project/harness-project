@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "screening_report.schema.json",
   "title": "screening_report.json -- initial screening briefing v0.1",
-  "description": "Machine-readable screening report assembled from prior-stage outputs. Produced by screening-report; screening_report.md (the human-facing render) is generated from this JSON via the document-assembly tool. Section structure: template rules are pending (see pipeline.md's note) -- this schema's current sections are a placeholder shape carried over from the original design and may change once the real template arrives.",
+  "description": "Machine-readable screening report assembled from prior-stage outputs. Produced by screening-report; screening_report.md (the human-facing render) is generated from this JSON via the document-assembly tool. Section structure follows templates/screening-report.md's 7-section shape.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {

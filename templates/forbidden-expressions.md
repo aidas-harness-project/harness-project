@@ -1,0 +1,34 @@
+---
+type: Reference
+title: 금지 표현 가이드
+description: 손사서 초안에서 피해야 할 단정적 법률·의료 표현과 그 대체 표현.
+tags: [guideline, draft, review]
+timestamp: 2026-07-13T00:00:00+09:00
+adopted_from: wiki/templates/forbidden-expressions.md
+---
+
+> **provenance**: `wiki/templates/forbidden-expressions.md`에서 2026-07-13에
+> harness-project로 채택한 사본. 이 파일이 1차 소스 — [draft-report.md](draft-report.md)
+> 참고.
+
+[critic agent](../.claude/agents/critic.md)가 탐지 대상으로 삼는 위험 표현.
+과도한 법률 판단·의료 확정 표현은 실무·법적 리스크가 있어 완곡한
+검토 표현으로 대체한다.
+
+# 표현 대조표
+
+| 위험 표현 | 대체 표현 |
+| --- | --- |
+| "보험사는 반드시 지급해야 한다" | "지급 가능성을 검토할 여지가 있다" |
+| "의학적으로 명백하다" | "의무기록상 해당 가능성이 확인되며, 전문의 검수가 필요하다" |
+| "약관상 부당하다" | "해당 약관 적용의 적정성에 대한 검토가 필요하다" |
+| "승소 가능성이 높다" | "분쟁 대응 여지가 있다" |
+
+# 배경
+
+승률 예측·예상보험금 산정·장해율 자동 산정은 PoC 제외 범위인 것과 같은
+이유다: 법적·실무 리스크가 크고 전문가 판단 영역이기 때문이다.
+
+# Citations
+
+[1] [PoC 가이드](../POC%20guide.md)
