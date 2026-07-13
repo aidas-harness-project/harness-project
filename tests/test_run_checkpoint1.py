@@ -1,7 +1,7 @@
 """run_checkpoint1.py -- the checkpoint-1 automation wrapper (OCR + classify,
 stopping at a P8 disagreement; resolve_from_raw_ocr() continues past one
-once a human decides). All claude subprocess calls are mocked -- these
-tests never shell out to a real CLI.
+once a human decides). Provider calls are mocked -- these tests never shell
+out to a real CLI or call an external API.
 """
 import json
 
@@ -9,6 +9,7 @@ import pytest
 
 import dao
 import run_checkpoint1 as rc1
+from llm_providers import ProviderResult
 
 
 @pytest.fixture(autouse=True)
@@ -35,7 +36,7 @@ def _seed_manifest(tmp_path, case_id, doc_id):
 
 def _mock_ocr(monkeypatch, pages):
     """pages: list of (reading_a, reading_b, agreement) tuples."""
-    def fake_run_ocr(case_id, doc_id, pdf_path, progress=None):
+    def fake_run_ocr(case_id, doc_id, pdf_path, progress=None, **kwargs):
         return {"document_path": str(pdf_path), "pages": [
             {"page": i, "reading_a": a, "reading_b": b, "agreement": agree,
              "disagreement_details": [] if agree == "agreed" else ["DISAGREE: mock"]}
@@ -45,10 +46,23 @@ def _mock_ocr(monkeypatch, pages):
 
 
 def _mock_classify(monkeypatch, doc_type="insurer_response", label="보험사 회신"):
-    def fake_classify(text):
+    def fake_classify(text, classifier=None):
         return {"predicted_document_type": doc_type, "document_type_label": label,
                 "confidence": 0.9, "quote": text[:20]}
     monkeypatch.setattr(rc1, "classify_document", fake_classify)
+
+
+class FakeClassifier:
+    provider_name = "openai-api"
+    model_name = "gpt-test"
+
+    def __init__(self, response):
+        self.response = response
+        self.prompts = []
+
+    def classify_document(self, prompt, prompt_version):
+        self.prompts.append((prompt, prompt_version))
+        return ProviderResult(self.provider_name, self.model_name, prompt_version, self.response)
 
 
 def test_all_agreed_passes_through_to_classification(tmp_path, monkeypatch):
@@ -72,6 +86,94 @@ def test_all_agreed_passes_through_to_classification(tmp_path, monkeypatch):
     assert state["stages"][0]["status"] == "passed"
 
 
+def test_checkpoint1_provider_backed_classification_without_claude_cli(tmp_path, monkeypatch):
+    _seed_manifest(tmp_path, "CASE_009", "DOC_001")
+    _mock_ocr(monkeypatch, [("provider page text", "provider page text b", "agreed")])
+    classifier = FakeClassifier(
+        '{"predicted_document_type": "medical_record", "document_type_label": "의무기록", '
+        '"confidence": 0.88, "quote": "provider page text"}'
+    )
+
+    result = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001",
+        classifier=classifier,
+    )
+
+    assert result["status"] == "passed"
+    assert result["document_type"] == "medical_record"
+    assert classifier.prompts[0][1] == rc1.CLASSIFICATION_PROMPT_VERSION
+    classification = json.loads(
+        (tmp_path / "outputs" / "CASE_009" / "classification_result_DOC_001.json").read_text(encoding="utf-8")
+    )
+    assert classification["predicted_document_type"] == "medical_record"
+    assert classification["model_info"]["model_name"] == "openai-api:gpt-test"
+    assert classification["model_info"]["provider_name"] == "openai-api"
+
+
+def test_classifier_defaults_to_comparator_provider(tmp_path, monkeypatch):
+    _seed_manifest(tmp_path, "CASE_009", "DOC_001")
+    _mock_ocr(monkeypatch, [("page text", "page text b", "agreed")])
+    comparator_and_classifier = FakeClassifier(
+        '{"predicted_document_type": "receipt", "document_type_label": "영수증", '
+        '"confidence": 0.77, "quote": "page text"}'
+    )
+
+    result = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001",
+        comparator=comparator_and_classifier,
+    )
+
+    assert result["status"] == "passed"
+    assert result["document_type"] == "receipt"
+    assert len(comparator_and_classifier.prompts) == 1
+
+
+def test_classifier_model_override_builds_new_provider(monkeypatch):
+    comparator = FakeClassifier(
+        '{"predicted_document_type": "receipt", "document_type_label": "영수증", '
+        '"confidence": 0.77, "quote": "page text"}'
+    )
+    built = []
+
+    def fake_build_provider(config, **kwargs):
+        built.append(config)
+        return FakeClassifier("{}")
+
+    monkeypatch.setattr(rc1, "build_provider", fake_build_provider)
+
+    provider = rc1.build_classifier_provider(
+        comparator_provider=comparator,
+        env={"HARNESS_CLASSIFIER_MODEL": "classifier-only-model"},
+    )
+
+    assert provider is not comparator
+    assert built[0].provider_name == "openai-api"
+    assert built[0].model_name == "classifier-only-model"
+
+
+def test_explicit_classifier_provider_does_not_inherit_different_comparator_model(monkeypatch):
+    comparator = FakeClassifier(
+        '{"predicted_document_type": "receipt", "document_type_label": "영수증", '
+        '"confidence": 0.77, "quote": "page text"}'
+    )
+    built = []
+
+    def fake_build_provider(config, **kwargs):
+        built.append(config)
+        return FakeClassifier("{}")
+
+    monkeypatch.setattr(rc1, "build_provider", fake_build_provider)
+
+    rc1.build_classifier_provider(
+        classifier_provider_name="fixture",
+        comparator_provider=comparator,
+        env={},
+    )
+
+    assert built[0].provider_name == "fixture"
+    assert built[0].model_name is None
+
+
 def test_agreed_pages_written_to_processed_layer(tmp_path, monkeypatch):
     _seed_manifest(tmp_path, "CASE_009", "DOC_001")
     _mock_ocr(monkeypatch, [("real page text", "real page text b", "agreed")])
@@ -88,7 +190,7 @@ def test_disagreement_blocks_and_does_not_classify(tmp_path, monkeypatch):
     _mock_ocr(monkeypatch, [("page one A", "page one B", "agreed"),
                             ("page two A", "page two B", "disagreed")])
     classify_called = []
-    monkeypatch.setattr(rc1, "classify_document", lambda text: classify_called.append(text) or {})
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: classify_called.append(text) or {})
 
     result = rc1.run_checkpoint1("CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001")
 
@@ -120,7 +222,7 @@ def test_blocked_run_resets_manifest_instead_of_leaving_it_stale(tmp_path, monke
     dao._update_run_state("CASE_009", "RUN_OLD", "document_processing", "passed", "tester")
 
     _mock_ocr(monkeypatch, [("A", "B", "disagreed")])
-    monkeypatch.setattr(rc1, "classify_document", lambda text: {})
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
 
     rc1.run_checkpoint1("CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_002")
 
@@ -139,7 +241,7 @@ def test_disagreed_page_has_no_text_path_agreed_page_does(tmp_path, monkeypatch)
     _seed_manifest(tmp_path, "CASE_009", "DOC_001")
     _mock_ocr(monkeypatch, [("agreed text", "agreed text b", "agreed"),
                             ("A version", "B version", "disagreed")])
-    monkeypatch.setattr(rc1, "classify_document", lambda text: {})
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
 
     rc1.run_checkpoint1("CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001")
 
@@ -155,7 +257,7 @@ def test_raw_ocr_scratch_saved_when_blocked(tmp_path, monkeypatch):
     isn't retained in ocr_result.json itself (only reading_b is)."""
     _seed_manifest(tmp_path, "CASE_009", "DOC_001")
     _mock_ocr(monkeypatch, [("the real reading_a text", "a different reading_b text", "disagreed")])
-    monkeypatch.setattr(rc1, "classify_document", lambda text: {})
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
 
     result = rc1.run_checkpoint1("CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001")
 
@@ -169,7 +271,7 @@ def test_raw_ocr_scratch_saved_when_blocked(tmp_path, monkeypatch):
 def test_resolve_from_raw_ocr_completes_a_single_page_document(tmp_path, monkeypatch):
     _seed_manifest(tmp_path, "CASE_009", "DOC_001")
     _mock_ocr(monkeypatch, [("A reading", "B reading", "disagreed")])
-    monkeypatch.setattr(rc1, "classify_document", lambda text: {})
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
 
     blocked = rc1.run_checkpoint1("CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001")
     assert blocked["status"] == "blocked_disagreement"
@@ -195,7 +297,7 @@ def test_resolve_from_raw_ocr_completes_a_single_page_document(tmp_path, monkeyp
 def test_resolve_from_raw_ocr_partial_when_multiple_disagreements(tmp_path, monkeypatch):
     _seed_manifest(tmp_path, "CASE_009", "DOC_001")
     _mock_ocr(monkeypatch, [("p1 A", "p1 B", "disagreed"), ("p2 A", "p2 B", "disagreed")])
-    monkeypatch.setattr(rc1, "classify_document", lambda text: {})
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
 
     blocked = rc1.run_checkpoint1("CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001")
     ocr_data = json.loads((tmp_path / "_ocr_scratch" / "CASE_009_DOC_001_raw.json").read_text(encoding="utf-8"))
@@ -216,47 +318,29 @@ def test_resolve_from_raw_ocr_rejects_bad_chosen_reading(tmp_path, monkeypatch):
                                   resolved_by="Dev", note="n", held_by="tester", run_id="RUN_20260713_001")
 
 
-def test_classify_document_parses_real_shaped_response(monkeypatch):
-    from unittest import mock
+def test_classify_document_parses_provider_response():
+    classifier = FakeClassifier(
+        '{"predicted_document_type": "insurer_response", "document_type_label": "회신", '
+        '"confidence": 0.95, "quote": "sample"}'
+    )
 
-    def fake_run(cmd, **kw):
-        r = mock.Mock()
-        r.returncode = 0
-        r.stdout = '{"predicted_document_type": "insurer_response", "document_type_label": "회신", "confidence": 0.95, "quote": "sample"}'
-        r.stderr = ""
-        return r
-    monkeypatch.setattr(rc1.subprocess, "run", fake_run)
+    result = rc1.classify_document("some document text", classifier)
 
-    result = rc1.classify_document("some document text")
     assert result["predicted_document_type"] == "insurer_response"
     assert result["confidence"] == 0.95
+    assert result["_provider_metadata"]["provider_name"] == "openai-api"
+    assert classifier.prompts[0][1] == rc1.CLASSIFICATION_PROMPT_VERSION
 
 
-def test_classify_document_fails_loud_on_unparseable_response(monkeypatch):
-    from unittest import mock
-
-    def fake_run(cmd, **kw):
-        r = mock.Mock()
-        r.returncode = 0
-        r.stdout = "not json at all"
-        r.stderr = ""
-        return r
-    monkeypatch.setattr(rc1.subprocess, "run", fake_run)
+def test_classify_document_fails_loud_on_unparseable_response():
+    classifier = FakeClassifier("not json at all")
 
     with pytest.raises(SystemExit):
-        rc1.classify_document("some text")
+        rc1.classify_document("some text", classifier)
 
 
-def test_classify_document_rejects_unknown_document_type(monkeypatch):
-    from unittest import mock
-
-    def fake_run(cmd, **kw):
-        r = mock.Mock()
-        r.returncode = 0
-        r.stdout = '{"predicted_document_type": "not_a_real_type", "confidence": 0.9, "quote": "x"}'
-        r.stderr = ""
-        return r
-    monkeypatch.setattr(rc1.subprocess, "run", fake_run)
+def test_classify_document_rejects_unknown_document_type():
+    classifier = FakeClassifier('{"predicted_document_type": "not_a_real_type", "confidence": 0.9, "quote": "x"}')
 
     with pytest.raises(SystemExit):
-        rc1.classify_document("some text")
+        rc1.classify_document("some text", classifier)
