@@ -45,6 +45,16 @@ def test_build_provider_selects_claude_cli_by_default(tmp_path):
     assert provider.root == tmp_path
 
 
+def test_claude_cli_provider_can_read_command_from_environment(tmp_path):
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="claude-cli"),
+        env={"HARNESS_CLAUDE_COMMAND": "C:/tools/claude.exe"},
+        root=tmp_path,
+    )
+
+    assert provider.command == "C:/tools/claude.exe"
+
+
 @pytest.mark.parametrize(("provider_name", "key_name"), [
     ("anthropic-api", "ANTHROPIC_API_KEY"),
     ("openai-api", "OPENAI_API_KEY"),
@@ -142,6 +152,19 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
     assert captured["kwargs"]["timeout"] == 180
     assert result.text == "transcribed text"
     assert result.metadata()["provider_name"] == "claude-cli"
+
+
+def test_claude_cli_provider_reports_missing_command(monkeypatch, tmp_path):
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("missing")
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.ClaudeCliProvider(root=tmp_path, command="missing-claude")
+
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.compare_text("compare prompt", "ocr_compare_v0.1")
+
+    assert "claude-cli command not found: missing-claude" in str(excinfo.value)
 
 
 def test_openai_provider_posts_text_to_responses_api(monkeypatch):
