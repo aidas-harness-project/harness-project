@@ -67,10 +67,14 @@ placeholders inline wherever a citation belongs) to
 `[E#]` tags plus the `.evidence.json` sidecar in one pass -- see
 harness-guardrails P1.
 
-**Section/template rules are pending** -- the exact required sections per
-`case_type`'s `template_id` haven't been provided yet. The tool renders
-whatever sections it's given, in order; template enforcement is a
-follow-up once that material arrives.
+**Section/template rules are defined** for `배상책임_후유장해형`
+(변형 A, I~VII) and `진단수술비형` (변형 B, I~VI) -- see `templates/`
+(`draft-report.md`, `screening-report.md`, `rebuttal-points.md`,
+`forbidden-expressions.md`, `component-output.md`), adopted from the wiki
+2026-07-13. `실손형`/`기타형` still have no ground-truth basis (TODO in
+`templates/draft-report.md`). The tool itself still renders whatever
+sections it's given, in order -- section presence/order enforcement
+against `template_id` is a follow-up (see open-decisions.md #2).
 
 # Taxonomy
 
