@@ -44,6 +44,7 @@ return a summary dict rather than just printing, so a caller (e.g. a
 scenario/branch-testing script) can inspect the outcome programmatically.
 """
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -270,6 +271,71 @@ def _reset_manifest_for_blocked_ocr(case_id, doc_id, ocr_result, held_by, run_id
         sys.exit(f"error: {message}")
 
 
+@contextlib.contextmanager
+def _page_range_pdf(pdf_path: Path, case_id: str, doc_id: str, page_start: int | None, page_end: int | None):
+    """Yield either the original PDF path or a temporary PDF containing only
+    the requested 1-based inclusive page range. This supports legacy intake
+    manifests where one raw PDF was split into multiple logical DOC_XXX
+    entries by page count without mutating the immutable raw source."""
+    if page_start is None and page_end is None:
+        yield pdf_path
+        return
+    if page_start is None or page_end is None:
+        sys.exit("error: --page-start and --page-end must be provided together")
+    if page_start < 1 or page_end < page_start:
+        sys.exit(f"error: invalid page range {page_start}-{page_end}")
+    if pdf_path.suffix.lower() != ".pdf":
+        sys.exit("error: --page-start/--page-end can only be used with PDF input")
+
+    scratch_root = ROOT / "_ocr_scratch"
+    scratch_root.mkdir(exist_ok=True)
+    temp_path = scratch_root / f"{case_id}_{doc_id}_p{page_start:03d}-{page_end:03d}.pdf"
+    try:
+        import fitz
+    except ImportError:
+        fitz = None
+
+    if fitz is None:
+        _write_page_range_pdf_pypdf(pdf_path, temp_path, page_start, page_end)
+        try:
+            yield temp_path
+        finally:
+            temp_path.unlink(missing_ok=True)
+        return
+
+    src = fitz.open(pdf_path)
+    try:
+        if page_end > src.page_count:
+            sys.exit(f"error: page range {page_start}-{page_end} exceeds {pdf_path} ({src.page_count} pages)")
+        out = fitz.open()
+        try:
+            out.insert_pdf(src, from_page=page_start - 1, to_page=page_end - 1)
+            out.save(temp_path)
+        finally:
+            out.close()
+        yield temp_path
+    finally:
+        src.close()
+        temp_path.unlink(missing_ok=True)
+
+
+def _write_page_range_pdf_pypdf(pdf_path: Path, temp_path: Path, page_start: int, page_end: int) -> None:
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError:
+        sys.exit("error: pymupdf missing and pypdf not installed for --page-start/--page-end")
+
+    reader = PdfReader(str(pdf_path))
+    if page_end > len(reader.pages):
+        sys.exit(f"error: page range {page_start}-{page_end} exceeds {pdf_path} ({len(reader.pages)} pages)")
+
+    writer = PdfWriter()
+    for page_index in range(page_start - 1, page_end):
+        writer.add_page(reader.pages[page_index])
+    with temp_path.open("wb") as f:
+        writer.write(f)
+
+
 def run_checkpoint1(
     case_id: str,
     doc_id: str,
@@ -289,6 +355,8 @@ def run_checkpoint1(
     reader_b_model: str | None = None,
     comparator_model: str | None = None,
     classifier_model: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
 ) -> dict:
     pdf_path = Path(pdf_path)
     if reader_a is None or reader_b is None or comparator is None:
@@ -310,15 +378,16 @@ def run_checkpoint1(
             comparator_provider=comparator,
         )
 
-    ocr_data = run_ocr(
-        case_id,
-        doc_id,
-        pdf_path,
-        progress=progress,
-        reader_a=reader_a,
-        reader_b=reader_b,
-        comparator=comparator,
-    )
+    with _page_range_pdf(pdf_path, case_id, doc_id, page_start, page_end) as extraction_path:
+        ocr_data = run_ocr(
+            case_id,
+            doc_id,
+            extraction_path,
+            progress=progress,
+            reader_a=reader_a,
+            reader_b=reader_b,
+            comparator=comparator,
+        )
 
     for p in ocr_data["pages"]:
         if p["agreement"] == "agreed":
@@ -456,6 +525,8 @@ def main():
     ap.add_argument("--reader-b-model", help="Model name for --reader-b")
     ap.add_argument("--comparator-model", help="Model name for --comparator")
     ap.add_argument("--classifier-model", help="Model name for --classifier-provider")
+    ap.add_argument("--page-start", type=int, help="1-based first source PDF page for this logical document")
+    ap.add_argument("--page-end", type=int, help="1-based last source PDF page for this logical document")
     args = ap.parse_args()
 
     try:
@@ -473,6 +544,8 @@ def main():
             reader_b_model=args.reader_b_model,
             comparator_model=args.comparator_model,
             classifier_model=args.classifier_model,
+            page_start=args.page_start,
+            page_end=args.page_end,
         )
     except ProviderConfigError as exc:
         sys.exit(f"error: {exc}")
