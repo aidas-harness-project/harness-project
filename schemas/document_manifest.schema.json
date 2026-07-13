@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "document_manifest.schema.json",
-  "title": "document_manifest.json -- case document roster v0.2",
+  "title": "document_manifest.json -- case document roster v0.3",
   "description": "The list of every document in a case and its processing status. This is a shared state file updated by multiple stages in sequence, not a single component's output -- it does not use the common output envelope. Update discipline: each stage adds only its own owner fields and never modifies fields it doesn't own (owner is documented per field below). This discipline is enforced structurally by the DAO's write_contract lock (see harness-guardrails P5), not just by convention.",
   "type": "object",
   "properties": {
@@ -82,10 +82,10 @@
         },
         "cross_validation_status": {
           "anyOf": [
-            { "enum": ["agreed", "disagreed_pending_review", "not_run"] },
+            { "enum": ["agreed", "disagreed_pending_review", "disagreed_resolved", "not_run"] },
             { "type": "null" }
           ],
-          "description": "owner: document-pipeline (checkpoint 1). Result of P8's dual-path (OCR engine vs. blind vision-model read) cross-validation."
+          "description": "owner: document-pipeline (checkpoint 1). Result of P8's dual-path (OCR engine vs. blind vision-model read) cross-validation. Mirrors ocr_result_{document_id}.json's own cross_validation_status enum -- found out of sync for real when a real resolution's write was correctly rejected by schema validation (this file hadn't been updated when 'disagreed_resolved' was added there)."
         },
         "redacted_text_path": {
           "type": ["string", "null"],

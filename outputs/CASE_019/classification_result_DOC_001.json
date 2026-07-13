@@ -1,0 +1,37 @@
+{
+  "case_id": "CASE_019",
+  "run_id": "RUN_20260713_001",
+  "component": "document-pipeline",
+  "status": "success",
+  "created_at": "2026-07-13T10:47:00+09:00",
+  "model_info": {
+    "model_name": "claude-cli",
+    "prompt_version": "classification_v0.1"
+  },
+  "document_id": "DOC_001",
+  "predicted_document_type": "insurer_response",
+  "document_type_label": "보험사 면책 공문",
+  "confidence": 0.97,
+  "pre_flagged": false,
+  "candidate_types": [
+    {
+      "document_type": "insurer_response",
+      "confidence": 0.97
+    },
+    {
+      "document_type": "other",
+      "confidence": 0.02
+    }
+  ],
+  "evidence_references": [
+    {
+      "page": 1,
+      "quote": "보험금 청구에 대한 회신"
+    },
+    {
+      "page": 1,
+      "quote": "금번 청구하신 보험금은 부득이 보상하여 드리지 못함을 알려드리오니 혜량하여 주시기 바랍니다."
+    }
+  ],
+  "review_required": false
+}

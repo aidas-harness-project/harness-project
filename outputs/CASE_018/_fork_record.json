@@ -1,0 +1,12 @@
+{
+  "new_case_id": "CASE_013",
+  "forked_from": "CASE_012",
+  "forked_at_step": "current",
+  "forked_at": "2026-07-13T11:13:28.237414+09:00",
+  "label": "real scenario-matrix test run",
+  "included_raw": true,
+  "included_ground_truth": false,
+  "ledger_carried_forward": true,
+  "held_by": "claude-session",
+  "run_id": "RUN_20260713_005"
+}

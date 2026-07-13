@@ -68,3 +68,22 @@ def test_check_source_ledger_clear_passes_when_all_approved(isolated_dao, make_a
 
     rc = dao.cmd_check_source_ledger_clear(make_args())
     assert rc == 0
+
+
+def test_schema_invalid_ledger_is_rejected_and_not_written(isolated_dao, make_args):
+    """Regression: cmd_set_ledger_status used to write whatever it built
+    with zero schema enforcement (found via a real fork_case.py smoke
+    test). A pre-existing malformed entry (classification isn't
+    raw|ground_truth) must still block the write, even though the
+    approved/rejected status this call sets is itself always valid."""
+    dao.atomic_write_json(dao.source_ledger_path("CASE_009"), {
+        "case_id": "CASE_009", "source_dir": "x",
+        "files": [{"file_name": "a.pdf", "classification": "not_a_real_type", "review_status": "pending",
+                   "reviewed_by": None, "reviewed_at": None, "rejection_reason": None}],
+    })
+
+    rc = dao.cmd_set_ledger_status(make_args(file_name="a.pdf", status="approved", reviewer="human"))
+
+    assert rc == 1
+    ledger = dao.load_json(dao.source_ledger_path("CASE_009"))
+    assert ledger["files"][0]["review_status"] == "pending", "unchanged -- the invalid write never happened"

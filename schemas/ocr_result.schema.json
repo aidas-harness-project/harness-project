@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ocr_result.schema.json",
-  "title": "ocr_result_{document_id}.json -- OCR quality + cross-validation log, one file per document v0.3",
+  "title": "ocr_result_{document_id}.json -- OCR quality + cross-validation log, one file per document v0.6",
   "description": "Per-page text extraction results, uncertain regions, and the P8 dual-path cross-validation outcome for ONE document. Produced by document-pipeline's checkpoint 1 -- one file per document (ocr_result_{document_id}.json), since checkpoint 1 runs once per document and a single shared file across documents would get silently overwritten by each subsequent document's write (write-contract replaces the whole file; see known-gaps.md's audit of this exact failure mode). v0.2 nested everything under a documents: [] array to cover multiple documents in one file -- v0.3 flattens that away since each file now covers exactly one document; document_id is a top-level field here, matching the filename. Propagation rule: if a later stage's evidence_reference quote overlaps an uncertain_region, that field is routed review_required: true. Only a per-document summary (ocr_quality, uncertain_region_count, cross_validation_status) is copied into document_manifest.json.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
@@ -50,8 +50,8 @@
           "description": "Document-level quality summary, mirrored in document_manifest.json. Derivation (e.g. uncertain-region ratio, presence of failed pages) is an implementation detail but must stay consistent across runs; a majority of 'low' documents is a No-Go signal to check."
         },
         "cross_validation_status": {
-          "enum": ["agreed", "disagreed_pending_review", "not_run"],
-          "description": "Document-level rollup of the per-page cross_validation results below. 'disagreed_pending_review' on any page means the whole document is blocked from downstream use per harness-guardrails P8 until a human resolves it."
+          "enum": ["agreed", "disagreed_pending_review", "disagreed_resolved", "not_run"],
+          "description": "Document-level rollup of the per-page cross_validation results below. 'disagreed_pending_review' on any page means the whole document is blocked from downstream use per harness-guardrails P8 until a human resolves it. 'disagreed_resolved' is distinct from 'agreed' -- the two independent reads did NOT actually agree, a human resolved which reading was correct (see each resolved page's cross_validation.resolution) -- collapsing this into 'agreed' would misrepresent what P8 actually found. Found by actually resolving a real disagreement (CASE_012/DOC_001 page 4, I67 vs I67.8) -- there was no way to represent 'resolved' at all before this."
         },
         "review_required": { "type": "boolean" },
         "review_reason": { "type": "string" }
@@ -65,9 +65,9 @@
       "properties": {
         "page": { "type": "integer", "minimum": 1 },
         "text_path": {
-          "type": "string",
+          "type": ["string", "null"],
           "pattern": "^data/processed/",
-          "description": "Path to this page's extracted text. data/processed/CASE_XXX/DOC_XXX/page_NNN.md"
+          "description": "Path to this page's extracted text. data/processed/CASE_XXX/DOC_XXX/page_NNN.md -- null when cross_validation.agreement is 'disagreed': per P8, a disagreed page is never written (no tolerance threshold, no picking one reading over the other), so there is no text_path yet. Found by actually running a real document through checkpoint 1 -- a real 4-page document with 3 agreed + 1 disagreed page has no other way to represent the disagreed page's entry."
         },
         "mean_confidence": {
           "anyOf": [
@@ -112,12 +112,30 @@
           "description": "The vision model's independent transcription/content summary of this page, produced before it ever saw the OCR text."
         },
         "agreement": {
-          "enum": ["agreed", "disagreed"]
+          "enum": ["agreed", "disagreed"],
+          "description": "This is a historical record of what the automated dual-path check found -- never rewritten to 'agreed' after a human resolution. If a human later resolves a 'disagreed' page, that fact and outcome go in 'resolution' below, not by silently changing this field (same 'never delete conflicting data' discipline as the conflict ledger, P6)."
         },
         "disagreement_details": {
           "type": "array",
           "description": "Populated only when agreement is 'disagreed' -- what specifically differs between the two readings.",
           "items": { "type": "string" }
+        },
+        "resolution": {
+          "type": ["object", "null"],
+          "description": "The usual case: set when agreement is 'disagreed' and a human has since verified which reading was correct (P8: this page's document is blocked from downstream use until this happens). null/absent while still pending. Once set, this page's text_path is written using the chosen reading's content. Also legitimately used when agreement is 'agreed' but a human found a problem compare() missed -- e.g. one reading contained fabricated content the other didn't have, which compare() (checking only for conflicting core facts, not extraneous content) can pass as 'agreed' -- found for real running CASE_012/DOC_001 page 3. In that case chosen_reading/note explain what was actually wrong and why the other reading was used instead.",
+          "properties": {
+            "chosen_reading": {
+              "enum": ["reading_a", "reading_b"],
+              "description": "Which of the two original dual-path readings (from ocr_extract.py's reading_a/reading_b) was verified correct."
+            },
+            "resolved_by": { "type": "string" },
+            "resolved_at": { "type": "string", "format": "date-time" },
+            "note": {
+              "type": "string",
+              "description": "Why -- e.g. what was checked against the raw page image, or corroborating evidence from elsewhere in the case."
+            }
+          },
+          "required": ["chosen_reading", "resolved_by", "resolved_at", "note"]
         }
       },
       "required": ["vision_model_reading", "agreement"]
