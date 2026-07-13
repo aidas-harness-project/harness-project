@@ -247,20 +247,39 @@ concurrent unlocked calls could both read the same length and both mint
    function defaults) specifically so tests can monkeypatch them to near-zero
    instead of a test suite actually waiting 15 minutes to see a timeout.
 
-**Scope boundary, stated plainly (this does NOT fully close
-`document_manifest.json`'s original staleness risk):** the fix above
-guarantees freshness for the DAO's own atomic read-modify-write
-subcommands. `write-contract` -- the generic path `document_manifest.json`
-actually goes through -- still has its read happen *outside* the DAO, via a
-separate earlier `read-contract` call the calling agent makes before
-constructing what it hands to `write-contract`. Waiting for the lock before
-writing now prevents write/write corruption on that path, but it can't
-retroactively fix a read that already happened before the wait began. Fully
-closing that would need a dedicated atomic patch subcommand (e.g. "update
-this one document's fields in `document_manifest.json`"), which doesn't
-exist yet and wasn't built in this pass -- not a live bug today (one
-sequential `document-pipeline` writer per case), same as originally noted,
-but the residual gap is real and distinct from what got fixed here.
+**Residual gap -- RESOLVED 2026-07-13.** The fix above guaranteed freshness
+for the DAO's own atomic read-modify-write subcommands, but left
+`document_manifest.json` itself still going through `write-contract`'s
+generic path -- read *outside* the DAO via a separate earlier
+`read-contract` call, write only locked at the very end. Closed with a
+dedicated atomic subcommand: `dao.py patch-manifest-document CASE_ID
+DOC_ID --fields-file PATH --held-by NAME --run-id RUN_ID [--stage STAGE]`
+(and the underlying `patch_manifest_document()` function, callable
+in-process). It acquires the lock first, reads the manifest fresh under
+that lock, merges only the given fields into the named document's entry
+(leaving every other document and field untouched), validates the whole
+file, and writes -- closing the exact gap the module docstring flagged.
+
+`run_checkpoint1.py`'s two manifest-mutation sites (`_finish_checkpoint1`'s
+success path, `_reset_manifest_for_blocked_ocr`'s blocked path -- the same
+staleness bug fixed in item 12 lived in these exact two call sites)
+switched to it, replacing their local read-then-`_write_contract` pattern.
+`document-pipeline.md` updated to call `patch-manifest-document` for both
+checkpoint 1's and checkpoint 2's manifest updates instead of implying
+`read-contract`+`write-contract`; checkpoint 2's `redacted_text_path`
+update was never actually instructed before this pass either (a smaller,
+adjacent gap found while fixing this one) -- now is.
+
+8 new tests (`tests/test_dao_manifest_patch.py`, 148 total), including one
+that actually exercises the freshness guarantee: a background thread
+modifies a sibling field while the main call is blocked waiting on the
+lock, and the test confirms the eventual write preserves that concurrent
+change rather than clobbering it with data read before the wait began --
+the same shape of bug this item exists to prevent, reproduced and proven
+fixed, not just asserted. Verified against real repo data too: ran the
+new CLI subcommand for real (via subprocess) against a scratch copy of
+`CASE_020`'s actual `document_manifest.json`, confirming the argparse
+wiring works end-to-end, not just the function called directly in tests.
 
 Regression tests: `acquire_lock_blocking` waits-then-succeeds and
 waits-then-times-out, `add-conflict-entry`/`set-ledger-status` staying
