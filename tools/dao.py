@@ -18,13 +18,15 @@ not just the final write, so the read they act on is guaranteed fresh --
 nothing else can have modified the file since this call started waiting.
 
 Caveat: this guarantee is specific to those single-call read-modify-write
-subcommands. write-contract's data is assembled by the calling agent
-*before* the call (via a separate, unlocked read-contract earlier) -- the
-agent, not the DAO, is still responsible for re-reading fresh data right
-before building what it hands to write-contract. Waiting for the lock
-before writing prevents write/write corruption, not a stale read that
-already happened outside this call. See known-gaps.md's note on
-document_manifest.json for the concrete case this affects.
+subcommands, PLUS patch-manifest-document below (added specifically to
+extend it to document_manifest.json, the one file this bit the hardest --
+see known-gaps.md item 7). Every OTHER write-contract target still has its
+data assembled by the calling agent *before* the call (via a separate,
+unlocked read-contract earlier) -- the agent, not the DAO, is still
+responsible for re-reading fresh data right before building what it hands
+to write-contract for those files. Waiting for the lock before writing
+prevents write/write corruption, not a stale read that already happened
+outside this call.
 
 Likewise this tool does not implement P4's retry-once-then-halt loop --
 write-contract makes exactly one write+validate attempt and reports
@@ -37,6 +39,8 @@ Subcommands:
     read-contract CASE_ID FILENAME
     write-contract CASE_ID FILENAME --data-file PATH --schema-name NAME
         [--run-id RUN_ID] [--stage STAGE]
+    patch-manifest-document CASE_ID DOC_ID --fields-file PATH --held-by NAME --run-id RUN_ID
+        [--stage STAGE]
     write-page-text CASE_ID DOC_ID PAGE --text-file PATH --held-by NAME --run-id RUN_ID
     write-redacted-text CASE_ID DOC_ID --text-file PATH --held-by NAME --run-id RUN_ID
     write-text CASE_ID FILENAME --text-file PATH --held-by NAME --run-id RUN_ID
@@ -261,6 +265,57 @@ def cmd_write_contract(args):
         return 0
     finally:
         release_lock(target)
+
+
+def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_by: str, run_id: str,
+                             stage: str | None = None, purpose: str | None = None):
+    """Atomically read-modify-write a single document's fields in
+    document_manifest.json, under one lock hold -- closes the residual gap
+    write-contract leaves open for this file specifically (see the module
+    docstring's caveat and known-gaps.md item 7): a caller using
+    read-contract + write-contract reads BEFORE acquiring the lock, so a
+    concurrent write between that read and the later write-contract call
+    would be silently lost. Here the read happens after the lock is held,
+    so it's guaranteed fresh. Returns (ok: bool, message: str) so both the
+    CLI wrapper and in-process callers (run_checkpoint1.py) share one
+    implementation instead of duplicating the read+merge+validate+write
+    logic locally."""
+    target = case_dir(case_id) / "document_manifest.json"
+    existing_lock = acquire_lock_blocking(target, held_by, run_id, purpose or f"patch document_manifest.json ({document_id})")
+    if existing_lock is not None:
+        return False, (f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+                        f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+    try:
+        if not target.exists():
+            return False, f"FAIL: no document_manifest.json for {case_id}"
+        manifest = json.loads(target.read_text(encoding="utf-8"))
+        doc = next((d for d in manifest["documents"] if d["document_id"] == document_id), None)
+        if doc is None:
+            return False, f"FAIL: document_id {document_id} not found in document_manifest.json"
+        doc.update(fields)
+        manifest["updated_at"] = now_iso()
+        errors = _schema_check(manifest, "document_manifest.schema.json")
+        if errors:
+            return False, "FAIL: schema validation errors for " + str(target) + " -- not written:\n" + \
+                "\n".join(f"  - {e}" for e in errors)
+        atomic_write_json(target, manifest)
+        if stage:
+            state = _update_run_state(case_id, run_id, stage, "passed", held_by)
+            if state is None:
+                return True, f"PASS: patched {document_id} in {target}\n" \
+                    "WARNING: patch succeeded, but run-state could not be updated (lock contention) -- " \
+                    "run-state may now lag behind actual progress; retry the run-state update."
+        return True, f"PASS: patched {document_id} in {target}"
+    finally:
+        release_lock(target)
+
+
+def cmd_patch_manifest_document(args):
+    fields = json.loads(Path(args.fields_file).read_text(encoding="utf-8"))
+    ok, message = patch_manifest_document(args.case_id, args.doc_id, fields, args.held_by, args.run_id,
+                                           stage=args.stage, purpose=args.purpose)
+    print(message)
+    return 0 if ok else 1
 
 
 def cmd_check_lock(args):
@@ -752,6 +807,13 @@ def main():
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.add_argument("--purpose"); p.add_argument("--stage")
     p.set_defaults(fn=cmd_write_contract)
+
+    p = sub.add_parser("patch-manifest-document")
+    p.add_argument("case_id"); p.add_argument("doc_id")
+    p.add_argument("--fields-file", required=True, help="JSON object of field:value updates merged into this document's entry")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.add_argument("--purpose"); p.add_argument("--stage")
+    p.set_defaults(fn=cmd_patch_manifest_document)
 
     p = sub.add_parser("write-page-text")
     p.add_argument("case_id"); p.add_argument("doc_id"); p.add_argument("page", type=int)

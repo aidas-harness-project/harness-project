@@ -167,20 +167,23 @@ def _reset_manifest_for_blocked_ocr(case_id, doc_id, ocr_result, held_by, run_id
     leaving stale values from a possible prior successful run.
     redacted_text_path/document_type/classification_confidence are nulled
     too: even if they were real before, this run's extraction just failed,
-    so nothing downstream should trust them as current."""
-    manifest_path = case_dir(case_id) / "document_manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    doc = next(d for d in manifest["documents"] if d["document_id"] == doc_id)
-    doc["pages"] = len(ocr_result["pages"])
-    doc["ocr_status"] = "failed"
-    doc["ocr_text_path"] = None
-    doc["ocr_quality"] = None
-    doc["uncertain_region_count"] = None
-    doc["cross_validation_status"] = ocr_result["cross_validation_status"]
-    doc["redacted_text_path"] = None
-    doc["document_type"] = None
-    doc["classification_confidence"] = None
-    _write_contract(case_id, "document_manifest.json", manifest, "document_manifest.schema.json", held_by, run_id)
+    so nothing downstream should trust them as current. Goes through
+    dao.patch_manifest_document (read-modify-write under one lock hold),
+    not a local read-then-_write_contract -- see known-gaps.md item 7."""
+    fields = {
+        "pages": len(ocr_result["pages"]),
+        "ocr_status": "failed",
+        "ocr_text_path": None,
+        "ocr_quality": None,
+        "uncertain_region_count": None,
+        "cross_validation_status": ocr_result["cross_validation_status"],
+        "redacted_text_path": None,
+        "document_type": None,
+        "classification_confidence": None,
+    }
+    ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)
+    if not ok:
+        sys.exit(f"error: {message}")
 
 
 def run_checkpoint1(case_id: str, doc_id: str, pdf_path: str, held_by: str, run_id: str, progress=None) -> dict:
@@ -241,17 +244,18 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text):
     _write_contract(case_id, f"classification_result_{doc_id}.json", classification_result,
                      "classification_result.schema.json", held_by, run_id)
 
-    manifest_path = case_dir(case_id) / "document_manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    doc = next(d for d in manifest["documents"] if d["document_id"] == doc_id)
-    doc["pages"] = len(ocr_result["pages"])
-    doc["ocr_status"] = "completed"
-    doc["ocr_quality"] = ocr_result["ocr_quality"]
-    doc["uncertain_region_count"] = 0
-    doc["cross_validation_status"] = ocr_result["cross_validation_status"]
-    doc["document_type"] = classification["predicted_document_type"]
-    doc["classification_confidence"] = classification.get("confidence", 0.5)
-    _write_contract(case_id, "document_manifest.json", manifest, "document_manifest.schema.json", held_by, run_id)
+    fields = {
+        "pages": len(ocr_result["pages"]),
+        "ocr_status": "completed",
+        "ocr_quality": ocr_result["ocr_quality"],
+        "uncertain_region_count": 0,
+        "cross_validation_status": ocr_result["cross_validation_status"],
+        "document_type": classification["predicted_document_type"],
+        "classification_confidence": classification.get("confidence", 0.5),
+    }
+    ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)
+    if not ok:
+        sys.exit(f"error: {message}")
 
     _dao._update_run_state(case_id, run_id, "document_processing", "passed", held_by)
 
