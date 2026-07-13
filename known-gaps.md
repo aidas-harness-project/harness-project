@@ -48,7 +48,7 @@ schemas yet -- real-world shape mismatches (a field an agent naturally wants
 to produce that the schema doesn't have, or vice versa) will only surface on
 first use.
 
-## 2. Live D1 near-miss -- CASE_002 -- PARTIALLY RESOLVED 2026-07-13
+## 2. Live D1 near-miss -- CASE_002 -- RESOLVED 2026-07-13
 
 `data/processed/CASE_002/DOC_002/*.md` (19 pages) and
 `DOC_005/page_00{1,2,3}.md` were written before a document-pipeline subagent
@@ -78,23 +78,44 @@ consent.
 listing both under `rejected` -- the case is structurally blocked from
 proceeding until resolved further, which is D2 working as intended.
 
-**Still open, deliberately not acted on without a human call:**
-- **Processed pages** (`data/processed/CASE_002/DOC_002/*.md`) -- left
-  as-is on explicit instruction, not purged/quarantined.
-- **The raw files themselves** (`data/raw/CASE_002/DOC_002.pdf`,
-  `DOC_003.pdf`) -- untouched. What "resolved" means for a *rejected raw
-  classification* isn't fully defined by the current tooling: `classification`
-  in `_source_ledger.json` is `raw` | `ground_truth`, and rejecting a file
-  is meant to flag "the proposed classification is wrong" -- but
-  `dao.py set-ledger-status` has no path to actually change `classification`
-  from `raw` to `ground_truth` (only `review_status`). So there's currently
-  no tool-supported way to "correctly reclassify and re-approve" these
-  files even if that were the right call -- the only supported action was
-  reject. Whether the case should be re-run with these two files simply
-  excluded from raw input, or something else, is still an open call.
-- **Evaluation exclusion (D1)** -- not formally recorded anywhere yet (no
-  run currently being evaluated to exclude from); the blocked ledger state
-  itself is the practical safeguard for now.
+**Resolution, decided with the user 2026-07-13: re-run the case excluding
+the answer-key-class files entirely, rather than building reclassify
+tooling or leaving it blocked indefinitely.** Doing this surfaced a
+bigger finding than expected:
+
+- **2 more of CASE_002's files were also wrongly approved.** Re-intaking
+  the same source folder as a fresh case (`CASE_020`) to exclude the 2
+  already-rejected files ran the (now-existing) D2 content pre-check
+  against the *other* 2 insurer-specific files for the first time --
+  `DOC_001` (KB) and `DOC_004` (한화), both originally approved 2026-07-10
+  by `orchestrator-agent` on filename pattern alone, before the content
+  pre-check tool existed at all. Both flagged: same firm (바른결손해사정),
+  same adjuster (김태윤, BD00001058), same "완료된 손해사정서 제출" pattern,
+  stated payout figures (10,000,000원 / 20,000,000원 각각). **All 4 of
+  CASE_002's insurer-specific submission documents turned out to be the
+  same third-party adjuster's completed reports** -- only the 5th file
+  (보험사 면책 공문, an insurer denial notice) was ever genuinely raw claim
+  material.
+- **CASE_002's ledger corrected to match**, not just left stale: `DOC_001`
+  and `DOC_004` re-set to `rejected` via `dao.py set-ledger-status`, same
+  evidence-based-reason discipline as the original 2 rejections (reviewer
+  `Dev`). `check-source-ledger-clear CASE_002` now correctly shows all 4
+  insurer files rejected, case still structurally blocked -- CASE_002
+  itself is kept exactly as it was otherwise (not purged, not re-executed),
+  serving as the historical incident record per the original decision not
+  to touch it further.
+- **`CASE_020` created as the actual go-forward case**: fresh intake from
+  the same `source-cases/` folder via `intake_case.py --files "*면책 공문*"`,
+  so the ledger only ever contained the 1 clean file -- no rejections to
+  work around, no need for reclassify tooling. Content pre-check ran real
+  and came back clear. `--execute` completed:
+  `data/raw/CASE_020/DOC_001.pdf` is the case's only document. A very thin
+  case (1 document, a denial letter, no claim substance beyond it), but a
+  real, D1-clean one -- a legitimate downstream run would need to decide
+  whether that's enough to actually process, separate from this item.
+- **Evaluation exclusion (D1)** -- not formally recorded anywhere (no run
+  is currently being evaluated), moot for CASE_002 since it can no longer
+  proceed with meaningful content; the ledger block is the safeguard.
 - **Item (d), intake's content-blind classification -- RESOLVED 2026-07-13.**
   `tools/intake_case.py` now runs a content pre-check on every `raw`-proposed
   PDF before writing the ledger (`scan_for_answer_key_content` -- one vision
@@ -119,11 +140,13 @@ proceeding until resolved further, which is D2 working as intended.
   call. `harness-guardrails-dev` D2 updated to describe this, synced to
   Codex/generic copies.
 
-  **Would this have caught CASE_002?** DOC_002 and DOC_003 both had a
+  **Would this have caught CASE_002?** All 4 of CASE_002's rejected files
+  (not just DOC_002/DOC_003 -- DOC_001/DOC_004 too, confirmed above) had a
   giveaway title on page 1 (literally "보험금사정서") -- yes, a 5-page scan
-  would have caught both. A document that buries its conclusion beyond page
-  5 without an early giveaway would still slip through; this raises the bar,
-  it doesn't make the check exhaustive.
+  catches all four in practice, confirmed by actually running it against
+  DOC_001/DOC_004 for real rather than assumed. A document that buries its
+  conclusion beyond page 5 without an early giveaway would still slip
+  through; this raises the bar, it doesn't make the check exhaustive.
 
 ## 3. `tools/ocr_extract.py` -- two known bugs -- RESOLVED 2026-07-12
 
