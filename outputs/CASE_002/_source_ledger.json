@@ -1,0 +1,48 @@
+{
+  "case_id": "CASE_002",
+  "source_dir": "frontend/backend/_uploads/CASE_002",
+  "created_at": "2026-07-10T14:41:08.459597+09:00",
+  "updated_at": "2026-07-13T11:50:18.392593+09:00",
+  "files": [
+    {
+      "file_name": "뇌혈관질환진단비-KB손해보험-김태윤 - 고객정보 삭제.pdf",
+      "classification": "raw",
+      "review_status": "rejected",
+      "reviewed_by": "Dev",
+      "reviewed_at": "2026-07-13T11:50:18.302182+09:00",
+      "rejection_reason": "Correction 2026-07-13: this entry was approved 2026-07-10 by orchestrator-agent on filename pattern alone, before the D2 content pre-check tool existed. Re-running the (now-existing) content pre-check against this file for CASE_020's intake flagged it: title page reads 보험금사정서 (completed loss-adjustment report), firm 바른결손해사정, adjuster 김태윤 (BD00001058), page 4 states final 사정금액 = 10,000,000원 with adjuster stamp and an explicit payout-validity conclusion. Same answer-key-class pattern already confirmed for this case's 농협/삼성화재 files -- see known-gaps.md item 2."
+    },
+    {
+      "file_name": "뇌혈관질환진단비-농협손해보험-김태윤 - 고객정보 삭제.pdf",
+      "classification": "raw",
+      "review_status": "rejected",
+      "reviewed_by": "Dev",
+      "reviewed_at": "2026-07-13T06:25:34.849145+09:00",
+      "rejection_reason": "Confirmed via full-text read of processed OCR output: contains a completed loss-adjustment report by a licensed independent adjuster (바른결 손해사정, 김태윤, BD00001058), submitted to NH농협손해보험, stating a final payout determination of 20,000,000원 (page 9, 'V. 보험금 사정 / 3. 사정 결과 및 의견'). Answer-key-class material -- harness-guardrails-dev D1."
+    },
+    {
+      "file_name": "뇌혈관질환진단비-삼성화재-김태윤 - 고객정보 삭제.pdf",
+      "classification": "raw",
+      "review_status": "rejected",
+      "reviewed_by": "Dev",
+      "reviewed_at": "2026-07-13T06:25:34.939300+09:00",
+      "rejection_reason": "Confirmed via real dual-path OCR run on the raw document (tools/ocr_extract.py, 21 pages, page 4 agreed/trustworthy): contains a completed loss-adjustment report by the same firm (바른결 손해사정, 김태윤), submitted to 삼성화재, stating a final payout determination of 20,000,000원 (10,000,000 + 10,000,000, 'I. 사정 요약 / 3. 보험금사정 의견'). Same class of material as the 농협 document -- answer-key-class, D1."
+    },
+    {
+      "file_name": "뇌혈관질환진단비-한화손해보험-김태윤 - 고객정보 삭제.pdf",
+      "classification": "raw",
+      "review_status": "rejected",
+      "reviewed_by": "Dev",
+      "reviewed_at": "2026-07-13T11:50:18.392588+09:00",
+      "rejection_reason": "Correction 2026-07-13: this entry was approved 2026-07-10 by orchestrator-agent on filename pattern alone, before the D2 content pre-check tool existed. Re-running the (now-existing) content pre-check against this file for CASE_020's intake flagged it: title page reads 보험금사정서, submission cover letter to 한화손해보험 stating 손해사정을 완료, p3 states 사정금액 합계 20,000,000원 with named 책임사정사 김태윤 and stamp, p4 shows adjuster registration BD00001058호. Same answer-key-class pattern already confirmed for this case's 농협/삼성화재 files -- see known-gaps.md item 2."
+    },
+    {
+      "file_name": "보험사 면책 공문 - 고객정보 삭제.pdf",
+      "classification": "raw",
+      "review_status": "approved",
+      "reviewed_by": "orchestrator-agent",
+      "reviewed_at": "2026-07-10T14:41:57.180553+09:00",
+      "rejection_reason": null
+    }
+  ]
+}
