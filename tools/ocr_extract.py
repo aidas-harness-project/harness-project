@@ -33,6 +33,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -125,26 +126,82 @@ def scratch_dir(case_id: str, doc_id: str):
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _split_to_page_images_fitz(doc_path: Path, out_dir: Path, max_pages: int | None = None) -> list[Path]:
+    import fitz  # pymupdf
+
+    doc = fitz.open(doc_path)
+    try:
+        page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
+        paths = []
+        for i in range(page_count):
+            page = doc.load_page(i)
+            pix = page.get_pixmap(dpi=200)
+            out_path = out_dir / f"page_{i + 1:03d}.png"
+            pix.save(out_path)
+            paths.append(out_path)
+        return paths
+    finally:
+        doc.close()
+
+
+def _find_pdftoppm() -> str | None:
+    dependency_root = Path(sys.executable).resolve().parent.parent
+    candidates = [
+        dependency_root / "native" / "poppler" / "Library" / "bin" / "pdftoppm.exe",
+        dependency_root / "bin" / "pdftoppm.exe",
+        dependency_root / "bin" / "pdftoppm.cmd",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    for name in ("pdftoppm.exe", "pdftoppm", "pdftoppm.cmd"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _pdftoppm_page_number(path: Path) -> int:
+    match = re.search(r"-(\d+)\.png$", path.name)
+    return int(match.group(1)) if match else 0
+
+
+def _split_to_page_images_pdftoppm(doc_path: Path, out_dir: Path, max_pages: int | None = None) -> list[Path]:
+    command = _find_pdftoppm()
+    if command is None:
+        sys.exit("error: pymupdf missing and pdftoppm not found for PDF rendering")
+
+    prefix = out_dir / "page"
+    cmd = [command, "-png", "-r", "200"]
+    if max_pages is not None:
+        cmd.extend(["-f", "1", "-l", str(max_pages)])
+    cmd.extend([str(doc_path), str(prefix)])
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        sys.exit(f"error: pdftoppm failed while rendering {doc_path}: {result.stderr.strip()}")
+
+    generated = sorted(out_dir.glob("page-*.png"), key=_pdftoppm_page_number)
+    if not generated:
+        sys.exit(f"error: pdftoppm did not produce page images for {doc_path}")
+
+    paths = []
+    for i, generated_path in enumerate(generated, start=1):
+        out_path = out_dir / f"page_{i:03d}.png"
+        generated_path.replace(out_path)
+        paths.append(out_path)
+    return paths
+
+
 def split_to_page_images(doc_path: Path, out_dir: Path, max_pages: int | None = None) -> list[Path]:
     """max_pages caps how many pages get rendered (from the start) -- used by
     intake_case.py's content pre-check, which only needs the first few pages,
     not a full render. None (default) renders every page, unchanged from
     this function's original behavior."""
     try:
-        import fitz  # pymupdf
+        return _split_to_page_images_fitz(doc_path, out_dir, max_pages)
     except ImportError:
-        sys.exit("error: pymupdf required -- pip install pymupdf")
-    doc = fitz.open(doc_path)
-    page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
-    paths = []
-    for i in range(page_count):
-        page = doc.load_page(i)
-        pix = page.get_pixmap(dpi=200)
-        out_path = out_dir / f"page_{i + 1:03d}.png"
-        pix.save(out_path)
-        paths.append(out_path)
-    doc.close()
-    return paths
+        return _split_to_page_images_pdftoppm(doc_path, out_dir, max_pages)
 
 
 def build_ocr_providers(

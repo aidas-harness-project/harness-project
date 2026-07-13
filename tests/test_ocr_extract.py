@@ -6,6 +6,7 @@ real `claude` binary and never call an external API.
 """
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -136,6 +137,35 @@ def test_scratch_dir_distinct_per_process_id(monkeypatch):
     with oe.scratch_dir("CASE_009", "DOC_001") as d2:
         path2 = d2
     assert path1 != path2
+
+
+def test_split_to_page_images_falls_back_to_pdftoppm(monkeypatch, tmp_path):
+    def missing_fitz(*args, **kwargs):
+        raise ImportError("fitz missing")
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        Path(f"{cmd[-1]}-1.png").write_bytes(b"fake png")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(oe, "_split_to_page_images_fitz", missing_fitz)
+    monkeypatch.setattr(oe, "_find_pdftoppm", lambda: "pdftoppm")
+    monkeypatch.setattr(oe.subprocess, "run", fake_run)
+
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    out_dir = tmp_path / "pages"
+    out_dir.mkdir()
+
+    result = oe.split_to_page_images(pdf_path, out_dir, max_pages=1)
+
+    assert result == [out_dir / "page_001.png"]
+    assert result[0].exists()
+    assert captured["cmd"] == ["pdftoppm", "-png", "-r", "200", "-f", "1", "-l", "1", str(pdf_path), str(out_dir / "page")]
+    assert captured["kwargs"]["timeout"] == 120
 
 
 def test_build_ocr_providers_supports_same_openai_provider_twice(monkeypatch):

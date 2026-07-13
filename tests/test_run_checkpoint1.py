@@ -65,6 +65,34 @@ class FakeClassifier:
         return ProviderResult(self.provider_name, self.model_name, prompt_version, self.response)
 
 
+def test_page_range_pdf_falls_back_to_pypdf(tmp_path, monkeypatch):
+    pypdf = pytest.importorskip("pypdf")
+    import builtins
+
+    original_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "fitz":
+            raise ImportError("fitz missing")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    pdf_path = tmp_path / "source.pdf"
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.add_blank_page(width=72, height=72)
+    with pdf_path.open("wb") as f:
+        writer.write(f)
+
+    with rc1._page_range_pdf(pdf_path, "CASE_009", "DOC_001", 2, 2) as subset_path:
+        assert subset_path != pdf_path
+        assert subset_path.exists()
+        reader = pypdf.PdfReader(str(subset_path))
+        assert len(reader.pages) == 1
+
+    assert not subset_path.exists()
+
+
 def test_all_agreed_passes_through_to_classification(tmp_path, monkeypatch):
     _seed_manifest(tmp_path, "CASE_009", "DOC_001")
     _mock_ocr(monkeypatch, [("page one text", "page one text b", "agreed"),
