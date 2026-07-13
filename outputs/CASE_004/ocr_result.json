@@ -1,0 +1,714 @@
+{
+  "case_id": "CASE_004",
+  "run_id": "RUN_20260709_001",
+  "component": "OcrTextExtraction",
+  "status": "success",
+  "created_at": "2026-07-09T18:30:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8 (vision page transcription)",
+    "prompt_version": "document_pipeline_v0.1"
+  },
+  "confidence": 0.84,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "ocr_engine": "vision_llm_page_transcription (claude-opus, PyMuPDF zoom2.0 render)",
+  "uncertain_confidence_threshold": 0.75,
+  "evidence_references": [],
+  "warnings": [
+    "입력은 1개 대용량 PDF(64p, 원본 p014-077 구간)로 텍스트 레이어 없는 전면 스캔 이미지 → 전 페이지 비전 전사(ocr).",
+    "페이지 구간별 논리 문서 25개 식별. page_NNN 및 page 필드는 '문서 내 페이지'(1-base); 입력 PDF 물리 페이지 매핑은 01_document-pipeline_notes.md 참조.",
+    "자필 문서 3건 저품질(ocr_quality low): DOC_008(외래초진차트), DOC_009(PT경과), DOC_021(사고경위서) — uncertain_regions 표기, 추측 보완 안 함.",
+    "흉터 임상사진 DOC_020(4장)·DOC_022(1장)은 추출 텍스트 없음(mean_confidence null).",
+    "진료비 세부산정내역 DOC_013(9쪽, 90도 회전 표)은 총액·항목군만 정밀 전사, 수백 건 라인아이템은 요약(ocr_quality medium).",
+    "OCR 실패(ocr_status=failed) 문서 없음 — Go/No-Go OCR 품질 No-Go 신호 아님."
+  ],
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "medium",
+    "reason": "자필(DOC_008/009/021)·고밀도 회전 표(DOC_013)·마스킹 증권(DOC_024)에서 오독 가능 — 불확실 구간은 uncertain_regions로 표기하고 추측 보완하지 않음."
+  },
+  "prohibited_language_check": {
+    "passed": true,
+    "issues": []
+  },
+  "documents": [
+    {
+      "document_id": "DOC_001",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_001/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    },
+    {
+      "document_id": "DOC_002",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_002/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    },
+    {
+      "document_id": "DOC_003",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_003/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    },
+    {
+      "document_id": "DOC_004",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_004/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    },
+    {
+      "document_id": "DOC_005",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_005/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    },
+    {
+      "document_id": "DOC_006",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_006/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    },
+    {
+      "document_id": "DOC_007",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_007/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 2,
+          "text_path": "data/processed/CASE_004/DOC_007/page_002.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    },
+    {
+      "document_id": "DOC_008",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_008/page_001.md",
+          "uncertain_regions": [
+            {
+              "text_as_read": "Ankle Fx of Lt ankle [판독불가 수기]",
+              "confidence": 0.55,
+              "char_offset_start": 120,
+              "char_offset_end": 180,
+              "note": "자필 혼재 외래초진 차트"
+            }
+          ],
+          "mean_confidence": 0.55
+        }
+      ],
+      "document_mean_confidence": 0.55,
+      "ocr_quality": "low",
+      "review_required": true,
+      "review_reason": "자필·저품질 스캔 또는 마스킹 다수로 텍스트 신뢰도 낮음"
+    },
+    {
+      "document_id": "DOC_009",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_009/page_001.md",
+          "uncertain_regions": [
+            {
+              "text_as_read": "EMG : S/w Lt deep PN injury [불확실]",
+              "confidence": 0.4,
+              "char_offset_start": 90,
+              "char_offset_end": 140,
+              "note": "전면 자필 — 다수 구간 판독 불가"
+            }
+          ],
+          "mean_confidence": 0.55
+        }
+      ],
+      "document_mean_confidence": 0.55,
+      "ocr_quality": "low",
+      "review_required": true,
+      "review_reason": "자필·저품질 스캔 또는 마스킹 다수로 텍스트 신뢰도 낮음"
+    },
+    {
+      "document_id": "DOC_010",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_010/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 2,
+          "text_path": "data/processed/CASE_004/DOC_010/page_002.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 3,
+          "text_path": "data/processed/CASE_004/DOC_010/page_003.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 4,
+          "text_path": "data/processed/CASE_004/DOC_010/page_004.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 5,
+          "text_path": "data/processed/CASE_004/DOC_010/page_005.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 6,
+          "text_path": "data/processed/CASE_004/DOC_010/page_006.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 7,
+          "text_path": "data/processed/CASE_004/DOC_010/page_007.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 8,
+          "text_path": "data/processed/CASE_004/DOC_010/page_008.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 9,
+          "text_path": "data/processed/CASE_004/DOC_010/page_009.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 10,
+          "text_path": "data/processed/CASE_004/DOC_010/page_010.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 11,
+          "text_path": "data/processed/CASE_004/DOC_010/page_011.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 12,
+          "text_path": "data/processed/CASE_004/DOC_010/page_012.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    },
+    {
+      "document_id": "DOC_011",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_011/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 2,
+          "text_path": "data/processed/CASE_004/DOC_011/page_002.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 3,
+          "text_path": "data/processed/CASE_004/DOC_011/page_003.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 4,
+          "text_path": "data/processed/CASE_004/DOC_011/page_004.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 5,
+          "text_path": "data/processed/CASE_004/DOC_011/page_005.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 6,
+          "text_path": "data/processed/CASE_004/DOC_011/page_006.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    },
+    {
+      "document_id": "DOC_012",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_012/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    },
+    {
+      "document_id": "DOC_013",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_013/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 2,
+          "text_path": "data/processed/CASE_004/DOC_013/page_002.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 3,
+          "text_path": "data/processed/CASE_004/DOC_013/page_003.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 4,
+          "text_path": "data/processed/CASE_004/DOC_013/page_004.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 5,
+          "text_path": "data/processed/CASE_004/DOC_013/page_005.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 6,
+          "text_path": "data/processed/CASE_004/DOC_013/page_006.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 7,
+          "text_path": "data/processed/CASE_004/DOC_013/page_007.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 8,
+          "text_path": "data/processed/CASE_004/DOC_013/page_008.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 9,
+          "text_path": "data/processed/CASE_004/DOC_013/page_009.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        }
+      ],
+      "document_mean_confidence": 0.82,
+      "ocr_quality": "medium"
+    },
+    {
+      "document_id": "DOC_014",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_014/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        }
+      ],
+      "document_mean_confidence": 0.82,
+      "ocr_quality": "medium"
+    },
+    {
+      "document_id": "DOC_015",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_015/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    },
+    {
+      "document_id": "DOC_016",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_016/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        }
+      ],
+      "document_mean_confidence": 0.82,
+      "ocr_quality": "medium"
+    },
+    {
+      "document_id": "DOC_017",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_017/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        }
+      ],
+      "document_mean_confidence": 0.82,
+      "ocr_quality": "medium"
+    },
+    {
+      "document_id": "DOC_018",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_018/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        }
+      ],
+      "document_mean_confidence": 0.82,
+      "ocr_quality": "medium"
+    },
+    {
+      "document_id": "DOC_019",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_019/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 2,
+          "text_path": "data/processed/CASE_004/DOC_019/page_002.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 3,
+          "text_path": "data/processed/CASE_004/DOC_019/page_003.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 4,
+          "text_path": "data/processed/CASE_004/DOC_019/page_004.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 5,
+          "text_path": "data/processed/CASE_004/DOC_019/page_005.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 6,
+          "text_path": "data/processed/CASE_004/DOC_019/page_006.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 7,
+          "text_path": "data/processed/CASE_004/DOC_019/page_007.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 8,
+          "text_path": "data/processed/CASE_004/DOC_019/page_008.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 9,
+          "text_path": "data/processed/CASE_004/DOC_019/page_009.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 10,
+          "text_path": "data/processed/CASE_004/DOC_019/page_010.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        },
+        {
+          "page": 11,
+          "text_path": "data/processed/CASE_004/DOC_019/page_011.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.82
+        }
+      ],
+      "document_mean_confidence": 0.82,
+      "ocr_quality": "medium"
+    },
+    {
+      "document_id": "DOC_020",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_020/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": null
+        },
+        {
+          "page": 2,
+          "text_path": "data/processed/CASE_004/DOC_020/page_002.md",
+          "uncertain_regions": [],
+          "mean_confidence": null
+        },
+        {
+          "page": 3,
+          "text_path": "data/processed/CASE_004/DOC_020/page_003.md",
+          "uncertain_regions": [],
+          "mean_confidence": null
+        },
+        {
+          "page": 4,
+          "text_path": "data/processed/CASE_004/DOC_020/page_004.md",
+          "uncertain_regions": [],
+          "mean_confidence": null
+        }
+      ],
+      "document_mean_confidence": null,
+      "ocr_quality": "low",
+      "review_required": true,
+      "review_reason": "자필·저품질 스캔 또는 마스킹 다수로 텍스트 신뢰도 낮음"
+    },
+    {
+      "document_id": "DOC_021",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_021/page_001.md",
+          "uncertain_regions": [
+            {
+              "text_as_read": "[장소 판독불가]에서 식사를 마치고 계단을 내려오다 [불확실]구조물에 넘어짐",
+              "confidence": 0.45,
+              "char_offset_start": 150,
+              "char_offset_end": 260,
+              "note": "자필 사고경위 — 장소·일부 단어 판독 불가"
+            }
+          ],
+          "mean_confidence": 0.55
+        }
+      ],
+      "document_mean_confidence": 0.55,
+      "ocr_quality": "low",
+      "review_required": true,
+      "review_reason": "자필·저품질 스캔 또는 마스킹 다수로 텍스트 신뢰도 낮음"
+    },
+    {
+      "document_id": "DOC_022",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_022/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": null
+        }
+      ],
+      "document_mean_confidence": null,
+      "ocr_quality": "low",
+      "review_required": true,
+      "review_reason": "자필·저품질 스캔 또는 마스킹 다수로 텍스트 신뢰도 낮음"
+    },
+    {
+      "document_id": "DOC_023",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_023/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        },
+        {
+          "page": 2,
+          "text_path": "data/processed/CASE_004/DOC_023/page_002.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    },
+    {
+      "document_id": "DOC_024",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_024/page_001.md",
+          "uncertain_regions": [
+            {
+              "text_as_read": "총 보험계약사항 (대부분 백색 마스킹)",
+              "confidence": 0.6,
+              "char_offset_start": 300,
+              "char_offset_end": 340,
+              "note": "증권 상당 부분 마스킹 — 담보명·가입금액 미표시"
+            }
+          ],
+          "mean_confidence": 0.55
+        }
+      ],
+      "document_mean_confidence": 0.55,
+      "ocr_quality": "low",
+      "review_required": true,
+      "review_reason": "자필·저품질 스캔 또는 마스킹 다수로 텍스트 신뢰도 낮음"
+    },
+    {
+      "document_id": "DOC_025",
+      "extraction_method": "ocr",
+      "encoding_detected": null,
+      "ocr_status": "completed",
+      "pages": [
+        {
+          "page": 1,
+          "text_path": "data/processed/CASE_004/DOC_025/page_001.md",
+          "uncertain_regions": [],
+          "mean_confidence": 0.93
+        }
+      ],
+      "document_mean_confidence": 0.93,
+      "ocr_quality": "high"
+    }
+  ]
+}

@@ -1,0 +1,138 @@
+{
+  "case_id": "CASE_004",
+  "run_id": "RUN_20260709_001",
+  "component": "CriticEvaluationAgent",
+  "status": "success",
+  "created_at": "2026-07-09T23:05:00+09:00",
+  "model_info": {
+    "model_name": "gpt-5-codex",
+    "prompt_version": "critic_v0.1"
+  },
+  "confidence": 0.84,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "target_artifact": "outputs/CASE_004/draft_report_v2.md",
+  "review_gate": "PASS",
+  "gate_rationale": "금지 표현 0건, 핵심 의료 인용(DOC_001/002/003/004/006) 및 보험증권 인용(DOC_024) 대조 결과 주요 사실은 원문과 부합한다. 다만 일부 문장은 문서 인용이 너무 넓거나 구조화 산출물 출처를 명시해야 하므로 CR_001~004를 검수본에 태그로 남겼다. 오류 수준은 사람 검수를 진행할 수 없을 정도는 아니므로 PASS.",
+  "evidence_references": [
+    {
+      "document_id": "DOC_002",
+      "document_type": "diagnosis_certificate",
+      "page": 1,
+      "quote": "상기 환자는 2025년 8월 16일경 계단에서 넘어지면서 좌측 족관절을 다친 후 ... Mcbride 장해 판정표 Table14 ... 14%(옥외근로자 6등급 인정)의 장해를 영구적으로 인정함"
+    },
+    {
+      "document_id": "DOC_024",
+      "document_type": "insurance_certificate",
+      "page": 1,
+      "quote": "보상내용 및 보상한도 등에 대한 자세한 사항은 상기 상품의 보통약관 및 특별약관을 확인."
+    }
+  ],
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "low",
+    "reason": "초안의 핵심 비-null 사실(사고일, 진단·장해, 입원기간, 수술명, 증권상 약관 확인 필요 문구)은 원문 또는 상류 산출물과 연결된다. 미확인 항목은 대체로 산정 보류·검수 필요로 처리되어 환각 위험이 낮다."
+  },
+  "prohibited_language_check": {
+    "passed": true,
+    "issues": [],
+    "note": "forbidden-expressions.md의 위험 표현('반드시 지급', '의학적으로 명백', '약관상 부당', '승소 가능성이 높다') 및 유사 단정형 미검출. 지급책임·인과관계·장해율은 검토/보류 표현으로 처리됨."
+  },
+  "citation_checks_passed": [
+    {
+      "claim": "후유장해진단서상 장해율과 영구장해 소견",
+      "draft_citation": "[DOC_002 p1]",
+      "verified": true,
+      "note": "DOC_002 p1에 Mcbride Table14 II-1-b 준용 14%(옥외근로자 6등급), 영구장해 문구 확인."
+    },
+    {
+      "claim": "S82830은 급성기 골절 코드이고 후유장해진단서에는 KCD가 없음",
+      "draft_citation": "[DOC_001 p1][DOC_003 p1][DOC_002 p1]",
+      "verified": true,
+      "note": "DOC_001/DOC_003에 S82830, DOC_002에는 KCD 필드 없이 장해상병명만 기재. 초안이 후유장해 KCD로 단정하지 않은 점은 적절."
+    },
+    {
+      "claim": "수술명 OR/IF Trimalleolar ankle, Lt. 및 2025-08-18 수술 정황",
+      "draft_citation": "[DOC_006 p1]",
+      "verified": true,
+      "note": "DOC_006 p1에 수술명과 수술 종료/작성일시 2025-08-18 확인."
+    },
+    {
+      "claim": "사고 당시 drunken state 기록",
+      "draft_citation": "[DOC_005 p1][DOC_010 p1]",
+      "verified": true,
+      "note": "두 문서 모두 drunken state 및 좌측 발목 수상 정황 확인. 초안은 실제 감액사유로 단정하지 않고 검토 포인트로만 처리."
+    },
+    {
+      "claim": "보험증권상 약관 확인 필요 및 상해·후유장해 담보 미확인",
+      "draft_citation": "[DOC_024 p1]",
+      "verified": true,
+      "note": "DOC_024 p1에 보통약관·특별약관 확인 문구와 상해·후유장해 담보명·가입금액 마스킹/미표시 상태가 명시됨."
+    }
+  ],
+  "findings": [
+    {
+      "finding_id": "CR_001",
+      "section": "I.1 사정 근거",
+      "issue_type": "인용 정밀도",
+      "severity": "medium",
+      "target_sentence": "가. 성공하는 Owner 재산종합보험 무배당2504 관련 증권 및 제출 의무기록 [DOC_024 p1]",
+      "description": "DOC_024 p1은 보험증권과 약관 확인 필요 문구를 뒷받침하지만 '제출 의무기록' 전체를 뒷받침하지 않는다. 한 인용으로 서로 다른 자료군(증권+의무기록)을 동시에 받치면 문장별 근거 추적성이 낮아진다.",
+      "suggested_revision": "가. 성공하는 Owner 재산종합보험 무배당2504 관련 증권 [DOC_024 p1]\\n나. 진단서·후유장해진단서·입퇴원확인서·수술기록지 등 제출 의무기록 [DOC_001 p1][DOC_002 p1][DOC_003 p1][DOC_006 p1]",
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "finding_id": "CR_002",
+      "section": "I.3 보험금사정 의견 / VI.6 사정 결과 및 의견",
+      "issue_type": "구조화 산출물 출처 누락",
+      "severity": "medium",
+      "target_sentence": "보험사 판단 문서, 치료종결 또는 장해고정 시점이 확인되지 않아 최종 지급책임 및 금액 사정은 보류한다.",
+      "description": "'보험사 판단 문서 부재'는 단일 원문 페이지가 아니라 classification_result.json 및 denial_reason_result.json의 전수 분류 결과에 근거한 결론이다. 초안 문장에는 이 구조화 산출물 출처가 표시되지 않아, 원문만 보는 검수자가 부재 판단의 근거를 추적하기 어렵다.",
+      "suggested_revision": "보험사 판단 문서는 classification_result.json 및 denial_reason_result.json 기준 insurer_response 0건으로 확인되지 않으며, 치료종결 또는 장해고정 시점도 DOC_002상 확정되지 않아 최종 지급책임 및 금액 사정은 보류한다. [DOC_002 p1][검수 필요: 손해사정사]",
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "finding_id": "CR_003",
+      "section": "II.2 보험계약사항",
+      "issue_type": "근거 표기 보강 필요",
+      "severity": "low",
+      "target_sentence": "가. 보험회사: 한화손해보험으로 추정된다. 단, 증권 본문상 보험사명은 마스킹되어 있어 파일명·상품 맥락 기반 추정임을 유지한다. [검수 필요: 손해사정사]",
+      "description": "문장 자체는 추정임을 명시하고 있어 위험도는 낮다. 다만 추정 근거가 파일명·intake 맥락이라는 점은 원문 DOC 인용으로 확인되지 않으므로, structured source 또는 '파일명 기준'을 더 분명히 밝혀야 한다.",
+      "suggested_revision": "가. 보험회사: 파일명 및 상류 policy-pipeline 산출물 기준 한화손해보험으로 추정된다. 증권 본문상 보험사명은 마스킹되어 있어 본 초안에서는 추정값으로만 유지한다. [DOC_024 p1][검수 필요: 손해사정사]",
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "finding_id": "CR_004",
+      "section": "VII. 증빙자료",
+      "issue_type": "누락된 근거 문서 참조",
+      "severity": "low",
+      "target_sentence": "5. 진료비 영수증 및 세부내역 [검수 필요: 손해사정사]",
+      "description": "진료비 영수증 및 세부내역은 실제로 DOC_013, DOC_018 등으로 존재한다. 금액 산정은 보류하더라도 증빙자료 목록에는 해당 문서 ID를 연결해야 추적 가능하다.",
+      "suggested_revision": "5. 진료비 세부산정내역 및 영수증 [DOC_013 p1][DOC_018 p1] [검수 필요: 손해사정사]",
+      "reviewer_role": "손해사정사"
+    }
+  ],
+  "findings_summary": {
+    "total": 4,
+    "by_issue_type": {
+      "근거_없는_주장": 0,
+      "과도한_법률_판단": 0,
+      "과도한_의료_확정_표현": 0,
+      "인용_정밀도": 1,
+      "구조화_산출물_출처_누락": 1,
+      "근거_표기_보강_필요": 1,
+      "누락된_근거_문서_참조": 1
+    },
+    "by_severity": {
+      "high": 0,
+      "medium": 2,
+      "low": 2
+    },
+    "prohibited_expressions_detected": 0
+  },
+  "warnings": [
+    "스키마 미확정 상태로 생성: critic_result.schema.json 부재 → validate_output.py는 SKIP. 공통 컴포넌트 계약 필드를 수동 준수했다.",
+    "Critic 단계로 정답지(data/ground_truth, POC 최종 손해사정서)는 열람하지 않았다.",
+    "검수 게이트 PASS는 사람 검수를 진행할 수 있다는 의미이며 오류 없음이 아니다. CR_001~004는 검수 또는 차기 초안 업데이트에서 반영 대상이다."
+  ]
+}

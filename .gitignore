@@ -14,6 +14,9 @@ __pycache__/
 # Pipeline execution data (copy of source-cases/ + intermediate outputs -- originals version-controlled in source-cases/)
 data/
 
+# Workspace Data with each run's report written by agent
+_workspace/
+
 # Per-step run backups (P10) -- regenerable snapshots, not source of truth
 outputs/*/_backups/
 

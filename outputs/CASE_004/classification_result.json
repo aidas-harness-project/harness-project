@@ -1,0 +1,645 @@
+{
+  "case_id": "CASE_004",
+  "run_id": "RUN_20260709_001",
+  "component": "DocumentClassification",
+  "status": "success",
+  "created_at": "2026-07-09T18:30:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8 (vision page transcription)",
+    "prompt_version": "document_pipeline_v0.1"
+  },
+  "confidence": 0.83,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "evidence_references": [],
+  "warnings": [
+    "배상책임 케이스(한화손보 재산종합보험). 파일명 '배상 한화손보 손해사정서'와 intake source '후유장해 케이스' 상충 → 실제로는 배상책임보험의 후유장해 담보 청구 건.",
+    "약관(insurance_policy) 문서 없음 — 증권(DOC_024)만 존재하고 대부분 마스킹. policy-pipeline은 지급요건/면책 조항 확인 제한적.",
+    "보험사 안내문(insurer_response) 없음 — 감액/부지급 통보 문서 이 케이스 입력에 부재. denial-response 담당 문서 없음.",
+    "DOC_023(위자료 산정기준표)은 배상 위자료 참고자료로 other 분류. 약관/안내문 아님.",
+    "저품질/저신뢰 분류(review_required): DOC_008, DOC_009, DOC_021(자필), DOC_023, DOC_024(증권 마스킹).",
+    "DOC_007·DOC_012·DOC_015는 판독소견서(영상)로 상호 중복 재출력본."
+  ],
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "low",
+    "reason": "분류는 문서 서식·표제 기반. 근거 문장 evidence_references에 연결."
+  },
+  "prohibited_language_check": {
+    "passed": true,
+    "issues": []
+  },
+  "documents": [
+    {
+      "document_id": "DOC_001",
+      "predicted_document_type": "diagnosis_certificate",
+      "document_type_label": "진단서",
+      "confidence": 0.97,
+      "candidate_types": [
+        {
+          "document_type": "diagnosis_certificate",
+          "confidence": 0.97
+        },
+        {
+          "document_type": "medical_record",
+          "confidence": 0.03
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_001",
+          "page": 1,
+          "quote": "진 단 서 / (주 질병·부상) 삼복사 골절, 발목,좌측 / 질병분류기호 S82830"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_002",
+      "predicted_document_type": "diagnosis_certificate",
+      "document_type_label": "후유장해진단서",
+      "confidence": 0.96,
+      "candidate_types": [
+        {
+          "document_type": "diagnosis_certificate",
+          "confidence": 0.96
+        },
+        {
+          "document_type": "medical_record",
+          "confidence": 0.04
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_002",
+          "page": 1,
+          "quote": "후 유 장 해 진 단 서 / Mcbride 장해 판정표 Table14 ... 14%(옥외근로자 6등급 인정)"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_003",
+      "predicted_document_type": "medical_record",
+      "document_type_label": "입·퇴원 확인서",
+      "confidence": 0.85,
+      "candidate_types": [
+        {
+          "document_type": "medical_record",
+          "confidence": 0.85
+        },
+        {
+          "document_type": "diagnosis_certificate",
+          "confidence": 0.15
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_003",
+          "page": 1,
+          "quote": "입 · 퇴원 확인서 / [S82830] 삼복사 골절, 발목,좌측 / 2025년 08월 16일 ~ 2025년 09월 01일 ( 17 ) 일간"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_004",
+      "predicted_document_type": "imaging_report",
+      "document_type_label": "신경전도/근전도 검사 리포트",
+      "confidence": 0.8,
+      "candidate_types": [
+        {
+          "document_type": "imaging_report",
+          "confidence": 0.8
+        },
+        {
+          "document_type": "medical_record",
+          "confidence": 0.2
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_004",
+          "page": 1,
+          "quote": "Neurography & Electromyography Report / Impression : C/W Lt. deep peroneal nerve injury, mild degree"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_005",
+      "predicted_document_type": "medical_record",
+      "document_type_label": "경과기록지",
+      "confidence": 0.88,
+      "candidate_types": [
+        {
+          "document_type": "medical_record",
+          "confidence": 0.88
+        },
+        {
+          "document_type": "diagnosis_certificate",
+          "confidence": 0.07
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_005",
+          "page": 1,
+          "quote": "경과기록지 / C.C : Lt. ankle pain / Xray & CT : Ankle Fx., Lt. (SER IV)"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_006",
+      "predicted_document_type": "medical_record",
+      "document_type_label": "수술기록지",
+      "confidence": 0.9,
+      "candidate_types": [
+        {
+          "document_type": "medical_record",
+          "confidence": 0.9
+        },
+        {
+          "document_type": "diagnosis_certificate",
+          "confidence": 0.05
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_006",
+          "page": 1,
+          "quote": "수 술 기 록 지 / 수술명 OR/IF Trimalleolar ankle, Lt. / 마취방법 04.Region(Spinal)"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_007",
+      "predicted_document_type": "imaging_report",
+      "document_type_label": "판독소견서(영상)",
+      "confidence": 0.9,
+      "candidate_types": [
+        {
+          "document_type": "imaging_report",
+          "confidence": 0.9
+        },
+        {
+          "document_type": "medical_record",
+          "confidence": 0.1
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_007",
+          "page": 1,
+          "quote": "판독 소견서 / Trimalleolar fracture / AiTFL partial tear and avulsion / Lt Ankle joint MRI"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_008",
+      "predicted_document_type": "medical_record",
+      "document_type_label": "Patient's Chart(외래초진)",
+      "confidence": 0.72,
+      "candidate_types": [
+        {
+          "document_type": "medical_record",
+          "confidence": 0.72
+        },
+        {
+          "document_type": "diagnosis_certificate",
+          "confidence": 0.2
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_008",
+          "page": 1,
+          "quote": "PATIENT'S CHART / Ankle Fx of Lt ankle / Impression Diagnosis Lt ankle 삼복사골절 (수술상태)"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "document_id": "DOC_009",
+      "predicted_document_type": "medical_record",
+      "document_type_label": "PT 경과기록(수기)",
+      "confidence": 0.6,
+      "candidate_types": [
+        {
+          "document_type": "medical_record",
+          "confidence": 0.6
+        },
+        {
+          "document_type": "diagnosis_certificate",
+          "confidence": 0.25
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_009",
+          "page": 1,
+          "quote": "PT. Sx & Sn. Progress / ROM check of Lt ankle / Mcbride 장해판정표 Table14 II-1-b 준용 14%"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "document_id": "DOC_010",
+      "predicted_document_type": "medical_record",
+      "document_type_label": "간호기록지",
+      "confidence": 0.92,
+      "candidate_types": [
+        {
+          "document_type": "medical_record",
+          "confidence": 0.92
+        },
+        {
+          "document_type": "other",
+          "confidence": 0.05
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_010",
+          "page": 1,
+          "quote": "간호기록지 / 수술명:OR/IF Trimalleolar ankle, Lt. / POD#14 퇴원 / Both leg's & toe's C/M/S (+/+/+)"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_011",
+      "predicted_document_type": "medical_record",
+      "document_type_label": "검사기록지(검사결과)",
+      "confidence": 0.85,
+      "candidate_types": [
+        {
+          "document_type": "medical_record",
+          "confidence": 0.85
+        },
+        {
+          "document_type": "other",
+          "confidence": 0.1
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_011",
+          "page": 1,
+          "quote": "검사기록지 / 임상병리검사·혈액학검사·일반화학검사·뇨검사·면역검사 / Triglyceride 398 H, CRP 6.91 H"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_012",
+      "predicted_document_type": "imaging_report",
+      "document_type_label": "판독소견서(영상, 재출력)",
+      "confidence": 0.88,
+      "candidate_types": [
+        {
+          "document_type": "imaging_report",
+          "confidence": 0.88
+        },
+        {
+          "document_type": "medical_record",
+          "confidence": 0.12
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_012",
+          "page": 1,
+          "quote": "판독 소견서 / Trimalleolar fracture / s/p ORIF, trimalleolar fracture"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_013",
+      "predicted_document_type": "receipt",
+      "document_type_label": "진료비 세부산정내역(입원)",
+      "confidence": 0.82,
+      "candidate_types": [
+        {
+          "document_type": "receipt",
+          "confidence": 0.82
+        },
+        {
+          "document_type": "other",
+          "confidence": 0.15
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_013",
+          "page": 1,
+          "quote": "진료비 세부산정내역 (퇴원) / 진료비 총액 10,666,257 / Anatomical Locking Distal Fibular Plate"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_014",
+      "predicted_document_type": "receipt",
+      "document_type_label": "진료비 세부산정내역서(외래)",
+      "confidence": 0.8,
+      "candidate_types": [
+        {
+          "document_type": "receipt",
+          "confidence": 0.8
+        },
+        {
+          "document_type": "other",
+          "confidence": 0.15
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_014",
+          "page": 1,
+          "quote": "진료비 세부산정내역서 / 후유장해진단서 100,000 / 근전도검사-하지 / 계 396,110"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_015",
+      "predicted_document_type": "imaging_report",
+      "document_type_label": "판독소견서(영상, 재출력)",
+      "confidence": 0.86,
+      "candidate_types": [
+        {
+          "document_type": "imaging_report",
+          "confidence": 0.86
+        },
+        {
+          "document_type": "medical_record",
+          "confidence": 0.12
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_015",
+          "page": 1,
+          "quote": "판독 소견서 / s/p ORIF, trimalleolar fracture / Lt Ankle joint MRI"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_016",
+      "predicted_document_type": "receipt",
+      "document_type_label": "진료비 세부산정내역서(외래)",
+      "confidence": 0.8,
+      "candidate_types": [
+        {
+          "document_type": "receipt",
+          "confidence": 0.8
+        },
+        {
+          "document_type": "other",
+          "confidence": 0.15
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_016",
+          "page": 1,
+          "quote": "진료비 세부산정내역서 / 초진진찰료-의원 18,840 / 후유장해진단서 100,000 / 계 396,110"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_017",
+      "predicted_document_type": "receipt",
+      "document_type_label": "진료비 세부산정내역(외래, 재활)",
+      "confidence": 0.78,
+      "candidate_types": [
+        {
+          "document_type": "receipt",
+          "confidence": 0.78
+        },
+        {
+          "document_type": "other",
+          "confidence": 0.17
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_017",
+          "page": 1,
+          "quote": "진료비 세부산정내역 / 도수치료 / 간섭파전류치료 / 계 489,230"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_018",
+      "predicted_document_type": "receipt",
+      "document_type_label": "진료비 계산서·영수증(입원)",
+      "confidence": 0.85,
+      "candidate_types": [
+        {
+          "document_type": "receipt",
+          "confidence": 0.85
+        },
+        {
+          "document_type": "other",
+          "confidence": 0.12
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_018",
+          "page": 1,
+          "quote": "진료비 계산서·영수증 / 진료비 총액 10,666,257 / 입원 2025-08-16~2025-09-01"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_019",
+      "predicted_document_type": "receipt",
+      "document_type_label": "외래 진료비 계산서·영수증 모음",
+      "confidence": 0.83,
+      "candidate_types": [
+        {
+          "document_type": "receipt",
+          "confidence": 0.83
+        },
+        {
+          "document_type": "other",
+          "confidence": 0.14
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_019",
+          "page": 1,
+          "quote": "외래 진료비 계산서·영수증 / 재활 및 물리치료료 비급여 105,000 / 진료비 총액 115,960 / 396,110"
+        }
+      ],
+      "review_required": false
+    },
+    {
+      "document_id": "DOC_020",
+      "predicted_document_type": "other",
+      "document_type_label": "흉터/반흔 임상사진",
+      "confidence": 0.7,
+      "candidate_types": [
+        {
+          "document_type": "other",
+          "confidence": 0.7
+        },
+        {
+          "document_type": "imaging_report",
+          "confidence": 0.25
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_020",
+          "page": 1,
+          "quote": "좌측 족관절 수술 반흔 임상 촬영 사진 (줄자 측정 포함) — 추출 텍스트 없음"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "document_id": "DOC_021",
+      "predicted_document_type": "other",
+      "document_type_label": "사고경위서(수기)",
+      "confidence": 0.75,
+      "candidate_types": [
+        {
+          "document_type": "other",
+          "confidence": 0.75
+        },
+        {
+          "document_type": "medical_record",
+          "confidence": 0.1
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_021",
+          "page": 1,
+          "quote": "사 고 경 위 서 / 2025년 8월 16일 오후 9시15분경 ... 계단을 내려오다 ... 넘어짐"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "document_id": "DOC_022",
+      "predicted_document_type": "other",
+      "document_type_label": "흉터/반흔 임상사진",
+      "confidence": 0.7,
+      "candidate_types": [
+        {
+          "document_type": "other",
+          "confidence": 0.7
+        },
+        {
+          "document_type": "imaging_report",
+          "confidence": 0.25
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_022",
+          "page": 1,
+          "quote": "좌측 족관절 수술 반흔 임상 촬영 사진 — 추출 텍스트 없음"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "document_id": "DOC_023",
+      "predicted_document_type": "other",
+      "document_type_label": "위자료 산정기준표(자료13)",
+      "confidence": 0.72,
+      "candidate_types": [
+        {
+          "document_type": "other",
+          "confidence": 0.72
+        },
+        {
+          "document_type": "insurance_policy",
+          "confidence": 0.15
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_023",
+          "page": 1,
+          "quote": "위자료 산정기준표 / 서울중앙지방법원 교통·산재 손해배상 전담재판부의 기준 / 가동능력 상실율을 곱한 금액"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "document_id": "DOC_024",
+      "predicted_document_type": "insurance_certificate",
+      "document_type_label": "보험증권(재산종합보험 무배당2504)",
+      "confidence": 0.7,
+      "candidate_types": [
+        {
+          "document_type": "insurance_certificate",
+          "confidence": 0.7
+        },
+        {
+          "document_type": "insurance_policy",
+          "confidence": 0.2
+        },
+        {
+          "document_type": "other",
+          "confidence": 0.1
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_024",
+          "page": 1,
+          "quote": "성공하는 Owner 재산종합보험 무배당2504 / 15년만기 / 재물담보 가입내용 / 적용요율 (2)일반음식점"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "document_id": "DOC_025",
+      "predicted_document_type": "other",
+      "document_type_label": "위임장",
+      "confidence": 0.9,
+      "candidate_types": [
+        {
+          "document_type": "other",
+          "confidence": 0.9
+        },
+        {
+          "document_type": "insurance_certificate",
+          "confidence": 0.05
+        }
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_025",
+          "page": 1,
+          "quote": "위 임 장 / 보험업법 제188조의 법정 손해사정업무 / 바른결 손해사정 귀중"
+        }
+      ],
+      "review_required": false
+    }
+  ]
+}
