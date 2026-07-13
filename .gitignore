@@ -29,6 +29,7 @@ _ocr_scratch/
 # Pipeline viewer frontend -- build artifacts and venvs, not source
 frontend/web/node_modules/
 frontend/web/dist/
+frontend/web/dist-static/
 frontend/backend/venv/
 frontend/backend/_uploads/
 frontend/backend/_runs.json

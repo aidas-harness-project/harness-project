@@ -336,16 +336,78 @@ was found while writing these -- this was pure coverage debt, not a live
 gap, closed for completeness now that the higher-severity items above are
 done.
 
-## 5. Frontend (`frontend/`) unreviewed
+## 5. Frontend (`frontend/`) -- RESOLVED 2026-07-13
 
-Web (Vite/React) + backend (`main.py`) exist and were actually used to drive
-the CASE_002/CASE_009 test runs (that's where `_run_logs/` came from), so
-it's functional enough to matter. Not reviewed for code quality or
-completeness in this pass.
+Reviewed `frontend/backend/main.py` (309 lines) in full and the React
+app's core logic (`api.js`, `App.jsx`, `pipelineDefinition.js`,
+`statusLogic.js`, plus a skim of the components) -- ~2400 LOC total.
 
-**To resolve:** a dedicated pass once the schema gap (item 1) stops blocking
-real end-to-end runs -- reviewing a frontend against a pipeline that can't
-finish yet has limited value.
+**Real bug found and fixed: the two human-review endpoints were broken,
+always.** `set_ledger_status` (`POST /api/cases/{id}/ledger/status`) and
+`set_conflict_verdict` (`POST /api/cases/{id}/conflicts/{id}/verdict`)
+shelled out to `tools/dao.py set-ledger-status` / `set-conflict-verdict`
+without `--held-by`/`--run-id` -- both became `required=True` when P5's
+locking got closed for these subcommands (item 7, earlier this session),
+but `main.py` was never updated to match. Confirmed by reproducing the
+exact call: `python tools/dao.py set-ledger-status CASE_020 <file>
+approved --reviewer x` exits 2 with argparse's "the following arguments
+are required" error, which `_run_dao_cli` turns into an opaque HTTP 400.
+**This meant the actual point of the review UI -- a human approving or
+rejecting a ledger entry, or resolving a conflict -- could never
+succeed through the frontend, for any case, ever.** Same class of gap as
+item 8 (P7/D1 write paths that were also never exercisable), just in the
+frontend instead of the DAO itself.
+
+Fixed: added `_frontend_run_id()` (matches `_run_state.schema.json`'s
+`run_id` pattern) and threaded `--held-by`/`--run-id` through
+`_run_dao_cli`; `set_ledger_status` uses the reviewer's own name as
+`held_by` (they're the human acting), `set_conflict_verdict` uses a fixed
+`"frontend-reviewer"` (the request has no separate name field --
+`LedgerPanel.jsx` already embeds the reviewer's name into the resolution
+note text itself for conflicts, so this is lock metadata only, not a gap
+in the audit trail). Verified for real, twice -- first attempt actually
+shelled out to the real `tools/dao.py` against the real, committed
+`CASE_020` and modified its ledger's `reviewed_by`/`reviewed_at` by
+accident (a Python-level `monkeypatch` of `dao.OUTPUTS` has no effect on
+a subprocess, which loads its own fresh copy of the module) -- caught via
+`git diff`, reverted with `git checkout`. Redone safely with a throwaway
+case (`CASE_997`, created and deleted within `outputs/`, never committed):
+both endpoints now succeed end-to-end through the real subprocess path.
+
+**Checked and ruled out as non-issues:** `oxlint` flagged an unused
+`PHASE_2` import in `App.jsx` -- traced it; `Sidebar.jsx` is the component
+that actually renders the stage list and correctly imports/maps both
+`PHASE_1` and `PHASE_2`, so Phase 2 stages do render in the UI, this was
+just a redundant import in a file that only needed `ALL_STAGES`. Also
+flagged a `useEffect` exhaustive-deps warning in `StageDetail.jsx` --
+false positive: `stageDef` comes from the static, module-level
+`pipelineDefinition.js` data, so `stageDef.key` already fully determines
+`stageDef.contracts`/`.report` for a given render; adding them as deps
+would be redundant, not a fix.
+
+**Design-level completeness note, not fixed (a scoping decision, not a
+bug):** `denial-response` (dependency-triggered, not phase-gated per its
+own agent spec) has no representation anywhere in the pipeline viewer --
+absent from `pipelineDefinition.js`'s stage list and the design spec's
+stage count alike. A user watching a case with a flagged insurer-response
+document would see no status for this stage at all. Consistent with the
+viewer's linear phase-list data model not fitting a dependency-triggered
+stage naturally; would need an actual design decision (a separate
+"triggered stages" section? inline under the triggering document?) before
+building it, not a mechanical fix.
+
+**Overall assessment:** the backend is well-structured and already
+security-conscious going in -- real path-traversal guards on both upload
+filenames and contract/report filenames (with commented rationale), CORS
+scoped to the dev origins, a genuinely scoped `--allowedTools` allowlist
+for launched runs (with its own residual-risk note already in the design
+spec: Write/Edit aren't path-scoped by the flag). Every read goes through
+`dao.py`'s own helpers (never reimplements file access), and every write
+now correctly goes through `dao.py`'s CLI with proper lock metadata. The
+one real bug found was a drift issue (the DAO evolved a required-argument
+change that the frontend's one call site never picked up), not a design
+flaw -- exactly the kind of thing an "unreviewed" surface accumulates
+silently.
 
 ## 8. End-to-end pipeline audit -- 4 real blockers found, all RESOLVED 2026-07-13
 
