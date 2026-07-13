@@ -1,0 +1,94 @@
+{
+  "case_id": "CASE_004",
+  "run_id": "RUN_20260709_001",
+  "component": "PolicyToDenialMatching",
+  "status": "partial",
+  "created_at": "2026-07-09T22:20:00+09:00",
+  "model_info": {
+    "model_name": "gpt-5-codex",
+    "prompt_version": "policy_to_denial_matching_v0.1"
+  },
+  "confidence": 0.86,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "low",
+    "reason": "denial_reason_result.json의 denial_reasons=[] 및 normalized_policy_clause.json의 clauses=[]를 그대로 반영했다. 보험사 주장이나 약관 조항을 추정 생성하지 않았다."
+  },
+  "prohibited_language_check": {
+    "passed": true,
+    "issues": []
+  },
+  "matching_applicable": false,
+  "absence_reason": "보험사 판단 문서(insurer_response)가 없어 감액·부지급 사유가 0건이고, 약관 원문도 없어 조항 매칭 대상이 없다.",
+  "denial_reason_count": 0,
+  "policy_clause_count": 0,
+  "matches": [],
+  "unmatched_denial_reasons": [],
+  "policy_clause_candidates": [],
+  "proactive_review_flags": [
+    {
+      "topic": "음주(drunken state) 면책 또는 감액 가능성",
+      "status": "review_only",
+      "reason": "의무기록상 사고 당시 음주 상태 기록은 있으나, 보험사가 실제 감액사유로 주장한 문서가 없고 약관 면책 조항도 부재하여 반박 포인트로 전환하지 않는다.",
+      "reviewer_role": "손해사정사",
+      "evidence_references": [
+        {
+          "document_id": "DOC_005",
+          "document_type": "medical_record",
+          "page": 1,
+          "quote": "Drunken state로 넘어지며 좌측 발목 접질러서 119 통해 내원"
+        },
+        {
+          "document_id": "DOC_010",
+          "document_type": "medical_record",
+          "page": 1,
+          "quote": "입원당시 drunken state(의사소통 잘됨)"
+        }
+      ]
+    },
+    {
+      "topic": "상해후유장해 담보명 및 가입금액 확인",
+      "status": "review_only",
+      "reason": "증권상 재물담보만 확인되고 상해·후유장해 담보명 및 가입금액이 마스킹/미표시되어 지급액 산정 전제가 확보되지 않았다.",
+      "reviewer_role": "손해사정사",
+      "evidence_references": [
+        {
+          "document_id": "DOC_024",
+          "document_type": "insurance_certificate",
+          "page": 1,
+          "quote": "상해·후유장해 담보의 가입금액·담보명은 마스킹/미표시 상태"
+        }
+      ]
+    },
+    {
+      "topic": "치료종결 또는 장해고정 시점",
+      "status": "review_only",
+      "reason": "후유장해진단서 발행일과 치료종결·장해고정 시점이 확정되지 않아 손해 산정 전 손해사정사 검토가 필요하다.",
+      "reviewer_role": "손해사정사",
+      "evidence_references": [
+        {
+          "document_id": "DOC_002",
+          "document_type": "diagnosis_certificate",
+          "page": 1,
+          "quote": "초진일: 2026년 2월 11일 / 현재에도 좌측 족관절의 동통과 관절 제한을 호소하는 자임"
+        }
+      ]
+    }
+  ],
+  "evidence_references": [
+    {
+      "document_id": "DOC_024",
+      "document_type": "insurance_certificate",
+      "page": 1,
+      "quote": "보상내용 및 보상한도 등에 대한 자세한 사항은 상기 상품의 보통약관 및 특별약관을 확인."
+    }
+  ],
+  "warnings": [
+    "스키마 미확정 상태로 생성: schemas/에 policy_to_denial_matching_result 스키마 없음. 공통 출력 계약 필드를 준수했다.",
+    "denial_reason_result.json 기준 denial_reasons=[]: 보험사 안내문 부재로 감액·부지급 사유 추출 대상이 없다.",
+    "normalized_policy_clause.json 기준 clauses=[]: 약관 원문 부재로 조항 매칭 대상이 없다.",
+    "음주·가입금액·치료종결 시점은 선제 검토 포인트로만 유지하며, 보험사의 실제 감액사유로 간주하거나 반박 포인트로 생성하지 않는다."
+  ]
+}
