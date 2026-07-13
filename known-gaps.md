@@ -550,11 +550,28 @@ One new regression test (`test_compare_prompt_asks_about_one_sided_extraneous_co
 locks the prompt's key phrasing so a future edit can't silently drop this
 check. 140 tests total.
 
-**Still open: the retroactive audit.** Every "agreed" page written by
-every prior real OCR run in this project (CASE_002's DOC_002/DOC_005,
-CASE_012's pages 1/2/4) has **not** been re-checked against the fixed
-prompt -- the fix prevents new instances, it doesn't retroactively verify
-old ones. Tracked separately as its own follow-up item.
+**Retroactive audit, PARTIAL 2026-07-13.** Only one reading was ever
+persisted per "agreed" page (item 9's flattening kept the chosen text,
+not both raw readings), so re-running the fixed `compare()` against the
+original two readings isn't possible for historical pages -- the only
+real audit method left is checking the stored text directly against the
+raw page image, the same way the original page-3 finding was made.
+
+- **CASE_012 pages 1, 2, 4 (DOC_001) -- audited, clean.** Rendered each
+  raw page at 200dpi and read it directly against the stored
+  `page_00N.md` text. All three verbatim-match the source with no
+  extraneous content. This closes out CASE_012's exposure -- all 4 of its
+  pages (3 plus 4's independently-resolved page) are now confirmed clean.
+- **CASE_002 DOC_002 (19 pages) / DOC_005 (3 pages) -- deliberately NOT
+  audited yet.** The case is D2-blocked (both files rejected as
+  answer-key-class content, `check-source-ledger-clear` returns
+  `clear: false`) -- structurally, nothing downstream can read this
+  content while blocked, so there's no live P1 exposure to close right
+  now the way CASE_012's was. Deferred rather than silently dropped:
+  22 pages of manual audit against a case that can't proceed anyway is
+  low-value compared to auditing content that's actually in the active
+  pipeline. Revisit if/when item 2's disposition question is resolved and
+  CASE_002 (or its raw files under a new case) is ever unblocked.
 
 ## 12. `tools/run_checkpoint1.py` and `tools/run_scenario_matrix.py` added
 
