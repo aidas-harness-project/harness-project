@@ -30,22 +30,22 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `document-pipeline`, checkpoint 1 (P8's dual-path cross-validation, `tools/ocr_extract.py`).
 
-**Current:** accepted as a known, unresolved risk -- flagged inline in `harness-guardrails` P8, not fixed.
+**Current:** accepted as a known, unresolved risk -- flagged inline in `harness-guardrails` P8, not fixed. Provider abstraction lets the run choose `claude-cli`, `openai-api`, or future provider paths, but it does not by itself solve data-retention/privacy.
 
-**Problem:** both cross-validation reads require a Claude CLI invocation to see the raw, unredacted page image (that's the point -- it has to see what's actually on the page, before redaction). If the model isn't under a no-data-retention arrangement, every cross-validation run sends PII to that destination.
+**Problem:** P8's two readers must see the raw, unredacted page image (that's the point -- they have to see what's actually on the page before redaction). The comparator and classifier may also see unredacted extracted text. If any configured provider path is not under a no-data-retention arrangement, every checkpoint-1 run may send PII to that destination.
 
 **Options on the table (see conversation history for the full discussion):**
 - Establish a no-retention trust arrangement for the deployment running these reads (procurement/vendor question, not an architecture change).
-- Replace one or both Claude reads with a real OCR engine once #4 below is resolved.
+- Replace one or both LLM-vision reads with a local or vendor-approved OCR engine once #4 below is resolved.
 
 **To resolve:** a deployment/vendor decision, not something to default on silently.
 
-## 4. No dedicated OCR engine -- Claude CLI stands in for both cross-validation reads
+## 4. No dedicated OCR engine -- provider-based P8 may still be LLM vision
 
 **Where:** `tools/ocr_extract.py`, used by `document-pipeline` checkpoint 1.
 
-**Current:** per explicit direction, both of P8's independent reads are Claude CLI invocations (fresh process, no shared context) rather than one being a real OCR engine and the other a vision model. `ocr_result.json`'s `ocr_engine`/`uncertain_confidence_threshold` fields say so honestly rather than implying a real engine exists; there's no per-block numeric confidence, only a binary agreed/disagreed verdict per page.
+**Current:** partially resolved for execution portability. The old stand-in was two fresh `claude-cli` invocations with no shared context. `tools/ocr_extract.py` now has provider-configurable `reader_a`, `reader_b`, and `comparator` paths, so Codex-compatible runs can use configured API providers such as `openai-api` and are no longer blocked solely by a missing Claude CLI. `ocr_result.json` records provider/model labels through `ocr_engine`, `vision_model_name`, and component `model_info`.
 
-**Problem:** two invocations of the *same* underlying model share more failure modes than two genuinely different technologies would. This catches transient/one-off misreads (the two calls disagreeing by chance) but not systematic blind spots (both calls confidently misreading the same unusual layout/handwriting the same way). P8's protection is real but weaker than the original design intended.
+**Remaining problem:** provider-configurable does not mean technology-independent. Same-provider runs such as `openai-api` + `openai-api` or `claude-cli` + `claude-cli` are separate calls, but they still share more failure modes than two genuinely different technologies would. Cross-provider LLM vision can reduce some shared model-specific risk, but it is still not the same as pairing a traditional OCR/text-extraction engine with an independent vision read. Current LLM-vision provider paths also do not produce per-block numeric OCR confidence; P8's hard signal remains page-level agreed/disagreed.
 
-**To resolve:** integrate an actual OCR engine (e.g. Upstage OCR, Tesseract, or similar -- see the original schema comments for candidates) as one of the two reading paths, keeping Claude as the second, genuinely independent, path.
+**To resolve:** integrate an actual OCR/text-extraction engine (e.g. Upstage OCR, Tesseract, embedded-PDF text extraction, or similar) as one of the two reading paths, then configure P8 so the second path is a genuinely independent reader rather than another call to the same class of LLM-vision model.

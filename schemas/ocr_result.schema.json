@@ -11,15 +11,15 @@
         "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
         "ocr_engine": {
           "type": "string",
-          "description": "OCR engine/extractor used. No dedicated engine exists yet (see open-decisions.md) -- tools/ocr_extract.py uses the Claude CLI as a stand-in for both reading paths. Record that honestly here (e.g. 'claude-cli (no dedicated OCR engine, see open-decisions.md)') rather than implying a real engine exists."
+          "description": "Primary extraction provider/path used for this document. In the current provider-based P8 flow this is usually reader_a's provider:model label (for example 'openai-api:gpt-...' or 'claude-cli:claude-cli'); a future dedicated OCR engine should be recorded here when one is added. If the selected provider is LLM vision rather than a traditional OCR engine, record that honestly rather than implying engine-level OCR confidence exists."
         },
         "vision_model_name": {
           "type": "string",
-          "description": "The vision-capable model used for P8's independent blind read (harness-guardrails P8). Its output is never shown the other read before comparing -- see cross_validation per page."
+          "description": "Historical field name for P8's second reader and comparator metadata. Record reader_b's provider:model label and comparator label as produced by the run. reader_b reads the same raw page blind, before it sees reader_a's output -- see cross_validation per page."
         },
         "uncertain_confidence_threshold": {
           "$ref": "common_component_output.schema.json#/$defs/confidence",
-          "description": "Blocks below this confidence are recorded as uncertain_region. Not fixed in the schema since confidence distributions vary by engine -- record whatever value was actually used for this run. tools/ocr_extract.py's Claude-CLI stand-in does not produce a real per-block confidence signal (no dedicated OCR engine) -- when using it, set this to 1.0 and leave uncertain_regions empty per page rather than fabricating a number; P8's actual failure signal from that tool is the agreed/disagreed cross-validation outcome, not a confidence threshold."
+          "description": "Blocks below this confidence are recorded as uncertain_region. Not fixed in the schema since confidence distributions vary by engine -- record whatever value was actually used for this run. Current LLM-vision provider paths such as claude-cli/openai-api do not produce a real per-block OCR confidence signal; when no real confidence signal exists, set this to 1.0 and leave uncertain_regions empty per page rather than fabricating a number. P8's actual failure signal in that path is the agreed/disagreed cross-validation outcome, not a confidence threshold."
         },
         "extraction_method": {
           "enum": ["embedded_text", "ocr", "mixed"],
@@ -105,11 +105,11 @@
     },
     "cross_validation_result": {
       "type": "object",
-      "description": "P8's dual-path cross-validation for this page: the OCR engine's text (above) vs. a vision-capable model reading the same raw page blind, without seeing the OCR output. Diffed for material-content agreement (same names/dates/numbers/diagnoses present) -- not verbatim match.",
+      "description": "P8's dual-path cross-validation for this page: reader_a and reader_b both read the same raw page blind, without seeing each other's output, then a comparator checks material-content agreement (same names/dates/numbers/diagnoses present) rather than verbatim formatting. The two reads may be separate calls to the same provider/model or different providers; do not claim genuinely independent technologies unless the configured paths actually are independent.",
       "properties": {
         "vision_model_reading": {
           "type": "string",
-          "description": "The vision model's independent transcription/content summary of this page, produced before it ever saw the OCR text."
+          "description": "Historical field name for reader_b's independent transcription/content summary of this page, produced before it ever saw reader_a's text."
         },
         "agreement": {
           "enum": ["agreed", "disagreed"],

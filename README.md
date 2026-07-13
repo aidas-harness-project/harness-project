@@ -85,8 +85,9 @@ the English-only rule):
 
 ## Running the pipeline
 
-Open this repository in Claude Code and ask in natural language; the
-`loss-adjustment-pipeline` skill orchestrates the agents in order.
+Open this repository in Claude Code or a Codex-compatible workspace and ask
+in natural language; the `loss-adjustment-pipeline` skill orchestrates the
+agents in order.
 
 ```
 "Process CASE_003"          -> full initial run (intake through evaluation)
@@ -99,6 +100,12 @@ validation via `tools/validate_output.py`) before the next stage proceeds.
 Run-mode detection (initial / full rerun / partial rerun / resume-from-
 interruption) and per-stage rules are defined in
 `.claude/skills/loss-adjustment-pipeline/SKILL.md`.
+
+Checkpoint 1's P8 extraction gate is provider-configurable. `claude-cli`
+remains the backward-compatible default, while Codex-compatible runs can
+use API-backed providers such as `openai-api` for `--reader-a`,
+`--reader-b`, `--comparator`, and `--classifier-provider` when the required
+environment credentials are present.
 
 ## Tools
 
