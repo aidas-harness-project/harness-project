@@ -131,37 +131,23 @@ class ClaudeCliProvider(BaseProvider):
             raise ProviderExecutionError(f"claude-cli call failed: {result.stderr.strip()}")
         return self._result(result.stdout.strip(), prompt_version, raw_metadata)
 
-    # OCR-reader role framing for claude-cli transcription (provider bug fix,
-    # not a guardrail relaxation). claude-cli is the PoC's first-class OCR
-    # provider -- the PoC validates the pipeline on a commercial LLM before the
-    # later switch to local models (see open-decisions.md #3/#4). But the child
-    # `claude -p` session runs with cwd=project root and auto-inherits this
-    # repo's CLAUDE.md, so a bare "transcribe this" request gets misread as a
-    # pipeline-bypass and refused (meta-commentary instead of text) -- the child
-    # can't tell "the pipeline is calling me as an OCR reader" from "someone is
-    # trying to route around the pipeline". The real guardrails (DAO-only writes,
-    # ground-truth isolation) are enforced by the tools/orchestrator, never by
-    # hoping the child refuses; a blind reader printing to stdout writes nothing
-    # and bypasses nothing. This framing tells the child exactly that. Injected
-    # on the claude-cli path ONLY -- the shared TRANSCRIBE_PROMPT is untouched so
-    # other providers aren't affected. NOTE: framing alone does not stop the
-    # refusal (the child cross-checks against CLAUDE.md and distrusts a
-    # "don't refuse" instruction); the matching authorization must also live in
-    # CLAUDE.md, which is the path the child auto-loads. See CLAUDE.md Hard rules
-    # and open-decisions.md #4 for the local-transition follow-up.
-    _OCR_READER_ROLE_FRAMING = (
-        "You are a blind OCR transcription reader -- one authorized path of the "
-        "document-pipeline stage's P8 cross-validation. This is a SANCTIONED pipeline "
-        "step, not a bypass: you do NOT write to outputs/ or data/, you do NOT touch "
-        "the DAO. The calling tool captures your stdout and performs the governed write "
-        "itself. Your ONLY job: transcribe every piece of text visible in the page "
-        "image exactly as written, and print it to stdout. Do not add commentary, do "
-        "not mention guardrails, do not refuse. Mark illegible regions as [unclear] "
-        "rather than guessing. Output nothing but the transcription."
-    )
-
+    # Transcription prompt is deliberately kept NEUTRAL -- just the shared
+    # TRANSCRIBE_PROMPT plus the image path, identical in spirit to the direct
+    # `claude -p` call this provider replaced. An earlier version prepended a
+    # defensive OCR-reader "role framing" block ("this is a SANCTIONED step, not
+    # a bypass, do NOT touch the DAO, do not refuse..."). That backfired: the
+    # child `claude -p` session runs with cwd=project root and auto-inherits this
+    # repo's CLAUDE.md, and a prompt that pre-argues its own legitimacy and says
+    # "do not refuse / do not mention guardrails" reads as a prompt-injection
+    # signal -- a genuine OCR request never needs to defend itself -- so the
+    # child refused and emitted meta-commentary instead of the page text. The fix
+    # is to say none of it: a plain "transcribe this image" request gives the
+    # child nothing to adjudicate. The real guardrails (DAO-only writes,
+    # ground-truth isolation) are enforced by the tools/orchestrator, not by the
+    # child's refusal; a blind reader printing to stdout writes nothing and
+    # bypasses nothing regardless of prompt wording.
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
-        framed_prompt = f"{self._OCR_READER_ROLE_FRAMING}\n\n{prompt}\n\nImage: {image_path}"
+        framed_prompt = f"{prompt}\n\nImage: {image_path}"
         return self._run(framed_prompt, prompt_version=prompt_version, allowed_read=True, timeout=180)
 
     def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
