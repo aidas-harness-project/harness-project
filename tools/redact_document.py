@@ -124,6 +124,7 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, provid
         "model_info": {
             "model_name": f"{provider.provider_name}:{provider.model_name}",
             "prompt_version": PROMPT_VERSION,
+            "provider_metadata": provider_metadata or {},
         },
         "method": "local_llm_offline" if provider.provider_name == "local-llm" else provider.provider_name,
         "document_id": doc_id,
@@ -135,7 +136,7 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, provid
     }
     if provider_metadata:
         contract["warnings"] = [
-            "Provider execution metadata is recorded in model_info; source text was accessed only through dao.py."
+            "Provider execution metadata is recorded in model_info.provider_metadata; source text was accessed only through dao.py."
         ]
 
     scratch_root = ROOT / "_redaction_scratch"
