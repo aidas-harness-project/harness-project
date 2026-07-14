@@ -53,10 +53,18 @@
           "enum": ["agreed", "disagreed_pending_review", "disagreed_resolved", "not_run"],
           "description": "Document-level rollup of the per-page cross_validation results below. 'disagreed_pending_review' on any page means the whole document is blocked from downstream use per harness-guardrails P8 until a human resolves it. 'disagreed_resolved' is distinct from 'agreed' -- the two independent reads did NOT actually agree, a human resolved which reading was correct (see each resolved page's cross_validation.resolution) -- collapsing this into 'agreed' would misrepresent what P8 actually found. Found by actually resolving a real disagreement (CASE_012/DOC_001 page 4, I67 vs I67.8) -- there was no way to represent 'resolved' at all before this."
         },
+        "cross_validation_mode": {
+          "enum": ["dual_technology", "single_technology_weak_p8_poc", "deferred_poc"],
+          "description": "How independent P8's two reads actually were, computed from the configured readers (not asserted). 'dual_technology' = reader_a and reader_b use genuinely different extraction technologies (e.g. local-ocr Tesseract + local-vlm vision model) -- real P8 independence. 'single_technology_weak_p8_poc' = both reads came from one provider/model (the PoC's claude-cli path); a documented WEAK P8 that cannot catch a correlated confident error shared by both reads -- must never be presented as genuine dual-technology P8. 'deferred_poc' = cross-validation was intentionally not run (single-reader PoC). Genuine two-technology independence is deferred to the local-transition step (open-decisions.md #4). This label describes reader independence only; the hard-halt on a genuine content disagreement is unchanged regardless of its value."
+        },
+        "cross_validation_note": {
+          "type": "string",
+          "description": "Human-readable justification for cross_validation_mode -- e.g. which providers/models both readers used and why the run is (or isn't) genuinely independent. Empty string when cross_validation_mode is 'dual_technology'."
+        },
         "review_required": { "type": "boolean" },
         "review_reason": { "type": "string" }
       },
-      "required": ["document_id", "ocr_engine", "vision_model_name", "uncertain_confidence_threshold", "extraction_method", "ocr_status", "pages", "ocr_quality", "cross_validation_status"]
+      "required": ["document_id", "ocr_engine", "vision_model_name", "uncertain_confidence_threshold", "extraction_method", "ocr_status", "pages", "ocr_quality", "cross_validation_status", "cross_validation_mode"]
     }
   ],
   "$defs": {

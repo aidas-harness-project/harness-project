@@ -291,6 +291,8 @@ def run_ocr(
             msg = f"page {i}/{len(page_images)}: {result['agreement']}"
             progress(msg) if progress else print(msg, file=sys.stderr)
 
+    cross_validation_mode, cross_validation_note = _classify_cross_validation(reader_a, reader_b)
+
     return {
         "document_path": str(doc_path),
         "providers": {
@@ -298,8 +300,35 @@ def run_ocr(
             "reader_b": _metadata_for(reader_b),
             "comparator": _metadata_for(comparator),
         },
+        "cross_validation_mode": cross_validation_mode,
+        "cross_validation_note": cross_validation_note,
         "pages": pages_out,
     }
+
+
+def _classify_cross_validation(reader_a, reader_b) -> tuple[str, str]:
+    """Label P8's cross-validation strength honestly, computed from the actual
+    readers rather than hard-coded, so the label self-corrects when the reader
+    pair changes. Two reads from the same provider (the PoC's claude-cli path,
+    until the local dual-technology pair is validated -- open-decisions.md #4)
+    are a documented weak-P8: they cannot catch a correlated confident error,
+    since both readings share one extraction technology. The hard-halt on a
+    genuine content disagreement is unchanged regardless of this label -- what
+    this records is reader *independence*, not disagreement tolerance."""
+    same_provider = reader_a.provider_name == reader_b.provider_name
+    same_model = getattr(reader_a, "model_name", None) == getattr(reader_b, "model_name", None)
+    if same_provider and same_model:
+        return (
+            "single_technology_weak_p8_poc",
+            f"Both readers are {reader_a.provider_name} (model "
+            f"{getattr(reader_a, 'model_name', 'n/a')}); one extraction technology "
+            "self-checking against itself. PoC-phase provider strategy: validate the "
+            "pipeline on a commercial LLM before switching to the local dual-technology "
+            "pair. This is NOT genuine dual-technology P8 -- it cannot detect a "
+            "correlated confident error shared by both reads. Genuine two-technology "
+            "independence is deferred to the local-transition step (open-decisions.md #4).",
+        )
+    return ("dual_technology", "")
 
 
 def main():

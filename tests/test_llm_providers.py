@@ -154,7 +154,8 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
     assert captured["cmd"] == [
         "claude",
         "-p",
-        "transcribe prompt\n\nImage: page.png",
+        f"{providers.ClaudeCliProvider._OCR_READER_ROLE_FRAMING}"
+        "\n\ntranscribe prompt\n\nImage: page.png",
         "--allowedTools",
         "Read",
     ]
@@ -445,24 +446,45 @@ def test_local_llm_rejects_non_loopback_ollama_host():
     assert "loopback" in str(excinfo.value)
 
 
-def test_local_llm_verifies_preloaded_model_before_run(monkeypatch):
+def test_local_llm_verifies_preloaded_model_before_loopback_generate(monkeypatch):
     calls = []
+    captured = {}
 
     def fake_run(cmd, **kwargs):
         calls.append((cmd, kwargs))
-        if cmd[1] == "show":
-            return SimpleNamespace(returncode=0, stdout="model info", stderr="")
-        return SimpleNamespace(returncode=0, stdout="AGREE: same", stderr="")
+        return SimpleNamespace(returncode=0, stdout="model info", stderr="")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"response":"AGREE: same","done":true,"total_duration":42}'
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
 
     monkeypatch.setattr(providers.subprocess, "run", fake_run)
-    provider = providers.LocalLlmProvider(model_name="local-model", env={})
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    provider = providers.LocalLlmProvider(
+        model_name="local-model", env={"OLLAMA_MODELS": "E:/runtime/models"}
+    )
 
     result = provider.compare_text("compare prompt", "compare_v1")
 
     assert calls[0][0] == ["ollama", "show", "local-model"]
-    assert calls[1][0] == ["ollama", "run", "local-model"]
-    assert calls[1][1]["input"] == "compare prompt"
-    assert calls[1][1]["env"]["OLLAMA_HOST"] == "http://127.0.0.1:11434"
+    assert calls[0][1]["env"]["OLLAMA_MODELS"] == "E:/runtime/models"
+    assert captured["url"] == "http://127.0.0.1:11434/api/generate"
+    assert captured["payload"] == {
+        "model": "local-model", "prompt": "compare prompt", "stream": False, "think": False,
+    }
+    assert captured["timeout"] == 120
     assert result.text == "AGREE: same"
 
 

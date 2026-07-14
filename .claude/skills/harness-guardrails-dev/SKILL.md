@@ -27,6 +27,15 @@ For skills: the containing folder gets a `-dev` suffix (e.g. `harness-guardrails
 
 This convention is itself dev-only guidance — it stops mattering once there's no dev/prod split left to track.
 
+## (Dev-only, temporary) P8 same-provider fallback
+
+When no genuinely independent second extraction technology is available (`local-ocr`/`local-vlm` not yet provisioned or not yet validated), the dev phase may run P8's two readers both as `claude-cli`. This is the PoC provider strategy — validate the pipeline with a commercial LLM first, move to the local pair after it passes real Korean-document quality validation (see `open-decisions.md` #4). It is a **documented weak-P8**, not equivalent to dual-technology cross-validation.
+
+- **Record it honestly in `ocr_result.json`**: `reader_a`/`reader_b` = `"claude-cli:claude-cli"`, `cross_validation_mode = "single_technology_weak_p8_dev"`, and a `reason` string stating no independent second technology was available at run time. Never let a same-provider run look like genuine P8.
+- **Disagreement handling is unchanged — hard-halt stays.** What is relaxed is *reader independence*, never *disagreement tolerance*. A genuine content disagreement between the two claude-cli reads still halts with no tolerance threshold.
+- Each `claude-cli` reader is invoked through the OCR-reader role framing (`llm_providers.py` `ClaudeCliProvider._OCR_READER_ROLE_FRAMING`). Because a child `claude -p` session inherits the repo's `CLAUDE.md`, the prompt framing alone does **not** stop its self-refusal — the authorization must also be present in `CLAUDE.md` itself (Hard rules → the OCR-reader carve-out), which is the path the child auto-loads. Verified: prompt-only framing failed on DOC_001; adding the `CLAUDE.md` carve-out made it transcribe.
+- **Dev-only. Must not ship to prod** — in production `harness-guardrails` P8 (genuine dual-path independence) applies. Remove this fallback, the `CLAUDE.md` carve-out, and `_OCR_READER_ROLE_FRAMING` once the local `local-ocr`+`local-vlm` pair is validated. Tracking: `docs/CASE_004_stage2_dev_bypass_progress.md`.
+
 ## D4. Directory/stage references must stay in sync with reality
 
 Skill and agent docs that name specific directories or pipeline stages must stay in sync with the real structure. When the project's directory structure or stage names change, every doc referencing the old path/name gets updated in the same change — not left stale for someone to trip over later. If a stale reference is found (a skill says one thing, reality is another), that mismatch gets fixed immediately, not noted and deferred.

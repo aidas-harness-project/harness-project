@@ -1,7 +1,7 @@
 {
   "case_id": "CASE_004",
   "created_at": "2026-07-09T18:00:00+09:00",
-  "updated_at": "2026-07-09T18:30:00+09:00",
+  "updated_at": "2026-07-14T13:58:35.532702+09:00",
   "documents": [
     {
       "document_id": "DOC_001",
@@ -10,13 +10,14 @@
       "file_format": "pdf",
       "file_size_bytes": 5329977,
       "pages": 1,
-      "ocr_status": "completed",
-      "ocr_text_path": "data/processed/CASE_004/DOC_001/page_001.md",
-      "ocr_quality": "high",
-      "uncertain_region_count": 0,
-      "redacted_text_path": "data/processed/CASE_004/DOC_001/redacted_text.md",
-      "document_type": "diagnosis_certificate",
-      "classification_confidence": 0.97
+      "ocr_status": "failed",
+      "ocr_text_path": null,
+      "ocr_quality": null,
+      "uncertain_region_count": null,
+      "redacted_text_path": null,
+      "document_type": null,
+      "classification_confidence": null,
+      "cross_validation_status": "disagreed_pending_review"
     },
     {
       "document_id": "DOC_002",
