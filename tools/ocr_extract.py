@@ -8,11 +8,12 @@ extraneous content (a fabricated appendix, meta-commentary, anything one
 reading has that the other lacks entirely) as a disagreement even when the
 core facts otherwise match.
 
-The reader/comparator backends are provider-configurable. The default
-remains claude-cli for backward compatibility, but Codex-compatible runs
-can select openai-api for reader_a, reader_b, and comparator. Using the
-same provider twice is still two isolated calls; it is not a true
-independent-engine cross-check, which is deferred to a later issue.
+The reader/comparator backends are provider-configurable. The recommended
+fully local P8 configuration pairs local-ocr (Tesseract) for reader A with
+local-vlm (an Ollama vision model) for reader B, then uses local-llm for the
+text comparison. This gives the two readers different extraction
+technologies while keeping every call on the machine. Local providers never
+download dependencies and never fall back externally.
 
 This tool does not write any contract file itself -- it prints page-level
 results as JSON. document-pipeline reads that JSON, writes each page's
@@ -25,7 +26,9 @@ cleaned up on exit), not system /tmp.
 Usage:
     python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf
     python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf \
-        --reader-a openai-api --reader-b openai-api --comparator openai-api
+        --reader-a local-ocr --reader-a-model kor+eng:6 \
+        --reader-b local-vlm --reader-b-model qwen3-vl:4b \
+        --comparator local-llm --comparator-model qwen3-vl:4b
 """
 import argparse
 import contextlib

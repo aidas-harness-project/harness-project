@@ -341,3 +341,140 @@ def test_unknown_provider_fails_before_any_execution():
 
     assert "codex-api" in str(excinfo.value)
     assert "openai-api" in str(excinfo.value)
+
+
+def test_local_ocr_runs_tesseract_without_network(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="추출된 텍스트", stderr="")
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.build_provider(
+        providers.ProviderConfig("local-ocr", "kor+eng:11"),
+        env={"HARNESS_LOCAL_OCR_COMMAND": "tesseract-local"},
+        root=tmp_path,
+    )
+
+    result = provider.transcribe_image(Path("page.png"), "ignored", "ocr_v1")
+
+    assert captured["cmd"] == [
+        "tesseract-local", "page.png", "stdout", "-l", "kor+eng", "--psm", "11"
+    ]
+    assert "input" not in captured["kwargs"]
+    assert result.text == "추출된 텍스트"
+    assert result.provider_name == "local-ocr"
+
+
+def test_local_ocr_never_falls_back_when_command_is_missing(monkeypatch):
+    monkeypatch.setattr(providers.subprocess, "run", mock.Mock(side_effect=FileNotFoundError("missing")))
+    provider = providers.LocalOcrProvider(command="missing-tesseract")
+
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.transcribe_image(Path("page.png"), "prompt", "ocr_v1")
+
+    assert "install Tesseract" in str(excinfo.value)
+
+
+def test_local_vlm_rejects_non_loopback_ollama_host():
+    with pytest.raises(providers.ProviderConfigError) as excinfo:
+        providers.LocalVlmProvider(
+            model_name="qwen3-vl:4b", env={"OLLAMA_HOST": "https://example.com"}
+        )
+
+    assert "loopback" in str(excinfo.value)
+
+
+def test_local_vlm_verifies_model_and_posts_base64_image(monkeypatch, tmp_path):
+    calls = []
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return SimpleNamespace(returncode=0, stdout="model exists", stderr="")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"response":"page text","done":true,"total_duration":123}'
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"fake png")
+    provider = providers.build_provider(
+        providers.ProviderConfig("local-vlm", "qwen3-vl:4b"),
+        env={
+            "OLLAMA_HOST": "http://127.0.0.1:11434",
+            "OLLAMA_MODELS": "E:/runtime/models",
+            "HARNESS_LOCAL_VLM_COMMAND": "E:/runtime/ollama.exe",
+        },
+    )
+
+    result = provider.transcribe_image(image_path, "transcribe", "ocr_v1")
+
+    assert calls[0][0] == ["E:/runtime/ollama.exe", "show", "qwen3-vl:4b"]
+    assert calls[0][1]["env"]["OLLAMA_MODELS"] == "E:/runtime/models"
+    assert captured["url"] == "http://127.0.0.1:11434/api/generate"
+    assert captured["payload"]["model"] == "qwen3-vl:4b"
+    assert captured["payload"]["images"] == ["ZmFrZSBwbmc="]
+    assert captured["payload"]["stream"] is False
+    assert captured["timeout"] == 300
+    assert result.text == "page text"
+
+
+def test_local_llm_rejects_non_loopback_ollama_host():
+    with pytest.raises(providers.ProviderConfigError) as excinfo:
+        providers.LocalLlmProvider(
+            model_name="local-model", env={"OLLAMA_HOST": "https://example.com"}
+        )
+
+    assert "loopback" in str(excinfo.value)
+
+
+def test_local_llm_verifies_preloaded_model_before_run(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        if cmd[1] == "show":
+            return SimpleNamespace(returncode=0, stdout="model info", stderr="")
+        return SimpleNamespace(returncode=0, stdout="AGREE: same", stderr="")
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.LocalLlmProvider(model_name="local-model", env={})
+
+    result = provider.compare_text("compare prompt", "compare_v1")
+
+    assert calls[0][0] == ["ollama", "show", "local-model"]
+    assert calls[1][0] == ["ollama", "run", "local-model"]
+    assert calls[1][1]["input"] == "compare prompt"
+    assert calls[1][1]["env"]["OLLAMA_HOST"] == "http://127.0.0.1:11434"
+    assert result.text == "AGREE: same"
+
+
+def test_local_llm_refuses_to_auto_download_missing_model(monkeypatch):
+    monkeypatch.setattr(
+        providers.subprocess,
+        "run",
+        mock.Mock(return_value=SimpleNamespace(returncode=1, stdout="", stderr="missing")),
+    )
+    provider = providers.LocalLlmProvider(model_name="missing-model", env={})
+
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.classify_document("prompt", "classification_v1")
+
+    assert "automatic download is disabled" in str(excinfo.value)

@@ -6,9 +6,9 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `document-pipeline`, checkpoint 2 (Redaction).
 
-**Current:** general LLM.
+**Current:** `tools/redact_document.py` provides an executable checkpoint-2 path. Privacy-sensitive runs use the `local-llm` provider backed by a model already present in a loopback-only Ollama deployment. Missing runtime/model fails closed; there is no external fallback.
 
-**Candidate:** OpenMed -- an open-source suite of self-hosted biomedical NER models (Hugging Face), including PHI/PII de-identification. Matches the no-data-collection trust property already required for the OCR engine. Not yet adopted.
+**Candidate:** OpenMed -- an open-source suite of self-hosted biomedical NER models (Hugging Face), including PHI/PII de-identification. It may offer more deterministic entity handling than a general local LLM. Not yet adopted.
 
 **To resolve:** verify current library/model maturity and integration effort before switching. Low urgency at PoC scale, but should be revisited if redaction quality or data-handling trust becomes a concern.
 
@@ -30,13 +30,13 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `document-pipeline`, checkpoint 1 (P8's dual-path cross-validation, `tools/ocr_extract.py`).
 
-**Current:** accepted as a known, unresolved risk -- flagged inline in `harness-guardrails` P8, not fixed. Provider abstraction lets the run choose `claude-cli`, `openai-api`, or future provider paths, but it does not by itself solve data-retention/privacy.
+**Current:** an offline path is implemented but not yet validated end-to-end. Runs explicitly configured with a `local-ocr` + `local-vlm` reader pair and the loopback-only `local-llm` comparator/classifier/redactor keep raw page data on the machine: those providers require preinstalled E:-scoped binaries/models, refuse automatic downloads during a run, and never fall back externally. This closes the external-transmission gap in principle, but the runtime has not been installed and no smoke test has confirmed it on a real case — treat it as implemented, pending validation, not resolved. The risk remains in full for external CLI/API provider selections.
 
 **Problem:** P8's two readers must see the raw, unredacted page image (that's the point -- they have to see what's actually on the page before redaction). The comparator and classifier may also see unredacted extracted text. If any configured provider path is not under a no-data-retention arrangement, every checkpoint-1 run may send PII to that destination.
 
 **Options on the table (see conversation history for the full discussion):**
 - Establish a no-retention trust arrangement for the deployment running these reads (procurement/vendor question, not an architecture change).
-- Replace one or both LLM-vision reads with a local or vendor-approved OCR engine once #4 below is resolved.
+- Use the implemented local path (`local-ocr` + `local-vlm` + `local-llm`) after `tools/local_runtime.py` passes.
 
 **To resolve:** a deployment/vendor decision, not something to default on silently.
 
@@ -44,8 +44,8 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `tools/ocr_extract.py`, used by `document-pipeline` checkpoint 1.
 
-**Current:** partially resolved for execution portability. The old stand-in was two fresh `claude-cli` invocations with no shared context. `tools/ocr_extract.py` now has provider-configurable `reader_a`, `reader_b`, and `comparator` paths, so Codex-compatible runs can use configured API providers such as `openai-api` and are no longer blocked solely by a missing Claude CLI. `ocr_result.json` records provider/model labels through `ocr_engine`, `vision_model_name`, and component `model_info`.
+**Current:** two offline reader technologies now exist. `local-ocr` invokes preinstalled Tesseract, while `local-vlm` sends the page image only to a preloaded loopback Ollama vision model. `local-llm` performs comparison and classification. `ocr_result.json` records the actual provider/model labels.
 
-**Remaining problem:** provider-configurable does not mean technology-independent. Same-provider runs such as `openai-api` + `openai-api` or `claude-cli` + `claude-cli` are separate calls, but they still share more failure modes than two genuinely different technologies would. Cross-provider LLM vision can reduce some shared model-specific risk, but it is still not the same as pairing a traditional OCR/text-extraction engine with an independent vision read. Current LLM-vision provider paths also do not produce per-block numeric OCR confidence; P8's hard signal remains page-level agreed/disagreed.
+**Remaining problem:** the Tesseract + vision-model pair is technologically independent, but the chosen local model still needs real Korean insurance-document validation. Two `local-ocr` reads remain available only as a weaker fallback and still share Tesseract's systematic errors. P8's hard signal remains page-level agreed/disagreed.
 
-**To resolve:** integrate an actual OCR/text-extraction engine (e.g. Upstage OCR, Tesseract, embedded-PDF text extraction, or similar) as one of the two reading paths, then configure P8 so the second path is a genuinely independent reader rather than another call to the same class of LLM-vision model.
+**To resolve:** run the real smoke/quality matrix for the pinned local vision model and document its Korean transcription failure modes before treating the local pair as production-ready.

@@ -79,3 +79,21 @@ def test_write_reviewed_draft_rejects_invalid_version(isolated_dao, make_args, t
 
     with pytest.raises(SystemExit):
         dao.cmd_write_reviewed_draft(args)
+
+
+def test_read_page_text_returns_only_validated_processed_page(isolated_dao, make_args, capsys):
+    page_path = isolated_dao / "data" / "processed" / "CASE_009" / "DOC_001" / "page_001.md"
+    page_path.parent.mkdir(parents=True)
+    page_path.write_text("검증된 페이지 텍스트", encoding="utf-8")
+
+    rc = dao.cmd_read_page_text(make_args(page=1))
+
+    assert rc == 0
+    assert capsys.readouterr().out == "검증된 페이지 텍스트"
+
+
+def test_read_page_text_fails_when_checkpoint1_page_is_missing(isolated_dao, make_args, capsys):
+    rc = dao.cmd_read_page_text(make_args(page=3))
+
+    assert rc == 1
+    assert "NOT_EXTRACTED" in capsys.readouterr().out
