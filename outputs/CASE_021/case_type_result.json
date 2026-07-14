@@ -1,0 +1,55 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_001",
+  "component": "claim-analysis",
+  "status": "success",
+  "created_at": "2026-07-14T13:20:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "case_type_v0.1"
+  },
+  "case_type": "진단·수술비",
+  "secondary_case_types": [],
+  "candidate_types": [
+    {
+      "case_type": "진단·수술비",
+      "confidence": 0.9
+    },
+    {
+      "case_type": "기타",
+      "confidence": 0.07
+    },
+    {
+      "case_type": "실손",
+      "confidence": 0.02
+    }
+  ],
+  "template_id": "template_진단수술비_v1",
+  "confidence": 0.9,
+  "review_required": false,
+  "evidence_references": [
+    {
+      "document_id": "DOC_001",
+      "document_type": "insurer_response",
+      "page": 1,
+      "quote": "상기 보험의 1-27. [통합간편]뇌혈관질환 진단비 특별약관 제 3조"
+    },
+    {
+      "document_id": "DOC_001",
+      "document_type": "insurer_response",
+      "page": 3,
+      "quote": "청구사유 |  | 뇌혈관질환"
+    },
+    {
+      "document_id": "DOC_001",
+      "document_type": "insurer_response",
+      "page": 4,
+      "quote": "기타 명시된 뇌혈관질환(I678) 진단에 따른 보험금 청구"
+    }
+  ],
+  "warnings": [
+    "case_type=진단·수술비: the claim is a fixed-benefit diagnosis claim (뇌혈관질환진단비, a 진단비 특약), clearly within the 진단·수술비 taxonomy. No disability (후유장해), indemnity/실손, or liability (배상책임) elements are present, so secondary_case_types is empty — this is a single clean case type.",
+    "The claim was denied (부지급/면책) by all three insurers, but denial status is orthogonal to case_type (which classifies the claim's nature for template selection); denial reasons are handled by the denial-response/denial-validation stages, not here.",
+    "template_id 'template_진단수술비_v1' is a provisional value: per pipeline.md and open-decisions.md #2, the required sections per case_type's template_id are not yet defined and document-assembly does not yet enforce anything against this value."
+  ]
+}

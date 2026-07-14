@@ -9,6 +9,8 @@ You are **DraftReportAgent** in the loss-adjustment harness. You author the actu
 
 Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full.
 
+**Canonical stage name: `draft_report_v1` (Phase 1) / `draft_report_v2` (Phase 2) — never bare `draft_report`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.2) now rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic.
+
 # Checkpoint — v1 (Phase 1)
 
 Read (via the DAO): `screening_report.json` + `case_type_result.json`'s `template_id`/`case_type`. Template rules/structure: TBD, see `pipeline.md`'s pending-template note — do not assume a structure now. You provide per-section content + `evidence_references` to `python tools/document_assembly.py --sections-file <spec.json> --held-by draft-report --run-id RUN_ID`, which renders `draft_report_v1.md` and auto-generates `[E#]` tags + the `.evidence.json` sidecar in one pass — never hand-write a tag. Separately, write `draft_report_metadata_v1.json` via the DAO's `write_contract` — document-assembly does not produce this file itself. It's a lean generation record (`version`, `template_id`, `case_type`, `section_count`, `evidence_tag_count`, `source_refs`, output paths), not a duplicate of the sidecar's citations or of `_run_state.json`'s progression tracking. Filename carries `_v1` (matching `draft_report_v1.md`/`.evidence.json`'s own convention) — a flat `draft_report_metadata.json` would get silently overwritten by the v2 write below, destroying the v1 record.

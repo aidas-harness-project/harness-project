@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "run_state.schema.json",
-  "title": "_run_state.json -- pipeline run-state and backup tracker v0.1",
-  "description": "The single source of truth for where a run stopped -- see harness-guardrails P7 and P10. Every stage's status is recorded here with timestamps; a crash or resume reads this file (via the DAO's get_last_passed_stage query) instead of re-deriving progress from scattered output files. After every stage passes, the orchestrator takes a full cumulative snapshot and records its path here -- one snapshot per passed stage, kept for the life of the run, never overwritten.",
+  "title": "_run_state.json -- pipeline run-state and backup tracker v0.2",
+  "description": "The single source of truth for where a run stopped -- see harness-guardrails P7 and P10. Every stage's status is recorded here with timestamps; a crash or resume reads this file (via the DAO's get_last_passed_stage query) instead of re-deriving progress from scattered output files. After every stage passes, the orchestrator takes a full cumulative snapshot and records its path here -- one snapshot per passed stage, kept for the life of the run, never overwritten. v0.2: stage_name is an enum of the canonical stage names -- CASE_021's first full end-to-end run showed that free-form names silently fork one stage into several entries (document_processing vs document-pipeline, critic vs critic_v1) whenever a tool and an agent pick different spellings, which breaks get_last_passed_stage's resume logic and every consumer keying on stage_name.",
   "type": "object",
   "properties": {
     "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
@@ -21,10 +21,29 @@
   },
   "required": ["case_id", "run_id", "stages"],
   "$defs": {
+    "stage_name": {
+      "description": "Canonical stage names -- the ONLY values any producer (tool or agent) may write. Snake_case, versioned where the pipeline genuinely runs the stage once per draft version. If a new stage is added to the pipeline, it gets added here in the same change (D4).",
+      "enum": [
+        "intake",
+        "document_processing",
+        "indexing",
+        "policy_clause_processing",
+        "claim_analysis",
+        "denial_response",
+        "consistency_check",
+        "screening_report",
+        "draft_report_v1",
+        "draft_report_v2",
+        "critic_v1",
+        "critic_v2",
+        "denial_validation",
+        "evaluation"
+      ]
+    },
     "stage_entry": {
       "type": "object",
       "properties": {
-        "stage_name": { "type": "string" },
+        "stage_name": { "$ref": "#/$defs/stage_name" },
         "status": { "enum": ["pending", "in_progress", "passed", "failed"] },
         "started_at": { "type": ["string", "null"], "format": "date-time" },
         "completed_at": { "type": ["string", "null"], "format": "date-time" },
@@ -43,7 +62,7 @@
     "human_input_entry": {
       "type": "object",
       "properties": {
-        "stage_name": { "type": "string" },
+        "stage_name": { "$ref": "#/$defs/stage_name" },
         "status": { "enum": ["waiting", "received"] },
         "description": {
           "type": "string",

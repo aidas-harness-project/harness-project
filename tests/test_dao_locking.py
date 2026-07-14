@@ -145,7 +145,7 @@ def test_add_conflict_entry_requires_held_by_and_run_id_and_locks(isolated_dao, 
     target = dao.conflict_ledger_path("CASE_009")
     dao.acquire_lock(target, "someone-else", "RUN_OTHER", "holding")
 
-    rc = dao.cmd_add_conflict_entry(make_args(stage="claim-analysis", topic="t", sources_file=str(sources_file)))
+    rc = dao.cmd_add_conflict_entry(make_args(stage="claim_analysis", topic="t", sources_file=str(sources_file)))
 
     assert rc == 1, "must wait, then report the still-held lock rather than silently proceeding"
     ledger = dao.load_conflict_ledger("CASE_009")

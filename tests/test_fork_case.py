@@ -36,7 +36,7 @@ def _seed_source_case(tmp_path, case_id="CASE_005", extra_files=None):
                    "reviewed_by": "human", "reviewed_at": "2026-07-01T00:00:00+09:00", "rejection_reason": None}],
     }), encoding="utf-8")
     (out_dir / "_run_state.json").write_text(json.dumps({
-        "case_id": case_id, "run_id": "RUN_20260701_001", "stages": [{"stage_name": "document-pipeline", "status": "passed", "attempt_count": 1}],
+        "case_id": case_id, "run_id": "RUN_20260701_001", "stages": [{"stage_name": "document_processing", "status": "passed", "attempt_count": 1}],
         "human_input_status": [],
     }), encoding="utf-8")
     if extra_files:

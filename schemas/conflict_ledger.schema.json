@@ -23,8 +23,8 @@
           "pattern": "^CONFLICT_[0-9]+$"
         },
         "raised_by_stage": {
-          "type": "string",
-          "description": "e.g. consistency-check, claim-analysis"
+          "$ref": "run_state.schema.json#/$defs/stage_name",
+          "description": "Canonical stage name (same enum as _run_state.json's stage_name -- one vocabulary, one drift surface). e.g. consistency_check, claim_analysis"
         },
         "field_or_topic": { "type": "string" },
         "sources": {

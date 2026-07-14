@@ -10,6 +10,8 @@ You are **PolicyPipelineAgent** in the loss-adjustment harness. You turn policy 
 
 Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. Most relevant here: P2 (read from the processed layer via the DAO, never raw), P1 (every extracted clause traces to a specific quote), P5 (lock before writing).
 
+**Canonical stage name: `policy_clause_processing`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.2) now rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic.
+
 # Internal sub-phases (not separately gated — only the final output is)
 
 1. Identify clause boundaries in the policy text.

@@ -1,0 +1,200 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_001",
+  "component": "screening-report",
+  "status": "success",
+  "created_at": "2026-07-14T15:00:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "screening_report_v0.1"
+  },
+  "confidence": 0.55,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "medium",
+    "reason": "All restated facts trace to DOC_001 quotes. The judgment-bearing outputs (preliminary_assessment feasibility/difficulty, key-issue framing) are hedged per P3 and routed for review; the pivotal medical question (I67.8 진단확정 objective establishment) is deliberately left unresolved rather than asserted, and no policy document or medical/imaging record exists in-case to confirm coverage terms independently."
+  },
+  "report_path": "outputs/CASE_021/screening_report.md",
+  "case_summary": {
+    "case_type": "진단·수술비",
+    "main_diagnosis": "기타 명시된 뇌혈관질환 (I67.8)",
+    "kcd_code": "I67.8",
+    "accident_date": "2025-10-16",
+    "onset_date": "2025-09-30",
+    "treatment_period": null,
+    "claim_coverages": [
+      "뇌혈관질환진단비"
+    ]
+  },
+  "insurer_position": {
+    "has_denial_or_reduction": true,
+    "main_reason_code": "R04",
+    "main_reason_label": "약관상 지급요건 미충족",
+    "summary": "삼성화재(p1-2)·KB손해보험(p3)·한화손해보험(p4) 3개 보험사가 동일한 뇌혈관질환진단비(I67.8) 청구를 모두 전부 부지급(면책) 처리한 것으로 나타난다. 3사 공통 논거는 2025-10-10 brain MRI/MRA 영상소견(양측 대뇌백질의 경미·우연 발견 만성 허혈성 병변, 특이적 신경학적 증상 부재)이 약관상 진단확정 요건을 객관적으로 충족한다고 보기 어렵다는 취지로 파악된다. 잠정적으로 R04(지급요건 미충족)로 분류하였으나 KB가 표제상 '면책'으로 기재하는 등 R05와의 성격 구분에는 검토 여지가 있어 손해사정사 검토가 필요한 것으로 판단된다(확정 판단 아님).",
+    "reduction_amount": null
+  },
+  "key_issues": [
+    {
+      "issue_id": "ISSUE_1",
+      "title": "I67.8 진단확정의 객관적 성립 여부 (핵심 쟁점)",
+      "description": "2025-10-10 영상소견이 약관상 뇌혈관질환 진단확정을 객관적으로 뒷받침하는지 여부가 본 건의 핵심 쟁점이다. 요구 검사(MRI/MRA·신경학적 검진)는 시행되었으나(REQ-2 충족), 그 결과가 진단을 성립시키는지(REQ-3)는 3사 모두 부정적으로 판단하였다. 의학적 다툼의 여지가 있는 사항으로 확정 서술 없이 유보하며 의사 검토가 필요한 것으로 판단된다.",
+      "related_documents": [
+        "DOC_001"
+      ],
+      "review_required": true,
+      "reviewer_role": "의사"
+    },
+    {
+      "issue_id": "ISSUE_2",
+      "title": "원 영상·의무기록·약관 부존재 (단일 문서 사건)",
+      "description": "사건이 3사 부지급 안내문 1건(DOC_001)만으로 구성되어, 핵심 쟁점을 독립 검증할 진단서·의무기록·2025-10-10 영상 원본·약관 전문이 사건 내 부존재한다. 이 자료 공백이 예비 평가의 확정성을 제한하는 근본 요인으로 판단된다.",
+      "related_documents": [
+        "DOC_001"
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "issue_id": "ISSUE_3",
+      "title": "부지급 사유의 R04(지급요건 미충족)/R05(면책) 성격 규정",
+      "description": "각 안내문이 결과를 '부지급'·'면책'으로 표기하나 실질 논거는 약관 진단확정 요건 미충족(R04)에 가까운 것으로 파악된다. R04/R05 성격 구분은 향후 대응 방향에 영향을 줄 수 있어 손해사정사 검토가 필요한 것으로 판단된다.",
+      "related_documents": [
+        "DOC_001"
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "issue_id": "ISSUE_4",
+      "title": "동일 청구의 3개 보험사 병렬 부지급",
+      "description": "단일 뇌혈관질환진단비 청구가 삼성화재·KB·한화 3개 별개 보험계약에 병렬로 걸려 있고 3사가 각각 독립적으로 부지급하였다. 대응 시 3사 계약·약관을 개별적으로 다루어야 하는 다중성이 존재한다.",
+      "related_documents": [
+        "DOC_001"
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "issue_id": "ISSUE_5",
+      "title": "accident_date·onset_date의 단일출처 대체 매핑",
+      "description": "accident_date(2025-10-16)는 삼성 p1의 사고일 필드가 공란이어서 한화 진단서 발급일로 대체 매핑된 값이며, onset_date(2025-09-30)는 최초 내원일을 증상발생 근접값으로 사용한 것으로, 둘 다 명시된 사고일/발병일이 아니다. 손해사정사 확인이 필요하다.",
+      "related_documents": [
+        "DOC_001"
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    }
+  ],
+  "inconsistencies": [],
+  "missing_documents": [
+    {
+      "document_type": "imaging_report",
+      "reason": "2025-10-10 brain MRI/MRA 원본 및 판독지 — 3사 부지급 논거의 근거가 된 영상소견을 독립적으로 재판독·검증하기 위한 핵심 임상 자료이나 사건 내 부존재."
+    },
+    {
+      "document_type": "diagnosis_certificate",
+      "reason": "I67.8 진단서 — 진단확정 사실과 유자격 의사·의료기관 요건(REQ-1) 확인용. 현재 진단 사실은 보험사 안내문 인용으로만 확인됨."
+    },
+    {
+      "document_type": "medical_record",
+      "reason": "경과기록 등 의무기록 — 병력·신경학적 검진 소견 등 진단확정 근거를 원자료로 확인하기 위함. 사건 내 부존재."
+    },
+    {
+      "document_type": "insurance_policy",
+      "reason": "삼성·KB·한화 각 약관 전문(진단확정 조항 전체) — 안내문에 부분 인용된 문언 외 지급요건을 확인하기 위함. policy-pipeline이 정규화한 약관 문서가 사건 내 없음."
+    }
+  ],
+  "review_points": [
+    {
+      "point": "2025-10-10 영상소견이 I67.8 뇌혈관질환 진단확정을 객관적으로 뒷받침하는지 여부(REQ-3, 사건 핵심 쟁점) 검토.",
+      "reviewer_role": "의사",
+      "priority": "high"
+    },
+    {
+      "point": "확보 시 2025-10-10 brain MRI/MRA 원본·판독지에 대한 독립 재판독.",
+      "reviewer_role": "의사",
+      "priority": "high"
+    },
+    {
+      "point": "진단서·의무기록·영상 원본 등 부족 자료 확보(사건 내 부존재).",
+      "reviewer_role": "손해사정사",
+      "priority": "high"
+    },
+    {
+      "point": "3사 부지급 사유의 R04(지급요건 미충족)/R05(면책) 성격 규정.",
+      "reviewer_role": "손해사정사",
+      "priority": "medium"
+    },
+    {
+      "point": "accident_date(2025-10-16, 진단서 발급일 대체)·onset_date(2025-09-30, 최초 내원일) 단일출처 값 확인.",
+      "reviewer_role": "손해사정사",
+      "priority": "medium"
+    },
+    {
+      "point": "각 보험사 약관 전문 확보 후 진단확정 요건 전체 대비 검토.",
+      "reviewer_role": "손해사정사",
+      "priority": "medium"
+    }
+  ],
+  "preliminary_assessment": {
+    "feasibility": "low",
+    "difficulty": "high",
+    "priority_review_points": [
+      "핵심: I67.8 진단확정의 객관적 성립 여부(REQ-3)는 의학적 다툼의 여지가 있어 의사 검토 전까지 유보하며, 현재 확보된 유일한 의학적 특성 서술(경미·우연 발견 백질 병변, 특이적 신경학적 증상 부재)은 3사 모두 진단확정 불충족 취지로 일치하고 있어 현 증거만으로는 인용 가능성이 낮은 편으로 잠정 판단됨(확정 아님).",
+      "핵심 쟁점을 뒤집을 수 있는 원 영상·의무기록·진단서가 사건 내 부존재하여, 자료 확보 여부에 따라 본 평가가 상당히 변동될 수 있음.",
+      "부지급 사유의 R04/R05 성격 규정 및 3개 보험사 병렬 계약 대응은 손해사정사 검토가 필요함."
+    ],
+    "rationale_evidence_references": [
+      {
+        "document_id": "DOC_001",
+        "document_type": "insurer_response",
+        "page": 1,
+        "quote": "양측 대뇌백질에 미미한 만성 허혈성 병변 확인되며 상기 진단에 부합하지 않습니다"
+      },
+      {
+        "document_id": "DOC_001",
+        "document_type": "insurer_response",
+        "page": 3,
+        "quote": "병소와 일치하는 특이적 신경학적 증상 확인되지 않는 상태 및 영상검사상의 결과내용 참조하였을때 I67B 진단의 객관적소견으로 보기어"
+      },
+      {
+        "document_id": "DOC_001",
+        "document_type": "insurer_response",
+        "page": 4,
+        "quote": "비가역적인 병변을 보이는 소혈관질환 즉 만성대뇌허혈로 확진되기는 미흡한 소견임"
+      }
+    ]
+  },
+  "draft_writer_input_summary": {
+    "recommended_template_id": "template_진단수술비_v1",
+    "sections_to_emphasize": [
+      "진단확정 요건(REQ-3) 충족 여부 쟁점",
+      "3사 부지급 사유 비교(삼성·KB·한화)",
+      "원 영상·의무기록 등 부족 자료 확보 필요성",
+      "R04(지급요건 미충족)/R05(면책) 성격 구분"
+    ]
+  },
+  "evidence_references": [
+    {
+      "document_id": "DOC_001",
+      "document_type": "insurer_response",
+      "page": 1,
+      "quote": "기타 명시된 뇌혈관질환(I67.8)으로 진단받은 사실을 확인하였습니다"
+    },
+    {
+      "document_id": "DOC_001",
+      "document_type": "insurer_response",
+      "page": 1,
+      "quote": "상기 보험의 1-27. [통합간편]뇌혈관질환 진단비 특별약관 제 3조에 따르면 「뇌혈관질환」의 진단확정은"
+    }
+  ],
+  "warnings": [
+    "단일 문서 사건: 사건 자료가 3사 부지급 안내문 1건(DOC_001)뿐이며 약관 전문·진단서·의무기록·영상 원본이 부존재. 핵심 쟁점(I67.8 진단확정 성립 여부)을 독립 검증할 원자료가 없어 예비 평가의 확정성이 제한됨.",
+    "inconsistencies는 비어 있음 — evidence_validation_result(9/9 consistent)에서 내부 출처 간 모순이 발견되지 않았고 충돌 원장(P6)도 clear 상태. 보험사-청구인 간 진단확정 성립 여부에 대한 다툼은 P6 대상이 아니라 Phase 2 denial-validation의 분석 대상임.",
+    "preliminary_assessment의 feasibility=low / difficulty=high는 확정 판단이 아니라 제한적 자료에 기초한 잠정 소견(P3)이며 손해사정사·의사 검토 전제. 핵심 의학적 쟁점(REQ-3)은 의도적으로 미해소 상태로 유보함.",
+    "template_id 'template_진단수술비_v1'은 잠정값 — 케이스타입별 필수 섹션 규칙이 아직 미확정이며 document-assembly가 이를 강제하지 않음(pipeline.md 참조).",
+    "스테이지 5 상위 산출물 전반에서 약 11개 항목이 검토 대상(review_required=true)으로 표시되어 있으며, 라우팅은 의사(진단확정/영상 재판독)·손해사정사(자료 확보, R-code 성격, 날짜 매핑)로 정리됨."
+  ]
+}
