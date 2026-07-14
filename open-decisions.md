@@ -6,7 +6,7 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `document-pipeline`, checkpoint 2 (Redaction).
 
-**Current:** `tools/redact_document.py` provides an executable checkpoint-2 path. Privacy-sensitive runs use the `local-llm` provider backed by a model already present in a loopback-only Ollama deployment. Missing runtime/model fails closed; there is no external fallback.
+**Current:** `tools/redact_document.py` provides an executable checkpoint-2 path. Privacy-sensitive runs use the `local-llm` provider backed by a model already present in a loopback-only Ollama deployment. Missing runtime/model fails closed; there is no external fallback. Synthetic quality checks are not yet passing: `qwen3:1.7b` returned valid JSON but failed to replace detected name/phone values, while the `qwen3:4b` CPU run was stopped after excessive latency. Local execution therefore resolves the transmission path, not redaction correctness or throughput.
 
 **Candidate:** OpenMed -- an open-source suite of self-hosted biomedical NER models (Hugging Face), including PHI/PII de-identification. It may offer more deterministic entity handling than a general local LLM. Not yet adopted.
 
@@ -30,7 +30,7 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `document-pipeline`, checkpoint 1 (P8's dual-path cross-validation, `tools/ocr_extract.py`).
 
-**Current:** an offline path is implemented but not yet validated end-to-end. Runs explicitly configured with a `local-ocr` + `local-vlm` reader pair and the loopback-only `local-llm` comparator/classifier/redactor keep raw page data on the machine: those providers require preinstalled E:-scoped binaries/models, refuse automatic downloads during a run, and never fall back externally. This closes the external-transmission gap in principle, but the runtime has not been installed and no smoke test has confirmed it on a real case — treat it as implemented, pending validation, not resolved. The risk remains in full for external CLI/API provider selections.
+**Current:** the offline path and E:-scoped runtime are installed. A synthetic image smoke test confirmed exact transcription through both Tesseract and the loopback `qwen3-vl:4b` reader, and preflight confirmed the pinned local text/vision models. No real-case run has been performed. These local providers refuse automatic downloads during a run and never fall back externally, so they close the external-transmission path for local runs; the risk remains in full for external CLI/API provider selections.
 
 **Problem:** P8's two readers must see the raw, unredacted page image (that's the point -- they have to see what's actually on the page before redaction). The comparator and classifier may also see unredacted extracted text. If any configured provider path is not under a no-data-retention arrangement, every checkpoint-1 run may send PII to that destination.
 
@@ -46,6 +46,6 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Current:** two offline reader technologies now exist. `local-ocr` invokes preinstalled Tesseract, while `local-vlm` sends the page image only to a preloaded loopback Ollama vision model. `local-llm` performs comparison and classification. `ocr_result.json` records the actual provider/model labels.
 
-**Remaining problem:** the Tesseract + vision-model pair is technologically independent, but the chosen local model still needs real Korean insurance-document validation. Two `local-ocr` reads remain available only as a weaker fallback and still share Tesseract's systematic errors. P8's hard signal remains page-level agreed/disagreed.
+**Remaining problem:** the Tesseract + vision-model pair is technologically independent, but the chosen local model still needs real Korean insurance-document validation. The synthetic ASCII smoke test is not evidence of Korean table, handwriting, stamp, skew, or low-resolution accuracy. Two `local-ocr` reads remain available only as a weaker fallback and still share Tesseract's systematic errors. P8's hard signal remains page-level agreed/disagreed.
 
 **To resolve:** run the real smoke/quality matrix for the pinned local vision model and document its Korean transcription failure modes before treating the local pair as production-ready.
