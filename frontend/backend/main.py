@@ -38,9 +38,11 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import dao  # tools/dao.py
+import run_checkpoint1  # tools/run_checkpoint1.py -- resolve_from_raw_ocr for P8 review
 
 app = FastAPI(title="Pipeline Viewer API")
 app.add_middleware(
@@ -53,6 +55,8 @@ app.add_middleware(
 CASE_ID_RE = re.compile(r"^CASE_[A-Za-z0-9_-]+$")
 SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9_.-]+\.(json|md)$")
 CONFLICT_ID_RE = re.compile(r"^CONFLICT_[0-9]+$")  # matches conflict_ledger.schema.json's own pattern
+DOC_ID_RE = re.compile(r"^DOC_[0-9]+$")  # matches document_manifest.schema.json's own pattern
+VERSION_RE = re.compile(r"^v[12]$")
 UPLOAD_EXTENSIONS = {".pdf", ".txt", ".md", ".png", ".jpg", ".jpeg", ".tiff", ".xlsx", ".csv"}
 UPLOAD_FORBIDDEN_CHARS = set("/\\\0")
 UPLOAD_DIR = Path(__file__).resolve().parent / "_uploads"
@@ -87,6 +91,23 @@ def _valid_conflict_id(conflict_id: str):
     malformed id."""
     if not CONFLICT_ID_RE.fullmatch(conflict_id):
         raise HTTPException(400, "invalid conflict_id -- must match CONFLICT_<digits>")
+
+
+def _valid_doc_id(doc_id: str):
+    """Same argument-injection discipline as _valid_conflict_id -- doc_id
+    flows into resolve_from_raw_ocr and (indirectly) DAO write paths."""
+    if not DOC_ID_RE.fullmatch(doc_id):
+        raise HTTPException(400, "invalid doc_id -- must match DOC_<digits>")
+
+
+def _valid_actor_name(name: str, what: str = "reviewer"):
+    """A reviewer/actor name becomes an option VALUE in a dao.py argv (and
+    lock metadata) -- require it non-empty and not flag-shaped, so it can
+    never be mistaken for an option by a downstream parser."""
+    if not name.strip():
+        raise HTTPException(400, f"{what} name is required -- this is a real human-audit record")
+    if name.lstrip().startswith("-"):
+        raise HTTPException(400, f"{what} name must not start with '-'")
 
 
 def _known_ledger_file_name(case_id: str, file_name: str):
@@ -235,6 +256,156 @@ def report(case_id: str, name: str):
     }
 
 
+@app.get("/api/cases/{case_id}/source-file")
+def source_file(case_id: str, name: str):
+    """Serves the original source document a ledger entry refers to, so the
+    human can actually READ what they're approving/rejecting without leaving
+    the UI (D2: the review is only meaningful if the reviewer saw the file).
+    Read-only serving for a human's eyes -- no agent consumes this endpoint,
+    so P2's processed-layer rule isn't in play. `name` must already be a
+    real entry in the case's own ledger (same containment logic as the
+    audit-write endpoints), which also rules out path traversal: intake and
+    upload both record plain basenames only."""
+    _require_case(case_id)
+    _known_ledger_file_name(case_id, name)
+    if any(c in UPLOAD_FORBIDDEN_CHARS for c in name):
+        raise HTTPException(400, "invalid file name")
+    ledger = dao.load_json(dao.source_ledger_path(case_id)) or {}
+    candidates = [UPLOAD_DIR / case_id / name]
+    source_dir = ledger.get("source_dir")
+    if source_dir and ".." not in Path(source_dir).parts:
+        candidates.append(ROOT / source_dir / name)
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file() and resolved.is_relative_to(candidate.parent.resolve()):
+            media_type = "application/pdf" if resolved.suffix.lower() == ".pdf" else None
+            return FileResponse(resolved, media_type=media_type, filename=name,
+                                content_disposition_type="inline")
+    raise HTTPException(404, f"source file for {name!r} not found in staging or the ledger's source_dir")
+
+
+# ------------------------------------------- human decisions in the UI --
+
+class OcrResolveBody(BaseModel):
+    doc_id: str
+    page: int
+    chosen_reading: str  # reading_a | reading_b
+    reviewer: str
+    note: str
+
+
+SCRATCH_DIR = ROOT / "_ocr_scratch"
+
+
+@app.get("/api/cases/{case_id}/ocr-review")
+def ocr_review(case_id: str):
+    """Everything a human needs to resolve a P8 dual-read disagreement on
+    screen: each blocked document's still-unresolved pages with BOTH full
+    readings side by side (from the _ocr_scratch raw save run_checkpoint1
+    makes whenever a disagreement blocks a run)."""
+    case_path = _require_case(case_id)
+    documents = []
+    for result_path in sorted(case_path.glob("ocr_result_DOC_*.json")):
+        data = dao.load_json(result_path)
+        if not data or data.get("cross_validation_status") != "disagreed_pending_review":
+            continue
+        doc_id = data.get("document_id")
+        raw = None
+        if doc_id and DOC_ID_RE.fullmatch(doc_id):
+            raw_path = SCRATCH_DIR / f"{case_id}_{doc_id}_raw.json"
+            raw = dao.load_json(raw_path)
+        raw_pages = {p["page"]: p for p in (raw or {}).get("pages", [])}
+        pages = []
+        for p in data.get("pages", []):
+            cv = p.get("cross_validation") or {}
+            if cv.get("agreement") != "disagreed" or cv.get("resolution"):
+                continue
+            raw_page = raw_pages.get(p.get("page"), {})
+            pages.append({
+                "page": p.get("page"),
+                "reading_a": raw_page.get("reading_a"),
+                "reading_b": raw_page.get("reading_b") or cv.get("vision_model_reading"),
+                "disagreement_details": raw_page.get("disagreement_details")
+                                         or cv.get("disagreement_details") or [],
+            })
+        documents.append({
+            "doc_id": doc_id,
+            "review_reason": data.get("review_reason"),
+            "raw_available": raw is not None,
+            "pages": pages,
+        })
+    return {"documents": documents}
+
+
+@app.post("/api/cases/{case_id}/ocr-resolve")
+def ocr_resolve(case_id: str, body: OcrResolveBody):
+    """A human picks which of the two independent readings is correct for one
+    disagreed page -- the P8 resolution gate, driven from the UI. Delegates
+    to run_checkpoint1.resolve_from_raw_ocr, the same path a terminal
+    resolution uses; when the last page of a document resolves, that function
+    continues into classification + manifest update, so this request can take
+    a while (one real model call) -- the UI shows a busy state meanwhile."""
+    _require_case(case_id)
+    _valid_doc_id(body.doc_id)
+    _valid_actor_name(body.reviewer)
+    if body.chosen_reading not in ("reading_a", "reading_b"):
+        raise HTTPException(400, "chosen_reading must be reading_a or reading_b")
+    if not body.note.strip():
+        raise HTTPException(400, "a resolution note is required -- what did you verify, and how?")
+    raw_path = SCRATCH_DIR / f"{case_id}_{body.doc_id}_raw.json"
+    ocr_data = dao.load_json(raw_path)
+    if ocr_data is None:
+        raise HTTPException(409, f"no raw dual-read data at {raw_path.name} -- this disagreement predates "
+                                 "the scratch save; re-run checkpoint 1 to regenerate both readings")
+    try:
+        result = run_checkpoint1.resolve_from_raw_ocr(
+            case_id, body.doc_id, ocr_data, body.page, body.chosen_reading,
+            resolved_by=body.reviewer, note=body.note,
+            held_by=body.reviewer, run_id=_frontend_run_id(),
+        )
+    except SystemExit as e:  # resolve_from_raw_ocr sys.exit()s on a bad page/reading
+        raise HTTPException(400, str(e))
+    return result
+
+
+class HumanReviewCompleteBody(BaseModel):
+    version: str  # v1 | v2
+    reviewer: str
+
+
+@app.get("/api/cases/{case_id}/human-review")
+def human_review(case_id: str):
+    """State of the critic -> human review -> evaluation gate (P7/D1) per
+    draft version, so the UI can show exactly what the pipeline is waiting
+    on and whether the gate is already open."""
+    case_path = _require_case(case_id)
+    out = {}
+    for version in ("v1", "v2"):
+        flag = dao.load_json(dao.human_review_flag_path(case_id, version))
+        out[version] = {
+            "reviewed_draft_exists": (case_path / f"draft_report_{version}_reviewed.md").exists(),
+            "expert_review_exists": (case_path / f"expert_review_{version}.json").exists(),
+            "review_complete": flag is not None,
+            "completed_by": (flag or {}).get("reviewer"),
+            "completed_at": (flag or {}).get("marked_complete_at"),
+        }
+    return out
+
+
+@app.post("/api/cases/{case_id}/human-review-complete")
+def human_review_complete(case_id: str, body: HumanReviewCompleteBody):
+    """The human marks their expert review done, opening D1's versioned gate.
+    dao.py itself enforces the hard precondition (expert_review_v{N}.json
+    must exist and validate) -- this endpoint only relays the human's action,
+    it cannot self-certify past that check."""
+    _require_case(case_id)
+    _valid_actor_name(body.reviewer)
+    if not VERSION_RE.fullmatch(body.version):
+        raise HTTPException(400, "version must be v1 or v2")
+    return _run_dao_cli(["mark-human-review-complete", case_id, body.version, "--reviewer", body.reviewer],
+                        held_by=body.reviewer)
+
+
 # ---------------------------------------------------------- upload + run --
 
 def _load_runs() -> dict:
@@ -316,11 +487,20 @@ def run_case(case_id: str):
         ["claude", "-p", prompt, "--allowedTools", ALLOWED_TOOLS],
         cwd=str(ROOT), stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
     )
+    _PROCS[case_id] = proc
 
     runs = _load_runs()
     runs[case_id] = {"pid": proc.pid, "log_path": str(log_path), "started_at": time.time(), "status": "running"}
     _save_runs(runs)
     return {"case_id": case_id, "pid": proc.pid, "status": "launched"}
+
+
+# Live Popen handles for runs launched by THIS backend process -- the only
+# way to observe a child's real exit code (and to reap it: a plain
+# os.kill(pid, 0) liveness probe reports a zombie child as alive forever,
+# which is exactly how a finished/crashed run used to stay "running" until
+# the backend restarted).
+_PROCS: dict[str, subprocess.Popen] = {}
 
 
 def _pid_alive(pid: int) -> bool:
@@ -335,17 +515,43 @@ def _pid_alive(pid: int) -> bool:
 
 @app.get("/api/cases/{case_id}/run-status")
 def run_status(case_id: str):
+    """Honest run lifecycle for the UI: `running` only while the child is
+    genuinely alive; a zero exit is `finished`, a non-zero exit is `crashed`
+    (with the exit code), and a run whose Popen handle was lost to a backend
+    restart ends as `ended_unknown` rather than being dressed up as finished.
+    log_age_seconds lets the UI flag a run that's alive but silent (stuck)."""
     _valid_case_id(case_id)
     runs = _load_runs()
     entry = runs.get(case_id)
     if not entry:
         return {"status": "not_started"}
-    if entry["status"] == "running" and not _pid_alive(entry["pid"]):
-        entry["status"] = "finished"
-        runs[case_id] = entry
-        _save_runs(runs)
-    log_tail = ""
+    if entry["status"] == "running":
+        proc = _PROCS.get(case_id)
+        if proc is not None and proc.pid == entry["pid"]:
+            exit_code = proc.poll()  # also reaps the child if it exited
+            if exit_code is not None:
+                entry["status"] = "finished" if exit_code == 0 else "crashed"
+                entry["exit_code"] = exit_code
+                entry["ended_at"] = time.time()
+                runs[case_id] = entry
+                _save_runs(runs)
+                _PROCS.pop(case_id, None)
+        elif not _pid_alive(entry["pid"]):
+            # Launched by a previous backend process: the exit code is gone
+            # with it. Say so instead of guessing success.
+            entry["status"] = "ended_unknown"
+            entry["ended_at"] = time.time()
+            runs[case_id] = entry
+            _save_runs(runs)
+    log_tail, log_size, log_age_seconds = "", None, None
     log_path = Path(entry["log_path"])
     if log_path.exists():
-        log_tail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
-    return {"status": entry["status"], "pid": entry["pid"], "started_at": entry["started_at"], "log_tail": log_tail}
+        log_tail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+        stat = log_path.stat()
+        log_size = stat.st_size
+        log_age_seconds = round(time.time() - stat.st_mtime, 1)
+    return {
+        "status": entry["status"], "pid": entry["pid"], "started_at": entry["started_at"],
+        "ended_at": entry.get("ended_at"), "exit_code": entry.get("exit_code"),
+        "log_tail": log_tail, "log_size": log_size, "log_age_seconds": log_age_seconds,
+    }

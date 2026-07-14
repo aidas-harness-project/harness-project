@@ -1,34 +1,41 @@
 import { useEffect, useState, useCallback } from "react";
 import Sidebar from "./components/Sidebar";
 import StageDetail from "./components/StageDetail";
-import { PHASE_1, PHASE_2, ALL_STAGES } from "./pipelineDefinition";
+import RunBanner from "./components/RunBanner";
+import { PHASE_1, PHASE_2, TRIGGERED, ALL_STAGES } from "./pipelineDefinition";
 import { api } from "./api";
 
 function useCaseData(caseId) {
   const [runState, setRunState] = useState(null);
   const [ledgers, setLedgers] = useState(null);
+  const [ocrReview, setOcrReview] = useState(null);
   const [error, setError] = useState(null);
 
   const reload = useCallback(() => {
     if (!caseId) return;
     setError(null);
-    Promise.all([api.runState(caseId), api.ledgers(caseId)])
-      .then(([rs, lg]) => {
+    Promise.all([
+      api.runState(caseId),
+      api.ledgers(caseId),
+      api.ocrReview(caseId).catch(() => null), // never let the P8 queue take the whole view down
+    ])
+      .then(([rs, lg, ocr]) => {
         setRunState(rs);
         setLedgers(lg);
+        setOcrReview(ocr);
       })
       .catch((e) => setError(e.message));
   }, [caseId]);
 
   useEffect(reload, [reload]);
-  return { runState, ledgers, error, reload };
+  return { runState, ledgers, ocrReview, error, reload };
 }
 
 export default function App() {
   const [cases, setCases] = useState([]);
   const [current, setCurrent] = useState(null);
   const [selectedStage, setSelectedStage] = useState(PHASE_1[0].key);
-  const { runState, ledgers, error, reload } = useCaseData(current);
+  const { runState, ledgers, ocrReview, error, reload } = useCaseData(current);
 
   const refreshCaseList = useCallback(() => {
     api
@@ -42,10 +49,18 @@ export default function App() {
 
   useEffect(refreshCaseList, [refreshCaseList]);
 
-  const stageIndex = ALL_STAGES.findIndex((s) => s.key === selectedStage);
-  const stageDef = ALL_STAGES[stageIndex];
-  const phaseLabel = PHASE_1.some((s) => s.key === selectedStage) ? "Phase 1" : "Phase 2";
-  const indexWithinPhase = phaseLabel === "Phase 1" ? stageIndex : stageIndex - PHASE_1.length;
+  const stageDef = ALL_STAGES.find((s) => s.key === selectedStage);
+  let phaseLabel, indexWithinPhase;
+  if (PHASE_1.some((s) => s.key === selectedStage)) {
+    phaseLabel = "Phase 1";
+    indexWithinPhase = PHASE_1.findIndex((s) => s.key === selectedStage);
+  } else if (PHASE_2.some((s) => s.key === selectedStage)) {
+    phaseLabel = "Phase 2";
+    indexWithinPhase = PHASE_2.findIndex((s) => s.key === selectedStage);
+  } else {
+    phaseLabel = "Triggered";
+    indexWithinPhase = TRIGGERED.findIndex((s) => s.key === selectedStage);
+  }
 
   return (
     <div className="app-shell">
@@ -57,6 +72,7 @@ export default function App() {
         onSelectStage={setSelectedStage}
         runState={runState}
         ledgers={ledgers}
+        ocrReview={ocrReview}
         onRefresh={reload}
         onCaseListChanged={refreshCaseList}
       />
@@ -64,6 +80,7 @@ export default function App() {
       <main className="app-main">
         {!current && <p className="muted">Select a case to begin.</p>}
         {error && <p className="error-banner">{error}</p>}
+        {current && <RunBanner caseId={current} onActivity={reload} />}
         {current && runState && stageDef && (
           <StageDetail
             stageDef={stageDef}
@@ -71,6 +88,7 @@ export default function App() {
             phaseLabel={phaseLabel}
             runState={runState}
             ledgers={ledgers}
+            ocrReview={ocrReview}
             caseId={current}
             onLedgersChanged={reload}
           />
