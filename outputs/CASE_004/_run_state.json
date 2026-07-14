@@ -2,7 +2,7 @@
   "case_id": "CASE_004",
   "run_id": "RUN_20260713_004",
   "created_at": "2026-07-13T15:48:42.798283+09:00",
-  "updated_at": "2026-07-13T15:59:24.004071+09:00",
+  "updated_at": "2026-07-14T14:00:39.756125+09:00",
   "stages": [
     {
       "stage_name": "intake",
@@ -14,10 +14,18 @@
     },
     {
       "stage_name": "document-processing",
-      "status": "failed",
+      "status": "in_progress",
       "started_at": "2026-07-13T15:59:00.570765+09:00",
-      "completed_at": "2026-07-13T15:59:11.891526+09:00",
-      "attempt_count": 1,
+      "completed_at": "2026-07-13T18:01:18.994286+09:00",
+      "attempt_count": 3,
+      "backup_path": null
+    },
+    {
+      "stage_name": "document_processing",
+      "status": "failed",
+      "started_at": "2026-07-14T11:07:06.624365+09:00",
+      "completed_at": "2026-07-14T14:00:39.749289+09:00",
+      "attempt_count": 3,
       "backup_path": null
     }
   ],
@@ -31,10 +39,17 @@
     },
     {
       "stage_name": "document-processing",
-      "status": "waiting",
+      "status": "received",
       "description": "Stage 2 blocked: legacy OCR lacks current P8 dual-path cross-validation records, and claude CLI is unavailable for rerun in this environment",
       "requested_at": "2026-07-13T15:59:24.004071+09:00",
-      "received_at": null
+      "received_at": "2026-07-13T18:00:47.170230+09:00"
+    },
+    {
+      "stage_name": "document-processing",
+      "status": "received",
+      "description": "Stage 2 blocked: Claude CLI execution would transmit private claim content externally; explicit user approval is required before P8 OCR rerun",
+      "requested_at": "2026-07-13T18:01:19.142756+09:00",
+      "received_at": "2026-07-13T18:03:29.695245+09:00"
     }
   ]
 }

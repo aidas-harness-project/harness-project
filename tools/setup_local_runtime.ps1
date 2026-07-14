@@ -1,6 +1,7 @@
 param(
     [string]$RuntimeRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) '.runtime'),
-    [string]$Model = 'qwen3-vl:4b',
+    [string]$TextModel = 'qwen3:1.7b',
+    [string]$VisionModel = 'qwen3-vl:4b',
     [string]$OllamaVersion = 'v0.30.8',
     [string]$Python = ''
 )
@@ -30,7 +31,8 @@ function Get-VerifiedDownload {
         }
         Remove-Item -LiteralPath $Destination -Force
     }
-    Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination
+    & curl.exe -L --fail --retry 3 --retry-delay 2 $Uri -o $Destination
+    if ($LASTEXITCODE -ne 0) { throw "Download failed: $Uri" }
     if ((Get-Item -LiteralPath $Destination).Length -eq 0) {
         throw "Download produced an empty file: $Uri"
     }
@@ -63,7 +65,13 @@ $Asset = $Release.assets | Where-Object { $_.name -eq 'ollama-windows-amd64.zip'
 if (-not $Asset) { throw "Ollama release $OllamaVersion has no ollama-windows-amd64.zip asset" }
 $OllamaZip = Join-Path $Downloads "ollama-windows-amd64-$OllamaVersion.zip"
 $Digest = if ($Asset.digest -and $Asset.digest.StartsWith('sha256:')) { $Asset.digest.Substring(7).ToUpperInvariant() } else { '' }
-Get-VerifiedDownload -Uri $Asset.browser_download_url -Destination $OllamaZip -ExpectedSha256 $Digest
+if ($Digest -and [long]$Asset.size -ge 67108864) {
+    & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'download_verified_ranges.ps1') `
+        -Uri $Asset.browser_download_url -Sha256 $Digest -Size ([long]$Asset.size) -Destination $OllamaZip
+    if ($LASTEXITCODE -ne 0) { throw "Range download failed for Ollama $OllamaVersion" }
+} else {
+    Get-VerifiedDownload -Uri $Asset.browser_download_url -Destination $OllamaZip -ExpectedSha256 $Digest
+}
 if (-not (Test-Path -LiteralPath (Join-Path $OllamaRoot 'ollama.exe'))) {
     Expand-Archive -LiteralPath $OllamaZip -DestinationPath $OllamaRoot -Force
 }
@@ -76,8 +84,58 @@ $env:HARNESS_LOCAL_VLM_COMMAND = $OllamaExe
 $env:TESSDATA_PREFIX = $TessdataRoot
 $env:OLLAMA_MODELS = $ModelRoot
 $env:OLLAMA_HOST = 'http://127.0.0.1:11434'
-$env:HARNESS_LOCAL_LLM_MODEL = $Model
-$env:HARNESS_LOCAL_VLM_MODEL = $Model
+$env:HARNESS_LOCAL_LLM_MODEL = $TextModel
+$env:HARNESS_LOCAL_VLM_MODEL = $VisionModel
+
+function Install-OllamaRegistryModel {
+    param([Parameter(Mandatory=$true)][string]$ModelName)
+
+    $NameAndTag = $ModelName.Split(':', 2)
+    $Name = $NameAndTag[0]
+    $Tag = if ($NameAndTag.Count -eq 2) { $NameAndTag[1] } else { 'latest' }
+    $PathParts = $Name.Split('/', [System.StringSplitOptions]::RemoveEmptyEntries)
+    if ($PathParts.Count -eq 1) {
+        $Namespace = 'library'
+        $Repository = $PathParts[0]
+    } elseif ($PathParts.Count -eq 2) {
+        $Namespace = $PathParts[0]
+        $Repository = $PathParts[1]
+    } else {
+        throw "Unsupported Ollama model name: $ModelName"
+    }
+
+    $RegistryBase = "https://registry.ollama.ai/v2/$Namespace/$Repository"
+    $ManifestDirectory = Join-Path $ModelRoot "manifests\registry.ollama.ai\$Namespace\$Repository"
+    $ManifestDestination = Join-Path $ManifestDirectory $Tag
+    $ManifestDownload = Join-Path $Downloads ("ollama-manifest-{0}-{1}.json" -f $Repository, $Tag)
+    Get-VerifiedDownload -Uri "$RegistryBase/manifests/$Tag" -Destination $ManifestDownload
+    $Manifest = Get-Content -Raw -LiteralPath $ManifestDownload | ConvertFrom-Json
+    $Descriptors = @($Manifest.config) + @($Manifest.layers)
+
+    foreach ($Descriptor in ($Descriptors | Sort-Object digest -Unique)) {
+        if (-not $Descriptor.digest.StartsWith('sha256:')) {
+            throw "Unsupported model blob digest: $($Descriptor.digest)"
+        }
+        $Hash = $Descriptor.digest.Substring(7).ToLowerInvariant()
+        $BlobDestination = Join-Path $ModelRoot "blobs\sha256-$Hash"
+        $BlobUri = "$RegistryBase/blobs/$($Descriptor.digest)"
+        if ([long]$Descriptor.size -ge 67108864) {
+            & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'download_verified_ranges.ps1') `
+                -Uri $BlobUri -Sha256 $Hash -Size ([long]$Descriptor.size) -Destination $BlobDestination
+            if ($LASTEXITCODE -ne 0) { throw "Range download failed for $($Descriptor.digest)" }
+        } else {
+            Get-VerifiedDownload -Uri $BlobUri -Destination $BlobDestination -ExpectedSha256 $Hash.ToUpperInvariant()
+        }
+    }
+
+    New-Item -ItemType Directory -Force -Path $ManifestDirectory | Out-Null
+    Copy-Item -Force -LiteralPath $ManifestDownload -Destination $ManifestDestination
+}
+
+# Install registry blobs directly into the E:-scoped model store. This avoids
+# Ollama's downloader creating large partial files in an unintended location.
+Install-OllamaRegistryModel -ModelName $TextModel
+if ($VisionModel -ne $TextModel) { Install-OllamaRegistryModel -ModelName $VisionModel }
 
 $ServerReady = $false
 try {
@@ -96,10 +154,12 @@ if (-not $ServerReady) {
 }
 if (-not $ServerReady) { throw 'Ollama loopback server did not become ready' }
 
-# Downloads happen only during this explicit setup command. Providers never
-# call pull and therefore cannot silently fall back to network access.
-& $OllamaExe pull $Model
-if ($LASTEXITCODE -ne 0) { throw "Failed to preload Ollama model $Model" }
+# Providers never call pull, so inference cannot silently fall back to network
+# access. Confirm that the preloaded registry manifest is visible to Ollama.
+foreach ($PreloadedModel in @($TextModel, $VisionModel) | Sort-Object -Unique) {
+    & $OllamaExe show $PreloadedModel *> $null
+    if ($LASTEXITCODE -ne 0) { throw "Ollama did not recognize preloaded model $PreloadedModel" }
+}
 
 $EnvironmentFile = Join-Path $RuntimeRoot 'local-runtime.env.ps1'
 @"
@@ -109,8 +169,8 @@ $EnvironmentFile = Join-Path $RuntimeRoot 'local-runtime.env.ps1'
 `$env:TESSDATA_PREFIX = '$TessdataRoot'
 `$env:OLLAMA_MODELS = '$ModelRoot'
 `$env:OLLAMA_HOST = 'http://127.0.0.1:11434'
-`$env:HARNESS_LOCAL_LLM_MODEL = '$Model'
-`$env:HARNESS_LOCAL_VLM_MODEL = '$Model'
+`$env:HARNESS_LOCAL_LLM_MODEL = '$TextModel'
+`$env:HARNESS_LOCAL_VLM_MODEL = '$VisionModel'
 "@ | Set-Content -LiteralPath $EnvironmentFile -Encoding UTF8
 
 if (-not $Python) {
@@ -120,6 +180,6 @@ if (-not $Python) {
     else { throw 'Python executable not found; pass -Python with an absolute path' }
 }
 
-& $Python (Join-Path $PSScriptRoot 'local_runtime.py') --runtime-root $RuntimeRoot --text-model $Model --vision-model $Model
+& $Python (Join-Path $PSScriptRoot 'local_runtime.py') --runtime-root $RuntimeRoot --text-model $TextModel --vision-model $VisionModel
 if ($LASTEXITCODE -ne 0) { throw 'Local runtime preflight failed' }
 Write-Output "Local runtime ready. Activate it with: . '$EnvironmentFile'"

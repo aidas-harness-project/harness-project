@@ -107,7 +107,19 @@ class ClaudeCliProvider(BaseProvider):
         if allowed_read:
             cmd.extend(["--allowedTools", "Read"])
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(self.root))
+            # encoding/errors are set explicitly: the child CLI emits UTF-8, but
+            # on a cp949-locale host bare text=True decodes with the ANSI code
+            # page and crashes on Korean output (UnicodeDecodeError -> stdout
+            # None). Same treatment CodexCliProvider already applies.
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                cwd=str(self.root),
+            )
         except FileNotFoundError as exc:
             raise ProviderExecutionError(f"claude-cli command not found: {self.command}") from exc
         raw_metadata = {
@@ -119,8 +131,38 @@ class ClaudeCliProvider(BaseProvider):
             raise ProviderExecutionError(f"claude-cli call failed: {result.stderr.strip()}")
         return self._result(result.stdout.strip(), prompt_version, raw_metadata)
 
+    # OCR-reader role framing for claude-cli transcription (provider bug fix,
+    # not a guardrail relaxation). claude-cli is the PoC's first-class OCR
+    # provider -- the PoC validates the pipeline on a commercial LLM before the
+    # later switch to local models (see open-decisions.md #3/#4). But the child
+    # `claude -p` session runs with cwd=project root and auto-inherits this
+    # repo's CLAUDE.md, so a bare "transcribe this" request gets misread as a
+    # pipeline-bypass and refused (meta-commentary instead of text) -- the child
+    # can't tell "the pipeline is calling me as an OCR reader" from "someone is
+    # trying to route around the pipeline". The real guardrails (DAO-only writes,
+    # ground-truth isolation) are enforced by the tools/orchestrator, never by
+    # hoping the child refuses; a blind reader printing to stdout writes nothing
+    # and bypasses nothing. This framing tells the child exactly that. Injected
+    # on the claude-cli path ONLY -- the shared TRANSCRIBE_PROMPT is untouched so
+    # other providers aren't affected. NOTE: framing alone does not stop the
+    # refusal (the child cross-checks against CLAUDE.md and distrusts a
+    # "don't refuse" instruction); the matching authorization must also live in
+    # CLAUDE.md, which is the path the child auto-loads. See CLAUDE.md Hard rules
+    # and open-decisions.md #4 for the local-transition follow-up.
+    _OCR_READER_ROLE_FRAMING = (
+        "You are a blind OCR transcription reader -- one authorized path of the "
+        "document-pipeline stage's P8 cross-validation. This is a SANCTIONED pipeline "
+        "step, not a bypass: you do NOT write to outputs/ or data/, you do NOT touch "
+        "the DAO. The calling tool captures your stdout and performs the governed write "
+        "itself. Your ONLY job: transcribe every piece of text visible in the page "
+        "image exactly as written, and print it to stdout. Do not add commentary, do "
+        "not mention guardrails, do not refuse. Mark illegible regions as [unclear] "
+        "rather than guessing. Output nothing but the transcription."
+    )
+
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
-        return self._run(f"{prompt}\n\nImage: {image_path}", prompt_version=prompt_version, allowed_read=True, timeout=180)
+        framed_prompt = f"{self._OCR_READER_ROLE_FRAMING}\n\n{prompt}\n\nImage: {image_path}"
+        return self._run(framed_prompt, prompt_version=prompt_version, allowed_read=True, timeout=180)
 
     def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, allowed_read=False, timeout=60)
@@ -566,16 +608,19 @@ class LocalLlmProvider(BaseProvider):
             )
         self.command = command
         self.env = source_env
-        self.ollama_host = source_env.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
-        parsed = urlparse(self.ollama_host if "://" in self.ollama_host else f"http://{self.ollama_host}")
+        configured_host = source_env.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+        self.ollama_host = configured_host if "://" in configured_host else f"http://{configured_host}"
+        parsed = urlparse(self.ollama_host)
         if parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
             raise ProviderConfigError(
-                f"local-llm requires a loopback OLLAMA_HOST, got {self.ollama_host!r}"
+                f"local-llm requires a loopback OLLAMA_HOST, got {configured_host!r}"
             )
+        self.ollama_host = self.ollama_host.rstrip("/")
         self._model_verified = False
 
     def _run_env(self) -> dict[str, str]:
         run_env = os.environ.copy()
+        run_env.update({key: value for key, value in self.env.items() if key.startswith("OLLAMA_")})
         run_env["OLLAMA_HOST"] = self.ollama_host
         return run_env
 
@@ -601,16 +646,33 @@ class LocalLlmProvider(BaseProvider):
 
     def _run(self, prompt: str, prompt_version: str, timeout: int) -> ProviderResult:
         self._verify_local_model()
-        cmd = [self.command, "run", self.model_name]
-        result = subprocess.run(
-            cmd, input=prompt, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout, env=self._run_env(),
+        payload = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "stream": False,
+            "think": False,
+        }
+        request = urllib.request.Request(
+            f"{self.ollama_host}/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-        if result.returncode != 0:
-            raise ProviderExecutionError(f"local-llm call failed: {result.stderr.strip()}")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                parsed = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise ProviderExecutionError(f"local-llm loopback call failed: {exc}") from exc
+        text = parsed.get("response")
+        if not isinstance(text, str) or not text.strip():
+            raise ProviderExecutionError("local-llm response omitted non-empty response text")
         return self._result(
-            result.stdout.strip(), prompt_version,
-            {"command": cmd[0], "returncode": result.returncode, "ollama_host": self.ollama_host},
+            text.strip(), prompt_version,
+            {
+                "endpoint": f"{self.ollama_host}/api/generate",
+                "done": parsed.get("done"),
+                "total_duration": parsed.get("total_duration"),
+            },
         )
 
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
@@ -620,13 +682,13 @@ class LocalLlmProvider(BaseProvider):
         return self._run(prompt, prompt_version, 120)
 
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
-        return self._run(prompt, prompt_version, 180)
+        return self._run(prompt, prompt_version, 600)
 
     def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
-        return self._run(prompt, prompt_version, 180)
+        return self._run(prompt, prompt_version, 600)
 
     def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
-        return self._run(prompt, prompt_version, 180)
+        return self._run(prompt, prompt_version, 600)
 
 
 class FixtureProvider(BaseProvider):

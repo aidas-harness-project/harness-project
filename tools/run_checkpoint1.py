@@ -237,6 +237,14 @@ def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
         "document_mean_confidence": None,
         "ocr_quality": "low" if any_disagreement else "high",
         "cross_validation_status": "disagreed_pending_review" if any_disagreement else "agreed",
+        # P8 cross-validation strength label, computed from the actual readers by
+        # ocr_extract.run_ocr (single_technology_weak_p8_poc when both readers are
+        # one provider -- the PoC's claude-cli path, honestly not genuine
+        # dual-technology P8; see open-decisions.md #4). Recorded here so the
+        # ocr_result.json reader can never mistake a same-provider run for genuine
+        # dual-technology independence.
+        "cross_validation_mode": ocr_data.get("cross_validation_mode", "dual_technology"),
+        "cross_validation_note": ocr_data.get("cross_validation_note", ""),
         "review_required": any_disagreement,
     }
     if any_disagreement:

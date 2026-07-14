@@ -17,7 +17,8 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME_ROOT = ROOT / ".runtime"
-DEFAULT_MODEL = "qwen3-vl:4b"
+DEFAULT_TEXT_MODEL = "qwen3:1.7b"
+DEFAULT_VISION_MODEL = "qwen3-vl:4b"
 
 
 def _inside(path: Path, parent: Path) -> bool:
@@ -43,8 +44,8 @@ def _run(command: list[str], env: dict[str, str], timeout: int = 30) -> tuple[bo
 def preflight(
     runtime_root: Path,
     *,
-    text_model: str = DEFAULT_MODEL,
-    vision_model: str = DEFAULT_MODEL,
+    text_model: str = DEFAULT_TEXT_MODEL,
+    vision_model: str = DEFAULT_VISION_MODEL,
     env: dict[str, str] | None = None,
 ) -> dict:
     source_env = dict(os.environ if env is None else env)
@@ -125,8 +126,8 @@ def preflight(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-root", type=Path, default=DEFAULT_RUNTIME_ROOT)
-    parser.add_argument("--text-model", default=DEFAULT_MODEL)
-    parser.add_argument("--vision-model", default=DEFAULT_MODEL)
+    parser.add_argument("--text-model", default=DEFAULT_TEXT_MODEL)
+    parser.add_argument("--vision-model", default=DEFAULT_VISION_MODEL)
     args = parser.parse_args()
     result = preflight(
         args.runtime_root, text_model=args.text_model, vision_model=args.vision_model
