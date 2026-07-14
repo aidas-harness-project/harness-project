@@ -1,0 +1,24 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_002",
+  "component": "evaluation",
+  "status": "success",
+  "created_at": "2026-07-14T18:40:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "expert_review_v0.1"
+  },
+  "reviewer_id": "Claude (delegated by Rekhet)",
+  "reviewer_role": "손해사정사",
+  "reviewed_document": "outputs/CASE_021/draft_report_v2_reviewed.md",
+  "overall_approved": true,
+  "findings_disposition": [
+    {
+      "finding_ref": "CF-1",
+      "disposition": "accepted",
+      "note": "유효하며 심각도 낮음으로 수용. III.2.다의 '각 안내문' 귀속은 미관찰 소견(미세 뇌경색·미세출혈·지주막하출혈·혈관주변공간 확장 등 특징적 소견 미관찰)이 한화손해보험 안내문[E20] 단일 출처임에도 3사 공통 기재처럼 과대 귀속한 것으로 확인됨(태그 E20 자체는 정확). 출처 범위를 '한화손해보험 안내문[E20]'으로 한정하는 수정은 향후 v3 개정 시 반드시 반영해야 하나, v2 게이트 차단 사유는 아님."
+    }
+  ],
+  "general_comments": "판정: 승인(코멘트 포함) — v2는 정답지(ground-truth) 평가로 진행하기에 적합함. 코멘트: (1) v1의 CF-1은 해결(RESOLVED) 확인 — 요건 3의 인라인 재구성 표기가 존재하고 올바르게 배치됨. (2) v2 신규 CF-1(III.2.다의 한화 단일 출처 미관찰 소견을 '각 안내문'으로 과대 귀속, 태그 E20 자체는 정확)은 유효하며 심각도 낮음으로 수용 — 출처 한정 수정('한화손해보험 안내문[E20]')은 향후 v3 개정에 구속적이나 v2 게이트 차단 사유 아님. (3) 사정 금액 미정(산정 유보) 처리 승인 — 사건 내 지급액 수치가 존재하지 않으므로 이를 임의로 창작하지 않은 것은 올바른 P1 준수 행위임. (4) 서식 준수 접근 승인 — 채울 수 없는 서식 항목에 대해 부존재를 정직하게 명시하는 방식이 억지 보충(padding)보다 우수함. (5) 반박 방향은 적절히 헤징되어 있음을 확인 — 보험사별 재검토/제3자 절차 프레이밍 승인.",
+  "reviewed_at": "2026-07-14T18:35:00+09:00"
+}
