@@ -90,6 +90,7 @@ def test_ocr_result_page_text_path_nullable_for_disagreed_pages():
         "document_id": "DOC_001", "ocr_engine": "x", "vision_model_name": "x", "uncertain_confidence_threshold": 1.0,
         "extraction_method": "ocr", "ocr_status": "completed", "pages": [page_disagreed],
         "ocr_quality": "medium", "cross_validation_status": "disagreed_pending_review",
+        "cross_validation_mode": "single_technology_weak_p8_poc",
         "review_required": True, "reviewer_role": "손해사정사",
     }
     assert validate_instance(instance, "ocr_result.schema.json", schemas, registry) == []

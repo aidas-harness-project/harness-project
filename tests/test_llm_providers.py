@@ -151,11 +151,15 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
 
     result = provider.transcribe_image(Path("page.png"), "transcribe prompt", "ocr_extraction_v0.1")
 
+    # The transcription prompt must stay NEUTRAL -- just the caller's prompt plus
+    # the image path, no defensive "role framing" preamble. A prior version
+    # prepended a "this is a SANCTIONED step, do not refuse..." block that the
+    # nested claude read as a prompt-injection signal and refused; this assertion
+    # is the regression guard against that framing creeping back in.
     assert captured["cmd"] == [
         "claude",
         "-p",
-        f"{providers.ClaudeCliProvider._OCR_READER_ROLE_FRAMING}"
-        "\n\ntranscribe prompt\n\nImage: page.png",
+        "transcribe prompt\n\nImage: page.png",
         "--allowedTools",
         "Read",
     ]
