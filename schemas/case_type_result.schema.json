@@ -28,7 +28,7 @@
         },
         "template_id": {
           "type": "string",
-          "description": "Report template identifier. One of 배상책임_후유장해형, 진단수술비형 (실손형/기타형 still TODO, no ground-truth basis yet) -- see templates/draft-report.md for the full section structure per template_id (see open-decisions.md #2 for status). document-assembly does not yet enforce section presence/order against this value -- that wrapper is still a follow-up."
+          "description": "Report template identifier. Canonical keys per templates/registry.json: 배상책임_후유장해형, 진단수술비형 (실손형/기타형 still TODO, no ground-truth basis yet -- use the closest variant and record it in warnings). document_assembly.py --template enforces section presence/order against exactly this value at render time, so a non-registry id breaks the draft stage."
         },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
         "evidence_references": {

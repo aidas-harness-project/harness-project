@@ -823,3 +823,95 @@ raise before `_run_dao_cli` is ever reached. Re-verified the same crafted
 attacks are now blocked, and that the real, previously-approved `CASE_020`
 filename and a real `CONFLICT_1`-shaped id both still pass -- no
 regression on the legitimate path this same commit had just fixed (item 5).
+
+## 14. First full end-to-end run (CASE_021) -- 3 gaps sealed, 1 scope question OPEN
+
+CASE_021 (fresh intake from the 약관상 지급범위 source: raw = the 4-page
+3-insurer denial pack, ground truth = the adjuster's 4 완성 손해사정서) was
+the first case ever to traverse intake -> evaluation in one run
+(RUN_20260714_001, all stages passed, 21/21 contracts schema-PASS, real P8
+disagreement resolved by a delegated-human image review along the way).
+The run surfaced four gaps; three sealed 2026-07-14:
+
+- **Run-state stage-name drift -- SEALED.** `run_checkpoint1.py` wrote
+  `document_processing` while the document-pipeline agent freely chose
+  `document-pipeline`, and critic wrote both `critic` and `critic_v1` --
+  one stage forked into parallel entries, breaking
+  `get_last_passed_stage`'s resume logic and every stage_name consumer.
+  Fixed structurally: `run_state.schema.json` v0.2 makes `stage_name` an
+  enum of the 14 canonical names (conflict-ledger `raised_by_stage` now
+  $refs the same enum -- one vocabulary, one drift surface), every agent
+  spec pins its own canonical name, the orchestrator skill lists the full
+  set, and CASE_021's run-state was repaired under lock. Regression test:
+  a drifted name is rejected and nothing persists.
+- **`extracted_claim_fields` too narrow + broken ad-hoc dates -- SEALED.**
+  The run produced 6 real facts with no slot (imaging_date,
+  claim_received_date, policy_contract_date, claim_item, disposition,
+  insurers) which got smuggled through `warnings`, losing typed structure
+  and evidence links. Worse: `additionalProperties` used `oneOf` over the
+  three field shapes, but a YYYY-MM-DD string satisfies both `value_field`
+  and `date_field` -- exactly-one matching made every ad-hoc date field
+  structurally unvalidatable. Schema v0.2: named slots added, oneOf ->
+  anyOf. And the root enabler: `validate_instance()` never passed a
+  FormatChecker, so every `format: date` in every schema was decorative --
+  a malformed date validated fine. Now enforced project-wide; full
+  revalidation sweep of all real cases' outputs passed.
+- **Redaction scope undefined -- SEALED.** CASE_012's real run redacted 0
+  items from the same content CASE_021's redacted 4 (corporate hotline,
+  addresses, CEO signatory name) -- neither was wrong against the spec,
+  because the spec never said. document-pipeline.md now fixes the
+  convention: all natural-person names regardless of capacity + all
+  phone/address/policy-number values including published corporate contact
+  info; corporate entity names stay.
+- **Single-denial-pack under-scoping -- OPEN (user decision, not a code
+  fix).** The pipeline only ever saw the 3 insurers present in the denial
+  pack; ground truth shows a 4th policy (농협, 20,000,000원 payable) with
+  no in-case denial notice -- invisible to every stage and only surfaced
+  at evaluation. Real question: should intake of a multi-insurer case
+  require a per-insurer completeness check (does every GT insurer have a
+  corresponding raw-side document?), or is partial-scope processing
+  acceptable with the asymmetry recorded at evaluation (what CASE_021
+  did)? Deferred to the user; evaluation_result_v1.json records the
+  asymmetry explicitly either way.
+
+## 15. OCR subprocess inherited project context and editorialized -- two-sided fabrication that defeats item 11's check -- RESOLVED 2026-07-14 (tool), pages scrubbed
+
+Found live during CASE_022's checkpoint 1 (the 기왕증 case, first run
+after the template wrapper). `ocr_extract.py`'s `claude -p` calls run with
+`cwd=ROOT`, so the transcription subprocess auto-loaded this project's
+CLAUDE.md, skills, and session hooks -- and a context-aware reader
+editorializes: on a document pack containing third-party adjuster
+determinations, BOTH blind reads appended similar meta-commentary after
+the true page end ("answer-key-class content per D2, check
+_source_ledger.json...", one literally phrased "Flagging, not caveman" --
+the session's hook text leaking into the subprocess). Because the
+additions were two-sided and materially similar, `compare()` judged the
+pages agreed and the fabricated blocks landed in the trusted processed
+layer (pages 2/3/5) -- the exact escalation item 11's one-sided-addition
+check cannot catch. Pages 4/6 disagreed for ordinary reasons and carried
+the same flags in both readings.
+
+Also notable: the subprocess's "flags" were *correct about the content*
+(the pack does contain adjuster determinations) but wrong about the
+situation -- the delegated D2 review had already examined those exact
+pages and approved them as third-party precedent evidence. A transcriber
+is not the place for classification judgment; that's what intake's
+content pre-check and D2 human review are for.
+
+**Fixed:**
+- `ocr_extract.py`: both `claude -p` calls (`transcribe_once`, `compare`)
+  now pass `--safe-mode` -- all customizations (CLAUDE.md, hooks, skills)
+  disabled, auth untouched; the reader sees nothing but the page. Verified
+  live before adopting (`--safe-mode` smoke test) and locked by a
+  regression test asserting both subprocess argvs carry the flag.
+- Pages 2/3/5 scrubbed under DAO write-page-text: flag blocks stripped,
+  true page ends verified against 150dpi renders, scrub recorded in each
+  page's `cross_validation.resolution` (the item-11 "agreed but human
+  found a problem" use case). Pages 4/6 resolved normally (image-verified
+  hand corrections, flags stripped) -- notes in ocr_result_DOC_001.json.
+
+**Residual, deliberate:** prior cases' processed pages were NOT re-audited
+for this pattern (CASE_012/013/020/021 predate the wrapper-era prompts and
+their runs' readings never showed flag tails -- CASE_021's page-2 fabricated
+addition was one-sided and caught; still, the retroactive-audit debt from
+item 11 now covers two failure patterns instead of one).

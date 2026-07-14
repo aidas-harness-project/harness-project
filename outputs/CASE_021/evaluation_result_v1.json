@@ -1,0 +1,105 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_001",
+  "component": "evaluation",
+  "status": "success",
+  "created_at": "2026-07-14T15:20:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "evaluation_v0.1"
+  },
+  "review_required": false,
+  "core_field_accuracy": {
+    "applicable": true,
+    "na_reason": null,
+    "score": 0.86,
+    "field_comparisons": [
+      {
+        "field_name": "diagnosis_name",
+        "predicted_value": "기타 명시된 뇌혈관질환",
+        "actual_value": "기타 명시된 뇌혈관질환 (I678) — GT 주요 상병명",
+        "match": true
+      },
+      {
+        "field_name": "kcd_code",
+        "predicted_value": "I67.8",
+        "actual_value": "I67.8 / I678 (GT: I67 기타 뇌혈관질환, 뇌혈관질환(뇌졸중제외) 범주에 포함)",
+        "match": true
+      },
+      {
+        "field_name": "claim_coverage",
+        "predicted_value": "뇌혈관질환진단비 (진단비 특약)",
+        "actual_value": "뇌질병진단비(뇌혈관질환(뇌졸중제외))진단비III / 뇌혈관질환진단비 특별약관 (GT 사정금액 대상 담보)",
+        "match": true
+      },
+      {
+        "field_name": "accident_date (보험사고일)",
+        "predicted_value": "2025-10-16",
+        "actual_value": "2025-10-16 (GT: '2025년 10월 16일 발생한 보험사고')",
+        "match": true
+      },
+      {
+        "field_name": "imaging_date",
+        "predicted_value": "2025-10-10",
+        "actual_value": "2025-10-10 (GT 진단경위: 2025.10.10 시행 뇌 MRI)",
+        "match": true
+      },
+      {
+        "field_name": "policy_contract_date (KB)",
+        "predicted_value": "2023-10-16",
+        "actual_value": "2023-10-16 (GT 보험계약사항: KB 보험기간 2023.10.16~2043.10.16 시기)",
+        "match": true
+      },
+      {
+        "field_name": "onset_date",
+        "predicted_value": "2025-09-30",
+        "actual_value": null,
+        "match": false
+      }
+    ]
+  },
+  "case_type_accuracy": {
+    "applicable": true,
+    "na_reason": null,
+    "correct": true,
+    "predicted_case_type": "진단·수술비",
+    "actual_case_type": "진단·수술비 (뇌혈관질환 정액 진단비 특약 청구 — GT 사정금액이 정액 진단비로 산정됨)"
+  },
+  "denial_reason_top1_agreement": {
+    "applicable": true,
+    "na_reason": null,
+    "correct": true,
+    "predicted_code": "R04",
+    "actual_code": "R04"
+  },
+  "denial_reason_top3_agreement": {
+    "applicable": true,
+    "na_reason": null,
+    "correct": true,
+    "candidate_codes": [
+      "R04",
+      "R05",
+      "R99"
+    ],
+    "actual_code": "R04"
+  },
+  "policy_mapping_top3_inclusion": {
+    "applicable": true,
+    "na_reason": null,
+    "included": true,
+    "matched_rank": 1
+  },
+  "draft_quality": {
+    "applicable": true,
+    "na_reason": null,
+    "rating": "good",
+    "narrative": "The reviewed draft's analytical substance aligns strongly with the independent third-party 손해사정서 (ground truth), but its provisional directional lean is opposite to the real outcome. CORRECT: (1) diagnosis I67.8 기타 명시된 뇌혈관질환 and covered benefit (뇌혈관질환/뇌질병 정액 진단비 특약); (2) case type 진단·수술비; (3) the pivotal issue correctly isolated as 요건 3 — whether the 2025-10-10 MRI/MRA objectively establishes 진단확정; (4) the 진단확정 요건 clause the draft reconstructed (의료법 제3조 의사 + 병력·신경학적 검진 + brain CT/MRI/뇌혈관조영술/PET/SPECT/뇌척수액검사 기초) matches the governing clause the GT adjuster reproduces verbatim in Section IV (관계법규 및 약관의 적용·판단); (5) the §6 missing-evidence asks (진단서, 의무기록, 영상 원본·판독지, 약관 전문) are exactly the materials the GT adjuster relied on (주치의 진단서·의무기록·의료자문). The draft (P3-compliant) declined to adjudicate 요건 3 and routed it to 전문의. DIVERGENCE: the independent adjuster concluded all claims PAYABLE — KB 10,000,000원, 삼성화재 20,000,000원, 한화 20,000,000원 (and a 4th policy, 농협 20,000,000원, absent from the in-case denial pack) — resolving 요건 3 as MET (the 소혈관질환/백질 소견 accepted as supporting I67.8). The draft's §7 instead characterized the concordant 3사 부지급 as '청구 인용에 유리하지 않은 정황' — a mild lean AGAINST the claim, the wrong direction; the pipeline's coverage_result likewise set the benefit applicable=false (confidence 0.3, flagged for 의사 review). MITIGATING: that lean was double-hedged, explicitly non-final, and explicitly conditioned on obtaining the missing 진단서/의무기록 and a 전문의 re-read — precisely the path that produced the real payable outcome — so the draft's framework and process were sound and vindicated even though the provisional inference erred. Rated good (not excellent) because the adverse lean, read without its hedges, points away from the correct result; not fair because the analytical framework, clause identification, and evidence-gap diagnosis were accurate and directly mirrored the real adjuster's reasoning."
+  },
+  "warnings": [
+    "PII handling: ground truth contains the 피보험자's real name and the 손해사정사's personal identifiers. These are deliberately excluded from this evaluation output; only non-identifying determinations (payout amounts, R-codes, clause text, event dates) were transcribed.",
+    "denial_reason metrics interpretation: the GT is a third-party 손해사정서 that OVERTURNS the 3사 denial and concludes payable, so there is no final upheld denial-reason code. R04 is scored 'correct' as the accurate classification of the DENIAL'S NATURE (진단확정/지급요건 미충족, not a true 면책 R05) — GT Section IV frames the dispute the same way and resolves the requirement as met, vindicating R04 over the R05 candidate. The outcome divergence (denied-by-insurers vs payable-by-adjuster) is captured in draft_quality, not treated as a denial-reason miss.",
+    "Scope asymmetry (per orchestrator note): the draft and upstream stages covered 3 insurers (삼성화재·KB·한화, the in-case denial pack); GT reveals a 4th policy (농협손해보험, 20,000,000원 payable) with NO corresponding in-case denial notice — outside the pipeline's available inputs, so not a pipeline error, but it means the case's true payout scope (총 70,000,000원 across 4 policies; 50,000,000원 across the 3 in-draft policies) exceeds what the draft could address.",
+    "core_field_accuracy: onset_date (2025-09-30, a flagged best-available anchor from the first symptom visit) is not independently confirmable against GT — the 손해사정서 states no explicit 발병일; scored match=false as unverified, not as contradicted (6/7 confirmable core facts matched).",
+    "Ground-truth read scope (D1 exception, cost-bounded per orchestrator): read cover + 사정 요약(사정금액·보험금사정 의견) of all four GT reports (GT_001 KB, GT_002 농협, GT_003 삼성화재, GT_004 한화), plus Sections II–IV reasoning of GT_001 only. Full ~87-page transcription deliberately not performed."
+  ]
+}

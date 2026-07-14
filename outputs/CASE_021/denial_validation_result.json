@@ -1,0 +1,153 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_002",
+  "component": "denial-validation",
+  "status": "success",
+  "created_at": "2026-07-14T15:10:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "denial_validation_v0.1"
+  },
+  "confidence": 0.5,
+  "review_required": true,
+  "reviewer_role": "의사",
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "low",
+    "reason": "Every verdict traces to a verbatim quote in DOC_001's four chunks (the entire in-case evidence base). No medical or legal strength is asserted beyond what the notices themselves state or concede; the dispositive question (whether the 2025-10-10 imaging objectively establishes I67.8 진단확정) is left as a hedged, review-flagged inference per P3, not resolved."
+  },
+  "prohibited_language_check": {
+    "passed": true,
+    "issues": []
+  },
+  "warnings": [
+    "The only in-case evidence is the denial pack itself (DOC_001, 4 pages / 4 chunks). No 영상 원본·판독지, 진단서 전문, 의무기록, or 약관 전문 is present. All three verdicts are therefore partially_supported rather than not_supported: the insurers' factual premise (minimal chronic ischemic white-matter change, no lesion-concordant neurological symptom) is grounded, but the dispositive conclusion (진단확정 요건 미충족) is a contested medical judgment that the in-case evidence neither fully sustains nor squarely contradicts.",
+    "Rebuttal footing is limited by task constraint to (a) the insurers' own concessions, (b) internal tensions across the three notices, and (c) the evidence-acquisition path (원본·판독지·진단서·의무기록·약관 전문 미확보). No independent medical or legal strength is manufactured beyond that.",
+    "Cross-notice tension is the analytical subject here, NOT a P6 source conflict (the three notices concern three separate insurer policies for the same claim, and their divergence is insurer-vs-insurer characterization, not the case's own sources contradicting each other). Conflict ledger deliberately untouched; check-conflicts-clear returned clear before start.",
+    "REQ-2 (병력·신경학적 검진 + MRI/MRA 등 검사의 시행) is 'met' by the insurers' own account per requirement_matching_result.json; the denials rest entirely on REQ-3 (findings objectively establishing the diagnosis). This narrowing is load-bearing for all three verdicts.",
+    "농협 is out of scope per project-owner decision (no in-case denial notice); not addressed here.",
+    "The dispositive REQ-3 question requires 의사 review of the underlying imaging/records, which are not in-case; each verdict is flagged review_required accordingly."
+  ],
+  "validations": [
+    {
+      "reason_id": "DR_1",
+      "verdict": "partially_supported",
+      "verdict_explanation": "삼성화재의 부지급 사유(2025.10.10 MRI/MRA상 양측 대뇌백질의 미미한 만성 허혈성 병변이 진단에 '부합하지 않는다')는 사실적 전제(경미한 백질 병변의 존재) 면에서는 통지문 자체로 근거가 확인되나, 이를 곧바로 I67.8 진단확정 불충족으로 단정하는 결론 부분은 케이스 내 증거만으로는 온전히 뒷받침된다고 보기 어려운 것으로 판단된다(P3, 추정). 첫째, 삼성화재는 같은 통지문에서 피보험자가 '기타 명시된 뇌혈관질환(I67.8)으로 진단받은 사실'을 확인하였다고 스스로 기재하여, 자격 있는 의사의 진단이 존재함을 인정하고 있다. 둘째, 동일 청구 건에 대한 한화 통지문은 같은 유형의 백질 신호 증강을 '소혈관질환의 초기 소견으로도 볼 수 있으나'라고 인정하고 있어, 삼성화재의 단정적 '부합하지 않습니다'와 케이스 내에서 긴장 관계에 있다. 셋째, 약관 진단확정 요건 중 검사 시행 요건(REQ-2)은 이미 충족된 것으로 정리되어 다툼은 REQ-3(소견의 객관적 부합 여부)에 국한된다. 넷째, 삼성화재 스스로 '의견을 달리하실 경우 관련자료 제출 시 즉시 재검토'를 안내하여 판단의 종국성을 유보하고 있다. 다만 영상 원본·판독지·진단서 전문이 케이스 내에 없어 진단 부합을 적극적으로 입증할 수도 없으므로, 사유가 완전히 뒤집혔다(not_supported)기보다 부분적으로만 뒷받침된다(partially_supported)고 보는 것이 타당하다. 최종 판단에는 의사 검수 필요.",
+      "retrieved_chunk_ids": [
+        "CHUNK_1",
+        "CHUNK_2",
+        "CHUNK_3",
+        "CHUNK_4"
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "2025.10.10(판독 2025.10.14) brain mri mra 판독상, 양측 대뇌백질에 미미한 만성 허혈성 병변 확인되며 상기 진단에 부합하지 않습니다."
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "기타 명시된 뇌혈관질환(I67.8)으로 진단받은 사실을 확인하였습니다."
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "백질의 신호 증강자체는 소혈관질환의 초기 소견으로도 볼 수 있으나"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "당사와 의견을 달리하실 경우 필요한 관련자료를 제출하여 주시면, 즉시 재검토하도록 하겠습니다."
+        }
+      ],
+      "confidence": 0.5,
+      "review_required": true,
+      "reviewer_role": "의사"
+    },
+    {
+      "reason_id": "DR_2",
+      "verdict": "partially_supported",
+      "verdict_explanation": "KB손해보험의 부지급(면책) 사유(병소와 일치하는 특이적 신경학적 증상이 없고 영상소견상 I67.8의 객관적 소견으로 보기 어렵다)는 케이스 내 증거로 사실적 전제(2025.09.30 신경학적검사 특이소견 없음, 2025.10.10 최소 만성 허혈병변)가 확인되는 한도에서는 근거가 있으나, 이를 진단확정 요건 불충족으로 단정하는 결론은 케이스 내 증거만으로는 부분적으로만 뒷받침된다고 판단된다(P3, 추정). 첫째, KB 스스로 25.10.10 MRI/MRA 시행 및 병변 확인 사실을 기재하여 약관 진단확정의 검사 시행 요건(REQ-2)은 충족됨을 인정한다 — 다툼은 소견의 객관적 부합(REQ-3)에 국한된다. 둘째, KB는 검토의견에서 지급사유 미합의 시 '종합병원 소속 전문의 제3자'의 의견에 따를 수 있고 그 비용을 회사가 전액 부담한다는 절차를 스스로 안내하여, 현재 판단이 종국적·확정적이지 않음을 시사한다. 셋째, 동일 건 한화 통지문의 '소혈관질환의 초기 소견으로도 볼 수 있으나'라는 인정은 KB의 '객관적 소견으로 보기 어렵다'는 판단과 케이스 내에서 긴장 관계에 있다. 다만 영상 원본·판독지·의무기록 전문이 케이스 내에 없어 진단 부합을 적극 입증할 수 없으므로 not_supported가 아니라 partially_supported로 본다. 최종 판단에는 의사 검수 필요.",
+      "retrieved_chunk_ids": [
+        "CHUNK_1",
+        "CHUNK_2",
+        "CHUNK_3",
+        "CHUNK_4"
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "병소와 일치하는 특이적 신경학적 증상 확인되지 않는 상태 및 영상검사상의 결과내용 참조하였을때 I67B 진단의 객관적소견으로 보기어려운 바 부지급됨을 안내드립니다."
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "25.10.10 뇌MRI,MRA(TOF,미조영) 검사상 양측 뇌백질의 최소 만성 허혈병변으로 확인되었습니다."
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "보험수익자와 회사가 함께 제3자를 정하고 그 제3자의 의견에 따를 수 있습니다. 제3자는 의료법 제3조(의료기관)에 규정한 종합병원 소속 전문의 중에 정하며, 보험금 지급사유 판정에 드는 의료비용은 회사가 전액 부담합니다."
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "백질의 신호 증강자체는 소혈관질환의 초기 소견으로도 볼 수 있으나"
+        }
+      ],
+      "confidence": 0.5,
+      "review_required": true,
+      "reviewer_role": "의사"
+    },
+    {
+      "reason_id": "DR_3",
+      "verdict": "partially_supported",
+      "verdict_explanation": "한화손해보험의 지급 곤란 사유(경미한 백질 신호 증강은 연령상 흔한 소견이고 특이 신경학적 증상 없이 우연히 발견되어 만성대뇌허혈 확진에 미흡)는 케이스 내에서 가장 상세한 의학적 논거를 제시하나, 같은 통지문 안에 스스로의 결론을 약화시키는 인정이 다수 포함되어 있어 부분적으로만 뒷받침된다고 판단된다(P3, 추정). 첫째, 한화는 '백질의 신호 증강자체는 소혈관질환의 초기 소견으로도 볼 수 있으나'라고 명시하여 해당 소견이 소혈관질환 초기 소견과 양립 가능함을 스스로 인정한다. 둘째, '향후 신경학적 증상을 가진 소혈관질환으로 발현할 수 있어 추적검사 요하나'라고 하여 병변의 임상적 의미를 완전히 배제하지 않는다. 셋째, 한화는 '추가 검사·객관적 반증 자료 제출 시 재검토 가능하고, 대학병원급 제3의 병원 의료자문·통신감정을 통해 재검토 가능'하다고 안내하여 현재 판단의 비종국성을 명시한다. 이들 인정은 '확진되기는 미흡한 소견임'이라는 단정과 케이스 내에서 긴장 관계에 있다. 다만 영상 원본·판독지 및 추적검사 자료가 케이스 내에 없어 확진 성립을 적극 입증할 수는 없으므로 not_supported가 아니라 partially_supported로 본다. 소견의 임상적 의의 및 감별 필요성 판단에는 의사 검수 필요.",
+      "retrieved_chunk_ids": [
+        "CHUNK_1",
+        "CHUNK_2",
+        "CHUNK_3",
+        "CHUNK_4"
+      ],
+      "evidence_references": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "비가역적인 병변을 보이는 소혈관질환 즉 만성대뇌허혈로 확진되기는 미흡한 소견임"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "백질의 신호 증강자체는 소혈관질환의 초기 소견으로도 볼 수 있으나, 백질의 만성 변화를 유발하는 다른 여러가지 원인들과 감별이 요함"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "본 피보험자가 보인 경미한 수준의 백질 신호 증강은 연령을 고려할 때, 향후 신경학적 증상을 가진 소혈관질환으로 발현할 수 있어 추적검사 요하나"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "향후 추가적인 검사 또는 다른 객관적인 반증 자료를 제출해주시면 재검토 가능하고, 대학병원급 제3의 병원에서 의료자문 및 통신감정을 통해 재검토 가능함을 안내드리며"
+        }
+      ],
+      "confidence": 0.5,
+      "review_required": true,
+      "reviewer_role": "의사"
+    }
+  ]
+}

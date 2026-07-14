@@ -4,6 +4,7 @@ provider-agnostic P8 wiring.
 Provider calls are faked throughout -- these tests never shell out to a
 real `claude` binary and never call an external API.
 """
+import pathlib
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace

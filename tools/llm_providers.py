@@ -103,7 +103,17 @@ class ClaudeCliProvider(BaseProvider):
         self.command = command
 
     def _run(self, prompt: str, *, prompt_version: str, allowed_read: bool, timeout: int) -> ProviderResult:
-        cmd = [self.command, "-p", prompt]
+        # --safe-mode: the child claude -p session must see NOTHING but the
+        # prompt -- no CLAUDE.md, skills, or session hooks. Without it, cwd=ROOT
+        # auto-loads this project's context, and a context-aware reader
+        # editorializes: CASE_022's real checkpoint-1 run had BOTH independent
+        # reads append similar D2 meta-commentary to transcribed pages, which
+        # compare() then waved through as material agreement (two-sided additions
+        # defeat the one-sided-addition check from known-gaps item 11), landing
+        # fabricated text in the trusted processed layer. This applies to every
+        # claude-cli call through this provider (transcribe/compare/classify/scan),
+        # not just OCR -- the same context-inheritance risk exists for all of them.
+        cmd = [self.command, "-p", prompt, "--safe-mode"]
         if allowed_read:
             cmd.extend(["--allowedTools", "Read"])
         try:

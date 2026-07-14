@@ -1,0 +1,24 @@
+{
+  "case_id": "CASE_021",
+  "created_at": "2026-07-14T12:01:43.366527+09:00",
+  "updated_at": "2026-07-14T12:18:40.566859+09:00",
+  "documents": [
+    {
+      "document_id": "DOC_001",
+      "file_name": "DOC_001.pdf",
+      "file_path": "data/raw/CASE_021/DOC_001.pdf",
+      "file_format": "pdf",
+      "file_size_bytes": 296532,
+      "pre_flagged_type": null,
+      "pages": 4,
+      "ocr_status": "completed",
+      "ocr_text_path": null,
+      "ocr_quality": "low",
+      "uncertain_region_count": 0,
+      "cross_validation_status": "disagreed_resolved",
+      "redacted_text_path": "data/processed/CASE_021/DOC_001/redacted_text.md",
+      "document_type": "insurer_response",
+      "classification_confidence": 0.98
+    }
+  ]
+}

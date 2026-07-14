@@ -1,0 +1,128 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_002",
+  "created_at": "2026-07-14T12:07:26.237646+09:00",
+  "updated_at": "2026-07-14T17:47:50.546629+09:00",
+  "stages": [
+    {
+      "stage_name": "document_processing",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T12:20:31.037534+09:00",
+      "attempt_count": 0,
+      "backup_path": "/home/toxiclemon/Working/Labs/AIDAS/harness-project/outputs/CASE_021/_backups/step_01_document_processing"
+    },
+    {
+      "stage_name": "indexing",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T12:20:49.402410+09:00",
+      "attempt_count": 0,
+      "backup_path": null
+    },
+    {
+      "stage_name": "policy_clause_processing",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T12:20:49.490469+09:00",
+      "attempt_count": 0,
+      "backup_path": null
+    },
+    {
+      "stage_name": "claim_analysis",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T12:30:11.504634+09:00",
+      "attempt_count": 0,
+      "backup_path": "/home/toxiclemon/Working/Labs/AIDAS/harness-project/outputs/CASE_021/_backups/step_02_claim_analysis"
+    },
+    {
+      "stage_name": "denial_response",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T12:33:26.294619+09:00",
+      "attempt_count": 0,
+      "backup_path": null
+    },
+    {
+      "stage_name": "consistency_check",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T12:34:10.912798+09:00",
+      "attempt_count": 0,
+      "backup_path": "/home/toxiclemon/Working/Labs/AIDAS/harness-project/outputs/CASE_021/_backups/step_03_consistency_check"
+    },
+    {
+      "stage_name": "screening_report",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T12:41:02.986152+09:00",
+      "attempt_count": 0,
+      "backup_path": "/home/toxiclemon/Working/Labs/AIDAS/harness-project/outputs/CASE_021/_backups/step_04_screening_report"
+    },
+    {
+      "stage_name": "draft_report_v1",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T12:50:21.666574+09:00",
+      "attempt_count": 0,
+      "backup_path": "/home/toxiclemon/Working/Labs/AIDAS/harness-project/outputs/CASE_021/_backups/step_05_draft_report_v1"
+    },
+    {
+      "stage_name": "critic_v1",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T12:56:31.674266+09:00",
+      "attempt_count": 0,
+      "backup_path": "/home/toxiclemon/Working/Labs/AIDAS/harness-project/outputs/CASE_021/_backups/step_06_critic_v1"
+    },
+    {
+      "stage_name": "evaluation",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T17:47:50.542956+09:00",
+      "attempt_count": 0,
+      "backup_path": "/home/toxiclemon/Working/Labs/AIDAS/harness-project/outputs/CASE_021/_backups/step_11_evaluation"
+    },
+    {
+      "stage_name": "denial_validation",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T17:17:01.142552+09:00",
+      "attempt_count": 0,
+      "backup_path": "/home/toxiclemon/Working/Labs/AIDAS/harness-project/outputs/CASE_021/_backups/step_08_denial_validation"
+    },
+    {
+      "stage_name": "draft_report_v2",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T17:32:24.473679+09:00",
+      "attempt_count": 0,
+      "backup_path": "/home/toxiclemon/Working/Labs/AIDAS/harness-project/outputs/CASE_021/_backups/step_09_draft_report_v2"
+    },
+    {
+      "stage_name": "critic_v2",
+      "status": "passed",
+      "started_at": null,
+      "completed_at": "2026-07-14T17:40:36.736339+09:00",
+      "attempt_count": 0,
+      "backup_path": "/home/toxiclemon/Working/Labs/AIDAS/harness-project/outputs/CASE_021/_backups/step_10_critic_v2"
+    }
+  ],
+  "human_input_status": [
+    {
+      "stage_name": "evaluation",
+      "status": "received",
+      "description": "expert review of draft_report_v1_reviewed.md",
+      "requested_at": "2026-07-14T12:56:31.763977+09:00",
+      "received_at": "2026-07-14T12:58:55.062255+09:00"
+    },
+    {
+      "stage_name": "evaluation",
+      "status": "received",
+      "description": "expert review of draft_report_v2_reviewed.md",
+      "requested_at": "2026-07-14T17:40:36.888709+09:00",
+      "received_at": "2026-07-14T17:42:23.331196+09:00"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "$comment": "Machine-readable section contracts derived from templates/*.md -- consumed by tools/document_assembly.py's --template flag (open-decisions.md #2's enforcement wrapper). Each heading_pattern is a regex matched (re.search) against the rendered section headings in order; allow_extra_sections=false means the document must have exactly these sections, one per pattern, in this order. rebuttal_points has no entry on purpose: its structure repeats per denial reason (dynamic section count), so fixed-list enforcement can't express it -- templates/rebuttal-points.md stays prompt-enforced and critic-verified. When templates/*.md changes section structure, this file changes in the same commit (D4).",
+  "templates": {
+    "배상책임_후유장해형": {
+      "source": "templates/draft-report.md (변형 A)",
+      "document_title": "손해사정서",
+      "heading_patterns": [
+        "^표지",
+        "^I\\. 사정 요약",
+        "^II\\. 위임 및 보험계약사항",
+        "^III\\. 사고 및 손해 발생",
+        "^IV\\. 관계법규 및 보상책임",
+        "^V\\. 사정 기초",
+        "^VI\\. 손해배상금 사정",
+        "^VII\\. 증빙자료"
+      ],
+      "allow_extra_sections": false
+    },
+    "진단수술비형": {
+      "source": "templates/draft-report.md (변형 B)",
+      "document_title": "보험금사정서",
+      "heading_patterns": [
+        "^표지",
+        "^I\\. 사정 요약",
+        "^II\\. 위임 및 보험계약사항",
+        "^III\\. 보험사고 발생의 조사·확인한 사실",
+        "^IV\\. 관계법규 및 약관의 적용·판단",
+        "^V\\. 보험금 사정",
+        "^VI\\. 증빙자료"
+      ],
+      "allow_extra_sections": false
+    },
+    "screening_report": {
+      "source": "templates/screening-report.md",
+      "document_title": "스크리닝 리포트",
+      "heading_patterns": [
+        "^1\\. 사건 개요",
+        "^2\\. 보험사 판단",
+        "^3\\. 핵심 쟁점",
+        "^4\\. 문서 간 불일치",
+        "^5\\. 추가 필요 서류",
+        "^6\\. 전문가 검수 포인트",
+        "^7\\. 1차 판단"
+      ],
+      "allow_extra_sections": false
+    }
+  }
+}

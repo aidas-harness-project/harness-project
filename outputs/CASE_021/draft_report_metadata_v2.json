@@ -1,0 +1,41 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_002",
+  "component": "draft-report",
+  "status": "success",
+  "created_at": "2026-07-14T17:30:14+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "draft_report_v0.1"
+  },
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "version": "v2",
+  "template_id": "template_진단수술비_v1",
+  "case_type": "진단·수술비",
+  "section_count": 7,
+  "evidence_tag_count": 40,
+  "source_refs": [
+    "draft_report_v1.md",
+    "rebuttal_points.json",
+    "denial_validation_result.json",
+    "expert_review_v1.json",
+    "critic_result_v1.json",
+    "requirement_matching_result.json",
+    "denial_reason_result.json",
+    "case_type_result.json",
+    "DOC_001"
+  ],
+  "output_md_path": "outputs/CASE_021/draft_report_v2.md",
+  "output_sidecar_path": "outputs/CASE_021/draft_report_v2.evidence.json",
+  "warnings": [
+    "Template conformance: v2 restructured to templates/draft-report.md 변형 B (진단수술비형, 표제 보험금사정서, 공통 앞부분 + 로마숫자 I~VI). Section headings: 표지·제출공문·속표지(양식 고정부) / I.사정 요약 / II.위임 및 보험계약사항 / III.보험사고 발생의 조사·확인한 사실 / IV.관계법규 및 약관의 적용·판단 / V.보험금 사정 / VI.증빙자료.",
+    "Single-document case (DOC_001 only) cannot fill several template-required sections; absences stated honestly rather than padded: (a) 공통 앞부분 표지·제출공문·속표지의 사정법인/문서번호/작성일자/수신 보험회사 서식값 부존재; (b) II.1 위임 인적사항(성명·생년월일·주소·연락처)과 II.2 증권번호·보험기간·계약자·피보험자·수익자가 안내문상 [REDACTED] 또는 미기재; (c) VI 증빙자료 중 진단서·의무기록·영상 원본/판독지·검사결과지·약관 전문·위임장 등이 미확보로 표기.",
+    "I.2 사정 금액 및 V.1/V.2 보험금 사정(금액): 3사 전부 부지급/지급곤란 국면으로 지급·감액 금액이 안내문에 없고 담보 가입금액을 확인할 증권·약관이 부존재하여 금액을 '미정(산정 유보)'로 처리, 一金 미정整(₩ 미정)으로 표기 — 값을 창작하지 않음(P1/P3).",
+    "CF-1 fix (critic_result_v1 CF-1, expert_review_v1 disposition=accepted, v2 반영): IV.나 요건 3에 인라인 표기 '(재구성 — 약관 명시 문언 아님, 3사 부지급 논거로부터 도출)'를 부기하여 인용 근거 있는 요건 1·2(약관 인용)와 도출 요건 3을 목록 내에서 구분함.",
+    "Phase 2 fold-in (rebuttal_points.json RB-1/2/3, denial_validation_result.json): 각 보험사별 대응 방향을 IV.2(면책사유 검토)와 V.3(사정 결과 및 의견)에 반영 — 삼성화재의 I67.8 진단 사실 자체 인정 및 관련자료 재검토 경로, KB손해보험의 검사 시행 요건 충족 인정 및 종합병원 전문의 제3자 절차(회사 전액 부담), 한화손해보험의 '소혈관질환의 초기 소견으로도 볼 수 있으나' 인정·추적검사 필요 서술 및 대학병원급 제3병원 의료자문·통신감정 재검토 경로, 그리고 3사 통지 간 긴장 관계. 모든 대응 논거는 분쟁 대응 여지(추정·검수 필요)로 헤징되며 지급/성공을 예측하지 않음(P3).",
+    "3사 부지급 사유 성격 R04(지급요건 미충족) vs R05(면책)은 약관 전문 확보 시까지 잠정적으로 R04에 가까운 것으로 보되 손해사정사 검토 필요로 명시(denial_reason_result.json의 R04-vs-R05 tension 계승).",
+    "농협은 프로젝트 오너 결정에 따라 범위 외 — 본 사건 DOC_001에 농협 부지급 통지가 부존재하며, v2에서 다루지 않음.",
+    "Cross-notice tension(3사 통지 간 표현 차이)은 서로 다른 보험사(별개 계약) 사이의 특성 차이로서 사건 자체 출처 간 모순(P6 conflict-ledger 대상)이 아님을 문서에 명시. 진단 부합 여부(요건 3/REQ-3)의 최종 판단은 미해결·의사(전문의) 검수 의존 쟁점으로 유보. 본 초안은 손해사정사·전문의 검수를 전제로 한 예비 문서이며 downstream critic 검수 대상."
+  ]
+}
