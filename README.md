@@ -114,7 +114,7 @@ available when their credentials are present.
 ### Project-local offline runtime
 
 For claim documents that must not leave the machine, prepare the runtime on
-E: and preload one vision-capable model explicitly. `setup_local_runtime.ps1`
+E: and preload separate text and vision models explicitly. `setup_local_runtime.ps1`
 never installs Tesseract on C:; it requires an approved portable Tesseract 5
 copy already present at `.runtime/tesseract/tesseract.exe`, then downloads
 language data, Ollama, and the model into E: only:
@@ -127,8 +127,8 @@ python tools/local_runtime.py
 ```
 
 The recommended P8 pair is Tesseract (`local-ocr`) plus the loopback Ollama
-vision reader (`local-vlm`); comparison, classification, and checkpoint-2
-redaction use `local-llm`. The setup command is the only step allowed to
+vision reader (`local-vlm`, `qwen3-vl:4b`); comparison, classification, and
+checkpoint-2 redaction use the text-only `local-llm` (`qwen3:4b`). The setup command is the only step allowed to
 download. Pipeline providers verify that models already exist and never pull
 or fall back to an external service. On Codex Desktop, where `python` may not
 be on PATH, use the bundled Python absolute path reported by the workspace
