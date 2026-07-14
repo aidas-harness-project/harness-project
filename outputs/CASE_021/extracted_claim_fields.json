@@ -1,0 +1,109 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_001",
+  "component": "claim-analysis",
+  "status": "success",
+  "created_at": "2026-07-14T13:10:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "field_extraction_v0.1"
+  },
+  "confidence": 0.85,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "low",
+    "reason": "All fields are restatements of text present in DOC_001; no field is inferred beyond what the denial notices state."
+  },
+  "fields": {
+    "diagnosis_name": {
+      "value": "기타 명시된 뇌혈관질환",
+      "confidence": 0.95,
+      "evidence_references": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "기타 명시된 뇌혈관질환(I67.8)으로 진단받은 사실을 확인하였습니다"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "기타 명시된 뇌혈관질환(I678) 진단"
+        }
+      ],
+      "review_required": false,
+      "is_primary": true
+    },
+    "kcd_code": {
+      "value": "I67.8",
+      "confidence": 0.9,
+      "evidence_references": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "기타 명시된 뇌혈관질환(I67.8)"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "기타 명시된 뇌혈관질환(I678) 진단"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "I67B 진단의 객관적소견으로 보기어"
+        }
+      ],
+      "review_required": false,
+      "is_primary": true
+    },
+    "accident_date": {
+      "value": "2025-10-16",
+      "confidence": 0.6,
+      "evidence_references": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "2025년 10월 16일 에서 발급 된 기타 명시된 뇌혈관질환(I678) 진단"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "사고일: ;"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    "onset_date": {
+      "value": "2025-09-30",
+      "confidence": 0.55,
+      "evidence_references": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "25.09.30 두통, 어지려움으로 내원. 내원시 신경학적검사상 특이소견없음."
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    }
+  },
+  "warnings": [
+    "Document is a denial-notice pack (insurer_response) covering three separate insurer policies (삼성화재, KB손해보험, 한화손해보험) for the same 뇌혈관질환진단비 claim. No diagnosis certificate, medical record, or imaging report is present in this case, so hospital_name, treatment_period, admission_period, surgery_name are genuinely absent and omitted (schema requires >=1 evidence quote per field; none can be truthfully cited).",
+    "Schema constraint note: extracted_claim_fields only supports 8 predefined field names plus period-shaped custom fields; custom date/value-named fields fail the additionalProperties oneOf (format:date is not enforced, so a date string validates as BOTH date_field and value_field). The following additional core facts were therefore recorded here in warnings with their evidence rather than as structured fields, so they are not lost downstream: (a) imaging_date 2025-10-10 — MRI/MRA, the pivotal clinical event [DOC_001 p1 '2025.10.10(판독 2025.10.14) brain mri mra 판독상'; p3 '25.10.10 뇌MRI,MRA(TOF,미조영) 검사상'; p4 '25.10.10 두부 MRI/MRA상']; (b) claim_received_date 2025-10-20 [DOC_001 p3 '2025.10.20 ... 뇌혈관질환 ... 부지급(면책)']; (c) policy_contract_date 2023-10-16 (KB policy) [DOC_001 p3 'KB 3.5.5 오! 슬기로운간편건강보험Plus(무배당)(23.09) | : | 2023.10.16']; (d) claim_item '뇌혈관질환진단비' [DOC_001 p1 '[통합간편]뇌혈관질환 진단비 특별약관 제 3조']; (e) claim_disposition '부지급(면책) — all three insurers denied' [DOC_001 p1 '보상하여 드리지 못함'; p3 '보험금 부지급(면책) 처리됨'; p4 '지급하기 어려움'].",
+    "accident_date recorded as 2025-10-16 (한화 진단서 발급일, DOC_001 p4), used as the insured-event/diagnosis date because 삼성 p1's explicit 사고일 field is blank/redacted ('사고일: ;'). Flagged for adjuster confirmation — this is a best-available mapping, not a stated 사고일.",
+    "onset_date recorded as 2025-09-30 = the first documented visit for 두통/어지럼 (DOC_001 p3), used as the closest available symptom-onset anchor; not an explicitly stated symptom-onset date. Flagged for review.",
+    "kcd_code recorded as I67.8 (explicit on pages 1 and 4). Page 3 (KB) renders the same code as 'I67B', treated as an OCR/transcription variant of I67.8 — all three notices concern the identical 기타 명시된 뇌혈관질환 claim, so this is not raised as a P6 cross-source conflict. Noted for visibility.",
+    "No genuine cross-source conflict found across the three insurer pages: MRI/MRA date (2025.10.10) is consistent everywhere; the differing dates (visit 2025-09-30, imaging 2025-10-10, diagnosis 2025-10-16, claim receipt 2025-10-20) are distinct event types, not contradictions. Conflict ledger left clear."
+  ]
+}

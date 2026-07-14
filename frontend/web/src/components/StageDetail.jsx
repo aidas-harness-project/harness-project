@@ -3,6 +3,8 @@ import StatusStamp from "./StatusStamp";
 import ContractView from "./ContractView";
 import ReportViewer from "./ReportViewer";
 import { SourceLedgerPanel, ConflictLedgerPanel } from "./LedgerPanel";
+import OcrReviewPanel from "./OcrReviewPanel";
+import HumanReviewPanel from "./HumanReviewPanel";
 import { deriveStageStatus } from "../statusLogic";
 import { api } from "../api";
 
@@ -15,10 +17,10 @@ function Checkpoint({ cp, active }) {
   );
 }
 
-export default function StageDetail({ stageDef, index, phaseLabel, runState, ledgers, caseId, onLedgersChanged }) {
+export default function StageDetail({ stageDef, index, phaseLabel, runState, ledgers, ocrReview, caseId, onLedgersChanged }) {
   const [contracts, setContracts] = useState({});
   const [report, setReport] = useState(null);
-  const derived = deriveStageStatus(stageDef, runState, ledgers);
+  const derived = deriveStageStatus(stageDef, runState, ledgers, ocrReview);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,10 +81,22 @@ export default function StageDetail({ stageDef, index, phaseLabel, runState, led
           <SourceLedgerPanel ledger={ledgers?.source_ledger} caseId={caseId} onChanged={onLedgersChanged} />
         </div>
       )}
+      {stageDef.key === "document-pipeline" && (
+        <div className="detail-block">
+          <h5 className="mono">P8 dual-read review</h5>
+          <OcrReviewPanel caseId={caseId} review={ocrReview} onResolved={onLedgersChanged} />
+        </div>
+      )}
       {stageDef.key === "consistency-check" && (
         <div className="detail-block">
           <h5 className="mono">_conflict_ledger.json</h5>
           <ConflictLedgerPanel ledger={ledgers?.conflict_ledger} caseId={caseId} onChanged={onLedgersChanged} />
+        </div>
+      )}
+      {stageDef.reviewVersion && (
+        <div className="detail-block">
+          <h5 className="mono">human review gate ({stageDef.reviewVersion})</h5>
+          <HumanReviewPanel caseId={caseId} version={stageDef.reviewVersion} onChanged={onLedgersChanged} />
         </div>
       )}
 

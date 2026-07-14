@@ -43,8 +43,16 @@ export default function NewCaseRunner({ onOpenCase, onCaseListChanged }) {
         onCaseListChanged?.();
         if (status.status !== "running") {
           clearInterval(pollRef.current);
-          setPhase("done");
-          setMessage(`finished (status: ${status.status}). Check the sidebar for ${caseId}.`);
+          if (status.status === "crashed") {
+            setPhase("error");
+            setMessage(`run CRASHED (exit code ${status.exit_code}) -- open ${caseId} to see the log and where it stopped.`);
+          } else if (status.status === "finished") {
+            setPhase("done");
+            setMessage(`finished cleanly. Check the sidebar for ${caseId}.`);
+          } else {
+            setPhase("error");
+            setMessage(`run ended with status "${status.status}" -- open ${caseId} and check the run log.`);
+          }
           onOpenCase?.(caseId);
         }
       }, 5000);

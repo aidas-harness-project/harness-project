@@ -1,0 +1,107 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_001",
+  "component": "claim-analysis",
+  "status": "success",
+  "created_at": "2026-07-14T13:25:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "requirement_match_v0.1"
+  },
+  "confidence": 0.4,
+  "review_required": true,
+  "reviewer_role": "의사",
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "medium",
+    "reason": "Requirements are drawn only from the 약관 fragments the denial notices quote; no full policy clause set is available, and the pivotal requirement is a contested medical judgment left as uncertain rather than resolved."
+  },
+  "coverage_requirements": [
+    {
+      "coverage_name": "뇌혈관질환진단비",
+      "standardized_coverage_name": "cerebrovascular_diagnosis_benefit",
+      "requirements": [
+        {
+          "requirement_id": "REQ-1",
+          "requirement_text": "「뇌혈관질환」의 진단확정은 의료법 제3조(의료기관)에서 규정한 국내 병원·의원(또는 동등한 국외 의료기관)의 의사(치과의사 제외) 면허/자격증을 가진 자에 의하여 내려져야 한다 (진단이 자격 있는 의사/의료기관에서 이루어졌을 것).",
+          "clause_ref": null,
+          "status": "uncertain",
+          "confidence": 0.4,
+          "evidence_references": [
+            {
+              "document_id": "DOC_001",
+              "document_type": "insurer_response",
+              "page": 1,
+              "quote": "「뇌혈관질환」의 진단확정은 의료법 제3조(의료기관)에서 규정한 국내의 병원, 의원 또는 국외의 의료관련법에서 정한 의료기관의 의사(치과의사 제외) 면허를 가진 자에 의하여 내려져야 하며"
+            }
+          ],
+          "review_required": true,
+          "reviewer_role": "손해사정사"
+        },
+        {
+          "requirement_id": "REQ-2",
+          "requirement_text": "진단은 병력·신경학적 검진과 함께 뇌 전산화단층촬영(CT), 자기공명영상(MRI), 뇌혈관조영술, PET, SPECT, 뇌척수액검사 등을 기초로 하여야 한다 (요구되는 진단 검사·검진이 실제로 시행되었을 것).",
+          "clause_ref": null,
+          "status": "met",
+          "confidence": 0.7,
+          "evidence_references": [
+            {
+              "document_id": "DOC_001",
+              "document_type": "insurer_response",
+              "page": 1,
+              "quote": "2025.10.10(판독 2025.10.14) brain mri mra 판독상"
+            },
+            {
+              "document_id": "DOC_001",
+              "document_type": "insurer_response",
+              "page": 3,
+              "quote": "25.09.30 두통, 어지려움으로 내원. 내원시 신경학적검사상 특이소견없음."
+            },
+            {
+              "document_id": "DOC_001",
+              "document_type": "insurer_response",
+              "page": 3,
+              "quote": "25.10.10 뇌MRI,MRA(TOF,미조영) 검사상 양측 뇌백질의 최소 만성 허혈병변으로 확인되었습니다"
+            }
+          ],
+          "review_required": false
+        },
+        {
+          "requirement_id": "REQ-3",
+          "requirement_text": "위 검진·영상검사 결과가 「뇌혈관질환」(I67.8)의 진단확정을 객관적으로 뒷받침할 것 — 즉 검사소견이 진단에 부합할 것 (the workup findings must objectively establish the 뇌혈관질환 diagnosis).",
+          "clause_ref": null,
+          "status": "uncertain",
+          "confidence": 0.35,
+          "evidence_references": [
+            {
+              "document_id": "DOC_001",
+              "document_type": "insurer_response",
+              "page": 1,
+              "quote": "양측 대뇌백질에 미미한 만성 허혈성 병변 확인되며 상기 진단에 부합하지 않습니다"
+            },
+            {
+              "document_id": "DOC_001",
+              "document_type": "insurer_response",
+              "page": 3,
+              "quote": "병소와 일치하는 특이적 신경학적 증상 확인되지 않는 상태 및 영상검사상의 결과내용 참조하였을때 I67B 진단의 객관적소견으로 보기어"
+            },
+            {
+              "document_id": "DOC_001",
+              "document_type": "insurer_response",
+              "page": 4,
+              "quote": "비가역적인 병변을 보이는 소혈관질환 즉 만성대뇌허혈로 확진되기는 미흡한 소견임"
+            }
+          ],
+          "review_required": true,
+          "reviewer_role": "의사"
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    "No policy document exists in this case; every clause_ref is null. Requirements are reconstructed solely from the 약관 fragments quoted inside the denial notices (삼성 특약 제3조 p1; KB 제2조·제3조 p3; 한화 진단확정 조항 p4). Any payout requirement not quotable from those fragments is unconfirmed and deliberately not asserted.",
+    "REQ-3 is the pivotal, contested requirement and is left 'uncertain' by design (P3): all three insurers assert the imaging findings do not support I67.8 진단확정, but adopting that as 'not_met' would be asserting a coverage-eligibility/medical verdict this stage must not make. The claimant filed asserting a valid diagnosis. Resolution requires 의사 review of the underlying imaging/records, which are not present in this case. This is the crux for Phase 2 denial-validation.",
+    "REQ-2 marked 'met' as a factual restatement that the required workup (MRI/MRA + neurological examination) was performed — NOT a statement that the workup confirmed the disease (that is REQ-3).",
+    "REQ-1 marked 'uncertain': the qualified-physician/institution condition is not disputed by the insurers, but no diagnosis certificate or medical record is in-case to positively confirm it."
+  ]
+}

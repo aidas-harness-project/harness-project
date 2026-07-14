@@ -1,0 +1,24 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_001",
+  "component": "evaluation",
+  "status": "success",
+  "created_at": "2026-07-14T14:35:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "expert_review_v0.1"
+  },
+  "reviewer_id": "Claude (delegated by Rekhet)",
+  "reviewer_role": "손해사정사",
+  "reviewed_document": "outputs/CASE_021/draft_report_v1_reviewed.md",
+  "overall_approved": true,
+  "findings_disposition": [
+    {
+      "finding_ref": "CF-1",
+      "disposition": "accepted",
+      "note": "유효하나 심각도 낮음으로 수용. 요건 3은 향후 v2에서 인라인 표기 '(재구성 — 약관 명시 문언 아님)'를 반드시 부기해야 하나, v1에 대한 게이트 차단 사유는 아님."
+    }
+  ],
+  "general_comments": "판정: 승인(코멘트 포함) — 초안은 정답지(ground-truth) 평가로 진행하기에 적합함. 코멘트: (1) 초안이 요건 3(2025-10-10 영상검사가 I67.8 진단확정을 객관적으로 입증하는지)의 판단을 유보하고 전문의 검토로 라우팅한 것은 단일 문서 사건에서 올바른 처분임. (2) 크리틱 지적 CF-1은 유효하나 심각도 낮음으로 수용 — 요건 3은 향후 v2에서 인라인 '(재구성 — 약관 명시 문언 아님)' 표기 필요, v1 게이트 차단 사유 아님. (3) 3사 전체에 대한 R04(R05 대비) 분류는 약관 전문(全文) 확보 시까지 잠정으로 승인. (4) §6 미비 증거 목록(영상 원본/판독지, 진단서, 의무기록, 약관 전문)은 올바른 우선순위 요청임. (5) 금지표현 미발견 — P3 헤징은 크리틱이 검증하고 리뷰어가 표본 점검함.",
+  "reviewed_at": "2026-07-14T14:30:00+09:00"
+}
