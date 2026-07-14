@@ -160,6 +160,7 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
         "claude",
         "-p",
         "transcribe prompt\n\nImage: page.png",
+        "--safe-mode",
         "--allowedTools",
         "Read",
     ]
@@ -167,6 +168,37 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
     assert captured["kwargs"]["timeout"] == 180
     assert result.text == "transcribed text"
     assert result.metadata()["provider_name"] == "claude-cli"
+
+
+def test_claude_cli_provider_always_passes_safe_mode(monkeypatch, tmp_path):
+    """Regression (CASE_022 real run): claude -p with cwd=ROOT auto-loads the
+    project's CLAUDE.md/hooks, and a context-aware reader editorializes --
+    both blind reads appended similar D2 meta-commentary to transcribed
+    pages, which compare() waved through as agreement, contaminating the
+    trusted processed layer. Every claude-cli call through this provider
+    (transcribe/compare/classify/scan) must pass --safe-mode so the reader
+    sees nothing but its own prompt."""
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = "AGREE"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.ClaudeCliProvider(root=tmp_path)
+
+    provider.transcribe_image(Path("page.png"), "transcribe prompt", "ocr_extraction_v0.1")
+    provider.compare_text("compare prompt", "ocr_compare_v0.1")
+    provider.classify_document("classify prompt", "classification_v0.1")
+    provider.scan_intake_content("scan prompt", "intake_scan_v0.1")
+
+    assert len(calls) == 4
+    for cmd in calls:
+        assert "--safe-mode" in cmd, f"claude-cli call missing --safe-mode: {cmd}"
 
 
 def test_claude_cli_provider_reports_missing_command(monkeypatch, tmp_path):

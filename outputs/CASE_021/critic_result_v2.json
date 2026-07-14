@@ -1,0 +1,38 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_002",
+  "component": "critic",
+  "status": "success",
+  "created_at": "2026-07-14T18:20:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "critic_v0.1"
+  },
+  "reviewed_document": "outputs/CASE_021/draft_report_v2.md",
+  "passed": true,
+  "orphaned_tag_count": 0,
+  "unused_citation_count": 0,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "prohibited_language_check": {
+    "passed": true,
+    "issues": []
+  },
+  "hallucination_risk_check": {
+    "risk_level": "low",
+    "reason": "DAO read-evidence-tags returns consistent (0 orphaned, 0 unused) over all 40 [E#] tags; every quote verified against DOC_001's processed text at its cited page. Every inference (진단 부합/요건 3 충족 여부, R04-vs-R05 성격, 대응 실익) is hedged with '추정, 검수 필요' and routed to 손해사정사/의사, not asserted. CF-1 (v1) binding inline marker present and correctly placed. One low-severity source-scope over-attribution noted (CF-1 v2), not gate-blocking."
+  },
+  "findings": [
+    {
+      "finding_id": "CF-1",
+      "finding_type": "fabrication_unlinked_claim",
+      "location": {
+        "heading": "III. 보험사고 발생의 조사·확인한 사실 — 2. 치료관계내역 · 다. 현 상태",
+        "tag": "E20"
+      },
+      "description": "현 상태 서술이 '미세 뇌경색·미세출혈·지주막하출혈·혈관주변공간 확장 등 소혈관질환의 특징적 소견은 관찰되지 아니하였다는 것이 각 안내문의 기재이다[E20]'로 되어 있으나, 이 방사선학적 소견(특징적 소견 미관찰)은 E20 한화손해보험 안내문(4면) 단일 출처에만 존재한다. 삼성화재(1면)·KB손해보험(3면) 안내문에는 해당 미관찰 소견 서술이 없다. 인용 태그 자체는 E20으로 올바르게 연결되어 있어 순수한 무근거 주장(unlinked)은 아니나, '각 안내문의 기재'라는 문구가 단일 출처 소견을 3사 공통 기재인 것처럼 출처 범위를 과대하게 귀속시킨다. 앞 절(양측 뇌백질 최소 만성 허혈병변 확인)은 복수 안내문(KB E17, 삼성 취지)에 존재하므로 문장 전체가 틀린 것은 아니고, 과대 귀속은 뒤 절(특징적 소견 미관찰)에 국한된다. 의학적 결론은 IV·V항에서 별도로 헤징되어 있어 왜곡 위험은 낮음.",
+      "severity": "low",
+      "suggested_fix": "뒤 절의 출처 귀속을 단일 출처로 한정한다. 예: '… 관찰되지 아니하였다는 것이 한화손해보험 안내문의 기재이다[E20]'. 또는 앞 절(허혈병변 확인, 복수 출처)과 뒤 절(특징적 소견 미관찰, 한화 단일 출처)을 분리하여 각각의 출처 범위를 명확히 한다."
+    }
+  ]
+}

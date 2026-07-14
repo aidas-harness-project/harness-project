@@ -13,7 +13,7 @@ const VERDICT_COLOR = {
   pending: "var(--gold-bright)",
 };
 
-function useReviewerName() {
+export function useReviewerName() {
   const [reviewer, setReviewer] = useState(() => localStorage.getItem("reviewerName") || "");
   const update = (v) => {
     setReviewer(v);
@@ -28,6 +28,7 @@ export function SourceLedgerPanel({ ledger, caseId, onChanged }) {
   const [reasonText, setReasonText] = useState("");
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
+  const [viewing, setViewing] = useState(null); // file_name shown in the inline viewer
 
   if (!ledger) return <p className="muted">No source ledger for this case.</p>;
 
@@ -82,7 +83,30 @@ export function SourceLedgerPanel({ ledger, caseId, onChanged }) {
         <tbody>
           {ledger.files.map((f) => (
             <tr key={f.file_name}>
-              <td className="mono">{f.file_name}</td>
+              <td className="mono">
+                {f.file_name}
+                <div className="file-actions">
+                  <button
+                    className="btn-tiny"
+                    onClick={() => setViewing(viewing === f.file_name ? null : f.file_name)}
+                  >
+                    {viewing === f.file_name ? "hide document" : "view document"}
+                  </button>
+                  {api.sourceFileUrl(caseId, f.file_name) && (
+                    <a
+                      className="btn-tiny open-link"
+                      href={api.sourceFileUrl(caseId, f.file_name)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      open ↗
+                    </a>
+                  )}
+                </div>
+                {f.content_warning && (
+                  <div className="content-warning">⚠ {f.content_warning}</div>
+                )}
+              </td>
               <td>{f.classification}</td>
               <td style={{ color: REVIEW_COLOR[f.review_status] }}>
                 {f.review_status}
@@ -121,6 +145,24 @@ export function SourceLedgerPanel({ ledger, caseId, onChanged }) {
           ))}
         </tbody>
       </table>
+      {viewing && api.sourceFileUrl(caseId, viewing) && (
+        <div className="source-viewer">
+          <div className="source-viewer-head mono">{viewing}</div>
+          <object
+            data={api.sourceFileUrl(caseId, viewing)}
+            type={viewing.toLowerCase().endsWith(".pdf") ? "application/pdf" : undefined}
+            aria-label={`source document ${viewing}`}
+          >
+            <p className="muted">
+              Couldn't embed this document —{" "}
+              <a href={api.sourceFileUrl(caseId, viewing)} target="_blank" rel="noreferrer">
+                open it in a new tab
+              </a>{" "}
+              instead.
+            </p>
+          </object>
+        </div>
+      )}
       <style>{ledgerStyles}</style>
     </div>
   );
@@ -243,4 +285,10 @@ const ledgerStyles = `
   .resolution { margin-top: 10px; font-size: 13px; color: var(--sage); border-top: 1px solid var(--hairline); padding-top: 8px; }
   .conflict-actions, .conflict-note { margin-top: 12px; }
   .muted { color: var(--parchment-faint); font-style: italic; }
+  .file-actions { display: flex; gap: 6px; margin-top: 6px; }
+  .file-actions .open-link { text-decoration: none; display: inline-block; }
+  .content-warning { margin-top: 6px; font-size: 12px; color: var(--gold-bright); background: rgba(219,165,69,0.1); border: 1px solid var(--gold); border-radius: 4px; padding: 5px 8px; max-width: 420px; white-space: normal; font-family: var(--sans); }
+  .source-viewer { margin-top: 16px; border: 1px solid var(--hairline); border-radius: 6px; overflow: hidden; }
+  .source-viewer-head { font-size: 11px; color: var(--parchment-faint); padding: 8px 12px; border-bottom: 1px solid var(--hairline); background: var(--surface-2); }
+  .source-viewer object { display: block; width: 100%; height: 640px; background: var(--ink-2); }
 `;

@@ -49,6 +49,18 @@ const liveApi = {
     post(`/api/cases/${caseId}/ledger/status`, { body: { file_name: fileName, status, reviewer, reason } }),
   setConflictVerdict: (caseId, conflictId, verdict, note) =>
     post(`/api/cases/${caseId}/conflicts/${conflictId}/verdict`, { body: { verdict, note } }),
+
+  // In-UI review of the actual object under decision + P8/D1 human gates.
+  sourceFileUrl: (caseId, fileName) =>
+    `${BASE}/api/cases/${caseId}/source-file?name=${encodeURIComponent(fileName)}`,
+  ocrReview: (caseId) => get(`/api/cases/${caseId}/ocr-review`),
+  ocrResolve: (caseId, docId, page, chosenReading, reviewer, note) =>
+    post(`/api/cases/${caseId}/ocr-resolve`, {
+      body: { doc_id: docId, page, chosen_reading: chosenReading, reviewer, note },
+    }),
+  humanReview: (caseId) => get(`/api/cases/${caseId}/human-review`),
+  markHumanReviewComplete: (caseId, version, reviewer) =>
+    post(`/api/cases/${caseId}/human-review-complete`, { body: { version, reviewer } }),
 };
 
 function notFound(name) {
@@ -72,6 +84,11 @@ const staticApi = {
   runStatus: () => Promise.resolve({ status: "unavailable" }),
   setLedgerStatus: () => Promise.reject(new Error("read-only snapshot -- not connected to a live case")),
   setConflictVerdict: () => Promise.reject(new Error("read-only snapshot -- not connected to a live case")),
+  sourceFileUrl: () => null,
+  ocrReview: () => Promise.resolve({ documents: [] }),
+  ocrResolve: () => Promise.reject(new Error("read-only snapshot -- not connected to a live case")),
+  humanReview: () => Promise.resolve({}),
+  markHumanReviewComplete: () => Promise.reject(new Error("read-only snapshot -- not connected to a live case")),
 };
 
 export const api = STATIC_MODE ? staticApi : liveApi;

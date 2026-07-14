@@ -7,6 +7,7 @@ export const PHASE_1 = [
     key: "case-intake",
     label: "Case Intake",
     agent: null,
+    aliases: ["case_intake", "intake"],
     description: "Splits the source case into model input and ground truth, gated by a human-approved, per-file ledger.",
     checkpoints: [],
     gate: "source-ledger",
@@ -15,12 +16,14 @@ export const PHASE_1 = [
     key: "document-pipeline",
     label: "Document Processing",
     agent: "document-pipeline",
+    aliases: ["document_processing"],
     description: "OCR with dual-path cross-validation, classification, redaction, chunking.",
     checkpoints: [
       { key: "ocr-crossval-classify", label: "OCR + cross-validation + classification" },
       { key: "redaction", label: "Redaction" },
       { key: "chunking", label: "Chunking" },
     ],
+    gate: "ocr-review",
   },
   {
     key: "indexing",
@@ -90,9 +93,11 @@ export const PHASE_1 = [
     key: "evaluation-v1",
     label: "Evaluation",
     agent: "evaluation",
+    aliases: ["evaluation"],
     description: "The sole stage permitted to read ground truth, and only after human review.",
     checkpoints: [],
     contracts: ["evaluation_result.json"],
+    reviewVersion: "v1",
   },
 ];
 
@@ -130,12 +135,41 @@ export const PHASE_2 = [
     agent: "evaluation",
     description: "Same agent as Phase 1, run again.",
     checkpoints: [],
+    reviewVersion: "v2",
   },
 ];
 
-export const ALL_STAGES = [...PHASE_1, ...PHASE_2];
+// Dependency-triggered, not phase-gated (see pipeline.md): runs whenever a
+// flagged insurer-response document's processed text exists. Listed in its
+// own group so the viewer doesn't silently omit it from the case's status.
+export const TRIGGERED = [
+  {
+    key: "denial-response",
+    label: "Denial Reason Extraction",
+    agent: "denial-response",
+    aliases: ["denial_response"],
+    description:
+      "Extracts and classifies insurer denial/reduction reasons and matches them to policy clauses. Dependency-triggered -- runs whenever a flagged insurer-response document is processed, not at a fixed phase position.",
+    checkpoints: [],
+    contracts: ["denial_reason_result.json"],
+  },
+];
 
-export function findRunStateEntry(runState, stageKey) {
+export const ALL_STAGES = [...PHASE_1, ...PHASE_2, ...TRIGGERED];
+
+// Run-state stage names are written by the orchestrator/tools and don't
+// follow one registry (e.g. run_checkpoint1.py writes "document_processing"
+// while this viewer keys the stage "document-pipeline") -- match on the
+// stage key, its declared aliases, and a separator-insensitive comparison,
+// so a real failed/passed entry is never silently rendered as "pending"
+// just because of a naming-convention mismatch.
+function normalizeStageName(name) {
+  return String(name).toLowerCase().replace(/[-_\s]/g, "");
+}
+
+export function findRunStateEntry(runState, stageDefOrKey) {
   if (!runState?.stages) return null;
-  return runState.stages.find((s) => s.stage_name === stageKey) || null;
+  const def = typeof stageDefOrKey === "string" ? { key: stageDefOrKey } : stageDefOrKey;
+  const accepted = new Set([def.key, ...(def.aliases || [])].map(normalizeStageName));
+  return runState.stages.find((s) => accepted.has(normalizeStageName(s.stage_name))) || null;
 }

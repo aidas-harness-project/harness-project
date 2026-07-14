@@ -1,0 +1,48 @@
+{
+  "case_id": "CASE_021",
+  "source_dir": "source-cases/약관상 지급범위를 두고 다툰 케이스",
+  "created_at": "2026-07-14T12:01:06.186459+09:00",
+  "updated_at": "2026-07-14T12:01:34.613785+09:00",
+  "files": [
+    {
+      "file_name": "뇌혈관질환진단비-KB손해보험-김태윤 - 고객정보 삭제.pdf",
+      "classification": "ground_truth",
+      "review_status": "approved",
+      "reviewed_by": "Claude (delegated by Rekhet)",
+      "reviewed_at": "2026-07-14T12:01:34.344736+09:00",
+      "rejection_reason": null
+    },
+    {
+      "file_name": "뇌혈관질환진단비-농협손해보험-김태윤 - 고객정보 삭제.pdf",
+      "classification": "ground_truth",
+      "review_status": "approved",
+      "reviewed_by": "Claude (delegated by Rekhet)",
+      "reviewed_at": "2026-07-14T12:01:34.434389+09:00",
+      "rejection_reason": null
+    },
+    {
+      "file_name": "뇌혈관질환진단비-삼성화재-김태윤 - 고객정보 삭제.pdf",
+      "classification": "ground_truth",
+      "review_status": "approved",
+      "reviewed_by": "Claude (delegated by Rekhet)",
+      "reviewed_at": "2026-07-14T12:01:34.521789+09:00",
+      "rejection_reason": null
+    },
+    {
+      "file_name": "뇌혈관질환진단비-한화손해보험-김태윤 - 고객정보 삭제.pdf",
+      "classification": "ground_truth",
+      "review_status": "approved",
+      "reviewed_by": "Claude (delegated by Rekhet)",
+      "reviewed_at": "2026-07-14T12:01:34.613780+09:00",
+      "rejection_reason": null
+    },
+    {
+      "file_name": "보험사 면책 공문 - 고객정보 삭제.pdf",
+      "classification": "raw",
+      "review_status": "approved",
+      "reviewed_by": "Claude (delegated by Rekhet)",
+      "reviewed_at": "2026-07-14T12:01:34.248745+09:00",
+      "rejection_reason": null
+    }
+  ]
+}

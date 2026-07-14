@@ -72,9 +72,11 @@ harness-guardrails P1.
 (`draft-report.md`, `screening-report.md`, `rebuttal-points.md`,
 `forbidden-expressions.md`, `component-output.md`), adopted from the wiki
 2026-07-13. `실손형`/`기타형` still have no ground-truth basis (TODO in
-`templates/draft-report.md`). The tool itself still renders whatever
-sections it's given, in order -- section presence/order enforcement
-against `template_id` is a follow-up (see open-decisions.md #2).
+`templates/draft-report.md`). Section presence/order is structurally
+enforced (2026-07-14): `document_assembly.py --template <key>` validates
+against `templates/registry.json` and refuses to write on mismatch --
+rebuttal_points is the one deliberate exception (dynamic per-reason
+structure, no registry entry). See open-decisions.md #2.
 
 # Taxonomy
 

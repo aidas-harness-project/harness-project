@@ -1,0 +1,231 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_001",
+  "component": "consistency-check",
+  "status": "success",
+  "created_at": "2026-07-14T14:00:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "consistency_check_v0.1"
+  },
+  "confidence": 0.9,
+  "review_required": false,
+  "checks": [
+    {
+      "check_id": "CHK-1",
+      "topic": "KCD diagnosis code across DOC_001 p1 (삼성화재) / p3 (KB) / p4 (한화)",
+      "values_compared": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "기타 명시된 뇌혈관질환(I67.8)으로 진단받은 사실을 확인하였습니다"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "I67B 진단의 객관적소견으로 보기어"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "기타 명시된 뇌혈관질환(I678) 진단"
+        }
+      ],
+      "result": "consistent",
+      "conflict_id": null
+    },
+    {
+      "check_id": "CHK-2",
+      "topic": "Diagnosis name across DOC_001 p1 (삼성화재) / p4 (한화)",
+      "values_compared": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "기타 명시된 뇌혈관질환(I67.8)으로 진단받은 사실을 확인하였습니다"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "기타 명시된 뇌혈관질환(I678) 진단"
+        }
+      ],
+      "result": "consistent",
+      "conflict_id": null
+    },
+    {
+      "check_id": "CHK-3",
+      "topic": "MRI/MRA imaging date across DOC_001 p1 (삼성화재) / p3 (KB) / p4 (한화)",
+      "values_compared": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "2025.10.10(판독 2025.10.14) brain mri mra 판독상"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "25.10.10 뇌MRI,MRA(TOF,미조영) 검사상 양측 뇌백질의 최소 만성 허혈병변으로 확인되었습니다"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "25.10.10 두부 MRI/MRA상 백질에 여러 개의 협상 신호 증강 소견"
+        }
+      ],
+      "result": "consistent",
+      "conflict_id": null
+    },
+    {
+      "check_id": "CHK-4",
+      "topic": "Imaging finding characterization (백질 만성 허혈성 병변) across DOC_001 p1 (삼성화재) / p3 (KB) / p4 (한화)",
+      "values_compared": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "양측 대뇌백질에 미미한 만성 허혈성 병변 확인되며"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "양측 뇌백질의 최소 만성 허혈병변으로 확인되었습니다"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "경미한 수준의 백질 신호 증강"
+        }
+      ],
+      "result": "consistent",
+      "conflict_id": null
+    },
+    {
+      "check_id": "CHK-5",
+      "topic": "Presenting complaint / first-visit symptoms across DOC_001 p3 (KB) / p4 (한화)",
+      "values_compared": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "25.09.30 두통, 어지려움으로 내원. 내원시 신경학적검사상 특이소견없음."
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "두통 및 어지럼증을 주소로 내원"
+        }
+      ],
+      "result": "consistent",
+      "conflict_id": null
+    },
+    {
+      "check_id": "CHK-6",
+      "topic": "Claim item / coverage in dispute (뇌혈관질환진단비) across DOC_001 p1 (삼성화재) / p3 (KB) / p4 (한화)",
+      "values_compared": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "상기 보험의 1-27. [통합간편]뇌혈관질환 진단비 특별약관 제 3조"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "청구사유 |  | 뇌혈관질환"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "기타 명시된 뇌혈관질환(I678) 진단에 따른 보험금 청구"
+        }
+      ],
+      "result": "consistent",
+      "conflict_id": null
+    },
+    {
+      "check_id": "CHK-7",
+      "topic": "Claim disposition (부지급/면책) across DOC_001 p1 (삼성화재) / p3 (KB) / p4 (한화)",
+      "values_compared": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "금번 청구하신 보험금은 부득이 보상하여 드리지 못함을 알려드리오니"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "심사 결과 보험금 부지급(면책) 처리됨을 알려드리오니"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "고객님께서 청구한 보험금은 부득이 지급하기 어려움을 안내드립니다"
+        }
+      ],
+      "result": "consistent",
+      "conflict_id": null
+    },
+    {
+      "check_id": "CHK-8",
+      "topic": "accident/diagnosis date — extracted accident_date (2025-10-16, 한화 진단서 발급일 p4) vs 삼성 p1 사고일 field",
+      "values_compared": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "2025년 10월 16일 에서 발급 된 기타 명시된 뇌혈관질환(I678) 진단"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "증권번호:              /사고일: ;"
+        }
+      ],
+      "result": "consistent",
+      "conflict_id": null
+    },
+    {
+      "check_id": "CHK-9",
+      "topic": "symptom-onset date — extracted onset_date (2025-09-30, KB p3 first visit) vs 한화 p4 presenting-complaint description",
+      "values_compared": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "25.09.30 두통, 어지려움으로 내원."
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "두통 및 어지럼증을 주소로 내원"
+        }
+      ],
+      "result": "consistent",
+      "conflict_id": null
+    }
+  ],
+  "warnings": [
+    "No cross-source contradiction found. The single document (DOC_001) carries three insurers' denial notices (삼성화재 p1-2, KB p3, 한화 p4) for the same 뇌혈관질환진단비 (I67.8) claim; all three agree on every shared fact checked (diagnosis code/name, imaging date, imaging findings, presenting complaint, claim item, denial disposition). Conflict ledger left clear.",
+    "CHK-1: DOC_001 p3 renders the KCD code as 'I67B', a known OCR/transcription variant of I67.8 already adjudicated upstream (see ocr_result_DOC_001.json resolution and claim-analysis warnings). Logged here as consistent, NOT raised as a fresh P6 conflict, per that upstream resolution.",
+    "Not raised as P6 conflicts by design: (a) the insurer-vs-claimant disagreement over whether the I67.8 진단확정 is objectively established is denial-validation's (Phase 2) subject matter, not an internal source-vs-source contradiction; (b) the distinct event dates in the case (first visit 2025-09-30, imaging 2025-10-10, imaging read 2025-10-14, diagnosis/발급 2025-10-16, claim receipt 2025-10-20, KB contract 2023-10-16) are different event types, not conflicting values for the same fact.",
+    "CHK-8: 삼성 p1's explicit 사고일 field is blank/unpopulated ('사고일: ;'), so it states no competing value against 한화 p4's 진단 발급일 2025-10-16 — no contradiction, only a single-sourced value. claim-analysis already flagged (review_required=true) that accident_date=2025-10-16 is a best-available 진단서-발급일 mapping rather than a stated 사고일; that flag is preserved for adjuster review and is not itself a cross-source conflict."
+  ]
+}
