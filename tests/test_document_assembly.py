@@ -128,3 +128,47 @@ def test_no_files_written_when_sidecar_would_fail_schema(isolated_da):
     out_path = isolated_da / "outputs" / "CASE_009" / "draft_report_v1.md"
     assert not out_path.exists()
     assert not out_path.with_suffix(".evidence.json").exists()
+
+
+# --- template enforcement (--template / validate_template) --------------------
+
+def _headings_b():
+    """A conforming 변형 B (진단수술비형) heading set, as CASE_021 v2 actually used."""
+    return ["표지 · 제출 공문 · 속표지 (양식 고정부)", "I. 사정 요약", "II. 위임 및 보험계약사항",
+            "III. 보험사고 발생의 조사·확인한 사실", "IV. 관계법규 및 약관의 적용·판단",
+            "V. 보험금 사정", "VI. 증빙자료"]
+
+
+def test_template_conforming_headings_pass():
+    assert da.validate_template(_headings_b(), "진단수술비형") == []
+
+
+def test_template_missing_section_fails():
+    headings = _headings_b()
+    del headings[4]  # drop IV
+    errors = da.validate_template(headings, "진단수술비형")
+    assert errors, "a missing required section must be an error"
+
+
+def test_template_misordered_sections_fail():
+    headings = _headings_b()
+    headings[1], headings[2] = headings[2], headings[1]  # swap I and II
+    errors = da.validate_template(headings, "진단수술비형")
+    assert errors, "sections in the wrong order must be an error"
+
+
+def test_template_extra_section_fails_when_not_allowed():
+    headings = _headings_b() + ["VII. 임의 추가 섹션"]
+    errors = da.validate_template(headings, "진단수술비형")
+    assert errors, "an extra section must be an error when allow_extra_sections is false"
+
+
+def test_template_unknown_key_fails():
+    errors = da.validate_template(_headings_b(), "no_such_template")
+    assert errors and "unknown template" in errors[0]
+
+
+def test_template_screening_report_conforms():
+    headings = ["1. 사건 개요", "2. 보험사 판단", "3. 핵심 쟁점", "4. 문서 간 불일치",
+                "5. 추가 필요 서류", "6. 전문가 검수 포인트", "7. 1차 판단"]
+    assert da.validate_template(headings, "screening_report") == []

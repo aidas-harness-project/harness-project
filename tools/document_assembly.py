@@ -9,10 +9,14 @@ list for that section; this tool replaces each placeholder with a
 sequentially-numbered [E#] tag and writes the sidecar from the same data,
 so a tag and its citation can never drift out of sync.
 
-Section-order/required-fields template rules are pending (see pipeline.md's
-note) -- this tool renders whatever sections it's given, in the order
-given. Template enforcement (which sections a given template_id requires)
-gets layered on once that material arrives.
+Template enforcement (--template): pass a key from templates/registry.json
+(배상책임_후유장해형, 진단수술비형, screening_report) and the rendered
+sections are validated for presence AND order against that template's
+heading patterns before anything touches disk -- a mismatch is a hard
+exit, same fail/don't-persist contract as the sidecar validation below.
+Without --template the tool renders whatever it's given (correct for
+rebuttal_points.md, whose per-reason structure repeats dynamically and
+has no registry entry on purpose).
 
 This writes into outputs/ like any other DAO write path -- locked
 (held-by/run-id, same convention as dao.py write-contract, so dao.py
@@ -37,6 +41,7 @@ Usage:
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -46,6 +51,42 @@ from dao import acquire_lock_blocking, release_lock, atomic_write_text, atomic_w
 from _validation import load_registry, validate_instance
 
 ROOT = Path(__file__).resolve().parent.parent
+TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
+
+
+def validate_template(headings: list[str], template_key: str) -> list[str]:
+    """Check section presence + order against templates/registry.json.
+
+    Returns a list of human-readable error strings; empty means the
+    document conforms. allow_extra_sections=false (the only mode currently
+    used) demands exactly one heading per pattern, in order -- a missing,
+    extra, or misplaced section is an error, not a warning."""
+    registry = json.loads(TEMPLATE_REGISTRY.read_text(encoding="utf-8"))["templates"]
+    if template_key not in registry:
+        return [f"unknown template {template_key!r} -- registry has: {', '.join(sorted(registry))}"]
+    entry = registry[template_key]
+    patterns = entry["heading_patterns"]
+    errors = []
+    if entry.get("allow_extra_sections", False):
+        # ordered-subsequence match: every pattern must hit some heading, in order
+        pos = 0
+        for pat in patterns:
+            while pos < len(headings) and not re.search(pat, headings[pos]):
+                pos += 1
+            if pos == len(headings):
+                errors.append(f"required section matching {pat!r} is missing (or out of order)")
+            else:
+                pos += 1
+        return errors
+    if len(headings) != len(patterns):
+        errors.append(f"section count mismatch: template {template_key!r} requires exactly "
+                      f"{len(patterns)} sections, got {len(headings)}")
+    for i, (pat, heading) in enumerate(zip(patterns, headings), start=1):
+        if not re.search(pat, heading):
+            errors.append(f"section {i}: heading {heading!r} does not match required pattern {pat!r}")
+    for extra in headings[len(patterns):]:
+        errors.append(f"unexpected extra section: {extra!r}")
+    return errors
 
 
 def render(spec: dict) -> tuple[str, dict]:
@@ -96,9 +137,21 @@ def main():
     ap.add_argument("--sections-file", required=True, help="Path to the section-spec JSON described above")
     ap.add_argument("--held-by", required=True, help="Calling agent name, e.g. draft-report")
     ap.add_argument("--run-id", required=True)
+    ap.add_argument("--template", help="Key in templates/registry.json to enforce section "
+                    "presence/order against (e.g. 진단수술비형, screening_report). Omit only for "
+                    "documents with no registry entry (rebuttal_points).")
     args = ap.parse_args()
 
     spec = json.loads(Path(args.sections_file).read_text(encoding="utf-8"))
+
+    if args.template:
+        headings = [s["heading"] for s in spec["sections"]]
+        template_errors = validate_template(headings, args.template)
+        if template_errors:
+            sys.exit(f"error: sections do not conform to template {args.template!r} "
+                     "(templates/registry.json) -- nothing written:\n"
+                     + "\n".join(f"  - {e}" for e in template_errors))
+
     doc_text, sidecar = render(spec)
 
     out_path = ROOT / spec["output_path"]
