@@ -42,8 +42,12 @@ Replace each detected value with one of these stable placeholders:
 
 Do not summarize, translate, correct, reorder, or omit non-PII content. Preserve
 all line breaks and all medical, insurance, date, amount, diagnosis, and policy
-content exactly unless the value itself is PII. The input may already be
-pseudonymized; in that case return it unchanged and use items_redacted=0.
+content exactly unless the value itself is PII. Do not treat a value as safe
+merely because it looks like a sample, alias, or pseudonym. A value is already
+redacted only when it is one of the bracketed placeholders listed above.
+
+For example, "홍길동 / 010-1234-5678 / 골절" must become
+"[PERSON_NAME] / [PHONE_NUMBER] / 골절" with items_redacted=2.
 
 Reply with ONLY one JSON object in this exact shape:
 {{"redacted_text":"...", "items_redacted":0,
