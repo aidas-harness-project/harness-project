@@ -1,0 +1,62 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_001",
+  "component": "claim-analysis",
+  "status": "success",
+  "created_at": "2026-07-14T13:15:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "coverage_id_v0.1"
+  },
+  "confidence": 0.35,
+  "review_required": true,
+  "reviewer_role": "의사",
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "medium",
+    "reason": "Coverage identity is well-grounded, but the applicable determination relies only on the insurers' own characterization of the imaging; no policy document and no independent medical record are available to confirm whether 진단확정 conditions are met."
+  },
+  "coverages": [
+    {
+      "coverage_name": "뇌혈관질환진단비",
+      "standardized_coverage_name": "cerebrovascular_diagnosis_benefit",
+      "applicable": false,
+      "matched_clause_ref": null,
+      "confidence": 0.3,
+      "evidence_references": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "상기 보험의 1-27. [통합간편]뇌혈관질환 진단비 특별약관 제 3조에 따르면 「뇌혈관질환」의 진단확정은"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "양측 대뇌백질에 미미한 만성 허혈성 병변 확인되며 상기 진단에 부합하지 않습니다"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "I67B 진단의 객관적소견으로 보기어"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "비가역적인 병변을 보이는 소혈관질환 즉 만성대뇌허혈로 확진되기는 미흡한 소견임"
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "의사"
+    }
+  ],
+  "warnings": [
+    "NO policy document exists in this case (no insurance_policy-classified docs, no normalized_policy_clause_* files), so matched_clause_ref is null. The only 약관 text available is what the denial notices themselves quote of the 뇌혈관질환 진단확정 clause (삼성 특약 제3조 p1; KB 제2조·제3조 p3; 한화 진단확정 조항 p4). Coverage terms beyond those quotes are unconfirmed and must not be inferred.",
+    "P3 HEDGE — applicable=false is NOT an asserted coverage-eligibility verdict. It reflects only that, on the sole evidence available (the three insurers' characterization of the 2025-10-10 MRI/MRA as minimal chronic ischemic white-matter change with no specific neurological correlate), the 진단확정 condition is not confirmed met. Whether I67.8 진단확정 is in fact satisfied is a contested medical question requiring 의사 review and the underlying imaging/medical records, which are not present in this case. The claimant's implicit position (that the diagnosis is valid) is preserved for Phase 2 denial-validation.",
+    "Only one coverage (뇌혈관질환진단비) is at issue, but it is carried under three separate insurer policies (삼성화재 무배당 간편보험 새로고침; KB 3.5.5 오!슬기로운간편건강보험Plus; 한화 3N5 WELL100), each of which independently denied. Recorded as a single standardized coverage to keep the checkpoint-4 join clean; the three-policy multiplicity is flagged here and in denial-response's domain.",
+    "No surgery/indemnity/liability coverage is indicated by the document; only the diagnosis benefit is in play."
+  ]
+}

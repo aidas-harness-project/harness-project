@@ -1,12 +1,13 @@
 import { findRunStateEntry } from "./pipelineDefinition";
 
 // Derives what a stage is ACTUALLY doing, cross-referencing run-state against
-// the ledgers -- a stage can show "pending" in run-state while really being
-// blocked on a human decision recorded elsewhere. Every halt condition here
-// traces to a specific harness-guardrails rule; nothing is inferred without
-// a concrete field backing it.
-export function deriveStageStatus(stageDef, runState, ledgers) {
-  const entry = findRunStateEntry(runState, stageDef.key);
+// the ledgers and the P8 OCR-review queue -- a stage can show "pending" in
+// run-state while really being blocked on a human decision recorded
+// elsewhere. Every halt condition here traces to a specific
+// harness-guardrails rule; nothing is inferred without a concrete field
+// backing it.
+export function deriveStageStatus(stageDef, runState, ledgers, ocrReview) {
+  const entry = findRunStateEntry(runState, stageDef);
   const base = entry?.status || "pending";
 
   if (stageDef.gate === "source-ledger") {
@@ -31,6 +32,19 @@ export function deriveStageStatus(stageDef, runState, ledgers) {
     }
   }
 
+  if (stageDef.gate === "ocr-review") {
+    const blocked = ocrReview?.documents || [];
+    if (blocked.length) {
+      const pageCount = blocked.reduce((n, d) => n + d.pages.length, 0);
+      return {
+        status: "paused",
+        rule: "P8",
+        reason: `${pageCount} page(s) across ${blocked.length} document(s) have disagreeing dual reads -- human must pick the correct reading below`,
+        detail: blocked,
+      };
+    }
+  }
+
   if (stageDef.gate === "conflict-ledger") {
     const conflicts = ledgers?.conflict_ledger?.conflicts || [];
     const pending = conflicts.filter((c) => c.verdict === "pending");
@@ -44,8 +58,11 @@ export function deriveStageStatus(stageDef, runState, ledgers) {
     }
   }
 
+  const acceptedNames = new Set(
+    [stageDef.key, ...(stageDef.aliases || [])].map((n) => String(n).toLowerCase().replace(/[-_\s]/g, ""))
+  );
   const humanWait = runState?.human_input_status?.find(
-    (h) => h.stage_name === stageDef.key && h.status === "waiting"
+    (h) => acceptedNames.has(String(h.stage_name).toLowerCase().replace(/[-_\s]/g, "")) && h.status === "waiting"
   );
   if (humanWait) {
     return { status: "paused", rule: "P7", reason: humanWait.description, detail: humanWait };

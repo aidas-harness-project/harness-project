@@ -1,0 +1,32 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_001",
+  "component": "draft-report",
+  "status": "success",
+  "created_at": "2026-07-14T16:00:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "draft_report_v0.1"
+  },
+  "version": "v1",
+  "template_id": "template_진단수술비_v1",
+  "case_type": "진단·수술비",
+  "section_count": 7,
+  "evidence_tag_count": 23,
+  "source_refs": [
+    "screening_report.json",
+    "case_type_result.json",
+    "extracted_claim_fields.json",
+    "coverage_result.json",
+    "requirement_matching_result.json",
+    "denial_reason_result.json",
+    "evidence_validation_result.json"
+  ],
+  "output_md_path": "outputs/CASE_021/draft_report_v1.md",
+  "output_sidecar_path": "outputs/CASE_021/draft_report_v1.evidence.json",
+  "warnings": [
+    "template_id 'template_진단수술비_v1' is provisional; per pipeline.md and open-decisions.md #2 the per-template required-section rules are not yet defined and document-assembly does not enforce them. Sections were chosen sensibly per the draft-report spec and screening_report.draft_writer_input_summary.sections_to_emphasize.",
+    "Single-document case: the draft is built from one insurer-response pack (DOC_001) covering three insurers; no policy/diagnosis/medical/imaging document exists in-case, so all clause and diagnosis references trace to what the denial notices themselves quote.",
+    "P3 hedge-and-flag: 4 inference-bearing determinations are deliberately left open and routed for review rather than asserted — (1) the pivotal I67.8 진단확정 요건3 objective-establishment question (→의사), (2) R04/R05 characterization of the denial reason (→손해사정사), (3) accident/onset date single-source substitute mappings (→손해사정사), (4) the preliminary case-outcome leaning (→손해사정사·의사). No definitive legal/medical assertion is made; forbidden-expression substitutions applied."
+  ]
+}

@@ -1,17 +1,19 @@
 import CaseSelector from "./CaseSelector";
 import NewCaseRunner from "./NewCaseRunner";
-import { PHASE_1, PHASE_2 } from "../pipelineDefinition";
+import { PHASE_1, PHASE_2, TRIGGERED } from "../pipelineDefinition";
 import { deriveStageStatus, STATUS_META } from "../statusLogic";
 
-function NavRow({ stageDef, index, active, onSelect, runState, ledgers }) {
-  const derived = deriveStageStatus(stageDef, runState, ledgers);
+function NavRow({ stageDef, index, active, onSelect, runState, ledgers, ocrReview }) {
+  const derived = deriveStageStatus(stageDef, runState, ledgers, ocrReview);
   const meta = STATUS_META[derived.status] || STATUS_META.pending;
   return (
     <button className={`nav-row${active ? " active" : ""}`} onClick={() => onSelect(stageDef.key)}>
       <span className="nav-dot" style={{ background: meta.color }} />
-      <span className="nav-index mono">{String(index + 1).padStart(2, "0")}</span>
+      <span className="nav-index mono">{index == null ? "·" : String(index + 1).padStart(2, "0")}</span>
       <span className="nav-label">{stageDef.label}</span>
-      {derived.status === "paused" && <span className="nav-flag">!</span>}
+      {(derived.status === "paused" || derived.status === "halted" || derived.status === "failed") && (
+        <span className="nav-flag">!</span>
+      )}
     </button>
   );
 }
@@ -24,6 +26,7 @@ export default function Sidebar({
   onSelectStage,
   runState,
   ledgers,
+  ocrReview,
   onRefresh,
   onCaseListChanged,
 }) {
@@ -51,6 +54,7 @@ export default function Sidebar({
             onSelect={onSelectStage}
             runState={runState}
             ledgers={ledgers}
+            ocrReview={ocrReview}
           />
         ))}
         <div className="nav-group-label">Phase 2 · Insurer Response</div>
@@ -63,6 +67,20 @@ export default function Sidebar({
             onSelect={onSelectStage}
             runState={runState}
             ledgers={ledgers}
+            ocrReview={ocrReview}
+          />
+        ))}
+        <div className="nav-group-label">Triggered · Dependency-Gated</div>
+        {TRIGGERED.map((s) => (
+          <NavRow
+            key={s.key}
+            stageDef={s}
+            index={null}
+            active={selectedStage === s.key}
+            onSelect={onSelectStage}
+            runState={runState}
+            ledgers={ledgers}
+            ocrReview={ocrReview}
           />
         ))}
       </div>

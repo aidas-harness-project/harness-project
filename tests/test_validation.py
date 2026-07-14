@@ -109,3 +109,51 @@ def test_registry_loads_every_schema_and_resolves_cross_file_refs():
         }],
     }
     assert validate_instance(sample, "coverage_result.schema.json", schemas, registry) == []
+
+
+def _claim_fields_instance(fields):
+    return {
+        "case_id": "CASE_021", "run_id": "RUN_20260714_001", "component": "claim-analysis",
+        "status": "success", "fields": fields,
+    }
+
+
+def _date_field(value):
+    return {"value": value, "confidence": 0.9, "review_required": False,
+            "evidence_references": [{"document_id": "DOC_001", "page": 4, "quote": "q"}]}
+
+
+def test_adhoc_date_field_validates_under_anyof():
+    """Regression (CASE_021 end-to-end run, schema v0.2): additionalProperties
+    used oneOf over the three shapes, but a YYYY-MM-DD string satisfies BOTH
+    value_field and date_field -- exactly-one matching made every ad-hoc date
+    field fail validation, which is why the run's imaging/receipt dates got
+    smuggled through `warnings` instead of living as typed fields."""
+    schemas, registry = load_registry()
+    instance = _claim_fields_instance({"mri_read_date": _date_field("2025-10-14")})
+    assert validate_instance(instance, "extracted_claim_fields.schema.json", schemas, registry) == []
+
+
+def test_new_named_fields_from_case021_have_slots():
+    schemas, registry = load_registry()
+    value = {"value": "삼성화재, KB손해보험, 한화손해보험", "confidence": 0.95, "review_required": False,
+             "evidence_references": [{"document_id": "DOC_001", "page": 1, "quote": "q"}]}
+    instance = _claim_fields_instance({
+        "imaging_date": _date_field("2025-10-10"),
+        "claim_received_date": _date_field("2025-10-20"),
+        "policy_contract_date": _date_field("2023-10-16"),
+        "diagnosis_date": _date_field("2025-10-16"),
+        "insurers": value,
+    })
+    assert validate_instance(instance, "extracted_claim_fields.schema.json", schemas, registry) == []
+
+
+def test_malformed_date_is_actually_rejected():
+    """Regression: format: date was decorative -- jsonschema skips every
+    `format` keyword unless a FormatChecker is passed, so a named date_field
+    holding garbage would have validated. validate_instance now passes
+    Draft202012Validator.FORMAT_CHECKER."""
+    schemas, registry = load_registry()
+    instance = _claim_fields_instance({"accident_date": _date_field("2025-13-99")})
+    errors = validate_instance(instance, "extracted_claim_fields.schema.json", schemas, registry)
+    assert errors, "a malformed date must fail validation now that formats are checked"

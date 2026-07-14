@@ -1,0 +1,188 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_001",
+  "component": "denial-response",
+  "status": "success",
+  "created_at": "2026-07-14T12:00:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8",
+    "prompt_version": "denial_response_v0.1"
+  },
+  "confidence": 0.7,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "source_grounded": true,
+  "hallucination_risk_check": {
+    "risk_level": "low",
+    "reason": "Every extracted reason and amount traces to a verbatim quote in DOC_001's processed text. The only judgment layer is R-code taxonomy assignment, which is flagged review_required per finding."
+  },
+  "prohibited_language_check": {
+    "passed": true,
+    "issues": []
+  },
+  "warnings": [
+    "No normalized_policy_clause_*.json files exist for CASE_021 (policy-pipeline did not run — no policy contract documents in this case). Per task instruction, policy_matches reference only the 약관 clause text the denial notices themselves quote, recorded against DOC_001 (the insurer-response document) where that clause physically appears; they are NOT normalized clauses from a separately processed policy document.",
+    "R-code assignment for all three findings carries an R04-vs-R05 tension: each insurer frames the outcome as non-payment (KB explicitly labels it 부지급(면책)) while the substantive reasoning is that the objective imaging findings do not satisfy the policy's 진단확정(diagnostic-confirmation) requirement for the covered 뇌혈관질환 — i.e. 지급요건 미충족 (R04) rather than a true exclusion clause (R05). Classified R04 primary with R05 as candidate; flagged for 손해사정사 review.",
+    "No denial/reduction amount or rate is stated in any of the three notices — all three are full denials (reason_type=denial), so reduction_amount and reduction_rate are null throughout."
+  ],
+  "denial_reasons": [
+    {
+      "reason_id": "DR_1",
+      "reason_type": "denial",
+      "taxonomy_code": "R04",
+      "taxonomy_label": "약관상 지급요건 미충족",
+      "candidate_codes": [
+        {
+          "taxonomy_code": "R04",
+          "confidence": 0.75
+        },
+        {
+          "taxonomy_code": "R05",
+          "confidence": 0.15
+        },
+        {
+          "taxonomy_code": "R99",
+          "confidence": 0.05
+        }
+      ],
+      "raw_reason_text": "2025.10.10(판독 2025.10.14) brain mri mra 판독상, 양측 대뇌백질에 미미한 만성 허혈성 병변 확인되며 상기 진단에 부합하지 않습니다. 따라서, 금번 청구하신 보험금은 부득이 보상하여 드리지 못함을 알려드리오니 혜량하여 주시기 바랍니다.",
+      "insurer_claim_summary": "삼성화재의 입장으로는, 1-27.[통합간편]뇌혈관질환 진단비 특별약관 제3조의 진단확정 요건에 비추어 2025.10.10 brain MRI/MRA 판독상 확인된 양측 대뇌백질의 미미한 만성 허혈성 병변이 I67.8 뇌혈관질환 진단에 부합하지 않는다고 보아, 청구 보험금을 지급하지 않는다는 것으로 보인다. (판단의 당부는 검토 대상)",
+      "reduction_rate": null,
+      "reduction_amount": null,
+      "requested_documents": [],
+      "policy_matches": [
+        {
+          "document_id": "DOC_001",
+          "clause_id": "삼성화재_1-27_통합간편_뇌혈관질환진단비_특별약관_제3조",
+          "relevance_note": "삼성화재가 부지급 근거로 직접 인용한 진단확정 조항. 진단확정은 병력·신경학적 검진과 brain CT/MRI/뇌혈관조영술/PET/SPECT/뇌척수액검사 등을 기초로 하여야 한다고 규정하며, 삼성화재는 MRI/MRA 판독 결과가 이 요건상 진단에 부합하지 않는다고 판단함. DOC_001 p.1에 자체 인용된 약관 문언이며, policy-pipeline이 정규화한 별도 약관 문서가 아님(P1)."
+        }
+      ],
+      "confidence": 0.75,
+      "evidence_references": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "2025.10.10(판독 2025.10.14) brain mri mra 판독상, 양측 대뇌백질에 미미한 만성 허혈성 병변 확인되며 상기 진단에 부합하지 않습니다. 따라서, 금번 청구하신 보험금은 부득이 보상하여 드리지 못함"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 1,
+          "quote": "상기 보험의 1-27. [통합간편]뇌혈관질환 진단비 특별약관 제 3조에 따르면 「뇌혈관질환」의 진단확정은 ... 뇌 전산화단층촬영(brain CT scan), 자기공명영상법(MRI), 뇌혈관조영술, 양전자방출단층술(PET), 단일광자방출 전산화 단층술(SPECT), 뇌척수액검사 등을 기초로 하여야 합니다."
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "reason_id": "DR_2",
+      "reason_type": "denial",
+      "taxonomy_code": "R04",
+      "taxonomy_label": "약관상 지급요건 미충족",
+      "candidate_codes": [
+        {
+          "taxonomy_code": "R04",
+          "confidence": 0.65
+        },
+        {
+          "taxonomy_code": "R05",
+          "confidence": 0.2
+        },
+        {
+          "taxonomy_code": "R99",
+          "confidence": 0.05
+        }
+      ],
+      "raw_reason_text": "25.10.10 뇌MRI,MRA(TOF,미조영) 검사상 양측 뇌백질의 최소 만성 허혈병변으로 확인되었습니다. 병소와 일치하는 특이적 신경학적 증상 확인되지 않는 상태 및 영상검사상의 결과내용 참조하였을때 I67B 진단의 객관적소견으로 보기어려운 바 부지급됨을 안내드립니다.",
+      "insurer_claim_summary": "KB손해보험의 입장으로는, 제출된 의무기록 검토상 25.09.30 신경학적검사에 특이소견이 없고 25.10.10 뇌MRI/MRA상 양측 뇌백질의 최소 만성 허혈병변만 확인되어, 병소와 일치하는 특이적 신경학적 증상이 없는 점 등을 근거로 I67.8 진단의 객관적 소견으로 보기 어렵다고 보아 부지급(면책) 처리한 것으로 보인다. 표제상 '면책'으로 기재되어 있으나 실질 논거는 약관 제3조 진단확정 요건 미충족에 가깝다. (판단의 당부는 검토 대상)",
+      "reduction_rate": null,
+      "reduction_amount": null,
+      "requested_documents": [],
+      "policy_matches": [
+        {
+          "document_id": "DOC_001",
+          "clause_id": "KB손해보험_제3조_뇌혈관질환의_정의_및_진단_확정",
+          "relevance_note": "KB가 검토의견으로 인용한 진단확정 조항. 진단확정은 의료법 제3조 의료기관 의사에 의하여, 병력·신경학적 검진과 brain CT/MRI/뇌혈관조영술/PET/SPECT/뇌척수액검사 등을 기초로 하여야 한다고 규정. KB는 영상소견이 이 요건상 I67.8의 객관적 소견으로 보기 어렵다고 판단. DOC_001 p.3에 자체 인용된 문언."
+        },
+        {
+          "document_id": "DOC_001",
+          "clause_id": "KB손해보험_제2조_보험금_지급에_관한_세부규정",
+          "relevance_note": "함께 인용된 제3자 판정 절차 조항(지급사유 미합의 시 종합병원 전문의 제3자 의견). 부지급의 직접 근거라기보다 이의·재검토 절차 안내 성격."
+        }
+      ],
+      "confidence": 0.65,
+      "evidence_references": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "25.10.10 뇌MRI,MRA(TOF,미조영) 검사상 양측 뇌백질의 최소 만성 허혈병변으로 확인되었습니다. 병소와 일치하는 특이적 신경학적 증상 확인되지 않는 상태 및 영상검사상의 결과내용 참조하였을때 I67B 진단의 객관적소견으로 보기어려운 바 부지급됨을 안내드립니다."
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 3,
+          "quote": "제3조 (뇌혈관질환의 정의 및 진단 확정) 뇌혈관질환의 진단확정은 의료법 제3조(의료기관)에서 정한 국내의 병원 ... 의사(치과의사 제외)자격증을 가진 자에 의하여 내려져야 합니다. 이 진단은 병력, 신경학적 검진과 함께 뇌 전산화단층촬영(brain CT scan), 자기공명영상(MRI) ... 등을 기초로 하여야 합니다."
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    },
+    {
+      "reason_id": "DR_3",
+      "reason_type": "denial",
+      "taxonomy_code": "R04",
+      "taxonomy_label": "약관상 지급요건 미충족",
+      "candidate_codes": [
+        {
+          "taxonomy_code": "R04",
+          "confidence": 0.72
+        },
+        {
+          "taxonomy_code": "R05",
+          "confidence": 0.13
+        },
+        {
+          "taxonomy_code": "R99",
+          "confidence": 0.05
+        }
+      ],
+      "raw_reason_text": "본 피보험자가 보인 경미한 수준의 백질 신호 증강은 연령을 고려할 때, 향후 신경학적 증상을 가진 소혈관질환으로 발현할 수 있어 추적검사 요하나 현재는 특이한 신경학적 증상이나 징후는 동반되지 않고, 우연히 발견된 상태이므로, 비가역적인 병변을 보이는 소혈관질환 즉 만성대뇌허혈로 확진되기는 미흡한 소견임. 상기와 같은 검토결과에 따라 현재로써는 고객님께서 청구한 보험금은 부득이 지급하기 어려움을 안내드립니다.",
+      "insurer_claim_summary": "한화손해보험의 입장으로는, 25.10.10 두부 MRI/MRA상 미세 뇌경색·미세출혈·지주막하출혈·혈관주변공간 확장 등 소혈관질환의 특징적 소견이 없고, 관찰된 경미한 백질 신호 증강은 연령 증가에 따라 흔히 나타나는 소견이며 현재 특이 신경학적 증상 없이 우연히 발견된 상태여서 만성대뇌허혈(소혈관질환)로 확진하기에는 미흡하다고 보아, 약관상 진단확정 요건 충족이 어렵다는 취지로 보험금 지급이 어렵다고 안내한 것으로 보인다. (판단의 당부는 검토 대상)",
+      "reduction_rate": null,
+      "reduction_amount": null,
+      "requested_documents": [],
+      "policy_matches": [
+        {
+          "document_id": "DOC_001",
+          "clause_id": "한화손해보험_약관_뇌혈관질환_진단확정_요건",
+          "relevance_note": "한화가 인용한 진단확정 규정(조문 번호는 문서에 명시되지 않음). 진단확정은 의료법 제3조 제2항 병원 전문의에 의하여, 병력·신경학적 검진과 brain CT/MRI/뇌혈관조영술/PET/SPECT/뇌척수액검사 등을 기초로 하여야 한다고 규정. 한화는 영상소견이 만성대뇌허혈 확진에 미흡하여 이 요건을 충족하지 못한다고 판단. DOC_001 p.4에 자체 인용된 문언이며 조번호 미상."
+        }
+      ],
+      "confidence": 0.72,
+      "evidence_references": [
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "비가역적인 병변을 보이는 소혈관질환 즉 만성대뇌허혈로 확진되기는 미흡한 소견임"
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "상기와 같은 검토결과에 따라 현재로써는 고객님께서 청구한 보험금은 부득이 지급하기 어려움을 안내드립니다."
+        },
+        {
+          "document_id": "DOC_001",
+          "document_type": "insurer_response",
+          "page": 4,
+          "quote": "해당 약관에서는 \"뇌혈관질환\"의 진단확정은 의료법 제3조(의료기관) 제2항에서 정한 병원 ... 전문의 자격증을 가진 자(치과의사 제외)에 의하여 내려져야 하며, 이 진단은 병력,신경학적 검진과 함께 뇌 전산화단층촬영(brain CT scan), 자기공명영상(MRI) ... 등을 기초로 하여야 합니다."
+        }
+      ],
+      "review_required": true,
+      "reviewer_role": "손해사정사"
+    }
+  ]
+}

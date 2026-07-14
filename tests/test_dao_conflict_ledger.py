@@ -17,8 +17,8 @@ def test_add_conflict_entry_assigns_sequential_ids(isolated_dao, make_args, tmp_
         {"document_id": "DOC_001", "value": "2024-03-12", "quote": "사고일 2024-03-12"},
         {"document_id": "DOC_002", "value": "2024-03-15", "quote": "내원일 2024-03-15"},
     ]
-    args1 = make_args(stage="consistency-check", topic="accident_date", sources_file=_sources_file(tmp_path, sources))
-    args2 = make_args(stage="consistency-check", topic="diagnosis", sources_file=_sources_file(tmp_path, sources))
+    args1 = make_args(stage="consistency_check", topic="accident_date", sources_file=_sources_file(tmp_path, sources))
+    args2 = make_args(stage="consistency_check", topic="diagnosis", sources_file=_sources_file(tmp_path, sources))
 
     assert dao.cmd_add_conflict_entry(args1) == 0
     assert dao.cmd_add_conflict_entry(args2) == 0
@@ -32,7 +32,7 @@ def test_add_conflict_entry_assigns_sequential_ids(isolated_dao, make_args, tmp_
 def test_check_conflicts_clear_false_while_pending(isolated_dao, make_args, tmp_path):
     sources = [{"document_id": "DOC_001", "value": "a", "quote": "q1"},
                {"document_id": "DOC_002", "value": "b", "quote": "q2"}]
-    dao.cmd_add_conflict_entry(make_args(stage="claim-analysis", topic="t", sources_file=_sources_file(tmp_path, sources)))
+    dao.cmd_add_conflict_entry(make_args(stage="claim_analysis", topic="t", sources_file=_sources_file(tmp_path, sources)))
 
     rc = dao.cmd_check_conflicts_clear(make_args())
 
@@ -42,7 +42,7 @@ def test_check_conflicts_clear_false_while_pending(isolated_dao, make_args, tmp_
 def test_set_conflict_verdict_then_clear(isolated_dao, make_args, tmp_path):
     sources = [{"document_id": "DOC_001", "value": "a", "quote": "q1"},
                {"document_id": "DOC_002", "value": "b", "quote": "q2"}]
-    dao.cmd_add_conflict_entry(make_args(stage="claim-analysis", topic="t", sources_file=_sources_file(tmp_path, sources)))
+    dao.cmd_add_conflict_entry(make_args(stage="claim_analysis", topic="t", sources_file=_sources_file(tmp_path, sources)))
 
     rc = dao.cmd_set_conflict_verdict(make_args(conflict_id="CONFLICT_1", verdict="resolved", note="human confirmed DOC_001"))
     assert rc == 0
@@ -66,7 +66,7 @@ def test_conflict_sources_never_discarded_on_resolution(isolated_dao, make_args,
     must not drop either side's value."""
     sources = [{"document_id": "DOC_001", "value": "2024-03-12", "quote": "q1"},
                {"document_id": "DOC_002", "value": "2024-03-15", "quote": "q2"}]
-    dao.cmd_add_conflict_entry(make_args(stage="claim-analysis", topic="accident_date", sources_file=_sources_file(tmp_path, sources)))
+    dao.cmd_add_conflict_entry(make_args(stage="claim_analysis", topic="accident_date", sources_file=_sources_file(tmp_path, sources)))
     dao.cmd_set_conflict_verdict(make_args(conflict_id="CONFLICT_1", verdict="resolved", note="n"))
 
     ledger = dao.load_conflict_ledger("CASE_009")
@@ -79,7 +79,7 @@ def test_schema_invalid_sources_rejected_and_not_written(isolated_dao, make_args
     test). A malformed source (missing required 'quote') must block the
     write -- conflict_ledger.schema.json requires quote on every source."""
     bad_sources = [{"document_id": "DOC_001", "value": "a"}, {"document_id": "DOC_002", "value": "b", "quote": "q2"}]
-    args = make_args(stage="claim-analysis", topic="t", sources_file=_sources_file(tmp_path, bad_sources))
+    args = make_args(stage="claim_analysis", topic="t", sources_file=_sources_file(tmp_path, bad_sources))
 
     rc = dao.cmd_add_conflict_entry(args)
 
