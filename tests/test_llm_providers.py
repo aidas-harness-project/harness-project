@@ -55,6 +55,16 @@ def test_claude_cli_provider_can_read_command_from_environment(tmp_path):
     assert provider.command == "C:/tools/claude.exe"
 
 
+def test_codex_cli_provider_can_read_command_from_environment(tmp_path):
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="codex-cli"),
+        env={"HARNESS_CODEX_COMMAND": "C:/tools/codex.exe"},
+        root=tmp_path,
+    )
+
+    assert provider.command == "C:/tools/codex.exe"
+
+
 @pytest.mark.parametrize(("provider_name", "key_name"), [
     ("anthropic-api", "ANTHROPIC_API_KEY"),
     ("openai-api", "OPENAI_API_KEY"),
@@ -165,6 +175,85 @@ def test_claude_cli_provider_reports_missing_command(monkeypatch, tmp_path):
         provider.compare_text("compare prompt", "ocr_compare_v0.1")
 
     assert "claude-cli command not found: missing-claude" in str(excinfo.value)
+
+
+def test_codex_cli_provider_reads_output_last_message(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        output_path = Path(cmd[cmd.index("--output-last-message") + 1])
+        output_path.write_text("transcribed text", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="noisy log", stderr="")
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.CodexCliProvider(model_name="gpt-test", root=tmp_path)
+
+    result = provider.transcribe_image(Path("page.png"), "transcribe prompt", "ocr_extraction_v0.1")
+
+    assert captured["cmd"][:7] == [
+        "codex", "exec", "transcribe prompt", "--skip-git-repo-check",
+        "--sandbox", "read-only", "--model",
+    ]
+    assert captured["cmd"][7:11] == ["gpt-test", "--image", "page.png", "--output-last-message"]
+    output_path = Path(captured["cmd"][11])
+    assert not output_path.exists()
+    assert captured["kwargs"]["cwd"] == str(tmp_path)
+    assert captured["kwargs"]["timeout"] == 180
+    assert result.text == "transcribed text"
+    assert result.provider_name == "codex-cli"
+
+
+def test_codex_cli_provider_passes_optional_api_key(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["env"] = kwargs["env"]
+        output_path = Path(cmd[cmd.index("--output-last-message") + 1])
+        output_path.write_text("ok", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="codex-cli"),
+        env={"CODEX_API_KEY": "secret"},
+        root=tmp_path,
+    )
+
+    provider.compare_text("compare prompt", "ocr_compare_v0.1")
+
+    assert captured["env"]["CODEX_API_KEY"] == "secret"
+
+
+def test_codex_cli_provider_reports_nonzero_exit_and_cleans_output(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["output_path"] = Path(cmd[cmd.index("--output-last-message") + 1])
+        return SimpleNamespace(returncode=2, stdout="", stderr="authentication required")
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.CodexCliProvider(root=tmp_path)
+
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.compare_text("compare prompt", "ocr_compare_v0.1")
+
+    assert "codex-cli call failed: authentication required" in str(excinfo.value)
+    assert not captured["output_path"].exists()
+
+
+def test_codex_cli_provider_reports_missing_command(monkeypatch, tmp_path):
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("missing")
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.CodexCliProvider(root=tmp_path, command="missing-codex")
+
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.classify_document("classify prompt", "classification_v0.1")
+
+    assert "codex-cli command not found: missing-codex" in str(excinfo.value)
 
 
 def test_openai_provider_posts_text_to_responses_api(monkeypatch):

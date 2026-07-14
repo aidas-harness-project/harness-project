@@ -102,10 +102,14 @@ interruption) and per-stage rules are defined in
 `.claude/skills/loss-adjustment-pipeline/SKILL.md`.
 
 Checkpoint 1's P8 extraction gate is provider-configurable. `claude-cli`
-remains the backward-compatible default, while Codex-compatible runs can
-use API-backed providers such as `openai-api` for `--reader-a`,
-`--reader-b`, `--comparator`, and `--classifier-provider` when the required
-environment credentials are present.
+remains the backward-compatible default. Codex environments can select
+`codex-cli` for `--reader-a`, `--reader-b`, `--comparator`, and
+`--classifier-provider`; it runs `codex exec`, reuses the local Codex login,
+and does not require an API key. `CODEX_API_KEY` is only an optional fallback
+for unattended CI. The provider accepts an optional model through the
+existing `--*-model` arguments; set `HARNESS_CODEX_COMMAND` to override the
+`codex` executable. API-backed providers such as `openai-api` remain
+available when their credentials are present.
 
 ## Tools
 
