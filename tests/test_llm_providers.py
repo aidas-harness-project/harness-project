@@ -201,6 +201,8 @@ def test_codex_cli_provider_reads_output_last_message(monkeypatch, tmp_path):
     assert not output_path.exists()
     assert captured["kwargs"]["cwd"] == str(tmp_path)
     assert captured["kwargs"]["timeout"] == 180
+    assert captured["kwargs"]["encoding"] == "utf-8"
+    assert captured["kwargs"]["errors"] == "replace"
     assert result.text == "transcribed text"
     assert result.provider_name == "codex-cli"
 

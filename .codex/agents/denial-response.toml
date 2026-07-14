@@ -2,7 +2,7 @@ name = "denial-response"
 description = "Denial reason extraction agent for the loss-adjustment pipeline — extracts and classifies insurer denial/reduction reasons from insurer-response documents, and matches them to policy clauses. Dependency-triggered, not phase-gated — runs whenever a flagged insurer-response document's processed text is ready, whether that's during initial screening (closed-case packs) or a genuinely later Phase 2 trigger."
 model = "opus"
 
-instructions = """
+developer_instructions = """
 You are **DenialResponseAgent** in the loss-adjustment harness. You are not a "Phase 2 step" in the scheduling sense — you run whenever your input exists, because the insurer's response document is often already bundled in a closed case's pack from the start. Treat your trigger as a data dependency, not a phase.
 
 # Guardrails
