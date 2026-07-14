@@ -14,6 +14,7 @@ import json
 import mimetypes
 import os
 import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -23,7 +24,7 @@ from typing import Any, Mapping
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SUPPORTED_PROVIDERS = ("claude-cli", "anthropic-api", "openai-api", "fixture")
+SUPPORTED_PROVIDERS = ("claude-cli", "codex-cli", "anthropic-api", "openai-api", "fixture")
 DEFAULT_PROVIDER = "claude-cli"
 DEFAULT_ENV_PREFIX = "HARNESS_LLM"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -122,6 +123,95 @@ class ClaudeCliProvider(BaseProvider):
 
     def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, allowed_read=True, timeout=180)
+
+
+class CodexCliProvider(BaseProvider):
+    provider_name = "codex-cli"
+
+    def __init__(
+        self,
+        *,
+        model_name: str | None = None,
+        root: Path = ROOT,
+        command: str = "codex",
+        env: Mapping[str, str] | None = None,
+    ):
+        self.model_name = model_name or "codex-cli"
+        self.root = root
+        self.command = command
+        self.env = dict(env) if env is not None else dict(os.environ)
+
+    def _run(
+        self,
+        prompt: str,
+        *,
+        prompt_version: str,
+        timeout: int,
+        image_path: Path | None = None,
+    ) -> ProviderResult:
+        scratch_dir = self.root / "_ocr_scratch"
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        output_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="codex-last-message-",
+                suffix=".txt",
+                dir=scratch_dir,
+                delete=False,
+            ) as output_file:
+                output_path = Path(output_file.name)
+
+            cmd = [self.command, "exec", prompt, "--skip-git-repo-check", "--sandbox", "read-only"]
+            if self.model_name != "codex-cli":
+                cmd.extend(["--model", self.model_name])
+            if image_path is not None:
+                cmd.extend(["--image", str(image_path)])
+            cmd.extend(["--output-last-message", str(output_path)])
+
+            run_env = os.environ.copy()
+            if self.env.get("CODEX_API_KEY"):
+                run_env["CODEX_API_KEY"] = self.env["CODEX_API_KEY"]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    cwd=str(self.root),
+                    env=run_env,
+                )
+            except FileNotFoundError as exc:
+                raise ProviderExecutionError(f"codex-cli command not found: {self.command}") from exc
+
+            raw_metadata = {
+                "command": cmd[0],
+                "returncode": result.returncode,
+                "stderr": result.stderr.strip(),
+            }
+            if result.returncode != 0:
+                raise ProviderExecutionError(f"codex-cli call failed: {result.stderr.strip()}")
+            text = output_path.read_text(encoding="utf-8").strip()
+            return self._result(text, prompt_version, raw_metadata)
+        finally:
+            if output_path is not None:
+                output_path.unlink(missing_ok=True)
+
+    def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._run(
+            prompt,
+            prompt_version=prompt_version,
+            timeout=180,
+            image_path=image_path,
+        )
+
+    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._run(prompt, prompt_version=prompt_version, timeout=60)
+
+    def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._run(prompt, prompt_version=prompt_version, timeout=120)
+
+    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._run(prompt, prompt_version=prompt_version, timeout=180)
 
 
 class _ApiProviderStub(BaseProvider):
@@ -319,6 +409,13 @@ def build_provider(
             model_name=selected.model_name,
             root=root,
             command=source_env.get("HARNESS_CLAUDE_COMMAND") or "claude",
+        )
+    if provider_name == "codex-cli":
+        return CodexCliProvider(
+            model_name=selected.model_name,
+            root=root,
+            command=source_env.get("HARNESS_CODEX_COMMAND") or "codex",
+            env=source_env,
         )
     if provider_name == "anthropic-api":
         return AnthropicApiProvider(model_name=selected.model_name, env=source_env)
