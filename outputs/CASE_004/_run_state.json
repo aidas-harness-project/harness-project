@@ -2,7 +2,7 @@
   "case_id": "CASE_004",
   "run_id": "RUN_20260713_004",
   "created_at": "2026-07-13T15:48:42.798283+09:00",
-  "updated_at": "2026-07-13T15:59:24.004071+09:00",
+  "updated_at": "2026-07-14T16:58:52.934570+09:00",
   "stages": [
     {
       "stage_name": "intake",
@@ -13,7 +13,7 @@
       "backup_path": "E:\\SNU\\intern\\harness-project\\outputs\\CASE_004\\_backups\\step_01_intake"
     },
     {
-      "stage_name": "document-processing",
+      "stage_name": "document_processing",
       "status": "failed",
       "started_at": "2026-07-13T15:59:00.570765+09:00",
       "completed_at": "2026-07-13T15:59:11.891526+09:00",
@@ -30,7 +30,7 @@
       "received_at": "2026-07-13T15:57:01.000808+09:00"
     },
     {
-      "stage_name": "document-processing",
+      "stage_name": "document_processing",
       "status": "waiting",
       "description": "Stage 2 blocked: legacy OCR lacks current P8 dual-path cross-validation records, and claude CLI is unavailable for rerun in this environment",
       "requested_at": "2026-07-13T15:59:24.004071+09:00",
