@@ -75,8 +75,18 @@ def transcribe_once(image_path: Path) -> str:
     # cwd=ROOT: the nested claude CLI's --allowedTools Read is scoped to its
     # project dir, so image_path (under SCRATCH_ROOT, inside ROOT) must be
     # reachable from there -- a path under system /tmp would not be.
+    # --safe-mode: the transcription subprocess must see NOTHING but the page.
+    # Without it, claude -p (cwd=ROOT) auto-loads this project's CLAUDE.md,
+    # skills, and session hooks -- and a context-aware reader editorializes:
+    # CASE_022's real run had BOTH blind reads append similar D2 meta-commentary
+    # ("answer-key-class content, check the source ledger...") to transcribed
+    # pages, which compare() then waved through as material agreement, landing
+    # fabricated text in the trusted processed layer (pages 2/3/5). Two-sided
+    # additions defeat the one-sided-addition check from known-gaps item 11;
+    # the only robust fix is a genuinely context-free reader.
     result = subprocess.run(
-        ["claude", "-p", f"{TRANSCRIBE_PROMPT}\n\nImage: {image_path}", "--allowedTools", "Read"],
+        ["claude", "-p", f"{TRANSCRIBE_PROMPT}\n\nImage: {image_path}", "--allowedTools", "Read",
+         "--safe-mode"],
         capture_output=True, text=True, timeout=180, cwd=str(ROOT),
     )
     if result.returncode != 0:
@@ -92,7 +102,10 @@ def compare(text_a: str, text_b: str) -> dict:
     if text_a.strip() == text_b.strip():
         return {"agreement": "agreed", "disagreement_details": []}
     prompt = COMPARE_PROMPT_TEMPLATE.format(a=text_a, b=text_b)
-    result = subprocess.run(["claude", "-p", prompt], capture_output=True, text=True, timeout=60, cwd=str(ROOT))
+    # --safe-mode for the same reason as transcribe_once: the comparison
+    # verdict must come from a context-free reader, not one primed by this
+    # project's CLAUDE.md/hooks.
+    result = subprocess.run(["claude", "-p", prompt, "--safe-mode"], capture_output=True, text=True, timeout=60, cwd=str(ROOT))
     verdict = result.stdout.strip()
     verdict_upper = verdict.upper()
     # Word-boundary search, not startswith -- the model doesn't always lead

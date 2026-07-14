@@ -873,3 +873,45 @@ The run surfaced four gaps; three sealed 2026-07-14:
   acceptable with the asymmetry recorded at evaluation (what CASE_021
   did)? Deferred to the user; evaluation_result_v1.json records the
   asymmetry explicitly either way.
+
+## 15. OCR subprocess inherited project context and editorialized -- two-sided fabrication that defeats item 11's check -- RESOLVED 2026-07-14 (tool), pages scrubbed
+
+Found live during CASE_022's checkpoint 1 (the 기왕증 case, first run
+after the template wrapper). `ocr_extract.py`'s `claude -p` calls run with
+`cwd=ROOT`, so the transcription subprocess auto-loaded this project's
+CLAUDE.md, skills, and session hooks -- and a context-aware reader
+editorializes: on a document pack containing third-party adjuster
+determinations, BOTH blind reads appended similar meta-commentary after
+the true page end ("answer-key-class content per D2, check
+_source_ledger.json...", one literally phrased "Flagging, not caveman" --
+the session's hook text leaking into the subprocess). Because the
+additions were two-sided and materially similar, `compare()` judged the
+pages agreed and the fabricated blocks landed in the trusted processed
+layer (pages 2/3/5) -- the exact escalation item 11's one-sided-addition
+check cannot catch. Pages 4/6 disagreed for ordinary reasons and carried
+the same flags in both readings.
+
+Also notable: the subprocess's "flags" were *correct about the content*
+(the pack does contain adjuster determinations) but wrong about the
+situation -- the delegated D2 review had already examined those exact
+pages and approved them as third-party precedent evidence. A transcriber
+is not the place for classification judgment; that's what intake's
+content pre-check and D2 human review are for.
+
+**Fixed:**
+- `ocr_extract.py`: both `claude -p` calls (`transcribe_once`, `compare`)
+  now pass `--safe-mode` -- all customizations (CLAUDE.md, hooks, skills)
+  disabled, auth untouched; the reader sees nothing but the page. Verified
+  live before adopting (`--safe-mode` smoke test) and locked by a
+  regression test asserting both subprocess argvs carry the flag.
+- Pages 2/3/5 scrubbed under DAO write-page-text: flag blocks stripped,
+  true page ends verified against 150dpi renders, scrub recorded in each
+  page's `cross_validation.resolution` (the item-11 "agreed but human
+  found a problem" use case). Pages 4/6 resolved normally (image-verified
+  hand corrections, flags stripped) -- notes in ocr_result_DOC_001.json.
+
+**Residual, deliberate:** prior cases' processed pages were NOT re-audited
+for this pattern (CASE_012/013/020/021 predate the wrapper-era prompts and
+their runs' readings never showed flag tails -- CASE_021's page-2 fabricated
+addition was one-sided and caught; still, the retroactive-audit debt from
+item 11 now covers two failure patterns instead of one).
