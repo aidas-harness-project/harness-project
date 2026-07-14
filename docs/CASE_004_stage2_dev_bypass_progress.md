@@ -1,7 +1,14 @@
-# CASE_004 Stage 2 — 진행 상황 및 주의사항 (dev 임시 우회 작업)
+# CASE_004 Stage 2 — 진행 상황 및 주의사항 (PoC provider 수정 + weak-P8 기록)
 
-> 작성: 2026-07-14 · 대상: CASE_004 문서처리(Stage 2) 재개 작업
-> 목적: claude-cli 자가거부 블로커를 우회하기 위한 dev 전용 조치의 배경·현황·주의점 기록
+> 작성: 2026-07-14 · 최종 갱신: 2026-07-14 (커밋 `fa9e7ff` + shared push 이후)
+> 대상: CASE_004 문서처리(Stage 2) 재개 작업
+> 목적: claude-cli OCR 자가거부 **provider 버그 수정** + PoC의 P8 이중검증 방침(weak-P8) 기록.
+>
+> **프레이밍 정정(중요):** 이 작업은 "dev 임시 우회/카브아웃"이 아니라 ① claude-cli를
+> OCR 리더로 쓸 수 있게 하는 **provider 버그 수정**과 ② `open-decisions.md`에 이미 적힌
+> **PoC provider 방침(상용 LLM으로 파이프라인 먼저 검증 → 이후 로컬 전환)을 기록에 반영**하는
+> 일이다. claude-cli는 PoC의 정식 provider이지 임시 폴백이 아니다. 아래 §1~5는 초기 작성
+> 시점 서술(일부는 "dev 우회" 용어를 씀)이고, **최신 확정 상태는 §6을 볼 것.**
 
 ## 1. 왜 막혔나 (블로커의 정체)
 
@@ -87,16 +94,72 @@ Stage 2(문서처리, P8 이중경로 OCR)가 3회 실패한 근본 원인은 **
    - harness-guardrails-dev의 "P8 same-provider fallback" 섹션 (추가한다면)
    - `encoding="utf-8"` 픽스는 **유지**해도 무방(순수 버그픽스).
 
-## 5. 다음 단계 (확정)
+## 5. 다음 단계 (초기 계획 — 실제 결과는 §6)
 
-**PoC provider 전략(§3)에 따라 claude-cli weak-P8로 Stage 2를 진행한다.** 순서:
+> 아래는 초기 계획이며, §6에 실제 실행 결과를 기록했다. 라벨은 `_dev`가 아니라
+> 최종적으로 `_poc`로 확정됐다(§6-3).
 
-1. **작업 B** — CLAUDE.md에 dev 카브아웃 추가(자식 claude가 자동 로드하는 유일 경로).
-   "(Dev-only, temporary)"로 명시, 로컬 이중경로 전환 시 제거. 동시에
-   harness-guardrails-dev 스킬에도 "P8 same-provider fallback" 섹션 기록.
-2. **재검증** — DOC_001 1건으로 자가거부가 멈추고 실제 전사가 나오는지 확인
-   (§2-2 재현). 되면 진행, 안 되면 멈추고 보고.
-3. **Stage 2 full** — DOC_001~025를 claude-cli weak-P8로 처리(작업 A 프레이밍 + 카브아웃).
-   `ocr_result.json`에 `cross_validation_mode="single_technology_weak_p8_dev"` 기록.
-4. **로컬 전환은 후속** — `qwen2.5vl:3b` 한국어 smoke/quality matrix 통과 후,
-   `local-ocr`+`local-vlm` 진짜 P8로 전환하며 이 우회를 제거(§4-5 되돌리기 목록).
+1. **작업 B** — CLAUDE.md에 인가 문구 추가(자식 claude가 자동 로드하는 유일 경로) +
+   harness-guardrails-dev에 "P8 same-provider fallback" 섹션.
+2. **재검증** — DOC_001 1건으로 자가거부가 멈추고 실제 전사가 나오는지 확인.
+3. **Stage 2 full** — DOC_001~025를 claude-cli weak-P8로 처리.
+4. **로컬 전환은 후속** — 로컬 비전모델 한국어 smoke/quality matrix 통과 후 진짜 P8로 전환.
+
+## 6. 실제 실행 로그 (최신 확정 상태)
+
+### 6-1. 작업 A — provider 버그 수정 (완료·검증됨)
+- `ClaudeCliProvider.transcribe_image`에 `_OCR_READER_ROLE_FRAMING` 주입 (claude-cli 경로 전용).
+- `ClaudeCliProvider._run`에 `encoding="utf-8", errors="replace"` 추가 (cp949 크래시 해결).
+- 주석을 **"임시 폴백" → "PoC 정식 provider 방침"** 언어로 정정.
+
+### 6-2. 작업 B(경로) — CLAUDE.md 인가 문구가 결정적이었음 (실증)
+- **프롬프트 프레이밍 단독: 실패.** 자식이 CLAUDE.md와 대조해 `"don't refuse"`를
+  프롬프트 인젝션으로 의심하고 거부(§2-2).
+- **CLAUDE.md Hard rules에 "OCR-reader `claude -p` 세션은 인가된 경로, 우회 아님"
+  카브아웃 추가 후: PASS.** DOC_001에서 실제 진단서 전사 반환(삼복사 골절, S82830…),
+  거부 없음, `[unclear]` 마킹 정확. → 자식이 자동 로드하는 유일 경로는 cwd의 CLAUDE.md임이 확인됨.
+- `harness-guardrails-dev`에 "P8 same-provider fallback" 섹션 추가, `sync_agents.py`로
+  `.codex`/`.agents` 사본 재생성.
+
+### 6-3. 작업 B(라벨) — weak-P8을 정직하게 기록 (옵션 b 확정)
+- 두 번째 상용 벤더 키 없음 → 옵션 (a) 진짜 이중기술 불가. **옵션 (b) weak-P8 확정.**
+- `ocr_extract.run_ocr`이 **리더 provider 쌍을 보고 `cross_validation_mode`를 자동 계산**
+  (하드코딩 아님). 둘 다 claude-cli → `"single_technology_weak_p8_poc"` + reason note.
+  로컬 이중경로로 바꾸면 라벨이 자동으로 `"dual_technology"`로 전환됨(자기정정).
+- 전파: `run_checkpoint1._assemble_ocr_result` → `ocr_result.json`.
+- 스키마: `schemas/ocr_result.schema.json`에 `cross_validation_mode`(enum:
+  `dual_technology`/`single_technology_weak_p8_poc`/`deferred_poc`, **required**) +
+  `cross_validation_note` 추가.
+- **라벨 정정**: §4-1의 `_dev` 접미사는 최종 구현에서 `_poc`로 확정됨.
+
+### 6-4. 검증에서 드러난 중요 발견 — claude-cli 비전 비결정성
+- 같은 페이지·같은 프롬프트를 두 번 호출했더니 결과가 완전히 달랐다:
+  한 번은 진단서 정상 전사, 한 번은 "화상진단 결과지"로 오판독 + 대부분 `[unclear]`.
+- **함의**: weak-P8이라도 이런 **비상관 불일치는 P8이 정확히 `disagreed`로 잡아 halt**한다
+  (설계대로). 다만 정상 문서조차 두 read가 자주 엇갈려 **DOC_001~025 상당수가 P8
+  불일치로 halt될 수 있다.** 각 halt는 사람이 raw 이미지 대조로 해결(`resolve_from_raw_ocr`).
+- 이는 claude-cli 고유 특성(CLAUDE.md 변경이력 item 12의 "genuine OCR non-determinism").
+
+### 6-5. 커밋·push (완료)
+- 관련 테스트 29개 통과(회귀 없음) 확인 후 커밋 `fa9e7ff`
+  (*"CASE_004 Stage 2: fix claude-cli OCR self-refusal + honest weak-P8 labelling"*).
+- 커밋 범위: 코드(llm_providers/ocr_extract/run_checkpoint1/local_runtime 등) + 스키마 +
+  CLAUDE.md(카브아웃+변경이력) + guardrails-dev + 이 문서 + **미완 CASE_004 outputs**.
+  `wiki/`(별도 git 저장소)는 gitlink 오염 방지 위해 제외.
+- **`shared/fix_codex`**(팀 저장소 aidas-harness-project)로 push 완료 (`45636f1..fa9e7ff`, fast-forward).
+
+### 6-6. ⚠️ 미완 — Stage 2 전체 실행 중단 (API 한도)
+- DOC_001~025 전체 실행은 **API 월 지출 한도(monthly spend limit)**로 중단됨.
+  DOC_001만 검증 완료, DOC_002~025 미실행.
+- `outputs/CASE_004/`의 현재 상태(`_run_state.json`, `document_manifest.json`,
+  `ocr_result_DOC_001.json`)는 **미완 상태**이며, Stage 2 재실행 시 DAO로 재생성됨.
+- **재개 방법(새 세션)**: API 한도 상향 후 `loss-adjustment-pipeline` 스킬로
+  "process CASE_004" → Stage 2부터 재개, 이후 Stage 4~10 진행. 새 세션은
+  `.claude/settings.local.json`의 provider env가 자동 적용되어 재설정 불필요.
+
+### 6-7. 되돌리기 목록 갱신 (로컬 이중경로 전환 시)
+- `tools/llm_providers.py` `_OCR_READER_ROLE_FRAMING` + `transcribe_image` 프레이밍 → 제거
+- `CLAUDE.md` Hard rules OCR-reader 카브아웃 → 제거
+- `harness-guardrails-dev` "P8 same-provider fallback" 섹션 → 제거
+- `cross_validation_mode`는 리더 쌍 보고 자동 계산되므로 **코드 수정 없이** 로컬 리더로
+  바꾸면 `dual_technology`로 자동 전환 (스키마 필드·`encoding` 픽스는 **유지**).

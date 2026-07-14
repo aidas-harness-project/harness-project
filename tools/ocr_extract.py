@@ -28,7 +28,7 @@ Usage:
     python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf \
         --reader-a local-ocr --reader-a-model kor+eng:6 \
         --reader-b local-vlm --reader-b-model qwen3-vl:4b \
-        --comparator local-llm --comparator-model qwen3-vl:4b
+        --comparator local-llm --comparator-model qwen3:4b
 """
 import argparse
 import contextlib
