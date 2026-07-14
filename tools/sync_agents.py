@@ -74,7 +74,7 @@ def sync_agents():
             f'name = "{toml_escape(name)}"\n'
             f'description = "{toml_escape(description)}"\n'
             f'model = "{toml_escape(model)}"\n\n'
-            f'instructions = """\n{toml_escape(body)}\n"""\n'
+            f'developer_instructions = """\n{toml_escape(body)}\n"""\n'
         )
         (CODEX_AGENTS / f"{name}.toml").write_text(toml_text, encoding="utf-8")
         count += 1

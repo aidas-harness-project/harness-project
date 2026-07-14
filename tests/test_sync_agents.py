@@ -106,6 +106,7 @@ def test_sync_agents_writes_toml_with_expected_fields(isolated_sync):
     assert 'name = "my-agent"' in toml_text
     assert 'description = "does things"' in toml_text
     assert 'model = "sonnet"' in toml_text
+    assert 'developer_instructions = """' in toml_text
     assert "Body text here." in toml_text
 
 
@@ -132,8 +133,8 @@ def test_sync_agents_escapes_triple_quotes_in_body(isolated_sync):
 
     toml_text = (isolated_sync.codex_agents / "quoted-agent.toml").read_text(encoding="utf-8")
     assert '\\"\\"\\"' in toml_text
-    # The instructions block's own delimiters must still be exactly two: open and close
-    assert toml_text.count('instructions = """') == 1
+    # The developer-instructions block's own delimiters must still be exactly two: open and close
+    assert toml_text.count('developer_instructions = """') == 1
 
 
 def test_sync_agents_processes_every_md_file_in_the_directory(isolated_sync):
