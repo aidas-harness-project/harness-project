@@ -1,0 +1,124 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_002",
+  "component": "evaluation",
+  "status": "success",
+  "created_at": "2026-07-14T19:30:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "evaluation_v0.1"
+  },
+  "review_required": false,
+  "core_field_accuracy": {
+    "applicable": true,
+    "na_reason": null,
+    "score": 0.9,
+    "field_comparisons": [
+      {
+        "field_name": "diagnosis_name",
+        "predicted_value": "기타 명시된 뇌혈관질환 (I67.8)",
+        "actual_value": "기타 명시된 뇌혈관질환 (I678) — GT 주요 상병명 / 최종진단",
+        "match": true
+      },
+      {
+        "field_name": "kcd_code",
+        "predicted_value": "I67.8",
+        "actual_value": "I67.8 (GT: I67 within 통합뇌질병 분류표 기타 뇌혈관질환)",
+        "match": true
+      },
+      {
+        "field_name": "claim_coverage",
+        "predicted_value": "뇌혈관질환진단비 특별약관",
+        "actual_value": "통합 뇌질병진단비(뇌혈관질환(뇌졸중제외))진단비III (GT 사정 대상 담보)",
+        "match": true
+      },
+      {
+        "field_name": "accident_date (보험사고일)",
+        "predicted_value": "2025-10-16",
+        "actual_value": "2025-10-16 (GT: '2025년 10월 16일 발생한 보험사고')",
+        "match": true
+      },
+      {
+        "field_name": "imaging_date",
+        "predicted_value": "2025-10-10",
+        "actual_value": "2025-10-10 (GT 진단경위: 2025.10.10 시행 뇌 MRI)",
+        "match": true
+      },
+      {
+        "field_name": "policy_contract_date (KB)",
+        "predicted_value": "2023-10-16",
+        "actual_value": "2023-10-16 (GT 보험계약사항 KB 보험기간 시기)",
+        "match": true
+      },
+      {
+        "field_name": "product_name_KB",
+        "predicted_value": "KB 3.5.5 오! 슬기로운간편건강보험Plus(무배당)(23.09)",
+        "actual_value": "KB 3.5.5 오!슬기로운간편건강보험Plus(무배당)(23.09)(24149) (GT 사정근거)",
+        "match": true
+      },
+      {
+        "field_name": "product_name_삼성",
+        "predicted_value": "무배당 삼성화재 간편보험 새로고침(2304.1)(자동갱신형)",
+        "actual_value": "무배당 삼성화재 간편보험 새로고침(2304.1) (GT_003 사정근거)",
+        "match": true
+      },
+      {
+        "field_name": "product_name_한화",
+        "predicted_value": "한화 3N5 WELL100 간편건강보험(연만기 갱신형)2310",
+        "actual_value": "한화손해보험 한화 3N5 WELL100 간편건강보험(연만기 갱신형)2310 무배당 (GT_004 사정근거)",
+        "match": true
+      },
+      {
+        "field_name": "onset_date",
+        "predicted_value": "2025-09-30",
+        "actual_value": null,
+        "match": false
+      }
+    ]
+  },
+  "case_type_accuracy": {
+    "applicable": true,
+    "na_reason": null,
+    "correct": true,
+    "predicted_case_type": "진단·수술비",
+    "actual_case_type": "진단·수술비 (뇌혈관질환 정액 진단비 특약 — GT 사정금액이 정액 진단비로 산정됨)"
+  },
+  "denial_reason_top1_agreement": {
+    "applicable": true,
+    "na_reason": null,
+    "correct": true,
+    "predicted_code": "R04",
+    "actual_code": "R04"
+  },
+  "denial_reason_top3_agreement": {
+    "applicable": true,
+    "na_reason": null,
+    "correct": true,
+    "candidate_codes": [
+      "R04",
+      "R05",
+      "R99"
+    ],
+    "actual_code": "R04"
+  },
+  "policy_mapping_top3_inclusion": {
+    "applicable": true,
+    "na_reason": null,
+    "included": true,
+    "matched_rank": 1
+  },
+  "draft_quality": {
+    "applicable": true,
+    "na_reason": null,
+    "rating": "good",
+    "narrative": "v2 materially improves on v1, and its Phase-2 rebuttal grounds map precisely onto the real adjuster's actual overturning basis — while, within its P1/P3 constraints, still declining to assert the payable outcome. RESOLVED FROM v1: CF-1(v1) fixed — 요건 3 now carries the inline '(재구성 — 약관 명시 문언 아님, 3사 부지급 논거로부터 도출)' marker, correctly placed. TEMPLATE CONFORMANCE: v2 follows 변형 B (I 사정요약 · II 위임/보험계약사항 · III 조사·확인 사실 · IV 관계법규·약관 적용·판단 [1 지급책임 발생, 2 면책사유 검토] · V 보험금 사정 · VI 증빙자료), which structurally mirrors the GT 손해사정서's own section architecture (verified against GT_001); unfillable 서식 항목 honestly marked 부존재/미확보 rather than padded. REBUTTAL FIDELITY (core v2 signal): v2's RB-1/2/3 rest on (a) insurer self-concessions — esp. 한화's '백질 신호 증강 자체는 소혈관질환의 초기 소견으로도 볼 수 있으나' — (b) cross-notice tension, and (c) evidence-acquisition + 재검토/제3자 전문의/의료자문 paths. The real adjuster overturned ALL denials on the SAME grounds and the SAME decisive mechanism: a 신경외과 의료자문 (2026-04-03) concluding that mild 백질 변성, weighed with age/기저 위험인자/임상 증상, supports a '뇌소혈관질환 초기 단계 → I67.8' diagnosis — i.e. the exact 한화 concession v2 made load-bearing was medically vindicated and became the basis for payment — together with the 진단서 (별첨 제01호) and an explicit 면책사유 부존재 finding (GT Section IV.2), which directly confirms the pipeline's R04-not-R05 call. The one thing v2 could not do is what actually flipped the case: obtain that independent 의료자문 and the 진단서 (both absent in-case). v2 correctly listed exactly these as 미확보 and named the 제3자 전문의/의료자문 path as the route to resolution, so its gaps were diagnosed AS gaps, not glossed. DIVERGENCE: v2's headline 사정 의견 (I.3, V.3) still leads with the concordant 3사 denial as '청구 인용에 유리하지 않은 정황' — a mild wrong-direction lean — before pivoting to the concession-based dispute footing; the real outcome is fully payable (KB 10,000,000원; 삼성화재 20,000,000원, 한화 20,000,000원 per the v1-pass determinations). Residual low CF-1(v2): III.2.다 over-attributes a 한화-only radiological 미관찰 소견 to '각 안내문'. NET: rated good — a strong good, clearly improved over v1's good; near-excellent on rebuttal-grounds fidelity and template conformance, held below excellent only by the residual headline adverse lean and the low source-scoping slip — the former being P3-constrained (the draft must not assert the coverage outcome), so the divergence reflects the pipeline's mandate, not an analytical error in the rebuttal reasoning itself."
+  },
+  "warnings": [
+    "PII handling: ground truth contains the 피보험자's real name and the 손해사정사's personal identifiers. Excluded from this output; only non-identifying determinations (amounts, R-codes, clause/taxonomy text, event dates, 의료자문 date) transcribed.",
+    "denial_reason metrics interpretation: the GT is a third-party 손해사정서 that OVERTURNS the 3사 denial (payable) — no final upheld denial-reason code exists. R04 scored 'correct' as the accurate classification of the DENIAL'S NATURE (진단확정/지급요건 미충족, not a true 면책). This is even more strongly vindicated for v2: GT Section IV.2 (면책사유 검토) explicitly finds 면책사유 부존재 → confirms the pipeline's R04-over-R05 call. Outcome divergence captured in draft_quality, not treated as a denial-reason miss.",
+    "사정금액: GT states payout amounts (KB 10,000,000원 etc.). v2 recorded '미정(산정 유보)' because no payout figure existed anywhere in the pipeline's in-case inputs — the amounts live only in ground truth. Per P1 (do not invent values not in inputs) and endorsed by the human reviewer, this is correct behavior and is NOT scored as a core-field extraction miss.",
+    "Scope asymmetry (owner decision): 농협손해보험 (GT_002, 20,000,000원 payable) has no in-case denial notice and is intentionally out of scope; recorded as asymmetry, not scored against the draft — same handling as v1.",
+    "Decisive new evidence outside pipeline inputs: the 신경외과 의료자문 (2026-04-03) and the 진단서 (별첨 제01호) that actually flipped the case were obtained post-denial and exist only in ground truth; the pipeline could not have had them. v2 correctly identified the 의료자문/전문의 path as the resolution route.",
+    "Ground-truth read scope (D1 exception, cost-bounded): reused the four adjusters' final determinations captured in the v1 pass; for v2 re-rendered only GT_001 physical pp.8-9 (Sections IV.1.나/다, IV.2 면책사유 검토, V 보험금 사정) to capture the overturning ARGUMENT. GT_001's medical basis is representative (single insured, single 2025-10-10 imaging, single 의료자문); 삼성/한화/농협 reasoning bodies not re-rendered."
+  ]
+}
