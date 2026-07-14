@@ -35,6 +35,7 @@ cannot do; the orchestrator/agent owns that loop.
 
 Subcommands:
     read-document-text CASE_ID DOC_ID
+    read-page-text CASE_ID DOC_ID PAGE
     read-ground-truth CASE_ID --caller-stage STAGE --version {v1|v2}
     read-contract CASE_ID FILENAME
     write-contract CASE_ID FILENAME --data-file PATH --schema-name NAME
@@ -202,6 +203,21 @@ def cmd_read_document_text(args):
     print(f"NOT_EXTRACTED: {args.doc_id} has no processed text yet. "
           f"Invoke document-pipeline to produce it -- do not read the raw source directly (harness-guardrails P2).")
     return 1
+
+
+def cmd_read_page_text(args):
+    """Read one validated checkpoint-1 page from the processed layer.
+
+    This command exists for checkpoint 2 so redaction never opens a raw
+    source or reaches into data/processed outside the DAO boundary.
+    """
+    page_path = processed_dir(args.case_id, args.doc_id) / f"page_{args.page:03d}.md"
+    if not page_path.exists():
+        print(f"NOT_EXTRACTED: {args.doc_id} page {args.page} has no validated processed text yet. "
+              "Complete document-pipeline checkpoint 1 first.")
+        return 1
+    print(page_path.read_text(encoding="utf-8"), end="")
+    return 0
 
 
 def human_review_flag_path(case_id: str, version: str) -> Path:
@@ -793,6 +809,10 @@ def main():
 
     p = sub.add_parser("read-document-text"); p.add_argument("case_id"); p.add_argument("doc_id")
     p.set_defaults(fn=cmd_read_document_text)
+
+    p = sub.add_parser("read-page-text"); p.add_argument("case_id"); p.add_argument("doc_id")
+    p.add_argument("page", type=int)
+    p.set_defaults(fn=cmd_read_page_text)
 
     p = sub.add_parser("read-ground-truth"); p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)
     p.add_argument("--version", required=True, choices=["v1", "v2"])

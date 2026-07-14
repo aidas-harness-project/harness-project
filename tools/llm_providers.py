@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -24,7 +25,10 @@ from typing import Any, Mapping
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SUPPORTED_PROVIDERS = ("claude-cli", "codex-cli", "anthropic-api", "openai-api", "fixture")
+SUPPORTED_PROVIDERS = (
+    "claude-cli", "codex-cli", "anthropic-api", "openai-api",
+    "local-ocr", "local-vlm", "local-llm", "fixture",
+)
 DEFAULT_PROVIDER = "claude-cli"
 DEFAULT_ENV_PREFIX = "HARNESS_LLM"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -86,6 +90,9 @@ class BaseProvider:
     def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
         raise NotImplementedError
 
+    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        raise NotImplementedError
+
 
 class ClaudeCliProvider(BaseProvider):
     provider_name = "claude-cli"
@@ -123,6 +130,9 @@ class ClaudeCliProvider(BaseProvider):
 
     def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, allowed_read=True, timeout=180)
+
+    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._run(prompt, prompt_version=prompt_version, allowed_read=False, timeout=120)
 
 
 class CodexCliProvider(BaseProvider):
@@ -215,6 +225,9 @@ class CodexCliProvider(BaseProvider):
     def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, timeout=180)
 
+    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._run(prompt, prompt_version=prompt_version, timeout=120)
+
 
 class _ApiProviderStub(BaseProvider):
     required_key_env: str
@@ -248,6 +261,9 @@ class _ApiProviderStub(BaseProvider):
         raise self._not_implemented()
 
     def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
+        raise self._not_implemented()
+
+    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
         raise self._not_implemented()
 
 
@@ -341,6 +357,277 @@ class OpenAIApiProvider(_ApiProviderStub):
     def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._post_responses(prompt, prompt_version=prompt_version, timeout=180)
 
+    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._post_responses(prompt, prompt_version=prompt_version, timeout=120)
+
+
+class LocalOcrProvider(BaseProvider):
+    """Offline Tesseract adapter used only for page transcription.
+
+    ``model_name`` is ``LANGUAGES:PSM`` (for example ``kor+eng:6``).
+    The executable and language data must already be installed. This
+    provider never downloads anything and never falls back externally.
+    """
+
+    provider_name = "local-ocr"
+
+    def __init__(
+        self,
+        *,
+        model_name: str | None = None,
+        command: str = "tesseract",
+        env: Mapping[str, str] | None = None,
+    ):
+        self.model_name = model_name or "kor+eng:6"
+        self.command = command
+        self.env = dict(env) if env is not None else dict(os.environ)
+        language, separator, psm = self.model_name.partition(":")
+        if not language or (separator and (not psm.isdigit() or not 0 <= int(psm) <= 13)):
+            raise ProviderConfigError(
+                "local-ocr model must use LANGUAGES[:PSM], e.g. 'kor+eng:6'"
+            )
+        self.language = language
+        self.psm = psm or "6"
+
+    def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
+        cmd = [self.command, str(image_path), "stdout", "-l", self.language, "--psm", self.psm]
+        run_env = os.environ.copy()
+        if self.env.get("TESSDATA_PREFIX"):
+            run_env["TESSDATA_PREFIX"] = self.env["TESSDATA_PREFIX"]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=180, env=run_env,
+            )
+        except FileNotFoundError as exc:
+            raise ProviderExecutionError(
+                f"local-ocr command not found: {self.command}; install Tesseract with Korean language data"
+            ) from exc
+        if result.returncode != 0:
+            raise ProviderExecutionError(f"local-ocr call failed: {result.stderr.strip()}")
+        return self._result(
+            result.stdout.strip(), prompt_version,
+            {"command": cmd[0], "returncode": result.returncode, "language": self.language, "psm": self.psm},
+        )
+
+    def _unsupported(self, operation: str):
+        raise ProviderExecutionError(
+            f"local-ocr only supports transcribe_image; use local-llm for {operation}"
+        )
+
+    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        self._unsupported("compare_text")
+
+    def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
+        self._unsupported("classify_document")
+
+    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
+        self._unsupported("scan_intake_content")
+
+    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        self._unsupported("redact_text")
+
+
+class LocalVlmProvider(BaseProvider):
+    """Offline Ollama vision adapter restricted to a loopback daemon.
+
+    This is intended as the technology-independent P8 reader paired with
+    Tesseract. The model must already be present locally; model downloads are
+    deliberately outside the provider and there is no external fallback.
+    """
+
+    provider_name = "local-vlm"
+
+    def __init__(
+        self,
+        *,
+        model_name: str | None,
+        command: str = "ollama",
+        env: Mapping[str, str] | None = None,
+    ):
+        source_env = dict(env) if env is not None else dict(os.environ)
+        self.model_name = model_name or source_env.get("HARNESS_LOCAL_VLM_MODEL") or ""
+        if not self.model_name:
+            raise ProviderConfigError(
+                "local-vlm requires --model or HARNESS_LOCAL_VLM_MODEL; "
+                "the vision model must already be installed"
+            )
+        self.command = command
+        self.env = source_env
+        configured_host = source_env.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+        self.ollama_host = configured_host if "://" in configured_host else f"http://{configured_host}"
+        parsed = urlparse(self.ollama_host)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+            "localhost", "127.0.0.1", "::1",
+        }:
+            raise ProviderConfigError(
+                f"local-vlm requires a loopback OLLAMA_HOST, got {configured_host!r}"
+            )
+        self.ollama_host = self.ollama_host.rstrip("/")
+        self._model_verified = False
+
+    def _run_env(self) -> dict[str, str]:
+        run_env = os.environ.copy()
+        run_env.update({key: value for key, value in self.env.items() if key.startswith("OLLAMA_")})
+        run_env["OLLAMA_HOST"] = self.ollama_host
+        return run_env
+
+    def _verify_local_model(self) -> None:
+        if self._model_verified:
+            return
+        try:
+            result = subprocess.run(
+                [self.command, "show", self.model_name], capture_output=True,
+                text=True, encoding="utf-8", errors="replace", timeout=30,
+                env=self._run_env(),
+            )
+        except FileNotFoundError as exc:
+            raise ProviderExecutionError(
+                f"local-vlm command not found: {self.command}; install Ollama and preload the vision model"
+            ) from exc
+        if result.returncode != 0:
+            raise ProviderExecutionError(
+                f"local-vlm model {self.model_name!r} is not available locally; "
+                "preload it in the approved E: runtime (automatic download is disabled)"
+            )
+        self._model_verified = True
+
+    def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
+        self._verify_local_model()
+        payload = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "images": [base64.b64encode(image_path.read_bytes()).decode("ascii")],
+            "stream": False,
+            "think": False,
+        }
+        request = urllib.request.Request(
+            f"{self.ollama_host}/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                parsed = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise ProviderExecutionError(f"local-vlm loopback call failed: {exc}") from exc
+        text = parsed.get("response")
+        if not isinstance(text, str) or not text.strip():
+            raise ProviderExecutionError("local-vlm response omitted non-empty response text")
+        return self._result(
+            text.strip(), prompt_version,
+            {
+                "endpoint": f"{self.ollama_host}/api/generate",
+                "done": parsed.get("done"),
+                "total_duration": parsed.get("total_duration"),
+            },
+        )
+
+    def _unsupported(self, operation: str):
+        raise ProviderExecutionError(
+            f"local-vlm is reserved for image transcription; use local-llm for {operation}"
+        )
+
+    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        self._unsupported("compare_text")
+
+    def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
+        self._unsupported("classify_document")
+
+    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
+        self._unsupported("scan_intake_content")
+
+    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        self._unsupported("redact_text")
+
+
+class LocalLlmProvider(BaseProvider):
+    """Offline text-only Ollama adapter restricted to a loopback daemon.
+
+    The model must already exist locally (``ollama show`` must succeed),
+    which prevents ``ollama run`` from initiating an automatic download.
+    """
+
+    provider_name = "local-llm"
+
+    def __init__(
+        self,
+        *,
+        model_name: str | None,
+        command: str = "ollama",
+        env: Mapping[str, str] | None = None,
+    ):
+        source_env = dict(env) if env is not None else dict(os.environ)
+        self.model_name = model_name or source_env.get("HARNESS_LOCAL_LLM_MODEL") or ""
+        if not self.model_name:
+            raise ProviderConfigError(
+                "local-llm requires --model or HARNESS_LOCAL_LLM_MODEL; the model must already be installed"
+            )
+        self.command = command
+        self.env = source_env
+        self.ollama_host = source_env.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+        parsed = urlparse(self.ollama_host if "://" in self.ollama_host else f"http://{self.ollama_host}")
+        if parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+            raise ProviderConfigError(
+                f"local-llm requires a loopback OLLAMA_HOST, got {self.ollama_host!r}"
+            )
+        self._model_verified = False
+
+    def _run_env(self) -> dict[str, str]:
+        run_env = os.environ.copy()
+        run_env["OLLAMA_HOST"] = self.ollama_host
+        return run_env
+
+    def _verify_local_model(self) -> None:
+        if self._model_verified:
+            return
+        try:
+            result = subprocess.run(
+                [self.command, "show", self.model_name], capture_output=True,
+                text=True, encoding="utf-8", errors="replace", timeout=30,
+                env=self._run_env(),
+            )
+        except FileNotFoundError as exc:
+            raise ProviderExecutionError(
+                f"local-llm command not found: {self.command}; install Ollama and preload the configured model"
+            ) from exc
+        if result.returncode != 0:
+            raise ProviderExecutionError(
+                f"local-llm model {self.model_name!r} is not available locally; "
+                "preload it in an approved environment (automatic download is disabled)"
+            )
+        self._model_verified = True
+
+    def _run(self, prompt: str, prompt_version: str, timeout: int) -> ProviderResult:
+        self._verify_local_model()
+        cmd = [self.command, "run", self.model_name]
+        result = subprocess.run(
+            cmd, input=prompt, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout, env=self._run_env(),
+        )
+        if result.returncode != 0:
+            raise ProviderExecutionError(f"local-llm call failed: {result.stderr.strip()}")
+        return self._result(
+            result.stdout.strip(), prompt_version,
+            {"command": cmd[0], "returncode": result.returncode, "ollama_host": self.ollama_host},
+        )
+
+    def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
+        raise ProviderExecutionError("local-llm is text-only in this harness; use local-ocr for page transcription")
+
+    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._run(prompt, prompt_version, 120)
+
+    def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._run(prompt, prompt_version, 180)
+
+    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._run(prompt, prompt_version, 180)
+
+    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._run(prompt, prompt_version, 180)
+
 
 class FixtureProvider(BaseProvider):
     provider_name = "fixture"
@@ -370,6 +657,9 @@ class FixtureProvider(BaseProvider):
 
     def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._response("scan_intake_content", prompt_version)
+
+    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._response("redact_text", prompt_version)
 
 
 def add_provider_args(parser: argparse.ArgumentParser) -> None:
@@ -423,6 +713,26 @@ def build_provider(
         return AnthropicApiProvider(model_name=selected.model_name, env=source_env)
     if provider_name == "openai-api":
         return OpenAIApiProvider(model_name=selected.model_name, env=source_env)
+    if provider_name == "local-ocr":
+        return LocalOcrProvider(
+            model_name=selected.model_name,
+            command=source_env.get("HARNESS_LOCAL_OCR_COMMAND") or "tesseract",
+            env=source_env,
+        )
+    if provider_name == "local-vlm":
+        return LocalVlmProvider(
+            model_name=selected.model_name,
+            command=source_env.get("HARNESS_LOCAL_VLM_COMMAND")
+            or source_env.get("HARNESS_LOCAL_LLM_COMMAND")
+            or "ollama",
+            env=source_env,
+        )
+    if provider_name == "local-llm":
+        return LocalLlmProvider(
+            model_name=selected.model_name,
+            command=source_env.get("HARNESS_LOCAL_LLM_COMMAND") or "ollama",
+            env=source_env,
+        )
     if provider_name == "fixture":
         return FixtureProvider(model_name=selected.model_name, responses=fixture_responses)
     raise ProviderConfigError(f"unsupported provider {selected.provider_name!r}")

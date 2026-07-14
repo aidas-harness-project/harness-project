@@ -28,6 +28,10 @@ schemas.zip
 
 # ocr_extract.py's project-local scratch (page images) -- transient, cleaned up on exit
 _ocr_scratch/
+_redaction_scratch/
+
+# Project-local offline runtimes and model weights (downloaded, never versioned)
+.runtime/
 
 # Pipeline viewer frontend -- build artifacts and venvs, not source
 frontend/web/node_modules/
