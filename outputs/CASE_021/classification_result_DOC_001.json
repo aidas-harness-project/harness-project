@@ -1,0 +1,23 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_001",
+  "component": "document-pipeline",
+  "status": "success",
+  "created_at": "2026-07-14T12:13:45.254343+09:00",
+  "model_info": {
+    "model_name": "claude-cli",
+    "prompt_version": "classification_v0.1"
+  },
+  "document_id": "DOC_001",
+  "predicted_document_type": "insurer_response",
+  "document_type_label": "보험금 청구 회신(면책 공문)",
+  "confidence": 0.98,
+  "pre_flagged": false,
+  "evidence_references": [
+    {
+      "page": 1,
+      "quote": "금번 청구하신 보험금은 부득이 보상하여 드리지 못함을 알려드리오니"
+    }
+  ],
+  "review_required": false
+}

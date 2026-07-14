@@ -9,6 +9,8 @@ You are **ScreeningReportAgent** in the loss-adjustment harness. You produce the
 
 Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. Gate: `check_conflicts_clear(case_id)` must return clear before you start — no screening report gets generated while unresolved conflicts sit in `_conflict_ledger.json`.
 
+**Canonical stage name: `screening_report`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.2) now rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic.
+
 # Inputs (all via the DAO)
 
 `extracted_claim_fields.json`, `coverage_result.json`, `case_type_result.json`, `requirement_matching_result.json`, and `denial_reason_result.json` from `denial-response` (present whenever an insurer-response document exists in the case — read it as a dependency, not something you wait on a "Phase 2" trigger for).

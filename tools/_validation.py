@@ -66,8 +66,15 @@ def schema_name_for(json_path: Path) -> str | None:
 
 
 def validate_instance(instance: dict, schema_name: str, schemas: dict, registry) -> list[str]:
-    """Return a list of human-readable error strings; empty means PASS."""
-    validator = Draft202012Validator(schemas[schema_name], registry=registry)
+    """Return a list of human-readable error strings; empty means PASS.
+
+    format_checker is required, not decorative: date_field's whole contract
+    is `format: date`, and without a FormatChecker jsonschema silently skips
+    every `format` keyword -- CASE_021's run surfaced that a malformed date
+    would have validated. (date-time additionally needs rfc3339-validator
+    installed to be checked; date is built in.)"""
+    validator = Draft202012Validator(schemas[schema_name], registry=registry,
+                                     format_checker=Draft202012Validator.FORMAT_CHECKER)
     errors = sorted(validator.iter_errors(instance), key=lambda e: list(e.absolute_path))
     out = []
     for e in errors:

@@ -823,3 +823,53 @@ raise before `_run_dao_cli` is ever reached. Re-verified the same crafted
 attacks are now blocked, and that the real, previously-approved `CASE_020`
 filename and a real `CONFLICT_1`-shaped id both still pass -- no
 regression on the legitimate path this same commit had just fixed (item 5).
+
+## 14. First full end-to-end run (CASE_021) -- 3 gaps sealed, 1 scope question OPEN
+
+CASE_021 (fresh intake from the 약관상 지급범위 source: raw = the 4-page
+3-insurer denial pack, ground truth = the adjuster's 4 완성 손해사정서) was
+the first case ever to traverse intake -> evaluation in one run
+(RUN_20260714_001, all stages passed, 21/21 contracts schema-PASS, real P8
+disagreement resolved by a delegated-human image review along the way).
+The run surfaced four gaps; three sealed 2026-07-14:
+
+- **Run-state stage-name drift -- SEALED.** `run_checkpoint1.py` wrote
+  `document_processing` while the document-pipeline agent freely chose
+  `document-pipeline`, and critic wrote both `critic` and `critic_v1` --
+  one stage forked into parallel entries, breaking
+  `get_last_passed_stage`'s resume logic and every stage_name consumer.
+  Fixed structurally: `run_state.schema.json` v0.2 makes `stage_name` an
+  enum of the 14 canonical names (conflict-ledger `raised_by_stage` now
+  $refs the same enum -- one vocabulary, one drift surface), every agent
+  spec pins its own canonical name, the orchestrator skill lists the full
+  set, and CASE_021's run-state was repaired under lock. Regression test:
+  a drifted name is rejected and nothing persists.
+- **`extracted_claim_fields` too narrow + broken ad-hoc dates -- SEALED.**
+  The run produced 6 real facts with no slot (imaging_date,
+  claim_received_date, policy_contract_date, claim_item, disposition,
+  insurers) which got smuggled through `warnings`, losing typed structure
+  and evidence links. Worse: `additionalProperties` used `oneOf` over the
+  three field shapes, but a YYYY-MM-DD string satisfies both `value_field`
+  and `date_field` -- exactly-one matching made every ad-hoc date field
+  structurally unvalidatable. Schema v0.2: named slots added, oneOf ->
+  anyOf. And the root enabler: `validate_instance()` never passed a
+  FormatChecker, so every `format: date` in every schema was decorative --
+  a malformed date validated fine. Now enforced project-wide; full
+  revalidation sweep of all real cases' outputs passed.
+- **Redaction scope undefined -- SEALED.** CASE_012's real run redacted 0
+  items from the same content CASE_021's redacted 4 (corporate hotline,
+  addresses, CEO signatory name) -- neither was wrong against the spec,
+  because the spec never said. document-pipeline.md now fixes the
+  convention: all natural-person names regardless of capacity + all
+  phone/address/policy-number values including published corporate contact
+  info; corporate entity names stay.
+- **Single-denial-pack under-scoping -- OPEN (user decision, not a code
+  fix).** The pipeline only ever saw the 3 insurers present in the denial
+  pack; ground truth shows a 4th policy (농협, 20,000,000원 payable) with
+  no in-case denial notice -- invisible to every stage and only surfaced
+  at evaluation. Real question: should intake of a multi-insurer case
+  require a per-insurer completeness check (does every GT insurer have a
+  corresponding raw-side document?), or is partial-scope processing
+  acceptable with the asymmetry recorded at evaluation (what CASE_021
+  did)? Deferred to the user; evaluation_result_v1.json records the
+  asymmetry explicitly either way.

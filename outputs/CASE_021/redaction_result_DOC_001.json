@@ -1,0 +1,22 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260714_001",
+  "component": "document-pipeline",
+  "status": "success",
+  "created_at": "2026-07-14T12:18:13.729605+09:00",
+  "model_info": {
+    "model_name": "claude-cli",
+    "prompt_version": "redaction_v0.1"
+  },
+  "method": "general_llm",
+  "document_id": "DOC_001",
+  "redacted_text_path": "data/processed/CASE_021/DOC_001/redacted_text.md",
+  "items_redacted": 4,
+  "categories": [
+    "address",
+    "phone_number",
+    "person_name"
+  ],
+  "filename_pii_flagged": false,
+  "review_required": false
+}

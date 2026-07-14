@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "extracted_claim_fields.schema.json",
-  "title": "extracted_claim_fields.json -- core claim fact card v0.1",
-  "description": "Structured core facts extracted from claim documents. Produced by claim-analysis's checkpoint 1 (Claim Field Extraction). Field structure is fixed to three shapes -- single-value (value_field), date (date_field), period (period_field). No other shape is permitted.",
+  "title": "extracted_claim_fields.json -- core claim fact card v0.2",
+  "description": "Structured core facts extracted from claim documents. Produced by claim-analysis's checkpoint 1 (Claim Field Extraction). Field structure is fixed to three shapes -- single-value (value_field), date (date_field), period (period_field). No other shape is permitted. v0.2 (from CASE_021's first full end-to-end run): added the named fields that run actually produced but had no slot for (imaging_date, diagnosis_date, claim_received_date, policy_contract_date, claim_item, disposition, insurers -- they ended up smuggled through `warnings`, losing their typed structure and evidence links); and additionalProperties switched oneOf -> anyOf because a YYYY-MM-DD string satisfies both value_field and date_field, so oneOf's exactly-one rule made every ad-hoc date field fail validation.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -18,11 +18,18 @@
             "surgery_name": { "$ref": "#/$defs/value_field" },
             "hospital_name": { "$ref": "#/$defs/value_field" },
             "treatment_period": { "$ref": "#/$defs/period_field" },
-            "admission_period": { "$ref": "#/$defs/period_field" }
+            "admission_period": { "$ref": "#/$defs/period_field" },
+            "imaging_date": { "$ref": "#/$defs/date_field" },
+            "diagnosis_date": { "$ref": "#/$defs/date_field" },
+            "claim_received_date": { "$ref": "#/$defs/date_field" },
+            "policy_contract_date": { "$ref": "#/$defs/date_field" },
+            "claim_item": { "$ref": "#/$defs/value_field" },
+            "disposition": { "$ref": "#/$defs/value_field" },
+            "insurers": { "$ref": "#/$defs/value_field" }
           },
           "additionalProperties": {
-            "description": "New fields also use one of the three fixed shapes.",
-            "oneOf": [
+            "description": "New fields also use one of the three fixed shapes. anyOf, not oneOf: a YYYY-MM-DD string is a valid value_field AND a valid date_field, so exactly-one matching is impossible for ad-hoc date fields -- at-least-one is the correct constraint.",
+            "anyOf": [
               { "$ref": "#/$defs/value_field" },
               { "$ref": "#/$defs/date_field" },
               { "$ref": "#/$defs/period_field" }
