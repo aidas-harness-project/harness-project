@@ -7,6 +7,7 @@ them.
 subprocess.run is mocked throughout -- these tests never shell out to a
 real `claude` binary.
 """
+import pathlib
 import tempfile
 from unittest import mock
 
@@ -100,3 +101,28 @@ def test_scratch_dir_distinct_per_process_id(monkeypatch):
     with oe.scratch_dir("CASE_009", "DOC_001") as d2:
         path2 = d2
     assert path1 != path2
+
+
+def test_transcribe_and_compare_run_context_free(monkeypatch):
+    """Regression (CASE_022 real run): claude -p with cwd=ROOT auto-loads the
+    project's CLAUDE.md/hooks, and a context-aware reader editorializes --
+    both blind reads appended similar D2 meta-commentary to transcribed
+    pages, which compare() waved through as agreement, contaminating the
+    trusted processed layer. Both subprocess calls must pass --safe-mode
+    (all customizations disabled) so the reader sees nothing but the page."""
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            stdout = "AGREE"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(oe.subprocess, "run", fake_run)
+    oe.transcribe_once(pathlib.Path("/nonexistent/page.png"))
+    oe.compare("text a", "text b")
+    assert len(calls) == 2
+    for cmd in calls:
+        assert "--safe-mode" in cmd, f"claude call missing --safe-mode: {cmd}"
