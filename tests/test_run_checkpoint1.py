@@ -346,6 +346,52 @@ def test_resolve_from_raw_ocr_rejects_bad_chosen_reading(tmp_path, monkeypatch):
                                   resolved_by="Dev", note="n", held_by="tester", run_id="RUN_20260713_001")
 
 
+def test_cli_resolve_disagreement_loads_scratch_dump_and_resolves(tmp_path, monkeypatch, capsys):
+    """The resolve-disagreement subcommand must recover both readings from the
+    _ocr_scratch dump and drive resolve_from_raw_ocr end-to-end -- i.e. the
+    already-tested resolver is actually reachable from the CLI."""
+    _seed_manifest(tmp_path, "CASE_009", "DOC_001")
+    _mock_ocr(monkeypatch, [("A reading", "B reading", "disagreed")])
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
+    blocked = rc1.run_checkpoint1("CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001")
+    assert blocked["status"] == "blocked_disagreement"
+
+    _mock_classify(monkeypatch, doc_type="medical_record", label="의무기록")
+    rc1.main([
+        "resolve-disagreement", "CASE_009", "DOC_001",
+        "--page", "1", "--chosen-reading", "reading_b",
+        "--resolved-by", "Pyun", "--note", "refusal on reading_a; reading_b is the faithful transcription",
+        "--held-by", "document-pipeline", "--run-id", "RUN_20260713_002",
+    ])
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "passed"
+    ocr_result = json.loads((tmp_path / "outputs" / "CASE_009" / "ocr_result_DOC_001.json").read_text(encoding="utf-8"))
+    assert ocr_result["cross_validation_status"] == "disagreed_resolved"
+    assert ocr_result["pages"][0]["cross_validation"]["resolution"]["resolved_by"] == "Pyun"
+
+
+def test_cli_resolve_disagreement_errors_when_scratch_dump_missing(tmp_path):
+    with pytest.raises(SystemExit):
+        rc1.main([
+            "resolve-disagreement", "CASE_404", "DOC_001",
+            "--page", "1", "--chosen-reading", "reading_a",
+            "--resolved-by", "Pyun", "--note", "n",
+            "--held-by", "document-pipeline", "--run-id", "RUN_1",
+        ])
+
+
+def test_cli_legacy_positional_form_still_routes_to_run(tmp_path, monkeypatch, capsys):
+    """Backward compatibility: the old `CASE DOC PDF --held-by ... --run-id ...`
+    form (no subcommand token) must still run checkpoint 1 unchanged."""
+    _seed_manifest(tmp_path, "CASE_009", "DOC_001")
+    _mock_ocr(monkeypatch, [("same", "same", "agreed")])
+    _mock_classify(monkeypatch, doc_type="medical_record", label="의무기록")
+    rc1.main(["CASE_009", "DOC_001", "fake.pdf", "--held-by", "tester", "--run-id", "RUN_20260713_001"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "passed"
+
+
 def test_classify_document_parses_provider_response():
     classifier = FakeClassifier(
         '{"predicted_document_type": "insurer_response", "document_type_label": "회신", '
