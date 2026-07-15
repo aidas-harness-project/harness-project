@@ -253,6 +253,33 @@ def _metadata_for(provider) -> dict:
     return {"provider_name": provider.provider_name, "model_name": provider.model_name}
 
 
+def _resume_cache_dir(case_id: str, doc_id: str) -> Path:
+    """Stable (NOT pid-tagged) per-document dir holding one JSON per completed
+    page. Unlike scratch_dir()'s pid-tagged, rmtree-on-exit image staging,
+    this survives across process runs so an interrupted multi-page OCR can
+    resume instead of re-paying for pages it already transcribed."""
+    return SCRATCH_ROOT / "_resume" / f"{case_id}_{doc_id}"
+
+
+def _load_cached_page(cache_dir: Path, page: int) -> dict | None:
+    p = cache_dir / f"page_{page:03d}.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None  # corrupt/partial cache entry -> re-transcribe this page
+
+
+def _save_cached_page(cache_dir: Path, page: int, page_result: dict) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    # atomic write so an interrupt mid-write never leaves a half-page that
+    # would be trusted on resume.
+    tmp = cache_dir / f"page_{page:03d}.json.tmp"
+    tmp.write_text(json.dumps(page_result, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(cache_dir / f"page_{page:03d}.json")
+
+
 def run_ocr(
     case_id: str,
     doc_id: str,
@@ -261,6 +288,7 @@ def run_ocr(
     reader_a=None,
     reader_b=None,
     comparator=None,
+    resume: bool = True,
 ) -> dict:
     """The actual dual-path OCR loop, extracted out of main() so callers
     (run_checkpoint1.py) can invoke it in-process instead of shelling out
@@ -268,7 +296,17 @@ def run_ocr(
     this and does exactly what it always did (print JSON to stdout, exit
     1 on any disagreement). progress(msg) is called per page if given,
     instead of always printing to stderr, so a library caller can route it
-    (or silence it) rather than inheriting main()'s CLI-only behavior."""
+    (or silence it) rather than inheriting main()'s CLI-only behavior.
+
+    resume=True (default): each page's dual-read result is cached to a stable
+    per-document dir as it completes, and a re-run skips the (expensive) reader
+    calls for any page already cached. This makes a long multi-page run
+    interruptible -- kill it and re-invoke, and it picks up where it stopped
+    rather than restarting from page 1 (checkpoint 1 for CASE_003/DOC_008, 75
+    pages, otherwise loses everything on any interruption since ocr_result is
+    only written after the whole document finishes). The cache is cleared on
+    full completion. Page images are deterministic per PDF, so a cached page N
+    always corresponds to the same source page."""
     if not doc_path.exists():
         sys.exit(f"error: document not found -- {doc_path}")
 
@@ -278,6 +316,8 @@ def run_ocr(
         reader_b = reader_b or providers["reader_b"]
         comparator = comparator or providers["comparator"]
 
+    cache_dir = _resume_cache_dir(case_id, doc_id)
+
     pages_out = []
     with scratch_dir(case_id, doc_id) as tmp_dir:
         if doc_path.suffix.lower() == ".pdf":
@@ -286,10 +326,17 @@ def run_ocr(
             page_images = [doc_path]  # already a single image
 
         for i, img_path in enumerate(page_images, start=1):
+            cached = _load_cached_page(cache_dir, i) if resume else None
+            if cached is not None:
+                pages_out.append(cached)
+                msg = f"page {i}/{len(page_images)}: {cached['agreement']} (cached)"
+                progress(msg) if progress else print(msg, file=sys.stderr)
+                continue
+
             reading_a = transcribe_once(img_path, reader_a)
             reading_b = transcribe_once(img_path, reader_b)
             result = compare(reading_a["text"], reading_b["text"], comparator)
-            pages_out.append({
+            page_result = {
                 "page": i,
                 "reading_a": reading_a["text"],
                 "reading_b": reading_b["text"],
@@ -300,9 +347,16 @@ def run_ocr(
                     "reader_b": reading_b["metadata"],
                     "comparator": result["metadata"],
                 },
-            })
+            }
+            if resume:
+                _save_cached_page(cache_dir, i, page_result)
+            pages_out.append(page_result)
             msg = f"page {i}/{len(page_images)}: {result['agreement']}"
             progress(msg) if progress else print(msg, file=sys.stderr)
+
+    # Full document finished -> the per-page resume cache is no longer needed.
+    if resume:
+        shutil.rmtree(cache_dir, ignore_errors=True)
 
     cross_validation_mode, cross_validation_note = _classify_cross_validation(reader_a, reader_b)
 
