@@ -70,13 +70,23 @@ def _dao(*args: str) -> str:
 
 
 def _parse_redaction(raw: str) -> dict:
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not match:
-        raise ProviderExecutionError(f"redaction response was not JSON: {raw!r}")
-    try:
-        parsed = json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        raise ProviderExecutionError(f"redaction response was invalid JSON: {raw!r}") from exc
+    decoder = json.JSONDecoder()
+    start = 0
+    saw_brace = False
+    while True:
+        brace = raw.find("{", start)
+        if brace == -1:
+            msg = "redaction response was invalid JSON" if saw_brace else "redaction response was not JSON"
+            raise ProviderExecutionError(f"{msg}: {raw!r}")
+        saw_brace = True
+        try:
+            parsed, _ = decoder.raw_decode(raw[brace:])
+            break
+        except json.JSONDecodeError:
+            start = brace + 1
+            continue
+    if not isinstance(parsed, dict):
+        raise ProviderExecutionError(f"redaction response JSON must be an object: {raw!r}")
     if not isinstance(parsed.get("redacted_text"), str):
         raise ProviderExecutionError("redaction response omitted string redacted_text")
     if not isinstance(parsed.get("items_redacted"), int) or parsed["items_redacted"] < 0:
