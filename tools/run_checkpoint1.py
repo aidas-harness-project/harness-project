@@ -517,26 +517,7 @@ def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, c
     return _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, classifier=classifier)
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("case_id")
-    ap.add_argument("doc_id")
-    ap.add_argument("pdf_path")
-    ap.add_argument("--held-by", required=True)
-    ap.add_argument("--run-id", required=True)
-    ap.add_argument("--reader-a", choices=SUPPORTED_PROVIDERS, help="Provider for the first independent OCR read")
-    ap.add_argument("--reader-b", choices=SUPPORTED_PROVIDERS, help="Provider for the second independent OCR read")
-    ap.add_argument("--comparator", choices=SUPPORTED_PROVIDERS, help="Provider for OCR read comparison")
-    ap.add_argument("--classifier-provider", choices=SUPPORTED_PROVIDERS,
-                    help="Provider for document classification; defaults to the comparator provider")
-    ap.add_argument("--reader-a-model", help="Model name for --reader-a")
-    ap.add_argument("--reader-b-model", help="Model name for --reader-b")
-    ap.add_argument("--comparator-model", help="Model name for --comparator")
-    ap.add_argument("--classifier-model", help="Model name for --classifier-provider")
-    ap.add_argument("--page-start", type=int, help="1-based first source PDF page for this logical document")
-    ap.add_argument("--page-end", type=int, help="1-based last source PDF page for this logical document")
-    args = ap.parse_args()
-
+def _run_from_args(args):
     try:
         result = run_checkpoint1(
             args.case_id,
@@ -562,6 +543,113 @@ def main():
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if result["status"] == "blocked_disagreement":
         sys.exit(1)
+
+
+def _resolve_from_args(args):
+    """Wire the already-existing, unit-tested resolve_from_raw_ocr() to the CLI.
+
+    A P8 disagreement blocks the document pending a HUMAN decision of which
+    reading is correct (choosing the reading is never automated -- that would
+    reintroduce the very judgment P8 hands to a person). The full dual-read
+    data is recovered from _ocr_scratch/{case}_{doc}_raw.json (saved by
+    run_checkpoint1 exactly for this), so no OCR re-run is needed. --chosen-reading
+    is required; the tool does not guess."""
+    raw_path = ROOT / "_ocr_scratch" / f"{args.case_id}_{args.doc_id}_raw.json"
+    if not raw_path.exists():
+        sys.exit(
+            f"error: raw dual-read dump not found -- {raw_path}\n"
+            "resolve-disagreement needs the _ocr_scratch/{case}_{doc}_raw.json that "
+            "run_checkpoint1 writes when it blocks on a disagreement. If it was cleaned "
+            "up, re-run checkpoint 1 for this document to regenerate both readings."
+        )
+    try:
+        ocr_data = json.loads(raw_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.exit(f"error: could not read raw dual-read dump {raw_path}: {exc}")
+
+    try:
+        result = resolve_from_raw_ocr(
+            args.case_id,
+            args.doc_id,
+            ocr_data,
+            page=args.page,
+            chosen_reading=args.chosen_reading,
+            resolved_by=args.resolved_by,
+            note=args.note,
+            held_by=args.held_by,
+            run_id=args.run_id,
+        )
+    except ProviderConfigError as exc:
+        sys.exit(f"error: {exc}")
+    except ProviderExecutionError as exc:
+        sys.exit(f"error: {exc}")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _add_run_arguments(parser):
+    parser.add_argument("case_id")
+    parser.add_argument("doc_id")
+    parser.add_argument("pdf_path")
+    parser.add_argument("--held-by", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--reader-a", choices=SUPPORTED_PROVIDERS, help="Provider for the first independent OCR read")
+    parser.add_argument("--reader-b", choices=SUPPORTED_PROVIDERS, help="Provider for the second independent OCR read")
+    parser.add_argument("--comparator", choices=SUPPORTED_PROVIDERS, help="Provider for OCR read comparison")
+    parser.add_argument("--classifier-provider", choices=SUPPORTED_PROVIDERS,
+                        help="Provider for document classification; defaults to the comparator provider")
+    parser.add_argument("--reader-a-model", help="Model name for --reader-a")
+    parser.add_argument("--reader-b-model", help="Model name for --reader-b")
+    parser.add_argument("--comparator-model", help="Model name for --comparator")
+    parser.add_argument("--classifier-model", help="Model name for --classifier-provider")
+    parser.add_argument("--page-start", type=int, help="1-based first source PDF page for this logical document")
+    parser.add_argument("--page-end", type=int, help="1-based last source PDF page for this logical document")
+
+
+# Reserved subcommand names dispatched explicitly; anything else is treated as
+# the legacy positional `run` invocation (CASE DOC PDF ...) for backward
+# compatibility with document-pipeline.md and existing callers.
+_SUBCOMMANDS = {"run", "resolve-disagreement"}
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="command")
+
+    run_parser = sub.add_parser("run", help="Run checkpoint 1 (OCR + cross-validation + classification)")
+    _add_run_arguments(run_parser)
+
+    resolve_parser = sub.add_parser(
+        "resolve-disagreement",
+        help="Resolve one P8-disagreed page by selecting the correct reading (human decision)",
+    )
+    resolve_parser.add_argument("case_id")
+    resolve_parser.add_argument("doc_id")
+    resolve_parser.add_argument("--page", type=int, required=True, help="1-based page number of the disagreed page")
+    resolve_parser.add_argument("--chosen-reading", choices=["reading_a", "reading_b"], required=True,
+                                help="Which of the two independent reads the human verified as correct")
+    resolve_parser.add_argument("--resolved-by", required=True, help="Name of the human (e.g. 손해사정사) making the call")
+    resolve_parser.add_argument("--note", required=True, help="Why this reading is correct")
+    resolve_parser.add_argument("--held-by", required=True)
+    resolve_parser.add_argument("--run-id", required=True)
+
+    # Backward compatibility: the legacy form is `... CASE DOC PDF --held-by ...`
+    # with no subcommand token. If the first arg isn't a known subcommand (and
+    # isn't a help flag), route to the `run` parser so old invocations keep working.
+    if argv and argv[0] not in _SUBCOMMANDS and argv[0] not in ("-h", "--help"):
+        args = run_parser.parse_args(argv)
+        _run_from_args(args)
+        return
+
+    args = ap.parse_args(argv)
+    if args.command == "resolve-disagreement":
+        _resolve_from_args(args)
+    elif args.command == "run":
+        _run_from_args(args)
+    else:
+        ap.print_help()
+        sys.exit(2)
 
 
 if __name__ == "__main__":
