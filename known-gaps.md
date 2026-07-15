@@ -915,3 +915,103 @@ for this pattern (CASE_012/013/020/021 predate the wrapper-era prompts and
 their runs' readings never showed flag tails -- CASE_021's page-2 fabricated
 addition was one-sided and caught; still, the retroactive-audit debt from
 item 11 now covers two failure patterns instead of one).
+
+## 16. CASE_003 (RUN_20260714_003) checkpoint 1 -- local-vlm/local-llm non-functional on real pages, and the background agent run itself was killed by an API spend cap -- OPEN
+
+Two separate problems surfaced while running CASE_003's document-pipeline
+stage:
+
+**(a) `local-vlm` (qwen3-vl:4b) and `local-llm` (qwen3:4b) both fail on
+real content, confirmed live, not assumed.** The dispatched agent's
+instruction was explicit same-provider weak-P8 (`claude-cli`/`claude-cli`,
+per `harness-guardrails-dev`'s P8 fallback section), but the agent's stage
+skill documents the fully-local `local-ocr`+`local-vlm` pair as the
+*primary* recommendation, and `tools/local_runtime.py`'s preflight passed
+-- so the agent judgment-called trying the stronger dual-technology path
+first. Result: `local-vlm` returned `done_reason=length` with an **empty
+transcription** on every real document page (reproduced across multiple
+image sizes/token budgets -- it burns its generation budget on internal
+reasoning and emits no transcription text), confirmed working on the
+smoke-test image but not real pages. `local-llm` (checkpoint 2's default
+redaction provider) failed the same way for a different reason: ~11,000
+chars of reasoning prose instead of the required JSON, no parseable
+output. **No case output was ever written from either local attempt** --
+both errored at the tool level before any DAO write, so nothing needs to
+be discarded; the agent self-corrected to `--reader-a claude-cli
+--reader-b claude-cli --comparator claude-cli --classifier-provider
+claude-cli` before writing anything. Confirms `open-decisions.md` #4's
+"not yet validated" condition for the local pair is very much still open
+-- this is a second, independent data point (beyond whatever motivated
+the original weak-P8 fallback) that the currently-configured local models
+are not fit for this document type yet.
+
+**(b) The dispatched background agent was killed mid-run by the
+account-level API spend cap** ("You've hit your monthly spend limit"),
+not by any harness logic. It had gotten as far as switching to the
+claude-cli fallback and starting checkpoint 1 on real documents when it
+was terminated. No `ocr_result_{doc_id}.json` had been confirmed written
+before termination -- state as of writeup: `document_manifest.json` still
+shows the pre-run `pending` skeleton for all 13 documents, only
+`page_001.md` for DOC_001 shows a fresh (2026-07-14 22:29) timestamp,
+meaning checkpoint 1 was mid-flight on the very first document when the
+cap hit. This is an operational/infra constraint, not a pipeline design
+gap -- flagged here because CASE_003 is left in a half-run state
+(`_run_state.json` shows `document_processing: in_progress`, no
+snapshot-backup exists yet since no stage has passed) and resuming needs
+a human to either raise the spend limit or wait for the monthly reset
+before re-dispatching.
+
+**Not yet resolved:** whether to (1) wait out the cap and resume
+CASE_003's document-pipeline stage from scratch (checkpoint 1 hadn't
+completed even one document), or (2) investigate a genuinely-working
+local-vlm model/config before the next attempt so the dev-phase weak-P8
+fallback stops being the only working path. Both are user decisions, not
+mechanical fixes.
+
+**UPDATE 2026-07-15 (resumed run RUN_20260714_003):** the spend cap cleared
+and the run was resumed with the claude-cli/claude-cli weak-P8 fallback.
+Two things surfaced and were addressed:
+
+- **(c) claude-cli reader self-refusal is a recurring P8 failure on real
+  case documents, not a one-off.** Across DOC_005 (p4,p9), DOC_007 (p1),
+  DOC_009 (p1), DOC_010 (p1,p2), DOC_013 (p1), one of the two
+  claude-cli reads repeatedly *refused to transcribe* and emitted
+  meta-commentary (e.g. "this looks like sensitive case data, what's the
+  authorization?", or a fabricated preamble about "the git history in this
+  repo"), while the OTHER read transcribed faithfully. compare() correctly
+  flags this one-sided noise as a disagreement, so P8 hard-halts every time
+  -- the gate is behaving correctly; the *reader* is the problem. `--safe-mode`
+  (which strips CLAUDE.md/skills) is already applied and did NOT prevent it:
+  the model self-censors from the raw document image + the neutral prompt's
+  path hints alone, not from inherited repo context. Reintroducing defensive
+  "this is sanctioned, do not refuse" framing is still forbidden (it made
+  this worse before). This is the dev-phase weak-P8's real cost and a
+  stronger argument for validating a genuinely different reader technology
+  (local-ocr/local-vlm, open-decisions #4) so at least one reader can't
+  refuse. Rough rate this run: ~5 of 12 text documents hit at least one
+  refusal-caused disagreement.
+
+- **The human-resolution path for these disagreements was un-runnable and is
+  now wired.** `resolve_from_raw_ocr()` existed and was unit-tested but had
+  no CLI entry point, so a blocked document could not actually be resolved
+  without re-running OCR. Added `run_checkpoint1.py resolve-disagreement`
+  (loads the `_ocr_scratch/{case}_{doc}_raw.json` dual-read dump, applies a
+  human's per-page `--chosen-reading`, rolls the doc up to
+  `disagreed_resolved`). Used it to resolve DOC_005/007/009/012/013 under
+  reviewer Pyun. NB DOC_012 p1 was a GENUINE content conflict, not a refusal
+  (14,488 vs 34,488 on the 산출기초 field -- reading_b misread a form bracket
+  ']' as a leading '3'); resolved to reading_a (14,488) after direct source
+  inspection. The refusal cases and the genuine-conflict case go through the
+  exact same human-in-the-loop path -- the tool never auto-picks.
+
+- **(d) DOC_010 is a non-text document (clinical injury photographs -- an arm
+  scar measured with a tape, i.e. 후유장해 evidence), which the pipeline has no
+  first-class path for.** Both pages P8-disagreed only because one read
+  refused while the other correctly said "this is a photo, no transcribable
+  text"; there is no faithful *text* to choose. The taxonomy
+  (common_component_output document_type) has no image/photo type -- closest
+  is `other`. Forcing a photo-description into the page-text field would be
+  wrong. LEFT PENDING as a design decision (user asked for it to be handled
+  as an image/non-text document, not shoehorned into text). Needs: a
+  first-class no-text/image extraction_method + how downstream stages treat
+  such a page. Deferred, not resolved.
