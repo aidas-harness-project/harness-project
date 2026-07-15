@@ -171,10 +171,10 @@ def scan_for_answer_key_content(
         page_paths = split_to_page_images(pdf_path, tmp_dir, max_pages=n_pages)
         image_refs = "\n".join(f"Page {i + 1} image: {p}" for i, p in enumerate(page_paths))
         prompt = f"{CONTENT_SCAN_PROMPT.format(n=n_pages)}\n\n{image_refs}"
-        selected_provider = provider or build_scan_provider()
         try:
+            selected_provider = provider or build_scan_provider()
             result = selected_provider.scan_intake_content(prompt, CONTENT_SCAN_PROMPT_VERSION)
-        except ProviderExecutionError as exc:
+        except (ProviderConfigError, ProviderExecutionError) as exc:
             sys.exit(f"error: content-scan provider failed for {pdf_path.name}: {exc}")
         metadata = result.metadata()
         verdict = _parse_content_scan_verdict(result.text)

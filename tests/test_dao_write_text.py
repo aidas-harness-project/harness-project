@@ -97,3 +97,15 @@ def test_read_page_text_fails_when_checkpoint1_page_is_missing(isolated_dao, mak
 
     assert rc == 1
     assert "NOT_EXTRACTED" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("page", [0, -1])
+def test_read_page_text_rejects_non_positive_page_numbers(isolated_dao, make_args, capsys, page):
+    unexpected_path = isolated_dao / "data" / "processed" / "CASE_009" / "DOC_001" / f"page_{page:03d}.md"
+    unexpected_path.parent.mkdir(parents=True)
+    unexpected_path.write_text("must not be read", encoding="utf-8")
+
+    rc = dao.cmd_read_page_text(make_args(page=page))
+
+    assert rc == 1
+    assert capsys.readouterr().out == f"ERROR: page must be >= 1 (got {page})\n"

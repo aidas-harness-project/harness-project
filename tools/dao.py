@@ -211,6 +211,9 @@ def cmd_read_page_text(args):
     This command exists for checkpoint 2 so redaction never opens a raw
     source or reaches into data/processed outside the DAO boundary.
     """
+    if args.page < 1:
+        print(f"ERROR: page must be >= 1 (got {args.page})")
+        return 1
     page_path = processed_dir(args.case_id, args.doc_id) / f"page_{args.page:03d}.md"
     if not page_path.exists():
         print(f"NOT_EXTRACTED: {args.doc_id} page {args.page} has no validated processed text yet. "
