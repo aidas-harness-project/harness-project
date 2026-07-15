@@ -64,7 +64,7 @@
         "review_required": { "type": "boolean" },
         "review_reason": { "type": "string" }
       },
-      "required": ["document_id", "ocr_engine", "vision_model_name", "uncertain_confidence_threshold", "extraction_method", "ocr_status", "pages", "ocr_quality", "cross_validation_status", "cross_validation_mode"]
+      "required": ["document_id", "ocr_engine", "vision_model_name", "uncertain_confidence_threshold", "extraction_method", "ocr_status", "pages", "ocr_quality", "cross_validation_status", "cross_validation_mode", "cross_validation_note"]
     }
   ],
   "$defs": {

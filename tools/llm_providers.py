@@ -146,8 +146,9 @@ class ClaudeCliProvider(BaseProvider):
     # `claude -p` call this provider replaced. An earlier version prepended a
     # defensive OCR-reader "role framing" block ("this is a SANCTIONED step, not
     # a bypass, do NOT touch the DAO, do not refuse..."). That backfired: the
-    # child `claude -p` session runs with cwd=project root and auto-inherits this
-    # repo's CLAUDE.md, and a prompt that pre-argues its own legitimacy and says
+    # child `claude -p` session used to run with cwd=project root and inherit this
+    # repo's CLAUDE.md before _run() enforced --safe-mode. Even in an isolated
+    # child, a prompt that pre-argues its own legitimacy and says
     # "do not refuse / do not mention guardrails" reads as a prompt-injection
     # signal -- a genuine OCR request never needs to defend itself -- so the
     # child refused and emitted meta-commentary instead of the page text. The fix

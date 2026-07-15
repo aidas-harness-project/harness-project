@@ -170,3 +170,24 @@ def test_build_scan_provider_missing_openai_credentials_fail_clearly():
         intake_case.build_scan_provider(scan_provider_name="openai-api", env={})
 
     assert "OPENAI_API_KEY" in str(excinfo.value)
+
+
+def test_scan_for_answer_key_content_reports_provider_config_failure_without_traceback(monkeypatch, tmp_path):
+    fake_page = tmp_path / "page_001.png"
+    fake_page.write_bytes(b"fake png bytes")
+    monkeypatch.setattr(
+        intake_case,
+        "split_to_page_images",
+        lambda doc_path, out_dir, max_pages=None: [fake_page],
+    )
+    def fail_build_scan_provider():
+        raise ProviderConfigError("missing credentials")
+
+    monkeypatch.setattr(intake_case, "build_scan_provider", fail_build_scan_provider)
+
+    with pytest.raises(SystemExit) as excinfo:
+        intake_case.scan_for_answer_key_content(tmp_path / "doc.pdf", "CASE_009", 1)
+
+    assert str(excinfo.value) == (
+        "error: content-scan provider failed for doc.pdf: missing credentials"
+    )
