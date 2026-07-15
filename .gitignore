@@ -1,6 +1,13 @@
 # Obsidian workspace/cache (개인 UI 상태 — 지식이 아님)
 .obsidian/
 
+# The `wiki` knowledge base is a SEPARATE repo, never part of this one. The
+# templates the pipeline actually consumes were vendored into `templates/` on
+# 2026-07-13 to break the live dependency (each carries a `provenance` note).
+# A local `wiki/` clone must never be re-added -- `git add` on a nested repo
+# silently records a URL-less gitlink (mode 160000) that breaks fresh clones.
+wiki/
+
 # OS
 .DS_Store
 
