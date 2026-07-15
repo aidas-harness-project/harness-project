@@ -916,6 +916,20 @@ their runs' readings never showed flag tails -- CASE_021's page-2 fabricated
 addition was one-sided and caught; still, the retroactive-audit debt from
 item 11 now covers two failure patterns instead of one).
 
+**Item 14 addendum (2026-07-15, CASE_022):** second live instance of the
+same under-scoping class, worse shape. The 기왕증 case's evidence pack
+(교보/KB payment notices + 의료자문) supported a clean first-party
+후유장해 analysis -- which GT_001.txt fully vindicates (50% -> 기왕증
+10%p 공제 -> 40%, R01 confirmed, mechanism confirmed) -- but the actual
+final report (GT_002, the 59p "배상 손해사정서") is a THIRD-PARTY
+배상책임 quantum (지자체 계단 하자, 노동능력상실률 32%, 사정금액
+89,952,400원) whose claim documents were never in the pack at all.
+case_type scored correct=false through no reasoning error; the filename's
+leading "배상" was the visible hint. Same user decision as the 농협
+question, sharpened: intake needs either a completeness check against the
+GT's claim scope, or an explicit acceptance that evaluation measures
+"analysis of what was provided," not "prediction of the final report."
+
 ## 16. CASE_003 (RUN_20260714_003) checkpoint 1 -- local-vlm/local-llm non-functional on real pages, and the background agent run itself was killed by an API spend cap -- OPEN
 
 Two separate problems surfaced while running CASE_003's document-pipeline
