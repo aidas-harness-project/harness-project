@@ -1,0 +1,36 @@
+{
+  "case_id": "CASE_022",
+  "run_id": "RUN_20260714_003",
+  "component": "draft-report",
+  "status": "success",
+  "created_at": "2026-07-14T20:40:00+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "draft_report_v0.1"
+  },
+  "confidence": 0.72,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "version": "v1",
+  "template_id": "배상책임_후유장해형",
+  "case_type": "후유장해",
+  "section_count": 8,
+  "evidence_tag_count": 52,
+  "source_refs": [
+    "screening_report.json",
+    "case_type_result.json",
+    "extracted_claim_fields.json",
+    "coverage_result.json",
+    "requirement_matching_result.json",
+    "denial_reason_result.json",
+    "evidence_validation_result.json"
+  ],
+  "output_md_path": "outputs/CASE_022/draft_report_v1.md",
+  "output_sidecar_path": "outputs/CASE_022/draft_report_v1.evidence.json",
+  "warnings": [
+    "후유장해(제1자 상해보험 정액담보) 사안이나 template_id는 registry가 배상책임/후유장해를 한 키(배상책임_후유장해형)로 묶어 관리하므로 변형 A 서식으로 렌더링함. 서식의 배상책임 고정부(민법 750/758·과실상계·상법 724 직접청구권·위자료·일실수익·가동연한·호프만 중간이자)는 본 건에 부적용임을 각 섹션(IV·V·VI)에서 명시적으로 주석 처리하고, 실질(장해지급률·기왕증 감액·외상기여도 80%·담보별 정액 사정)을 V·VI에 담아 적응(adapt)함.",
+    "장해지급률 40 vs 50 및 기왕증(골다공증) 감액 적정성은 P3에 따라 단정하지 아니하고 '검토 대상/검토 필요'로 헤지 처리함. 감액 사유 귀속은 KB 지급설명서 본문 미기재로 50%×80%=40.00 산술 정합에 근거한 추론이며 source 한계상 손해사정사 감사가 종착점(denial-response status=partial 반영).",
+    "약관 원문 부재(DOC_001 단일 혼합 증빙 팩): 장해분류표 지급률·기왕증 감액 조항·담보 정의의 조항 단위 확정 불가 → 조항 의존 판단은 약관 확보를 전제로 유보. VI의 최종 사정금액(一金 표기)은 입력 산출물에 확정값이 없어 산정하지 아니함(P1/P3 — 없는 값 미기입).",
+    "모든 인용은 DOC_001(insurer_response, 7면 혼합 팩)의 verbatim quote이며 evidence sidecar(draft_report_v1.evidence.json, 52 태그)에 기록됨. 표지·VII(증빙자료)는 서식 고정부/목록으로 케이스 판단 문장이 아니어서 인용 태그 없음."
+  ]
+}

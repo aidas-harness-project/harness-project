@@ -1,0 +1,29 @@
+{
+  "case_id": "CASE_022",
+  "run_id": "RUN_20260714_003",
+  "component": "critic",
+  "status": "success",
+  "created_at": "2026-07-14T19:42:54+09:00",
+  "model_info": {
+    "model_name": "claude-opus-4-8[1m]",
+    "prompt_version": "critic_v0.1"
+  },
+  "confidence": 0.9,
+  "review_required": true,
+  "reviewer_role": "손해사정사",
+  "prohibited_language_check": {
+    "passed": true,
+    "issues": []
+  },
+  "reviewed_document": "outputs/CASE_022/draft_report_v1.md",
+  "passed": true,
+  "orphaned_tag_count": 0,
+  "unused_citation_count": 0,
+  "findings": [],
+  "warnings": [
+    "장해지급률 40 vs 50 및 기왕증(골다공증) 감액 적정성은 초안이 의도적으로 '검토 대상'으로 유보한 항목으로, 손해사정사·전문의 인적 검수가 필요함(초안 자체 review_required와 정합). 이는 critic 지적사항이 아니라 정상적 하류 검토 라우팅임.",
+    "III.2.다(현 상태) 문장의 '척주에 심한 기형을 남긴 영구장해 소견' 판단은 인라인 태그 [E26](압박률 65.3%)만 부착되어 있으나, 해당 장해 결론의 1차 근거(의료자문 p3·교보 p4)는 같은 초안 내 [E36]/[E37]/[E38]에 별도 부착되어 있음. 태그 누락·미근거(P1)는 아니며 문장 단위 인용 정밀도에 관한 관찰로, 차기 개정 시 [E26]에 [E36]/[E37] 병기 권고(비차단).",
+    "CONFLICT_1(재해원인: 서술형 '계단 낙상' vs KB 코드 '무리한 동작')은 인적 검토로 resolved 상태이며 초안이 양측 값을 삭제 없이 병기·보존함(P6 준수).",
+    "denial_reason_result.json이 status:partial(R01 감액사유가 산술 정합 기반 추론, source_grounded:false)인 점과 초안의 해당 절 헤지 서술이 정합함."
+  ]
+}
