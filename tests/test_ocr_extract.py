@@ -67,14 +67,30 @@ def test_compare_word_boundary_parsing(verdict, expected):
     assert result["agreement"] == expected
 
 
-def test_compare_identical_texts_still_runs_comparator_for_audit_metadata():
+def test_compare_identical_texts_shortcuts_without_calling_comparator():
+    """Byte-identical reads trivially agree -- compare() must short-circuit and
+    NOT spend a comparator provider call (parity with shared/main). This does
+    not relax P8: only the trivially-agreed case is shortcut; any difference
+    still goes through the comparator (covered by the other compare() tests)."""
     comparator = FakeComparator("AGREE: identical text")
 
     result = oe.compare("same text", "same text", comparator)
 
     assert result["agreement"] == "agreed"
-    assert len(comparator.prompts) == 1
-    assert result["metadata"]["provider_name"] == "fixture"
+    assert result["disagreement_details"] == []
+    assert len(comparator.prompts) == 0  # comparator was never invoked
+    assert result["metadata"]["comparator_called"] is False
+
+
+def test_compare_shortcut_ignores_surrounding_whitespace():
+    """The shortcut compares after .strip(), so reads that differ only in
+    leading/trailing whitespace still take the no-call agreed path."""
+    comparator = FakeComparator("AGREE")
+
+    result = oe.compare("  same text\n", "same text", comparator)
+
+    assert result["agreement"] == "agreed"
+    assert len(comparator.prompts) == 0
 
 
 def test_compare_disagree_substring_inside_word_does_not_false_trigger():

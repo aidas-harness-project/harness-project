@@ -88,6 +88,19 @@ def transcribe_once(image_path: Path, provider=None) -> dict:
 
 
 def compare(text_a: str, text_b: str, comparator=None) -> dict:
+    # Byte-identical shortcut: if the two independent reads are exactly equal
+    # after stripping, they trivially agree -- there is no possible one-sided
+    # addition or fact conflict to find, so skip the comparator provider call
+    # entirely (one fewer LLM round-trip per identical page). This does NOT
+    # relax P8: it only short-circuits the trivially-agreed case; any
+    # difference at all still goes through the full comparator below. Parity
+    # with shared/main, which fix_codex had dropped.
+    if text_a.strip() == text_b.strip():
+        return {
+            "agreement": "agreed",
+            "disagreement_details": [],
+            "metadata": {"shortcut": "identical_reads", "comparator_called": False},
+        }
     prompt = COMPARE_PROMPT_TEMPLATE.format(a=text_a, b=text_b)
     selected_comparator = comparator or build_provider(root=ROOT)
     provider_result = selected_comparator.compare_text(prompt, COMPARE_PROMPT_VERSION)
