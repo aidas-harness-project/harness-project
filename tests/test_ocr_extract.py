@@ -277,3 +277,67 @@ def test_build_ocr_providers_can_fall_back_to_common_llm_environment(monkeypatch
 
     assert [c.provider_name for c in created] == ["fixture", "fixture", "fixture"]
     assert [c.model_name for c in created] == ["common-model", "common-model", "common-model"]
+
+
+def _patch_two_page_split(monkeypatch, tmp_path):
+    """Make run_ocr see a deterministic 2-page document without a real PDF."""
+    def fake_split(doc_path, out_dir, max_pages=None):
+        imgs = []
+        for n in (1, 2):
+            p = out_dir / f"page_{n:03d}.png"
+            p.write_bytes(b"img")
+            imgs.append(p)
+        return imgs
+    monkeypatch.setattr(oe, "split_to_page_images", fake_split)
+    doc = tmp_path / "doc.pdf"
+    doc.write_bytes(b"%PDF-1.4 fake")
+    return doc
+
+
+def test_run_ocr_caches_pages_and_resume_skips_reader_calls(monkeypatch, tmp_path):
+    """An interrupted multi-page run must resume without re-transcribing pages
+    it already finished -- that's the whole point of the resume cache for a
+    75-page document that otherwise loses everything on any interruption."""
+    monkeypatch.setattr(oe, "SCRATCH_ROOT", tmp_path / "_ocr_scratch")
+    doc = _patch_two_page_split(monkeypatch, tmp_path)
+
+    # First run: only page 1 succeeds, page 2 raises mid-way (simulated crash).
+    reader_a = FakeReader("fixture", "m", ["A1", "A2"])
+    reader_b = FakeReader("fixture", "m", ["B1"])  # runs out on page 2 -> IndexError
+    comparator = FakeComparator("AGREE")
+    with pytest.raises(IndexError):
+        oe.run_ocr("CASE_009", "DOC_001", doc, reader_a=reader_a, reader_b=reader_b, comparator=comparator)
+
+    cache = oe._resume_cache_dir("CASE_009", "DOC_001")
+    assert (cache / "page_001.json").exists()
+    assert not (cache / "page_002.json").exists()
+
+    # Second run: fresh readers whose page-1 output would DIFFER if called.
+    # Page 1 must come from cache (readers NOT called for it); only page 2 runs.
+    reader_a2 = FakeReader("fixture", "m", ["A2"])
+    reader_b2 = FakeReader("fixture", "m", ["B2"])
+    result = oe.run_ocr("CASE_009", "DOC_001", doc, reader_a=reader_a2, reader_b=reader_b2, comparator=FakeComparator("AGREE"))
+
+    assert [p["page"] for p in result["pages"]] == [1, 2]
+    assert result["pages"][0]["reading_a"] == "A1"  # from cache, not "A2"
+    assert len(reader_a2.calls) == 1  # only page 2 re-read
+    # Cache cleared after full completion.
+    assert not cache.exists()
+
+
+def test_run_ocr_resume_false_ignores_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(oe, "SCRATCH_ROOT", tmp_path / "_ocr_scratch")
+    doc = _patch_two_page_split(monkeypatch, tmp_path)
+
+    # Seed a cache entry for page 1 that resume=False must ignore.
+    cache = oe._resume_cache_dir("CASE_009", "DOC_001")
+    oe._save_cached_page(cache, 1, {"page": 1, "reading_a": "STALE", "reading_b": "STALE",
+                                    "agreement": "agreed", "disagreement_details": [], "provider_metadata": {}})
+
+    reader_a = FakeReader("fixture", "m", ["A1", "A2"])
+    reader_b = FakeReader("fixture", "m", ["B1", "B2"])
+    result = oe.run_ocr("CASE_009", "DOC_001", doc, reader_a=reader_a, reader_b=reader_b,
+                        comparator=FakeComparator("AGREE"), resume=False)
+
+    assert result["pages"][0]["reading_a"] == "A1"  # freshly read, not "STALE"
+    assert len(reader_a.calls) == 2  # both pages read
