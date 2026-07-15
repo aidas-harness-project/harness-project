@@ -20,6 +20,9 @@ _workspace/
 # Pipeline contract outputs -- per-run generated artifacts, not source of truth
 outputs/
 
+# archived legacy files
+archive/
+
 # Transient file locks (P5) -- must never be committed
 *.lock
 
