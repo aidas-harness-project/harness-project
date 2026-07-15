@@ -214,6 +214,98 @@ def test_claude_cli_provider_reports_missing_command(monkeypatch, tmp_path):
     assert "claude-cli command not found: missing-claude" in str(excinfo.value)
 
 
+def test_claude_cli_provider_closes_stdin(monkeypatch, tmp_path):
+    """Without stdin=DEVNULL the child claude process blocks ~3s waiting for
+    input ('no stdin data received in 3s') and intermittently exits non-zero
+    on a live pipe -- the cause of CASE_003/DOC_008 dying mid-run."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.ClaudeCliProvider(root=tmp_path)
+
+    provider.compare_text("compare prompt", "ocr_compare_v0.1")
+
+    assert captured["kwargs"]["stdin"] == providers.subprocess.DEVNULL
+
+
+def test_claude_cli_provider_retries_transient_failure_then_succeeds(monkeypatch, tmp_path):
+    """A single non-zero exit must not kill the call -- a bounded retry
+    absorbs a transient hiccup so a 75-page run survives one bad page."""
+    monkeypatch.setattr(providers.time, "sleep", lambda *_: None)
+    attempts = []
+
+    def fake_run(cmd, **kwargs):
+        attempts.append(1)
+        result = mock.Mock()
+        if len(attempts) == 1:
+            result.returncode = 1
+            result.stdout = ""
+            result.stderr = "no stdin data received in 3s"
+        else:
+            result.returncode = 0
+            result.stdout = "recovered text"
+            result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.ClaudeCliProvider(root=tmp_path)
+
+    result = provider.compare_text("compare prompt", "ocr_compare_v0.1")
+
+    assert len(attempts) == 2
+    assert result.text == "recovered text"
+    assert result.metadata()["raw_metadata"]["attempts"] == 2
+
+
+def test_claude_cli_provider_raises_after_exhausting_retries(monkeypatch, tmp_path):
+    monkeypatch.setattr(providers.time, "sleep", lambda *_: None)
+    attempts = []
+
+    def fake_run(cmd, **kwargs):
+        attempts.append(1)
+        result = mock.Mock()
+        result.returncode = 1
+        result.stdout = ""
+        result.stderr = "persistent failure"
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.ClaudeCliProvider(root=tmp_path)
+
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.compare_text("compare prompt", "ocr_compare_v0.1")
+
+    assert len(attempts) == providers._CLAUDE_CLI_MAX_ATTEMPTS
+    assert "persistent failure" in str(excinfo.value)
+
+
+def test_claude_cli_provider_does_not_retry_missing_command(monkeypatch, tmp_path):
+    """FileNotFoundError is not transient -- it must raise immediately, not
+    burn all retry attempts."""
+    monkeypatch.setattr(providers.time, "sleep", lambda *_: None)
+    attempts = []
+
+    def fake_run(*args, **kwargs):
+        attempts.append(1)
+        raise FileNotFoundError("missing")
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.ClaudeCliProvider(root=tmp_path, command="missing-claude")
+
+    with pytest.raises(providers.ProviderExecutionError):
+        provider.compare_text("compare prompt", "ocr_compare_v0.1")
+
+    assert len(attempts) == 1
+
+
 def test_codex_cli_provider_reads_output_last_message(monkeypatch, tmp_path):
     captured = {}
 

@@ -15,6 +15,7 @@ import mimetypes
 import os
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlparse
@@ -31,6 +32,12 @@ SUPPORTED_PROVIDERS = (
 )
 DEFAULT_PROVIDER = "claude-cli"
 DEFAULT_ENV_PREFIX = "HARNESS_LLM"
+
+# claude-cli transient-failure retry: total attempts and fixed sleep between
+# them. Applies only to subprocess-level failures (non-zero exit / timeout),
+# never to content agreement -- see ClaudeCliProvider._run.
+_CLAUDE_CLI_MAX_ATTEMPTS = 3
+_CLAUDE_CLI_RETRY_SLEEP_SECONDS = 2.0
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
@@ -116,30 +123,62 @@ class ClaudeCliProvider(BaseProvider):
         cmd = [self.command, "-p", prompt, "--safe-mode"]
         if allowed_read:
             cmd.extend(["--allowedTools", "Read"])
-        try:
-            # encoding/errors are set explicitly: the child CLI emits UTF-8, but
-            # on a cp949-locale host bare text=True decodes with the ANSI code
-            # page and crashes on Korean output (UnicodeDecodeError -> stdout
-            # None). Same treatment CodexCliProvider already applies.
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                cwd=str(self.root),
-            )
-        except FileNotFoundError as exc:
-            raise ProviderExecutionError(f"claude-cli command not found: {self.command}") from exc
-        raw_metadata = {
-            "command": cmd[0],
-            "returncode": result.returncode,
-            "stderr": result.stderr.strip(),
-        }
-        if result.returncode != 0:
-            raise ProviderExecutionError(f"claude-cli call failed: {result.stderr.strip()}")
-        return self._result(result.stdout.strip(), prompt_version, raw_metadata)
+
+        # Bounded retry on transient subprocess-level failures. A single
+        # failed claude-cli call otherwise kills an entire multi-page run:
+        # checkpoint 1 only persists ocr_result after every page finishes, so
+        # one hiccup on page N of a 75-page document (CASE_003/DOC_008 died
+        # exactly this way at page 24 on "no stdin data received") discards all
+        # prior pages. This retries ONLY the subprocess call itself
+        # (FileNotFoundError is not transient and is not retried); it does NOT
+        # touch P8 -- content agreement/disagreement is judged by compare(),
+        # not here, so no disagreement tolerance is affected.
+        last_exc: ProviderExecutionError | None = None
+        for attempt in range(_CLAUDE_CLI_MAX_ATTEMPTS):
+            try:
+                # stdin=DEVNULL: without it the child inherits the parent's
+                # stdin and blocks ~3s waiting for input it will never get
+                # ("Warning: no stdin data received in 3s..."), which both
+                # slows every call and, on a live pipe (PowerShell background),
+                # intermittently returns non-zero. Closing stdin is exactly
+                # what the CLI's own warning recommends ("< /dev/null").
+                #
+                # encoding/errors are set explicitly: the child CLI emits
+                # UTF-8, but on a cp949-locale host bare text=True decodes with
+                # the ANSI code page and crashes on Korean output
+                # (UnicodeDecodeError -> stdout None). Same treatment
+                # CodexCliProvider already applies.
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout,
+                    cwd=str(self.root),
+                    stdin=subprocess.DEVNULL,
+                )
+            except FileNotFoundError as exc:
+                raise ProviderExecutionError(f"claude-cli command not found: {self.command}") from exc
+            except subprocess.TimeoutExpired as exc:
+                last_exc = ProviderExecutionError(f"claude-cli call timed out after {timeout}s")
+                last_exc.__cause__ = exc
+            else:
+                if result.returncode == 0:
+                    raw_metadata = {
+                        "command": cmd[0],
+                        "returncode": result.returncode,
+                        "stderr": result.stderr.strip(),
+                        "attempts": attempt + 1,
+                    }
+                    return self._result(result.stdout.strip(), prompt_version, raw_metadata)
+                last_exc = ProviderExecutionError(f"claude-cli call failed: {result.stderr.strip()}")
+
+            if attempt < _CLAUDE_CLI_MAX_ATTEMPTS - 1:
+                time.sleep(_CLAUDE_CLI_RETRY_SLEEP_SECONDS)
+
+        assert last_exc is not None
+        raise last_exc
 
     # Transcription prompt is deliberately kept NEUTRAL -- just the shared
     # TRANSCRIBE_PROMPT plus the image path, identical in spirit to the direct
