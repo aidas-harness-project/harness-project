@@ -37,7 +37,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from dao import case_dir, load_run_state
 from fork_case import next_free_case_id, copy_outputs_and_rewrite_case_id, copy_data_tree, check_no_active_locks
-from run_checkpoint1 import run_checkpoint1, resolve_from_raw_ocr
+from llm_providers import ProviderConfigError, ProviderExecutionError, SUPPORTED_PROVIDERS
+from ocr_extract import build_ocr_providers
+from run_checkpoint1 import build_classifier_provider, run_checkpoint1, resolve_from_raw_ocr
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -58,8 +60,54 @@ def _fork_for_scenario(source_case_id: str, label: str) -> str:
     return new_case_id
 
 
-def run_matrix(case_id: str, doc_id: str, pdf_path: str, held_by: str, run_id: str) -> dict:
-    baseline = run_checkpoint1(case_id, doc_id, pdf_path, held_by, run_id)
+def run_matrix(
+    case_id: str,
+    doc_id: str,
+    pdf_path: str,
+    held_by: str,
+    run_id: str,
+    reader_a=None,
+    reader_b=None,
+    comparator=None,
+    classifier=None,
+    reader_a_name: str | None = None,
+    reader_b_name: str | None = None,
+    comparator_name: str | None = None,
+    classifier_provider_name: str | None = None,
+    reader_a_model: str | None = None,
+    reader_b_model: str | None = None,
+    comparator_model: str | None = None,
+    classifier_model: str | None = None,
+) -> dict:
+    # Providers are resolved HERE, once, and passed as instances into both the
+    # baseline run_checkpoint1() call and every resolve_from_raw_ocr() scenario
+    # call below -- rather than letting each call re-resolve provider names
+    # independently. Without this, resolve_from_raw_ocr()'s classification step
+    # (called once per scenario) would fall back to build_classifier_provider()'s
+    # own default (real claude-cli) even when the baseline ran against an
+    # injected/non-default provider, silently reintroducing the P8/OCR
+    # bottleneck this script exists to let callers avoid. Resolving once also
+    # keeps the classifier consistent with the actual comparator used, matching
+    # build_classifier_provider()'s comparator-provider-name inference.
+    if reader_a is None or reader_b is None or comparator is None:
+        providers = build_ocr_providers(
+            reader_a_name=reader_a_name, reader_b_name=reader_b_name, comparator_name=comparator_name,
+            reader_a_model=reader_a_model, reader_b_model=reader_b_model, comparator_model=comparator_model,
+        )
+        reader_a = reader_a or providers["reader_a"]
+        reader_b = reader_b or providers["reader_b"]
+        comparator = comparator or providers["comparator"]
+    if classifier is None:
+        classifier = build_classifier_provider(
+            classifier_provider_name=classifier_provider_name,
+            classifier_model=classifier_model,
+            comparator_provider=comparator,
+        )
+
+    baseline = run_checkpoint1(
+        case_id, doc_id, pdf_path, held_by, run_id,
+        reader_a=reader_a, reader_b=reader_b, comparator=comparator, classifier=classifier,
+    )
 
     if baseline["status"] != "blocked_disagreement":
         return {"disagreement_found": False, "baseline": baseline,
@@ -89,7 +137,7 @@ def run_matrix(case_id: str, doc_id: str, pdf_path: str, held_by: str, run_id: s
             resolved_by=f"scenario-matrix:{scenario}",
             note=f"Automated scenario-matrix run -- forces {scenario} to observe the pipeline's behavior, "
                  f"not a real verified resolution. Do not treat this fork's output as a trustworthy case.",
-            held_by=held_by, run_id=run_id,
+            held_by=held_by, run_id=run_id, classifier=classifier,
         )
         outcome["fork_case_id"] = fork_id
         results[scenario] = outcome
@@ -122,9 +170,30 @@ def main():
     ap.add_argument("pdf_path")
     ap.add_argument("--held-by", required=True)
     ap.add_argument("--run-id", required=True)
+    ap.add_argument("--reader-a", choices=SUPPORTED_PROVIDERS, help="Provider for the first independent OCR read")
+    ap.add_argument("--reader-b", choices=SUPPORTED_PROVIDERS, help="Provider for the second independent OCR read")
+    ap.add_argument("--comparator", choices=SUPPORTED_PROVIDERS, help="Provider for OCR read comparison")
+    ap.add_argument("--classifier-provider", choices=SUPPORTED_PROVIDERS,
+                     help="Provider for document classification (baseline AND every scenario fork); "
+                          "defaults to the comparator provider")
+    ap.add_argument("--reader-a-model", help="Model name for --reader-a")
+    ap.add_argument("--reader-b-model", help="Model name for --reader-b")
+    ap.add_argument("--comparator-model", help="Model name for --comparator")
+    ap.add_argument("--classifier-model", help="Model name for --classifier-provider")
     args = ap.parse_args()
 
-    matrix = run_matrix(args.case_id, args.doc_id, args.pdf_path, args.held_by, args.run_id)
+    try:
+        matrix = run_matrix(
+            args.case_id, args.doc_id, args.pdf_path, args.held_by, args.run_id,
+            reader_a_name=args.reader_a, reader_b_name=args.reader_b, comparator_name=args.comparator,
+            classifier_provider_name=args.classifier_provider,
+            reader_a_model=args.reader_a_model, reader_b_model=args.reader_b_model,
+            comparator_model=args.comparator_model, classifier_model=args.classifier_model,
+        )
+    except ProviderConfigError as exc:
+        sys.exit(f"error: {exc}")
+    except ProviderExecutionError as exc:
+        sys.exit(f"error: {exc}")
     print_summary(matrix)
 
 
