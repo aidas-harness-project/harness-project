@@ -1,0 +1,23 @@
+{
+  "case_id": "CASE_022",
+  "run_id": "RUN_20260714_003",
+  "component": "document-pipeline",
+  "status": "success",
+  "created_at": "2026-07-14T18:38:51.825321+09:00",
+  "model_info": {
+    "model_name": "claude-cli",
+    "prompt_version": "classification_v0.1"
+  },
+  "document_id": "DOC_001",
+  "predicted_document_type": "insurer_response",
+  "document_type_label": "의료심사의뢰 회신",
+  "confidence": 0.75,
+  "pre_flagged": false,
+  "evidence_references": [
+    {
+      "page": 1,
+      "quote": "의료심사의뢰 회신"
+    }
+  ],
+  "review_required": false
+}
