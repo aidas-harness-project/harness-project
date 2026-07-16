@@ -127,8 +127,9 @@ python tools/local_runtime.py
 ```
 
 The recommended P8 pair is Tesseract (`local-ocr`) plus the loopback Ollama
-vision reader (`local-vlm`, `qwen3-vl:4b`); comparison, classification, and
-checkpoint-2 redaction use the text-only `local-llm` (`qwen3:4b`). The setup command is the only step allowed to
+vision reader (`local-vlm`, `qwen3-vl:4b-instruct-q4_K_M`); comparison, classification, and
+checkpoint-2 redaction use the text-only `local-llm`
+(`qwen3:4b-instruct-2507-q4_K_M`). The setup command is the only step allowed to
 download. Pipeline providers verify that models already exist and never pull
 or fall back to an external service. On Codex Desktop, where `python` may not
 be on PATH, use the bundled Python absolute path reported by the workspace

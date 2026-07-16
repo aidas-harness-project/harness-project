@@ -1,7 +1,7 @@
 param(
     [string]$RuntimeRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) '.runtime'),
-    [string]$TextModel = 'qwen3:4b',
-    [string]$VisionModel = 'qwen3-vl:4b',
+    [string]$TextModel = 'qwen3:4b-instruct-2507-q4_K_M',
+    [string]$VisionModel = 'qwen3-vl:4b-instruct-q4_K_M',
     [string]$OllamaVersion = 'v0.30.8',
     [string]$Python = ''
 )

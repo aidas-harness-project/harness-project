@@ -18,6 +18,12 @@ writing classification_result or marking the run-state stage passed --
 resolving a disagreement (choosing which reading is correct, and why) is a
 human decision, not something this script does on its own.
 
+For a whole document that a genuine human verifies is non-text visual
+evidence, `resolve-non-text` records that distinct outcome without choosing a
+reader or fabricating an image description. It writes no page text and routes
+the document to expert review only. Mixed text/image documents are rejected by
+that command.
+
 ocr_result.json only retains reading_b (as cross_validation.vision_model_reading)
 -- reading_a's full text is never persisted there. So when a disagreement
 blocks the run, the complete dual-read data (both readings, every page) is
@@ -38,6 +44,9 @@ checkpoint 3 (chunking, tools/chunk_text.py -- already exists, unchanged).
 
 Usage:
     python tools/run_checkpoint1.py CASE_ID DOC_ID <path to raw pdf> --held-by NAME --run-id RUN_ID
+    python tools/run_checkpoint1.py resolve-non-text CASE_ID DOC_ID \
+        --verified-by NAME --reviewer-role 의사 --note TEXT \
+        --held-by document-pipeline --run-id RUN_ID
 
 Also usable as a library -- run_checkpoint1() / resolve_from_raw_ocr()
 return a summary dict rather than just printing, so a caller (e.g. a
@@ -53,7 +62,7 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-from dao import case_dir, atomic_write_json, now_iso, load_registry, validate_instance
+from dao import case_dir, atomic_write_json, now_iso, load_registry, validate_instance, read_contract_data
 from dao import acquire_lock_blocking, release_lock, atomic_write_text, processed_dir
 import dao as _dao
 from llm_providers import (
@@ -212,6 +221,7 @@ def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
         agreed = p["agreement"] == "agreed"
         pages_out.append({
             "page": p["page"],
+            "content_kind": "text",
             "text_path": f"data/processed/{case_id}/{doc_id}/page_{p['page']:03d}.md" if agreed else None,
             "mean_confidence": None,
             "uncertain_regions": [],
@@ -222,6 +232,11 @@ def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
             },
         })
     any_disagreement = any(p["agreement"] == "disagreed" for p in ocr_data["pages"])
+    # Embedded-text (plain-text passthrough) documents carry their own honest
+    # extraction_method/encoding from ocr_extract._run_embedded_text -- a
+    # lossless decode, not OCR. Default to the OCR values for the image/PDF path.
+    extraction_method = ocr_data.get("extraction_method", "ocr")
+    is_embedded_text = extraction_method == "embedded_text"
     result = {
         "case_id": case_id, "run_id": run_id, "component": "document-pipeline", "status": "success",
         "created_at": now_iso(),
@@ -233,8 +248,13 @@ def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
         "ocr_engine": reader_a_label,
         "vision_model_name": f"{reader_b_label}; comparator={comparator_label}",
         "uncertain_confidence_threshold": 1.0,
-        "extraction_method": "ocr", "ocr_status": "completed", "pages": pages_out,
+        "extraction_method": extraction_method, "ocr_status": "completed", "pages": pages_out,
+        "encoding_detected": ocr_data.get("encoding_detected"),
         "document_mean_confidence": None,
+        # Embedded text is a lossless decode, not a probabilistic read -- its
+        # quality is 'high' and its cross-validation status 'agreed' (the decode
+        # is its own ground truth); cross_validation_mode 'deferred_poc' below is
+        # what records that no dual-read OCR cross-check was performed.
         "ocr_quality": "low" if any_disagreement else "high",
         "cross_validation_status": "disagreed_pending_review" if any_disagreement else "agreed",
         # P8 cross-validation strength label, computed from the actual readers by
@@ -273,6 +293,9 @@ def _reset_manifest_for_blocked_ocr(case_id, doc_id, ocr_result, held_by, run_id
         "redacted_text_path": None,
         "document_type": None,
         "classification_confidence": None,
+        "extraction_method": None,
+        "downstream_disposition": None,
+        "non_text_verification": None,
     }
     ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)
     if not ok:
@@ -460,16 +483,154 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         "cross_validation_status": ocr_result["cross_validation_status"],
         "document_type": classification["predicted_document_type"],
         "classification_confidence": classification.get("confidence", 0.5),
+        "extraction_method": ocr_result.get("extraction_method", "ocr"),
+        "downstream_disposition": "automated_text_pipeline",
+        "non_text_verification": None,
     }
     ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)
     if not ok:
         sys.exit(f"error: {message}")
 
-    _dao._update_run_state(case_id, run_id, "document_processing", "passed", held_by)
+    # Checkpoint 1 succeeding for one document does not complete the
+    # case-scoped document_processing stage. Other documents may still need
+    # checkpoint 1, and checkpoints 2 (redaction) and 3 (case chunking) have
+    # not run yet. Keep the top-level stage in progress; only the orchestrator
+    # may mark it passed after every checkpoint is complete and snapshotted.
+    _dao._update_run_state(case_id, run_id, "document_processing", "in_progress", held_by)
 
     return {"status": "passed", "case_id": case_id, "doc_id": doc_id,
             "document_type": classification["predicted_document_type"],
             "cross_validation_status": ocr_result["cross_validation_status"]}
+
+
+def resolve_as_non_text(
+    case_id: str,
+    doc_id: str,
+    *,
+    verified_by: str,
+    reviewer_role: str,
+    note: str,
+    held_by: str,
+    run_id: str,
+) -> dict:
+    """Resolve an entire P8-blocked document as human-verified visual evidence.
+
+    This deliberately does NOT choose either OCR reading and does NOT create a
+    page text file. The original disagreement remains in each page's
+    cross_validation record; the human verification only establishes that text
+    extraction is not applicable and that downstream use is expert-review-only.
+    """
+    if reviewer_role not in {"손해사정사", "의사", "법률전문가"}:
+        sys.exit(f"error: unsupported reviewer role {reviewer_role!r}")
+    if not verified_by.strip() or not note.strip():
+        sys.exit("error: --verified-by and --note must be non-empty")
+
+    ocr_result = read_contract_data(case_id, f"ocr_result_{doc_id}.json")
+    if ocr_result is None:
+        sys.exit(
+            f"error: ocr_result_{doc_id}.json not found -- run checkpoint 1 before resolving non-text content"
+        )
+    if ocr_result.get("cross_validation_status") != "disagreed_pending_review":
+        sys.exit(
+            "error: non-text resolution requires cross_validation_status "
+            f"'disagreed_pending_review', got {ocr_result.get('cross_validation_status')!r}"
+        )
+    pages = ocr_result.get("pages", [])
+    if not pages:
+        sys.exit("error: non-text resolution requires at least one page record")
+    pages_with_text = [page["page"] for page in pages if page.get("text_path")]
+    if pages_with_text:
+        sys.exit(
+            "error: whole-document non-text resolution cannot invalidate already-written page text; "
+            f"page(s) {pages_with_text} have text_path values"
+        )
+
+    # Never silently invalidate downstream artifacts from an earlier run.
+    stale = [
+        name for name in (
+            f"classification_result_{doc_id}.json",
+            f"redaction_result_{doc_id}.json",
+        )
+        if read_contract_data(case_id, name) is not None
+    ]
+    if stale:
+        sys.exit(
+            "error: non-text resolution would conflict with existing downstream contract(s): "
+            + ", ".join(stale)
+            + "; halt for a human audit instead of deleting or overwriting them"
+        )
+
+    verified_at = now_iso()
+    verification = {
+        "verified_by": verified_by,
+        "verified_at": verified_at,
+        "note": note,
+        "downstream_disposition": "expert_review_only",
+    }
+    for page in pages:
+        page["content_kind"] = "non_text_image"
+        page["text_path"] = None
+        page["mean_confidence"] = None
+        page["uncertain_regions"] = []
+        page["non_text_verification"] = dict(verification)
+
+    ocr_result.update({
+        "run_id": run_id,
+        "extraction_method": "non_text_image",
+        "ocr_status": "not_applicable",
+        "document_mean_confidence": None,
+        "ocr_quality": None,
+        "cross_validation_status": "non_text_verified",
+        "review_required": True,
+        "reviewer_role": reviewer_role,
+        "review_reason": (
+            "Human verified that this document is non-text visual evidence. "
+            "No transcription was selected or fabricated; automated downstream use is prohibited."
+        ),
+    })
+    _write_contract(
+        case_id,
+        f"ocr_result_{doc_id}.json",
+        ocr_result,
+        "ocr_result.schema.json",
+        held_by,
+        run_id,
+    )
+
+    manifest_verification = {
+        "verified_by": verified_by,
+        "verified_at": verified_at,
+        "note": note,
+        "reviewer_role": reviewer_role,
+    }
+    fields = {
+        "pages": len(pages),
+        "ocr_status": "not_applicable",
+        "ocr_text_path": None,
+        "ocr_quality": None,
+        "uncertain_region_count": 0,
+        "cross_validation_status": "non_text_verified",
+        "redacted_text_path": None,
+        "document_type": "other",
+        "classification_confidence": None,
+        "extraction_method": "non_text_image",
+        "downstream_disposition": "expert_review_only",
+        "non_text_verification": manifest_verification,
+    }
+    ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)
+    if not ok:
+        sys.exit(f"error: {message}")
+
+    # Do not mark the top-level stage passed here. Other documents plus
+    # redaction/chunking still have to finish; the orchestrator owns that state.
+    return {
+        "status": "non_text_verified",
+        "case_id": case_id,
+        "doc_id": doc_id,
+        "pages": len(pages),
+        "downstream_disposition": "expert_review_only",
+        "reviewer_role": reviewer_role,
+    }
 
 
 def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, chosen_reading: str,
@@ -586,6 +747,19 @@ def _resolve_from_args(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def _resolve_non_text_from_args(args):
+    result = resolve_as_non_text(
+        args.case_id,
+        args.doc_id,
+        verified_by=args.verified_by,
+        reviewer_role=args.reviewer_role,
+        note=args.note,
+        held_by=args.held_by,
+        run_id=args.run_id,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def _add_run_arguments(parser):
     parser.add_argument("case_id")
     parser.add_argument("doc_id")
@@ -608,7 +782,7 @@ def _add_run_arguments(parser):
 # Reserved subcommand names dispatched explicitly; anything else is treated as
 # the legacy positional `run` invocation (CASE DOC PDF ...) for backward
 # compatibility with document-pipeline.md and existing callers.
-_SUBCOMMANDS = {"run", "resolve-disagreement"}
+_SUBCOMMANDS = {"run", "resolve-disagreement", "resolve-non-text"}
 
 
 def main(argv=None):
@@ -634,6 +808,21 @@ def main(argv=None):
     resolve_parser.add_argument("--held-by", required=True)
     resolve_parser.add_argument("--run-id", required=True)
 
+    non_text_parser = sub.add_parser(
+        "resolve-non-text",
+        help="Record a human decision that the whole document is non-text visual evidence",
+    )
+    non_text_parser.add_argument("case_id")
+    non_text_parser.add_argument("doc_id")
+    non_text_parser.add_argument("--verified-by", required=True)
+    non_text_parser.add_argument(
+        "--reviewer-role", choices=["손해사정사", "의사", "법률전문가"], required=True,
+        help="Expert role that must review the visual evidence outside the automated text pipeline",
+    )
+    non_text_parser.add_argument("--note", required=True)
+    non_text_parser.add_argument("--held-by", required=True)
+    non_text_parser.add_argument("--run-id", required=True)
+
     # Backward compatibility: the legacy form is `... CASE DOC PDF --held-by ...`
     # with no subcommand token. If the first arg isn't a known subcommand (and
     # isn't a help flag), route to the `run` parser so old invocations keep working.
@@ -645,6 +834,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.command == "resolve-disagreement":
         _resolve_from_args(args)
+    elif args.command == "resolve-non-text":
+        _resolve_non_text_from_args(args)
     elif args.command == "run":
         _run_from_args(args)
     else:

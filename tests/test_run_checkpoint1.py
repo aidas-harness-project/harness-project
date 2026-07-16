@@ -111,7 +111,8 @@ def test_all_agreed_passes_through_to_classification(tmp_path, monkeypatch):
     assert manifest["documents"][0]["ocr_status"] == "completed"
     assert manifest["documents"][0]["document_type"] == "insurer_response"
     state = dao.load_run_state("CASE_009")
-    assert state["stages"][0]["status"] == "passed"
+    assert state["stages"][0]["status"] == "in_progress", \
+        "one document's checkpoint 1 must not pass the whole document_processing stage"
 
 
 def test_checkpoint1_provider_backed_classification_without_claude_cli(tmp_path, monkeypatch):
@@ -336,6 +337,80 @@ def test_resolve_from_raw_ocr_partial_when_multiple_disagreements(tmp_path, monk
     assert result["status"] == "partially_resolved"
     assert result["still_unresolved"] == [2]
     assert not (tmp_path / "outputs" / "CASE_009" / "classification_result_DOC_001.json").exists()
+
+
+def test_resolve_as_non_text_preserves_disagreement_and_writes_no_text(tmp_path, monkeypatch):
+    _seed_manifest(tmp_path, "CASE_009", "DOC_010")
+    _mock_ocr(monkeypatch, [("reader refused", "no transcribable text", "disagreed"),
+                            ("reader refused", "no transcribable text", "disagreed")])
+    blocked = rc1.run_checkpoint1(
+        "CASE_009", "DOC_010", "fake.pdf", "tester", "RUN_20260713_001"
+    )
+    assert blocked["status"] == "blocked_disagreement"
+
+    result = rc1.resolve_as_non_text(
+        "CASE_009", "DOC_010",
+        verified_by="Pyun", reviewer_role="의사",
+        note="Human verified both pages are visual evidence with no faithful text transcription.",
+        held_by="document-pipeline", run_id="RUN_20260713_002",
+    )
+
+    assert result["status"] == "non_text_verified"
+    assert result["downstream_disposition"] == "expert_review_only"
+    ocr_result = json.loads(
+        (tmp_path / "outputs" / "CASE_009" / "ocr_result_DOC_010.json").read_text(encoding="utf-8")
+    )
+    assert ocr_result["extraction_method"] == "non_text_image"
+    assert ocr_result["ocr_status"] == "not_applicable"
+    assert ocr_result["cross_validation_status"] == "non_text_verified"
+    assert ocr_result["review_required"] is True
+    assert all(page["text_path"] is None for page in ocr_result["pages"])
+    assert all(page["cross_validation"]["agreement"] == "disagreed" for page in ocr_result["pages"])
+    assert all(page["non_text_verification"]["downstream_disposition"] == "expert_review_only"
+               for page in ocr_result["pages"])
+    assert not (tmp_path / "data" / "processed" / "CASE_009" / "DOC_010" / "page_001.md").exists()
+    assert not (tmp_path / "outputs" / "CASE_009" / "classification_result_DOC_010.json").exists()
+
+    manifest = json.loads(
+        (tmp_path / "outputs" / "CASE_009" / "document_manifest.json").read_text(encoding="utf-8")
+    )["documents"][0]
+    assert manifest["ocr_status"] == "not_applicable"
+    assert manifest["document_type"] == "other"
+    assert manifest["downstream_disposition"] == "expert_review_only"
+    assert manifest["redacted_text_path"] is None
+    assert dao.load_run_state("CASE_009")["stages"][0]["status"] == "failed", \
+        "one document resolution must not mark the whole document_processing stage passed"
+
+
+def test_resolve_as_non_text_refuses_to_invalidate_existing_page_text(tmp_path, monkeypatch):
+    _seed_manifest(tmp_path, "CASE_009", "DOC_010")
+    _mock_ocr(monkeypatch, [("valid text", "valid text", "agreed"),
+                            ("refusal", "no text", "disagreed")])
+    rc1.run_checkpoint1("CASE_009", "DOC_010", "fake.pdf", "tester", "RUN_20260713_001")
+
+    with pytest.raises(SystemExit):
+        rc1.resolve_as_non_text(
+            "CASE_009", "DOC_010",
+            verified_by="Pyun", reviewer_role="의사", note="whole document is visual",
+            held_by="document-pipeline", run_id="RUN_20260713_002",
+        )
+
+
+def test_cli_resolve_non_text_is_reachable(tmp_path, monkeypatch, capsys):
+    _seed_manifest(tmp_path, "CASE_009", "DOC_010")
+    _mock_ocr(monkeypatch, [("refusal", "no text", "disagreed")])
+    rc1.run_checkpoint1("CASE_009", "DOC_010", "fake.pdf", "tester", "RUN_20260713_001")
+
+    rc1.main([
+        "resolve-non-text", "CASE_009", "DOC_010",
+        "--verified-by", "Pyun", "--reviewer-role", "의사",
+        "--note", "Human verified this whole document is non-text visual evidence.",
+        "--held-by", "document-pipeline", "--run-id", "RUN_20260713_002",
+    ])
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "non_text_verified"
+    assert out["reviewer_role"] == "의사"
 
 
 def test_resolve_from_raw_ocr_rejects_bad_chosen_reading(tmp_path, monkeypatch):
