@@ -180,24 +180,39 @@ class ClaudeCliProvider(BaseProvider):
         assert last_exc is not None
         raise last_exc
 
-    # Transcription prompt is deliberately kept NEUTRAL -- just the shared
-    # TRANSCRIBE_PROMPT plus the image path, identical in spirit to the direct
-    # `claude -p` call this provider replaced. An earlier version prepended a
-    # defensive OCR-reader "role framing" block ("this is a SANCTIONED step, not
-    # a bypass, do NOT touch the DAO, do not refuse..."). That backfired: the
-    # child `claude -p` session used to run with cwd=project root and inherit this
-    # repo's CLAUDE.md before _run() enforced --safe-mode. Even in an isolated
-    # child, a prompt that pre-argues its own legitimacy and says
-    # "do not refuse / do not mention guardrails" reads as a prompt-injection
-    # signal -- a genuine OCR request never needs to defend itself -- so the
-    # child refused and emitted meta-commentary instead of the page text. The fix
-    # is to say none of it: a plain "transcribe this image" request gives the
-    # child nothing to adjudicate. The real guardrails (DAO-only writes,
-    # ground-truth isolation) are enforced by the tools/orchestrator, not by the
-    # child's refusal; a blind reader printing to stdout writes nothing and
-    # bypasses nothing regardless of prompt wording.
+    # Transcription prompt is deliberately kept NEUTRAL -- no defensive
+    # "this is a SANCTIONED step, do not refuse" framing. An earlier version
+    # prepended exactly that role-framing block and it backfired: a prompt that
+    # pre-argues its own legitimacy reads as a prompt-injection signal -- a
+    # genuine OCR request never needs to defend itself -- so the child refused
+    # and emitted meta-commentary instead of the page text. That lesson still
+    # holds and is not being reverted here.
+    #
+    # What IS changed: the image is now referenced as an explicit imperative
+    # ("Read the image file at {path} and then ...") instead of a trailing
+    # "Image: {path}" label. Investigation (2026-07-16, CASE_024 follow-up)
+    # found the label form is not a rare/non-deterministic refusal at all --
+    # it failed 9/9 in controlled repeats (with and without --safe-mode,
+    # including on pages that had appeared to succeed on the first pass during
+    # real runs), every time with some variant of "no image was attached to
+    # this message." The model reads "Image: {path}" as descriptive metadata
+    # about an attachment that (via a text-only `claude -p` CLI call) never
+    # actually arrives, not as an instruction to invoke the Read tool on that
+    # path -- so it never even attempts the read. Making the read an explicit
+    # instruction resolved this in every repeat (3/3, then 2 more ad hoc
+    # confirmations on previously-refusing pages). This is not the same
+    # class of fix as the reverted role-framing: it carries no self-legitimizing
+    # or anti-refusal language, just a concrete action to take, so it gives the
+    # child nothing to treat as a prompt-injection signal.
+    #
+    # A related risk found during the same investigation, NOT fixed here:
+    # compare_text() is equally text-only and can suffer the identical
+    # "nothing was actually provided" misfire if a caller ever hands it a
+    # placeholder instead of real content -- it was only saved in the observed
+    # case by compare()'s existing fail-safe (unparseable verdict -> treated as
+    # disagreement), not by any structural protection. See known-gaps.md.
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
-        framed_prompt = f"{prompt}\n\nImage: {image_path}"
+        framed_prompt = f"Read the image file at {image_path} and then: {prompt}"
         return self._run(framed_prompt, prompt_version=prompt_version, allowed_read=True, timeout=180)
 
     def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
