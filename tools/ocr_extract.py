@@ -27,8 +27,8 @@ Usage:
     python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf
     python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf \
         --reader-a local-ocr --reader-a-model kor+eng:6 \
-        --reader-b local-vlm --reader-b-model qwen3-vl:4b \
-        --comparator local-llm --comparator-model qwen3:4b
+        --reader-b local-vlm --reader-b-model qwen3-vl:4b-instruct-q4_K_M \
+        --comparator local-llm --comparator-model qwen3:4b-instruct-2507-q4_K_M
 """
 import argparse
 import contextlib
@@ -79,6 +79,40 @@ COMPARE_PROMPT_TEMPLATE = (
 
 DISAGREE_RE = re.compile(r"\bDISAGREE\b")
 AGREE_RE = re.compile(r"\bAGREE\b")
+
+# File suffixes handled as embedded plain text rather than page images. A
+# plain-text source is a lossless byte decode, not a probabilistic OCR/vision
+# read -- there is no second, independent reading that could disagree, so P8's
+# dual-path cross-validation does not apply (cross_validation_mode
+# "deferred_poc"). Forcing such a file through vision transcription produced
+# hallucinated readings and a spurious P8 disagreement (CASE_024/DOC_001, a
+# CP949 Korean note read as "an AI assistant's message about running iconv").
+TEXT_SUFFIXES = {".txt", ".md", ".text"}
+# Encodings tried in order for a text-file decode. CP949 first: source-cases
+# Korean text files are CP949 (see ocr_result.schema.json encoding_detected),
+# and CP949 is a strict superset of ASCII so pure-ASCII files still decode.
+TEXT_ENCODINGS = ("cp949", "utf-8", "euc-kr")
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
+
+
+def decode_text_file(doc_path: Path) -> tuple[str, str]:
+    """Decode a plain-text source losslessly, returning (text, encoding_used).
+
+    Tries TEXT_ENCODINGS in order and returns the first that decodes cleanly.
+    A clean decode is deterministic and lossless -- unlike OCR, there is no
+    confidence signal and no second reading to cross-validate against. Raises
+    if none of the candidate encodings decode, rather than guessing with
+    errors='replace' (a silent-corruption path P8 exists to prevent)."""
+    raw = doc_path.read_bytes()
+    for enc in TEXT_ENCODINGS:
+        try:
+            return raw.decode(enc), enc
+        except UnicodeDecodeError:
+            continue
+    raise ProviderExecutionError(
+        f"could not decode {doc_path} as text with any of {TEXT_ENCODINGS}; "
+        "not forcing it through vision OCR"
+    )
 
 
 def transcribe_once(image_path: Path, provider=None) -> dict:
@@ -316,6 +350,12 @@ def run_ocr(
         reader_b = reader_b or providers["reader_b"]
         comparator = comparator or providers["comparator"]
 
+    # Plain-text sources take a deterministic decode path, never vision OCR.
+    # This must precede any provider/scratch/image work: there is nothing to
+    # transcribe, split, or cross-validate for a text file.
+    if doc_path.suffix.lower() in TEXT_SUFFIXES:
+        return _run_embedded_text(case_id, doc_id, doc_path, progress=progress)
+
     cache_dir = _resume_cache_dir(case_id, doc_id)
 
     pages_out = []
@@ -370,6 +410,55 @@ def run_ocr(
         "cross_validation_mode": cross_validation_mode,
         "cross_validation_note": cross_validation_note,
         "pages": pages_out,
+    }
+
+
+def _run_embedded_text(case_id: str, doc_id: str, doc_path: Path, progress=None) -> dict:
+    """Text-passthrough path for a plain-text source (no OCR, no vision).
+
+    Decodes the file losslessly and returns a single-page result shaped like
+    run_ocr()'s dual-path output so run_checkpoint1._assemble_ocr_result
+    consumes it unchanged. The distinction is carried honestly in the returned
+    dict: extraction_method 'embedded_text', the detected encoding, and
+    cross_validation_mode 'deferred_poc' (P8's dual-read cross-validation does
+    not apply to a deterministic decode -- there is no independent second
+    reading that could disagree). The page's cross_validation.agreement is
+    'agreed' because a lossless decode is its own ground truth; the mode label,
+    not a fake second reader, is what records that no OCR cross-check happened.
+    reading_a and reading_b are the identical decoded text so the downstream
+    page-write (which writes reading_a) writes the real content."""
+    text, encoding = decode_text_file(doc_path)
+    msg = f"page 1/1: embedded_text decode (encoding={encoding}, no OCR/cross-validation)"
+    progress(msg) if progress else print(msg, file=sys.stderr)
+    page = {
+        "page": 1,
+        "reading_a": text,
+        "reading_b": text,
+        "agreement": "agreed",
+        "disagreement_details": [],
+        "provider_metadata": {
+            "reader_a": {"provider_name": "embedded-text", "model_name": f"decode:{encoding}"},
+            "reader_b": {"provider_name": "embedded-text", "model_name": f"decode:{encoding}"},
+            "comparator": {"shortcut": "embedded_text_no_cross_validation", "comparator_called": False},
+        },
+    }
+    return {
+        "document_path": str(doc_path),
+        "providers": {
+            "reader_a": {"provider_name": "embedded-text", "model_name": f"decode:{encoding}"},
+            "reader_b": {"provider_name": "embedded-text", "model_name": f"decode:{encoding}"},
+            "comparator": {"provider_name": "embedded-text", "model_name": "none"},
+        },
+        "extraction_method": "embedded_text",
+        "encoding_detected": encoding,
+        "cross_validation_mode": "deferred_poc",
+        "cross_validation_note": (
+            f"Plain-text source decoded losslessly as {encoding}; no OCR or vision read was "
+            "performed, so P8's dual-path cross-validation does not apply (there is no independent "
+            "second reading that could disagree). Deterministic byte decode, not a probabilistic "
+            "read that could be confidently wrong."
+        ),
+        "pages": [page],
     }
 
 

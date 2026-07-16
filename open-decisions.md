@@ -31,7 +31,7 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `document-pipeline`, checkpoint 1 (P8's dual-path cross-validation, `tools/ocr_extract.py`).
 
-**Current:** the offline path and E:-scoped runtime are installed. A synthetic image smoke test confirmed exact transcription through both Tesseract and the loopback `qwen3-vl:4b` reader, and preflight confirmed the pinned local text/vision models. No real-case run has been performed. These local providers refuse automatic downloads during a run and never fall back externally, so they close the external-transmission path for local runs; the risk remains in full for external CLI/API provider selections.
+**Current:** the offline path and E:-scoped runtime are installed with explicit Instruct Q4 tags (`qwen3-vl:4b-instruct-q4_K_M` and `qwen3:4b-instruct-2507-q4_K_M`). A synthetic image smoke test produced identical Tesseract/VLM text, and a scoped 2026-07-16 CASE_003 DOC_013 checkpoint-1 run agreed on its one page and completed local classification. These local providers refuse automatic downloads during a run and never fall back externally, so they close the external-transmission path for local runs; the risk remains in full for external CLI/API provider selections. One real page is not production validation.
 
 **Problem:** P8's two readers must see the raw, unredacted page image (that's the point -- they have to see what's actually on the page before redaction). The comparator and classifier may also see unredacted extracted text. If any configured provider path is not under a no-data-retention arrangement, every checkpoint-1 run may send PII to that destination.
 
@@ -47,6 +47,12 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Current:** two offline reader technologies now exist. `local-ocr` invokes preinstalled Tesseract, while `local-vlm` sends the page image only to a preloaded loopback Ollama vision model. `local-llm` performs comparison and classification. `ocr_result.json` records the actual provider/model labels.
 
-**Remaining problem:** the Tesseract + vision-model pair is technologically independent, but the chosen local model still needs real Korean insurance-document validation. The synthetic ASCII smoke test is not evidence of Korean table, handwriting, stamp, skew, or low-resolution accuracy. Two `local-ocr` reads remain available only as a weaker fallback and still share Tesseract's systematic errors. P8's hard signal remains page-level agreed/disagreed.
+**Remaining problem:** the Tesseract + vision-model pair is technologically independent, and the explicit Instruct pair now has one successful real-page result, but it still needs representative Korean insurance-document validation. One page is not evidence for tables, handwriting, stamps, skew, low resolution, medical terminology, or all critical-field types. Two `local-ocr` reads remain available only as a weaker fallback and still share Tesseract's systematic errors. P8's hard signal remains page-level agreed/disagreed.
 
-**To resolve:** run the real smoke/quality matrix for the pinned local vision model and document its Korean transcription failure modes before treating the local pair as production-ready.
+**To resolve:** complete the v1 real sample matrix in `docs/ocr-improvement-roadmap.md`, including repeatability and latency, and document Korean transcription failure modes before treating the local pair as production-ready.
+
+## 5. Whole-document non-text visual evidence
+
+**Status: resolved 2026-07-15.** A document consisting entirely of photographs or other visual evidence is represented as `extraction_method: non_text_image`, `ocr_status: not_applicable`, `cross_validation_status: non_text_verified`, and `downstream_disposition: expert_review_only`. A genuine human must make this decision through `run_checkpoint1.py resolve-non-text`; the tool preserves the original P8 disagreement, creates no page text or model-generated image description, skips text classification/redaction, and records an explicit exclusion in `page_chunks.json`.
+
+This does not resolve mixed text/image documents. The whole-document command refuses any document with an already-written text page, so a future per-page mixed-content contract cannot silently reuse this bypass.

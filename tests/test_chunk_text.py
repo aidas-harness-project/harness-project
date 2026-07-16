@@ -85,5 +85,31 @@ def test_output_validates_against_page_chunks_schema(isolated_data):
     from _validation import load_registry, validate_instance
 
     schemas, registry = load_registry()
-    instance = {"case_id": "CASE_009", "component": "document-pipeline", "status": "success", "chunks": chunks}
+    instance = {"case_id": "CASE_009", "component": "document-pipeline", "status": "success",
+                "chunks": chunks, "excluded_documents": []}
     assert validate_instance(instance, "page_chunks.schema.json", schemas, registry) == []
+
+
+def test_non_text_document_is_explicitly_excluded_without_a_fake_chunk(isolated_data):
+    result = ct.assemble_chunks("CASE_009", [], ["DOC_010"])
+
+    assert result == {
+        "chunks": [],
+        "excluded_documents": [
+            {"document_id": "DOC_010", "reason": "non_text_expert_review_only"},
+        ],
+    }
+
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "tools"))
+    from _validation import load_registry, validate_instance
+
+    schemas, registry = load_registry()
+    instance = {"case_id": "CASE_009", "component": "document-pipeline", "status": "success", **result}
+    assert validate_instance(instance, "page_chunks.schema.json", schemas, registry) == []
+
+
+def test_document_cannot_be_chunked_and_excluded(isolated_data):
+    _write_redacted(isolated_data, "CASE_009", "DOC_010", "<<<PAGE page=1>>>\ntext\n")
+    with pytest.raises(SystemExit):
+        ct.assemble_chunks("CASE_009", ["DOC_010"], ["DOC_010"])

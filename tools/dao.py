@@ -195,6 +195,18 @@ def save_run_state(case_id: str, state: dict) -> None:
 # ------------------------------------------------------------------ nouns --
 
 def cmd_read_document_text(args):
+    manifest = read_contract_data(args.case_id, "document_manifest.json")
+    if manifest is not None:
+        entry = next(
+            (item for item in manifest.get("documents", []) if item.get("document_id") == args.doc_id),
+            None,
+        )
+        if entry and entry.get("downstream_disposition") == "expert_review_only":
+            print(
+                f"NON_TEXT_EXPERT_REVIEW_ONLY: {args.doc_id} is human-verified non-text visual evidence. "
+                "No processed text exists and automated downstream use is prohibited."
+            )
+            return 1
     processed = DATA / "processed" / args.case_id / args.doc_id
     redacted = processed / "redacted_text.md"
     if redacted.exists():
@@ -250,6 +262,12 @@ def cmd_read_contract(args):
         return 1
     print(p.read_text(encoding="utf-8"))
     return 0
+
+
+def read_contract_data(case_id: str, filename: str):
+    """DAO-owned structured contract read for in-process pipeline tools."""
+    p = case_dir(case_id) / filename
+    return load_json(p)
 
 
 def cmd_write_contract(args):

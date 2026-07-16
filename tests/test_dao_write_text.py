@@ -99,6 +99,30 @@ def test_read_page_text_fails_when_checkpoint1_page_is_missing(isolated_dao, mak
     assert "NOT_EXTRACTED" in capsys.readouterr().out
 
 
+def test_read_document_text_reports_non_text_instead_of_requesting_reextraction(
+    isolated_dao, make_args, capsys
+):
+    manifest_path = isolated_dao / "outputs" / "CASE_009" / "document_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    dao.atomic_write_json(manifest_path, {
+        "case_id": "CASE_009",
+        "documents": [{
+            "document_id": "DOC_001",
+            "file_name": "DOC_001.pdf",
+            "file_path": "data/raw/CASE_009/DOC_001.pdf",
+            "file_format": "pdf",
+            "file_size_bytes": 1,
+            "ocr_status": "not_applicable",
+            "downstream_disposition": "expert_review_only",
+        }],
+    })
+
+    rc = dao.cmd_read_document_text(make_args())
+
+    assert rc == 1
+    assert "NON_TEXT_EXPERT_REVIEW_ONLY" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("page", [0, -1])
 def test_read_page_text_rejects_non_positive_page_numbers(isolated_dao, make_args, capsys, page):
     unexpected_path = isolated_dao / "data" / "processed" / "CASE_009" / "DOC_001" / f"page_{page:03d}.md"

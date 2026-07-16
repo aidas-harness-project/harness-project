@@ -17,8 +17,8 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME_ROOT = ROOT / ".runtime"
-DEFAULT_TEXT_MODEL = "qwen3:4b"
-DEFAULT_VISION_MODEL = "qwen3-vl:4b"
+DEFAULT_TEXT_MODEL = "qwen3:4b-instruct-2507-q4_K_M"
+DEFAULT_VISION_MODEL = "qwen3-vl:4b-instruct-q4_K_M"
 
 
 def _inside(path: Path, parent: Path) -> bool:
