@@ -151,15 +151,19 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
 
     result = provider.transcribe_image(Path("page.png"), "transcribe prompt", "ocr_extraction_v0.1")
 
-    # The transcription prompt must stay NEUTRAL -- just the caller's prompt plus
-    # the image path, no defensive "role framing" preamble. A prior version
-    # prepended a "this is a SANCTIONED step, do not refuse..." block that the
-    # nested claude read as a prompt-injection signal and refused; this assertion
-    # is the regression guard against that framing creeping back in.
+    # The transcription prompt must stay NEUTRAL -- no defensive "role framing"
+    # preamble ("this is a SANCTIONED step, do not refuse..."); a prior version
+    # had that and the nested claude read it as a prompt-injection signal and
+    # refused. That regression guard still applies. Separately, the image must
+    # be referenced as an explicit imperative ("Read the image file at ...")
+    # rather than a trailing "Image: {path}" label -- investigation found the
+    # label form fails ~100% of the time (the model reads it as descriptive
+    # metadata about an attachment that never actually arrives over a text-only
+    # CLI call, and never attempts the Read tool at all).
     assert captured["cmd"] == [
         "claude",
         "-p",
-        "transcribe prompt\n\nImage: page.png",
+        "Read the image file at page.png and then: transcribe prompt",
         "--safe-mode",
         "--allowedTools",
         "Read",
