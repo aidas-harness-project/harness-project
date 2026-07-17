@@ -29,6 +29,9 @@ schemas.zip
 # ocr_extract.py's project-local scratch (page images) -- transient, cleaned up on exit
 _ocr_scratch/
 
+# graphify knowledge-graph build output -- regenerable from the corpus, not source
+graphify-out/
+
 # Pipeline viewer frontend -- build artifacts and venvs, not source
 frontend/web/node_modules/
 frontend/web/dist/
