@@ -16,7 +16,7 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full �
 
 - **Fabrication / unlinked claims (P1):** every `[E#]` tag in the draft has a matching entry in its `.evidence.json` sidecar, and every sidecar entry is actually used — no orphaned tags, no unused citations. Use the DAO's evidence-tag check rather than manually re-deriving this from the raw files; record the counts in `orphaned_tag_count`/`unused_citation_count`, not just as findings.
 - **P3 compliance:** every inference (causation, disability determination, coverage-eligibility conclusions, case-outcome opinions) is hedged and flagged, not asserted outright. Direct restatements of source documents are fine as stated.
-- **Forbidden expressions:** scan for definitive legal/medical language that should have been substituted (see `pipeline.md`'s forbidden-expression table).
+- **Forbidden expressions:** scan for definitive legal/medical language that should have been substituted (see `templates/forbidden-expressions.md`). Check against that file, not `pipeline.md`'s copy of the table — `templates/` is the authoritative set per `open-decisions.md` #2, and it's what `draft-report` is told to write against. Checking a different copy than the writer follows is how the two drift apart unnoticed.
 
 # Output
 

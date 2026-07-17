@@ -108,15 +108,11 @@ structure, no registry entry). See open-decisions.md #2.
 
 ## Forbidden-expression substitutions
 
-Definitive legal/medical assertions get hedged per harness-guardrails P3.
-Examples:
-
-| Avoid | Use instead |
-|---|---|
-| "보험사는 반드시 지급해야 한다" | "지급 가능성을 검토할 여지가 있다" |
-| "의학적으로 명백하다" | "의무기록상 해당 가능성이 확인되며, 전문의 검수가 필요하다" |
-| "약관상 부당하다" | "해당 약관 적용의 적정성에 대한 검토가 필요하다" |
-| "승소 가능성이 높다" | "분쟁 대응 여지가 있다" |
+Definitive legal/medical assertions get hedged per harness-guardrails P3. The
+substitution table lives in `templates/forbidden-expressions.md` -- the
+authoritative copy per `open-decisions.md` #2, and the one both `draft-report`
+(writer) and `critic` (checker) read. Not restated here: this file used to carry
+its own copy, and a duplicate that nothing reads is a table that drifts silently.
 
 # Priorities
 
