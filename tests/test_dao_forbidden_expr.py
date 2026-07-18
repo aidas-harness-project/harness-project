@@ -167,3 +167,62 @@ def test_critic_result_rejects_negative_hit_count():
     schemas, registry = load_registry()
     inst = _minimal_critic_result({"forbidden_literal_hit_count": -1})
     assert validate_instance(inst, "critic_result.schema.json", schemas, registry) != []
+
+
+# ---- Consolidation guard: the table lives in exactly one place ----
+
+def test_forbidden_table_not_restated_outside_authoritative_source():
+    """The forbidden-expression phrases must live in exactly one authoritative
+    file. A policy/spec file that restates the whole table (>=2 of the listed
+    phrases) has drifted from the single source -- the exact 2026-07-17 failure
+    where critic and draft-report followed different copies. A lone illustrative
+    example (one phrase) is fine and stays legal.
+
+    `POC guide.md` is the documented historical planning copy (CLAUDE.md treats
+    it as historical, not a live spec) and legitimately holds the original table;
+    it is allowlisted alongside the authoritative source. Generated mirrors
+    (.codex/.agents) are excluded -- they copy .claude verbatim, so scanning them
+    would just double-count the canonical files."""
+    import glob
+    from pathlib import Path
+
+    import dao
+
+    root = Path(dao.__file__).resolve().parent.parent
+    phrases = dao._load_forbidden_phrases(dao.FORBIDDEN_TEMPLATE)
+    assert len(phrases) >= 3, "parser failed to load the authoritative table"
+
+    authoritative = "templates/forbidden-expressions.md"
+    allowlist = {authoritative, "POC guide.md"}
+
+    candidates = ["pipeline.md", "POC guide.md", "README.md", "AGENTS.md",
+                  "open-decisions.md", "known-gaps.md", "CLAUDE.md"]
+    candidates += glob.glob(str(root / ".claude/agents/*.md"))
+    candidates += glob.glob(str(root / ".claude/skills/*/SKILL.md"))
+    candidates += glob.glob(str(root / "templates/*.md"))
+
+    def phrase_count(path):
+        norm = dao._normalize_expr(Path(path).read_text(encoding="utf-8"))
+        return sum(1 for p in phrases if p in norm)
+
+    # Mechanism check: POC guide.md really is a full-table copy, so the detector
+    # demonstrably fires on a genuine restatement. Keeps this test from passing
+    # vacuously if the matching ever silently breaks.
+    assert phrase_count(root / "POC guide.md") >= 2
+
+    offenders = []
+    for c in candidates:
+        p = Path(c) if Path(c).is_absolute() else root / c
+        if not p.exists():
+            continue
+        rel = str(p.resolve().relative_to(root))
+        if rel in allowlist:
+            continue
+        if phrase_count(p) >= 2:
+            offenders.append(rel)
+
+    assert offenders == [], (
+        f"Forbidden-expression table restated outside {authoritative}: "
+        f"{offenders}. Reference it, don't copy it (see the 2026-07-17 "
+        "consolidation)."
+    )
