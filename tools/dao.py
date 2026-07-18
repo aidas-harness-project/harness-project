@@ -81,6 +81,7 @@ from _validation import load_registry, validate_instance
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
 DATA = ROOT / "data"
+FORBIDDEN_TEMPLATE = ROOT / "templates" / "forbidden-expressions.md"
 KST = timezone(timedelta(hours=9))
 
 
@@ -478,6 +479,46 @@ def cmd_check_source_ledger_clear(args):
 # --------------------------------------------------------- evidence tags --
 
 TAG_RE = re.compile(r"\[E(\d+)\]")
+
+# --------------------------------------------------------- forbidden expressions --
+
+_MD_TABLE_ROW = re.compile(r"^\|(.+)\|$")
+
+
+def _normalize_expr(s: str) -> str:
+    """Normalize a forbidden-expression phrase or a draft line for matching:
+    straighten curly double-quotes, strip one layer of surrounding double-quotes,
+    collapse internal whitespace runs to a single space. Deliberately literal --
+    this is a floor, not a paraphrase detector."""
+    s = s.replace("“", '"').replace("”", '"')
+    s = re.sub(r"\s+", " ", s).strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        s = s[1:-1].strip()
+    return s
+
+
+def _load_forbidden_phrases(template_path: Path) -> list[str]:
+    """Return the normalized first-column ('위험 표현') phrases from the markdown
+    table in templates/forbidden-expressions.md. Returns [] if no parseable table
+    (caller treats that as a setup failure, never a clean draft). Raises
+    FileNotFoundError if the file is absent."""
+    text = template_path.read_text(encoding="utf-8")  # raises FileNotFoundError if absent
+    phrases = []
+    for line in text.splitlines():
+        m = _MD_TABLE_ROW.match(line.strip())
+        if not m:
+            continue
+        cells = [c.strip() for c in m.group(1).split("|")]
+        if not cells:
+            continue
+        first = cells[0]
+        # Skip the header row and the |---|---| separator row.
+        if first in ("위험 표현", "") or set(first) <= set("-: "):
+            continue
+        norm = _normalize_expr(first)
+        if norm:
+            phrases.append(norm)
+    return phrases
 
 
 def cmd_read_evidence_tags(args):
