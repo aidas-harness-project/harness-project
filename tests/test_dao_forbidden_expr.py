@@ -116,3 +116,15 @@ def test_missing_template_reports_no_template(isolated_dao, make_args, capsys, m
     rc = dao.cmd_check_forbidden_expressions(make_args(doc_path=str(draft)))
     assert rc == 2
     assert "NO_TEMPLATE" in capsys.readouterr().out
+
+
+def test_phrase_split_across_lines_hits_with_null_line(isolated_dao, make_args, capsys):
+    # Soft-wrapped: the phrase spans a line break, so it's found only in the
+    # whole-doc normalization, not any single line -> hit with line: None.
+    draft = _write_draft(isolated_dao, "결론적으로 보험사는 반드시\n지급해야 한다.\n")
+    rc = dao.cmd_check_forbidden_expressions(make_args(doc_path=str(draft)))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert out["clean"] is False
+    hit = next(h for h in out["hits"] if h["phrase"] == "보험사는 반드시 지급해야 한다")
+    assert hit["line"] is None
