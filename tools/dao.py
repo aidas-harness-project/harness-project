@@ -560,7 +560,7 @@ def cmd_check_forbidden_expressions(args):
     print(json.dumps({
         "clean": clean,
         "hits": hits,
-        "source": "templates/forbidden-expressions.md",
+        "source": str(FORBIDDEN_TEMPLATE.relative_to(ROOT)),
         "note": "listed literal phrases only; not exhaustive -- semantic P3 coverage is the critic's",
     }, ensure_ascii=False))
     return 0 if clean else 1
