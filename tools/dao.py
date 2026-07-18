@@ -51,6 +51,7 @@ Subcommands:
         [--reviewer NAME] [--reason TEXT]
     check-source-ledger-clear CASE_ID
     read-evidence-tags DOC_PATH
+    check-forbidden-expressions DOC_PATH
     update-run-state CASE_ID RUN_ID STAGE STATUS --held-by NAME
     set-human-input-status CASE_ID STAGE {waiting|received} --held-by NAME --run-id RUN_ID
         [--description TEXT]  (required when status is waiting)
@@ -521,6 +522,50 @@ def _load_forbidden_phrases(template_path: Path) -> list[str]:
     return phrases
 
 
+def cmd_check_forbidden_expressions(args):
+    """Deterministic floor: scan a rendered draft for the listed literal phrases
+    in templates/forbidden-expressions.md. Record-only -- the critic decides
+    passed. Not exhaustive; the semantic/implied cases are the critic's P3 pass."""
+    draft_path = Path(args.doc_path)
+    try:
+        phrases = _load_forbidden_phrases(FORBIDDEN_TEMPLATE)
+    except FileNotFoundError:
+        print(f"NO_TEMPLATE: {FORBIDDEN_TEMPLATE}")
+        return 2
+    if not phrases:
+        print(f"NO_TEMPLATE: {FORBIDDEN_TEMPLATE}")
+        return 2
+    if not draft_path.exists():
+        print(f"NOT_FOUND: {draft_path}")
+        return 1
+
+    raw_lines = draft_path.read_text(encoding="utf-8").splitlines()
+    norm_lines = [_normalize_expr(ln) for ln in raw_lines]
+    norm_full = _normalize_expr(" ".join(raw_lines))
+
+    hits = []
+    for phrase in phrases:
+        line_no = None
+        for i, nl in enumerate(norm_lines, start=1):
+            if phrase in nl:
+                line_no = i
+                break
+        if line_no is None and phrase in norm_full:
+            line_no = None  # present but spans soft-wrapped lines
+        elif line_no is None:
+            continue
+        hits.append({"phrase": phrase, "line": line_no})
+
+    clean = not hits
+    print(json.dumps({
+        "clean": clean,
+        "hits": hits,
+        "source": "templates/forbidden-expressions.md",
+        "note": "listed literal phrases only; not exhaustive -- semantic P3 coverage is the critic's",
+    }, ensure_ascii=False))
+    return 0 if clean else 1
+
+
 def cmd_read_evidence_tags(args):
     doc_path = Path(args.doc_path)
     sidecar_path = doc_path.with_suffix(".evidence.json")
@@ -897,6 +942,9 @@ def main():
 
     p = sub.add_parser("read-evidence-tags"); p.add_argument("doc_path")
     p.set_defaults(fn=cmd_read_evidence_tags)
+
+    p = sub.add_parser("check-forbidden-expressions"); p.add_argument("doc_path")
+    p.set_defaults(fn=cmd_check_forbidden_expressions)
 
     p = sub.add_parser("update-run-state")
     p.add_argument("case_id"); p.add_argument("run_id"); p.add_argument("stage")

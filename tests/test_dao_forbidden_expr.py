@@ -48,3 +48,71 @@ def test_load_forbidden_phrases_missing_file_raises(tmp_path):
     import pytest
     with pytest.raises(FileNotFoundError):
         dao._load_forbidden_phrases(tmp_path / "nope.md")
+
+
+# ---- Task 2: the subcommand ----
+
+def _write_draft(root, text):
+    p = root / "outputs" / "CASE_009" / "draft_report_v1.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_listed_phrase_is_a_hit(isolated_dao, make_args, capsys):
+    draft = _write_draft(isolated_dao, "결론적으로 보험사는 반드시 지급해야 한다.\n")
+    rc = dao.cmd_check_forbidden_expressions(make_args(doc_path=str(draft)))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert out["clean"] is False
+    assert out["hits"][0]["phrase"] == "보험사는 반드시 지급해야 한다"
+    assert out["hits"][0]["line"] == 1
+
+
+def test_clean_draft_is_clean(isolated_dao, make_args, capsys):
+    draft = _write_draft(isolated_dao, "지급 가능성을 검토할 여지가 있다.\n")
+    rc = dao.cmd_check_forbidden_expressions(make_args(doc_path=str(draft)))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["clean"] is True
+    assert out["hits"] == []
+
+
+def test_curly_quote_variant_still_a_hit(isolated_dao, make_args, capsys):
+    # The template is straight-quoted; a draft using curly quotes must still hit.
+    draft = _write_draft(isolated_dao, "“의학적으로 명백하다” 라고 볼 수 있다.\n")
+    rc = dao.cmd_check_forbidden_expressions(make_args(doc_path=str(draft)))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert any(h["phrase"] == "의학적으로 명백하다" for h in out["hits"])
+
+
+def test_internal_whitespace_variant_still_a_hit(isolated_dao, make_args, capsys):
+    draft = _write_draft(isolated_dao, "보험사는  반드시   지급해야 한다 고 판단된다.\n")
+    rc = dao.cmd_check_forbidden_expressions(make_args(doc_path=str(draft)))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert any(h["phrase"] == "보험사는 반드시 지급해야 한다" for h in out["hits"])
+
+
+def test_near_miss_paraphrase_is_not_a_literal_hit(isolated_dao, make_args, capsys):
+    # Proves the floor's boundary honestly: paraphrase is the critic's job, not this tool's.
+    draft = _write_draft(isolated_dao, "당연히 지급되어야 마땅하다.\n")
+    rc = dao.cmd_check_forbidden_expressions(make_args(doc_path=str(draft)))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["clean"] is True
+
+
+def test_missing_draft_reports_not_found(isolated_dao, make_args, capsys):
+    rc = dao.cmd_check_forbidden_expressions(make_args(doc_path=str(isolated_dao / "nope.md")))
+    assert rc == 1
+    assert "NOT_FOUND" in capsys.readouterr().out
+
+
+def test_missing_template_reports_no_template(isolated_dao, make_args, capsys, monkeypatch):
+    draft = _write_draft(isolated_dao, "보험사는 반드시 지급해야 한다.\n")
+    monkeypatch.setattr(dao, "FORBIDDEN_TEMPLATE", isolated_dao / "absent.md")
+    rc = dao.cmd_check_forbidden_expressions(make_args(doc_path=str(draft)))
+    assert rc == 2
+    assert "NO_TEMPLATE" in capsys.readouterr().out
