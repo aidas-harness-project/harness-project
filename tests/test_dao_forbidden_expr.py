@@ -128,3 +128,42 @@ def test_phrase_split_across_lines_hits_with_null_line(isolated_dao, make_args, 
     assert out["clean"] is False
     hit = next(h for h in out["hits"] if h["phrase"] == "보험사는 반드시 지급해야 한다")
     assert hit["line"] is None
+
+
+# ---- Task 3: schema backward-compat + new field ----
+
+def _minimal_critic_result(extra=None):
+    inst = {
+        "case_id": "CASE_009",
+        "component": "critic",
+        "status": "success",
+        "reviewed_document": "outputs/CASE_009/draft_report_v1.md",
+        "passed": True,
+        "orphaned_tag_count": 0,
+        "unused_citation_count": 0,
+        "findings": [],
+    }
+    if extra:
+        inst.update(extra)
+    return inst
+
+
+def test_critic_result_without_new_field_still_validates():
+    from _validation import load_registry, validate_instance
+    schemas, registry = load_registry()
+    inst = _minimal_critic_result()  # no forbidden_literal_hit_count -- pre-2026-07-18 shape
+    assert validate_instance(inst, "critic_result.schema.json", schemas, registry) == []
+
+
+def test_critic_result_accepts_forbidden_literal_hit_count():
+    from _validation import load_registry, validate_instance
+    schemas, registry = load_registry()
+    inst = _minimal_critic_result({"forbidden_literal_hit_count": 2})
+    assert validate_instance(inst, "critic_result.schema.json", schemas, registry) == []
+
+
+def test_critic_result_rejects_negative_hit_count():
+    from _validation import load_registry, validate_instance
+    schemas, registry = load_registry()
+    inst = _minimal_critic_result({"forbidden_literal_hit_count": -1})
+    assert validate_instance(inst, "critic_result.schema.json", schemas, registry) != []
