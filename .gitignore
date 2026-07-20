@@ -40,6 +40,11 @@ schemas.zip
 _ocr_scratch/
 _redaction_scratch/
 
+# segment_case.py's contact sheets and per-sheet resume cache. Kept separate from
+# _ocr_scratch/ because these deliberately OUTLIVE the process: a human reads the
+# sheets to approve boundaries, so nothing here may be rmtree'd on exit.
+_segmentation_scratch/
+
 # Project-local offline runtimes and model weights (downloaded, never versioned)
 .runtime/
 
