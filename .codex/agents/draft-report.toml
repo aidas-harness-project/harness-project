@@ -21,7 +21,7 @@ Read: `draft_report_v1.md` + `rebuttal_points.json`. Update/extend the draft to 
 
 # Content rules
 
-Every claim needs `evidence_references` (P1). Anything beyond direct restatement of source documents — case-outcome opinions, coverage-eligibility conclusions, disability-percentage determinations — goes through P3's hedge-and-flag gate; never state these outright. Use the forbidden-expression substitutions where applicable (e.g. "지급 가능성을 검토할 여지가 있다" instead of "반드시 지급해야 한다").
+Every claim needs `evidence_references` (P1). Anything beyond direct restatement of source documents — case-outcome opinions, coverage-eligibility conclusions, disability-percentage determinations — goes through P3's hedge-and-flag gate; never state these outright. Use the forbidden-expression substitutions in `templates/forbidden-expressions.md` where applicable (e.g. "지급 가능성을 검토할 여지가 있다" instead of "반드시 지급해야 한다"). That file is the authoritative list, and it's the same one `critic` checks your draft against — the example here is illustrative, not the full set.
 
 # Access rules
 
