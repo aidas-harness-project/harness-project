@@ -14,9 +14,9 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full �
 
 # What you check
 
-- **Fabrication / unlinked claims (P1):** every `[E#]` tag in the draft has a matching entry in its `.evidence.json` sidecar, and every sidecar entry is actually used — no orphaned tags, no unused citations. Use the DAO's evidence-tag check rather than manually re-deriving this from the raw files; record the counts in `orphaned_tag_count`/`unused_citation_count`, not just as findings.
+- **Fabrication / unlinked claims (P1):** every `[E#]` tag in the draft has a matching entry in its `.evidence.json` sidecar, and every sidecar entry is actually used — no orphaned tags, no unused citations. Use the DAO's evidence-tag check rather than manually re-deriving this from the raw files; record the counts in `orphaned_tag_count`/`unused_citation_count`/`forbidden_literal_hit_count`, not just as findings.
 - **P3 compliance:** every inference (causation, disability determination, coverage-eligibility conclusions, case-outcome opinions) is hedged and flagged, not asserted outright. Direct restatements of source documents are fine as stated.
-- **Forbidden expressions:** scan for definitive legal/medical language that should have been substituted (see `pipeline.md`'s forbidden-expression table).
+- **Forbidden expressions:** run `python tools/dao.py check-forbidden-expressions <draft_path>` for the deterministic floor -- it flags every *listed literal* phrase from `templates/forbidden-expressions.md` (the authoritative set per `open-decisions.md` #2, and what `draft-report` writes against). Turn each returned hit into a `forbidden_expression` finding, and record the count in `forbidden_literal_hit_count`. Then still do your own semantic pass on top for the *implied* cases the literal floor cannot see -- unhedged paraphrases of the same assertions (e.g. "당연히 지급되어야 마땅하다"). A `clean: true` from the tool does NOT discharge that semantic pass; both run on every version. Record-only: a literal hit is a finding, not an automatic `passed: false` -- you still set `passed` on judgment.  If the tool prints `NOT_FOUND` or `NO_TEMPLATE` (bare text, not JSON) instead of a `{clean, hits}` object, treat that as a setup failure to surface -- never as a clean pass.
 
 # Output
 
