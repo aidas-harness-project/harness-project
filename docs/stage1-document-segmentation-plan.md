@@ -148,13 +148,26 @@ page height**. A top-1/3 crop captures the document opening. Two exceptions:
   controls gave no usable baseline), and rendering both directions costs +57% to
   +100% more sheets against a design whose whole point is fewer tokens.
 
-  **No orientation detector ships.** An earlier version had one, and it was
-  deleted: once the model reads rotated pages directly, the flag gated nothing,
-  transformed nothing, and fed nothing but a log line — while still costing real
-  attention to calibrate (its threshold was tuned twice against shifting
-  measurements, and a false positive on an upright page was caught only by a
-  human reading the output). Detecting a condition nobody acts on is not a
-  feature.
+  **Every sheet is rendered three times: as-scanned, +90°, −90°**
+  (`build_sheet_set`, `SHEET_VARIANTS`). Since which way a page is turned is not
+  detectable, produce all three and let whoever is reading — a human doing manual
+  review, or the model — use the legible one. Rendering is cheap (~0.2s a sheet)
+  and costs no extra model calls, because only one variant per sheet is ever
+  sent. Filenames carry the variant (`sheet_02_p033-048_cw.png`).
+
+  This is what makes manual review possible at all: an as-scanned sheet of a
+  sideways run shows table left-edges instead of titles, so without the companion
+  turns a reviewer has no recourse for half the bundle. Verified on the real
+  p33-48 sheet — unreadable as-scanned, and in the `_cw` variant the 진료비
+  세부내역서 titles on p36 and p43 are plainly legible.
+
+  **No orientation detector ships.** An earlier version had one and it was
+  deleted: with all three variants available, a flag saying "this page might be
+  sideways" gates nothing, transforms nothing, and feeds nothing but a log line —
+  while still costing real attention to calibrate (threshold tuned twice against
+  measurements that shift with render size; a false positive on an upright page
+  caught only by a human reading the output). Detecting a condition nobody acts
+  on is not a feature.
 
 ### 7. Corpus-wide token effect
 
