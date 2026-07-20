@@ -130,48 +130,31 @@ Measuring overlay bbox vertical placement, body content starts at **0.02-0.20 of
 page height**. A top-1/3 crop captures the document opening. Two exceptions:
 
 - Pages with no overlay at all exist → blank-crop handling required.
-- **Rotated pages are the norm, not an exception: 51 of 110 (46%).** Scanning
-  every page put them in runs at p21, p29-73, p101-105. `page.rotation` is 0
-  throughout — content orientation, not a PDF flag — so metadata cannot reveal it.
+- **Roughly half the bundle is scanned rotated a quarter turn** (one long run
+  around p29-73 plus a shorter one near the end). `page.rotation` is 0 throughout
+  — content orientation, not a PDF flag — so metadata cannot reveal it.
 
-  **The originally planned detector does not work, and was verified not to.**
-  Comparing the ink bounding box's width to its height fails because a full-page
-  table fills the page whichever way it was scanned: upright p1 measured 348×419
-  and rotated p41 measured 372×531 — both taller than wide, both reported
-  upright, zero detections.
+  **The resolution is to do nothing about it.** Pages are sent to the model in
+  whatever orientation they were scanned, with one prompt line saying some are
+  rotated. Verified on a real 4×4 sheet spanning p65-80 (p65-73 rotated): the
+  model read **all 9 rotated cells, none unreadable**, and found the p74 document
+  boundary at **0.92 confidence**, citing the orientation-and-layout switch itself
+  as its evidence. It also correctly hedged on p65 (confidence 0.45,
+  `needs_full_page`) because a top strip cannot show whether p65 continues from
+  p64 on the previous sheet.
 
-  **Replacement (measured):** compare the variance of the row-projection against
-  the column-projection. Horizontal text concentrates ink into lines, so density
-  oscillates sharply scanning down the page and stays flat scanning across;
-  rotating the page swaps the two. Across all 110 pages the rotated ones top out
-  at 1.36 and the upright ones bottom out at 1.62, so the threshold sits at 1.5.
+  Straightening was considered and rejected: detecting *which way* a page is
+  turned did not work (wrong direction on 3 of 9 known-rotated pages, and upright
+  controls gave no usable baseline), and rendering both directions costs +57% to
+  +100% more sheets against a design whose whole point is fewer tokens.
 
-  *Correction to an earlier claim in this document:* a first pass reported
-  "2.99-27.2 vs 0.43-0.98, ~2× headroom." That came from a 7-page sample and was
-  wrong — the real margin is ±0.14, much tighter. An apparent counterexample
-  (upright p60 scoring 0.057) turned out to be a mislabel on my part: p60 is a
-  rotated 진료비 세부내역서, confirmed by rendering it. The detector was right;
-  the label was not.
-
-- **Rotated pages are left rotated. Do not straighten them.** Two measurements
-  settled this:
-
-  * *Detecting which way a page is turned does not work.* Rotating each way and
-    comparing vertical ink skew within text bands picked the wrong direction on 3
-    of 9 known-rotated pages, and genuinely upright controls scored 0.472-0.551 —
-    no usable baseline. Guessing one direction leaves half the corpus upside
-    down; rendering both directions costs +57% (rotated pages only) to +100% (all
-    pages) more sheets, against a design whose whole point is fewer tokens.
-  * *Asking the model to read them as-is works.* A real 4×4 sheet spanning p65-80
-    (p65-73 rotated, p74-80 upright), with one prompt line saying some pages are
-    rotated, came back having read **all 9 rotated cells, none unreadable**, and
-    found the p74 boundary at **0.92 confidence** citing the orientation-and-
-    layout switch itself as the evidence. It also correctly hedged on p65 —
-    confidence 0.45, listed in `needs_full_page` — because the top strip cannot
-    show whether p65 continues from p64 on the previous sheet.
-
-  So `orientation_suspect` is informational: it feeds human review and explains a
-  low-confidence cell. It gates nothing and transforms nothing.
+  **No orientation detector ships.** An earlier version had one, and it was
+  deleted: once the model reads rotated pages directly, the flag gated nothing,
+  transformed nothing, and fed nothing but a log line — while still costing real
+  attention to calibrate (its threshold was tuned twice against shifting
+  measurements, and a false positive on an upright page was caught only by a
+  human reading the output). Detecting a condition nobody acts on is not a
+  feature.
 
 ### 7. Corpus-wide token effect
 

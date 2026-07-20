@@ -451,41 +451,7 @@ def test_manifest_file_paths_use_forward_slashes_on_every_host():
         assert "\\" not in entry["file_path"]
 
 
-# ------------------------------------------------- orientation / crop --
-
-def _text_page(*, rotated: bool, size=(200, 280)):
-    """Synthesizes a page of text lines, optionally turned a quarter turn."""
-    from PIL import Image, ImageDraw
-
-    img = Image.new("RGB", size, "white")
-    draw = ImageDraw.Draw(img)
-    # Horizontal rules stand in for lines of text: ink concentrated into bands
-    # with gaps between them, which is the structure the detector keys on.
-    for y in range(20, size[1] - 20, 12):
-        draw.rectangle([20, y, size[0] - 20, y + 4], fill="black")
-    return img.rotate(90, expand=True) if rotated else img
-
-
-def test_orientation_detector_separates_upright_from_rotated():
-    assert sc.is_probably_sideways(_text_page(rotated=False)) is False
-    assert sc.is_probably_sideways(_text_page(rotated=True)) is True
-
-
-def test_orientation_ratio_is_not_fooled_by_a_full_page_ink_box():
-    """The bug this replaced: comparing the ink bounding box's aspect reported
-    both an upright page and a rotated one as upright, because a full-page table
-    fills the page either way. Real measurements were 348x419 and 372x531."""
-    upright = sc.orientation_ratio(_text_page(rotated=False))
-    rotated = sc.orientation_ratio(_text_page(rotated=True))
-    assert upright > sc.SIDEWAYS_PROJECTION_THRESHOLD
-    assert rotated < sc.SIDEWAYS_PROJECTION_THRESHOLD
-    assert upright > rotated * 3  # the real corpus showed no overlap at all
-
-
-def test_a_blank_page_is_not_reported_as_rotated():
-    from PIL import Image
-
-    assert sc.is_probably_sideways(Image.new("RGB", (100, 140), "white")) is False
+# ----------------------------------------------------------- cropping --
 
 
 def test_crop_top_keeps_the_requested_fraction():

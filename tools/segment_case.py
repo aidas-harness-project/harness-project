@@ -704,83 +704,6 @@ def crop_top(image, crop_ratio: float):
     return image.crop((0, 0, width, min(keep, height)))
 
 
-# Measured on the real 110p bundle: upright pages scored 2.99-27.2 and rotated
-# tables 0.43-0.98, with no overlap. 1.5 sits in the empty band with roughly 2x
-# headroom on the rotated side and 2x on the upright side.
-SIDEWAYS_PROJECTION_THRESHOLD = 1.5
-
-
-def orientation_ratio(image, *, ink_threshold: int = 200) -> float:
-    """Row-projection variance over column-projection variance.
-
-    Horizontal text concentrates ink into LINES, so scanning down the page the
-    ink density oscillates sharply (line, gap, line, gap) while scanning across
-    it stays comparatively flat. Rotate the page 90 degrees and the two swap.
-    Hence: > 1 means upright text, < 1 means text rotated a quarter turn.
-
-    An earlier version compared the ink bounding box's width to its height. That
-    does not work and was verified not to: on this corpus a full-page table fills
-    the page whichever way it was scanned, so p1 (upright) measured 348x419 and
-    p41 (rotated) measured 372x531 -- both taller than wide, both reported
-    upright. The bbox describes the page, not the text inside it.
-    """
-    grey = image.convert("L")
-    width, height = grey.size
-    if width < 2 or height < 2:
-        return float("inf")
-    pixels = grey.load()
-
-    rows = [0] * height
-    cols = [0] * width
-    ink = 0
-    for y in range(height):
-        for x in range(width):
-            if pixels[x, y] < ink_threshold:
-                rows[y] += 1
-                cols[x] += 1
-                ink += 1
-    if ink == 0:
-        return float("inf")  # A blank page is not rotated; it is blank.
-
-    def variance(values, scale):
-        normalized = [value / scale for value in values]
-        mean = sum(normalized) / len(normalized)
-        return sum((value - mean) ** 2 for value in normalized) / len(normalized)
-
-    row_var = variance(rows, width)
-    col_var = variance(cols, height)
-    return row_var / col_var if col_var else float("inf")
-
-
-def is_probably_sideways(image, *, threshold: float = SIDEWAYS_PROJECTION_THRESHOLD) -> bool:
-    """True when a page's text appears rotated a quarter turn.
-
-    These are common, not exceptional: 51 of the 110p bundle's pages (46%) are
-    rotated, in runs at p21, p29-73, and p101-105, while ``page.rotation`` stays
-    0 throughout -- it is content orientation, not a PDF flag, so metadata cannot
-    reveal it.
-
-    **Pages are NOT rotated upright before compositing, deliberately.** Two things
-    were measured before settling on that:
-
-    * Detecting WHICH way a page is turned does not work. Rotating each way and
-      comparing the vertical ink skew within text bands picked the wrong direction
-      on 3 of 9 known-rotated pages, and genuinely upright control pages scored
-      0.472-0.551 -- no usable baseline. Guessing one direction would leave half
-      the corpus upside down; rendering both would add 57-100% more sheets and
-      defeat the point of the grid.
-    * Asking the model to read them as-is works. A real 4x4 sheet spanning
-      p65-80 (p65-73 rotated, p74-80 upright), with one prompt line saying some
-      pages are rotated, came back having read all 9 rotated cells, none
-      unreadable, and found the p74 document boundary at 0.92 confidence citing
-      the orientation-and-layout switch itself as evidence.
-
-    So this flag is informational: it populates ``orientation_suspect`` for human
-    review and explains a low-confidence cell. It does not gate or transform.
-    """
-    return orientation_ratio(image) < threshold
-
-
 def render_page_images(
     pdf_path: Path,
     pages: list[int],
@@ -841,7 +764,7 @@ def compose_contact_sheet(page_images: dict[int, "object"], sheet_pages: list[in
     sheet = Image.new("RGB", (geometry["sheet_w"], geometry["sheet_h"]), SEPARATOR_COLOR)
     draw = ImageDraw.Draw(sheet)
     font = _load_label_font(max(11, cell_h // 14))
-    flags = {"blank_pages": [], "sideways_pages": []}
+    flags = {"blank_pages": []}
 
     for index in range(cols * rows):
         col, row = index % cols, index // cols
@@ -855,8 +778,6 @@ def compose_contact_sheet(page_images: dict[int, "object"], sheet_pages: list[in
 
         page_number = sheet_pages[index]
         source = page_images[page_number]
-        if is_probably_sideways(source):
-            flags["sideways_pages"].append(page_number)
         cropped = crop_top(source, geometry["crop_ratio"])
         if cropped.size != (cell_w, cell_h):
             cropped = cropped.resize((cell_w, cell_h), Image.LANCZOS)
