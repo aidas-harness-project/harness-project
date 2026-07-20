@@ -409,8 +409,14 @@ def merge_sheet_proposals(
     mentioned |= needs_full_page
 
     boundaries = sorted(boundary_meta)
-    # Case A.
-    if boundaries and boundaries[0] != 1 and 1 not in failed_pages:
+    # Case A, but only when page 1 was actually covered by some sheet. Applying it
+    # to a partial run -- sheets covering p65-80 of an 80-page document, say --
+    # would fabricate a one-page segment at p1 that nothing ever looked at.
+    page_1_was_examined = (
+        1 in mentioned
+        or (sheet_pages and any(1 in covered for covered in sheet_pages))
+    )
+    if boundaries and boundaries[0] != 1 and 1 not in failed_pages and page_1_was_examined:
         warnings.append(
             "page 1 was not reported as a document start; treating it as one "
             "since a bundle's first page necessarily begins some document"
@@ -586,6 +592,66 @@ DEFAULT_SEPARATOR_PX = 4
 DEFAULT_FALLBACK_DPI = 110
 
 
+SEGMENT_PROMPT_VERSION = "segment_contact_sheet_v0.1"
+
+# Verified against a real 4x4 sheet (p65-80 of the 110p bundle, 9 rotated cells):
+# every rotated cell was read and the p74 boundary found at 0.92 confidence.
+#
+# Two constraints from llm_providers.py's recorded failures, both load-bearing:
+#   * Send this through provider.transcribe_image, which prepends the working
+#     "Read the image file at {path} and then:" imperative. The trailing-label
+#     form ("Image: {path}") failed 9/9 with "no image was attached".
+#   * No self-legitimizing framing -- no "this is a sanctioned step", no "do not
+#     refuse". A prior version added that and the child model read it as a
+#     prompt-injection signal and refused. A genuine layout question does not
+#     argue for itself.
+SEGMENT_PROMPT = """This image is a contact sheet: {cell_count} cells in a \
+{cols}x{rows} grid, read left to right then top to bottom. Each cell shows the \
+top portion of one page from a single scanned PDF. The red number in each cell's \
+top-left corner is that page's number in the PDF -- use those numbers in your \
+answer rather than counting cell positions.
+
+Some pages were scanned rotated a quarter turn, so their text runs sideways. \
+Read those cells at whatever orientation they are in.
+
+{blank_note}The PDF concatenates several separate documents. Identify which \
+pages START a new document (a new title block, a different form layout, a \
+different letterhead, a page-1-of-N reset) as opposed to continuing the previous \
+one. A page that visually continues the document above it is not a boundary.
+
+If a cell's top portion is not enough to judge, list that page in \
+needs_full_page rather than guessing.
+
+Reply with ONLY one JSON object:
+{{"boundaries": [{{"page": N, "type_guess": "<one of: {types}>", \
+"type_label": "<the document's name in its own words>", \
+"confidence": 0.0-1.0, "evidence": "<what you saw>"}}],
+ "continuations": [N, ...],
+ "needs_full_page": [N, ...]}}"""
+
+
+def build_segment_prompt(sheet_pages: list[int], geometry: dict) -> str:
+    """Fills the sheet's actual shape into the prompt.
+
+    The blank-cell note only appears on a short final sheet; stating it on a full
+    sheet would invite the model to look for absent cells.
+    """
+    capacity = geometry["cols"] * geometry["rows"]
+    blank_note = ""
+    if len(sheet_pages) < capacity:
+        blank_note = (
+            f"Only the first {len(sheet_pages)} cells contain pages; the rest are "
+            f"blank and should be ignored.\n\n"
+        )
+    return SEGMENT_PROMPT.format(
+        cell_count=capacity,
+        cols=geometry["cols"],
+        rows=geometry["rows"],
+        blank_note=blank_note,
+        types=", ".join(sorted(DOCUMENT_TYPES)),
+    )
+
+
 def sheets_dir(case_id: str, doc_id: str) -> Path:
     """Stable per-document sheet directory -- deliberately not pid-tagged.
 
@@ -689,11 +755,28 @@ def orientation_ratio(image, *, ink_threshold: int = 200) -> float:
 def is_probably_sideways(image, *, threshold: float = SIDEWAYS_PROJECTION_THRESHOLD) -> bool:
     """True when a page's text appears rotated a quarter turn.
 
-    Such pages exist in the corpus (p33-48 of the 110p bundle are landscape
-    tables) while ``page.rotation`` stays 0 -- it is content orientation, not a
-    PDF flag, so metadata cannot reveal it. A top crop of one captures a table's
-    left edge rather than a title, so the cell cannot be judged and the page is
-    routed to the full-page path instead.
+    These are common, not exceptional: 51 of the 110p bundle's pages (46%) are
+    rotated, in runs at p21, p29-73, and p101-105, while ``page.rotation`` stays
+    0 throughout -- it is content orientation, not a PDF flag, so metadata cannot
+    reveal it.
+
+    **Pages are NOT rotated upright before compositing, deliberately.** Two things
+    were measured before settling on that:
+
+    * Detecting WHICH way a page is turned does not work. Rotating each way and
+      comparing the vertical ink skew within text bands picked the wrong direction
+      on 3 of 9 known-rotated pages, and genuinely upright control pages scored
+      0.472-0.551 -- no usable baseline. Guessing one direction would leave half
+      the corpus upside down; rendering both would add 57-100% more sheets and
+      defeat the point of the grid.
+    * Asking the model to read them as-is works. A real 4x4 sheet spanning
+      p65-80 (p65-73 rotated, p74-80 upright), with one prompt line saying some
+      pages are rotated, came back having read all 9 rotated cells, none
+      unreadable, and found the p74 document boundary at 0.92 confidence citing
+      the orientation-and-layout switch itself as evidence.
+
+    So this flag is informational: it populates ``orientation_suspect`` for human
+    review and explains a low-confidence cell. It does not gate or transform.
     """
     return orientation_ratio(image) < threshold
 

@@ -130,24 +130,48 @@ Measuring overlay bbox vertical placement, body content starts at **0.02-0.20 of
 page height**. A top-1/3 crop captures the document opening. Two exceptions:
 
 - Pages with no overlay at all exist → blank-crop handling required.
-- **Sideways-scanned pages exist, and there are far more than expected.**
-  Rendering the interior revealed that **p33-48 — sixteen consecutive pages — are
-  landscape tables rotated a quarter turn**, unreadable even to a human in that
-  orientation. `page.rotation` is 0 throughout, so metadata cannot reveal it.
+- **Rotated pages are the norm, not an exception: 51 of 110 (46%).** Scanning
+  every page put them in runs at p21, p29-73, p101-105. `page.rotation` is 0
+  throughout — content orientation, not a PDF flag — so metadata cannot reveal it.
 
   **The originally planned detector does not work, and was verified not to.**
   Comparing the ink bounding box's width to its height fails because a full-page
   table fills the page whichever way it was scanned: upright p1 measured 348×419
   and rotated p41 measured 372×531 — both taller than wide, both reported
-  upright, zero pages detected.
+  upright, zero detections.
 
-  **Replacement (measured, working):** compare the variance of the row-projection
-  against the column-projection. Horizontal text concentrates ink into lines, so
-  density oscillates sharply scanning down the page and stays flat scanning
-  across; rotate the page and the two swap. On the real bundle, upright pages
-  scored 2.99-27.2 and rotated pages 0.43-0.98 — **no overlap**, so the threshold
-  sits at 1.5 with roughly 2× headroom either way. Verified end to end: all 16 of
-  p33-48 flagged, zero false positives on p81-96 or p1-16.
+  **Replacement (measured):** compare the variance of the row-projection against
+  the column-projection. Horizontal text concentrates ink into lines, so density
+  oscillates sharply scanning down the page and stays flat scanning across;
+  rotating the page swaps the two. Across all 110 pages the rotated ones top out
+  at 1.36 and the upright ones bottom out at 1.62, so the threshold sits at 1.5.
+
+  *Correction to an earlier claim in this document:* a first pass reported
+  "2.99-27.2 vs 0.43-0.98, ~2× headroom." That came from a 7-page sample and was
+  wrong — the real margin is ±0.14, much tighter. An apparent counterexample
+  (upright p60 scoring 0.057) turned out to be a mislabel on my part: p60 is a
+  rotated 진료비 세부내역서, confirmed by rendering it. The detector was right;
+  the label was not.
+
+- **Rotated pages are left rotated. Do not straighten them.** Two measurements
+  settled this:
+
+  * *Detecting which way a page is turned does not work.* Rotating each way and
+    comparing vertical ink skew within text bands picked the wrong direction on 3
+    of 9 known-rotated pages, and genuinely upright controls scored 0.472-0.551 —
+    no usable baseline. Guessing one direction leaves half the corpus upside
+    down; rendering both directions costs +57% (rotated pages only) to +100% (all
+    pages) more sheets, against a design whose whole point is fewer tokens.
+  * *Asking the model to read them as-is works.* A real 4×4 sheet spanning p65-80
+    (p65-73 rotated, p74-80 upright), with one prompt line saying some pages are
+    rotated, came back having read **all 9 rotated cells, none unreadable**, and
+    found the p74 boundary at **0.92 confidence** citing the orientation-and-
+    layout switch itself as the evidence. It also correctly hedged on p65 —
+    confidence 0.45, listed in `needs_full_page` — because the top strip cannot
+    show whether p65 continues from p64 on the previous sheet.
+
+  So `orientation_suspect` is informational: it feeds human review and explains a
+  low-confidence cell. It gates nothing and transforms nothing.
 
 ### 7. Corpus-wide token effect
 
@@ -549,17 +573,16 @@ tell whether a crop-ratio or grid change helped or hurt.
 
 **Still open:**
 
-1. **Fallback saturation** — if >25% of pages get flagged, halt for re-tuning or
-   spend the calls? Now sharper than when first raised: p33-48 alone is 16 pages
-   of one 110p bundle that the crop genuinely cannot judge, so the fallback will
-   fire on real input rather than rarely. Worth deciding before the provider path
-   runs against a full case.
-2. **Sideways pages** — the detector now works (§6), so the open part is only what
-   to do with a flagged page: render it rotated back for the fallback call, send
-   it as-is, or hand it to a human. Rotating it back is cheap and likely correct,
-   but has not been tested.
-3. **Is Mode A viable as the default** — 344 pages is 22 sheets at 4×4. Having
-   now seen a real sheet, a human can scan one in well under a minute, so manual
-   review looks more practical than assumed. Confirm on a full case.
+1. **Fallback saturation** — if a lot of pages get flagged, halt for re-tuning or
+   spend the calls? The picture improved: rotated pages were the feared driver,
+   and the live test showed the model reading them rather than punting, flagging
+   only 4 of 16 pages for full-page review (25%, right at the cap). Two of those
+   four were sheet-edge pages where a full-page look genuinely cannot help — the
+   ambiguity is about the PREVIOUS sheet, not resolution. Worth deciding whether
+   sheet-edge hedges should even count toward saturation.
+2. **Is Mode A viable as the default** — 344 pages is 22 sheets at 4×4. Having now
+   seen real sheets, a human can scan one in well under a minute, so manual review
+   looks more practical than assumed. Confirm on a full case.
 
-**Settled at step 3:** grid size (4×4, §4).
+**Settled at step 3:** grid size (4×4, §4); rotated-page handling (leave them
+rotated, tell the model — §6, verified against a live call).

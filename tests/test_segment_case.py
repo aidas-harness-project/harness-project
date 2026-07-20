@@ -314,6 +314,28 @@ def test_a_failed_sheet_only_costs_its_own_pages():
     assert any("unparseable" in w for w in merged["warnings"])
 
 
+def test_partial_run_does_not_fabricate_a_segment_at_page_one():
+    """Found by feeding a real model response through: sheets covering p65-80 of
+    an 80-page document produced a phantom SEG(1,1), because the 'page 1 starts a
+    document' rule fired for a page no sheet had looked at."""
+    merged = sc.merge_sheet_proposals(
+        [_sheet(boundaries=[74], continuations=list(range(65, 74)))],
+        page_count=80,
+        sheet_pages=[list(range(65, 81))],
+    )
+    assert all(s["page_start"] != 1 for s in merged["segments"])
+    assert 1 in merged["unassigned_pages"]
+
+
+def test_page_one_rule_still_fires_when_page_one_was_examined():
+    merged = sc.merge_sheet_proposals(
+        [_sheet(boundaries=[5], continuations=[1, 2, 3, 4, 6])],
+        page_count=6,
+        sheet_pages=[[1, 2, 3, 4, 5, 6]],
+    )
+    assert merged["segments"][0]["page_start"] == 1
+
+
 def test_merge_carries_boundary_metadata_into_the_segment():
     merged = sc.merge_sheet_proposals(
         [_sheet(boundaries=[{"page": 1, "type_guess": "receipt", "type_label": "영수증",
@@ -552,6 +574,48 @@ def test_sheets_dir_is_stable_and_not_pid_tagged():
     find the previous run's renders rather than redoing 110 pages."""
     assert sc.sheets_dir("CASE_001", "DOC_001") == sc.sheets_dir("CASE_001", "DOC_001")
     assert sc.sheets_dir("CASE_001", "DOC_001").parent == sc.SCRATCH_ROOT
+
+
+# ---------------------------------------------------------------- prompt --
+
+def test_prompt_states_the_actual_grid_shape():
+    geo = sc.compute_sheet_geometry(cols=4, rows=4)
+    prompt = sc.build_segment_prompt(list(range(1, 17)), geo)
+    assert "4x4" in prompt
+    assert "16 cells" in prompt
+
+
+def test_prompt_mentions_blank_cells_only_on_a_short_sheet():
+    """Saying it on a full sheet would invite the model to hunt for absent cells."""
+    geo = sc.compute_sheet_geometry(cols=4, rows=4)
+    assert "blank" not in sc.build_segment_prompt(list(range(1, 17)), geo)
+    short = sc.build_segment_prompt([109, 110], geo)
+    assert "first 2 cells" in short
+
+
+def test_prompt_tells_the_model_to_read_rotated_cells_as_is():
+    """46% of the real bundle is rotated and we deliberately do not straighten
+    it, so the prompt has to carry that instruction."""
+    geo = sc.compute_sheet_geometry()
+    prompt = sc.build_segment_prompt([1, 2, 3], geo)
+    assert "rotated a quarter turn" in prompt
+    assert "whatever orientation" in prompt
+
+
+def test_prompt_carries_no_self_legitimizing_language():
+    """A prior version added 'this is a sanctioned step / do not refuse' framing
+    and the child model read it as prompt injection and refused. A genuine layout
+    question does not argue for itself."""
+    prompt = sc.build_segment_prompt([1], sc.compute_sheet_geometry()).lower()
+    for phrase in ["sanctioned", "do not refuse", "you are allowed", "authorized",
+                   "guardrail", "permitted"]:
+        assert phrase not in prompt
+
+
+def test_prompt_offers_the_real_enum_values():
+    prompt = sc.build_segment_prompt([1], sc.compute_sheet_geometry())
+    for value in sc.DOCUMENT_TYPES:
+        assert value in prompt
 
 
 def test_manifest_entries_validate_against_the_real_schema():
