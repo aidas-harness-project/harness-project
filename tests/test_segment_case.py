@@ -429,6 +429,131 @@ def test_manifest_file_paths_use_forward_slashes_on_every_host():
         assert "\\" not in entry["file_path"]
 
 
+# ------------------------------------------------- orientation / crop --
+
+def _text_page(*, rotated: bool, size=(200, 280)):
+    """Synthesizes a page of text lines, optionally turned a quarter turn."""
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", size, "white")
+    draw = ImageDraw.Draw(img)
+    # Horizontal rules stand in for lines of text: ink concentrated into bands
+    # with gaps between them, which is the structure the detector keys on.
+    for y in range(20, size[1] - 20, 12):
+        draw.rectangle([20, y, size[0] - 20, y + 4], fill="black")
+    return img.rotate(90, expand=True) if rotated else img
+
+
+def test_orientation_detector_separates_upright_from_rotated():
+    assert sc.is_probably_sideways(_text_page(rotated=False)) is False
+    assert sc.is_probably_sideways(_text_page(rotated=True)) is True
+
+
+def test_orientation_ratio_is_not_fooled_by_a_full_page_ink_box():
+    """The bug this replaced: comparing the ink bounding box's aspect reported
+    both an upright page and a rotated one as upright, because a full-page table
+    fills the page either way. Real measurements were 348x419 and 372x531."""
+    upright = sc.orientation_ratio(_text_page(rotated=False))
+    rotated = sc.orientation_ratio(_text_page(rotated=True))
+    assert upright > sc.SIDEWAYS_PROJECTION_THRESHOLD
+    assert rotated < sc.SIDEWAYS_PROJECTION_THRESHOLD
+    assert upright > rotated * 3  # the real corpus showed no overlap at all
+
+
+def test_a_blank_page_is_not_reported_as_rotated():
+    from PIL import Image
+
+    assert sc.is_probably_sideways(Image.new("RGB", (100, 140), "white")) is False
+
+
+def test_crop_top_keeps_the_requested_fraction():
+    from PIL import Image
+
+    cropped = sc.crop_top(Image.new("RGB", (300, 900), "white"), 0.33)
+    assert cropped.size == (300, 297)
+
+
+def test_crop_top_never_exceeds_the_page():
+    from PIL import Image
+
+    cropped = sc.crop_top(Image.new("RGB", (300, 10), "white"), 0.6)
+    assert cropped.size[1] <= 10
+
+
+# ---------------------------------------------------- sheet composition --
+
+def _geometry():
+    return sc.compute_sheet_geometry(cols=2, rows=2, separator_px=4)
+
+
+def _pages(page_numbers, geometry):
+    from PIL import Image
+
+    height = int(geometry["cell_h"] / geometry["crop_ratio"])
+    return {n: Image.new("RGB", (geometry["cell_w"], height), "white")
+            for n in page_numbers}
+
+
+def test_composed_sheet_matches_the_computed_geometry():
+    geo = _geometry()
+    sheet, _ = sc.compose_contact_sheet(_pages([1, 2, 3, 4], geo), [1, 2, 3, 4], geo)
+    assert sheet.size == (geo["sheet_w"], geo["sheet_h"])
+
+
+def test_a_short_final_sheet_keeps_full_canvas_size():
+    """Shrinking it would change geometry between sheets and break the model's
+    spatial expectation; repeating pages would manufacture phantom boundaries."""
+    geo = _geometry()
+    sheet, _ = sc.compose_contact_sheet(_pages([109, 110], geo), [109, 110], geo)
+    assert sheet.size == (geo["sheet_w"], geo["sheet_h"])
+
+
+def test_unused_cells_are_blank_and_unlabelled():
+    geo = _geometry()
+    sheet, _ = sc.compose_contact_sheet(_pages([1, 2], geo), [1, 2], geo)
+    sep = geo["separator_px"]
+    # Bottom-right cell is unused: its interior must be white, not red-boxed.
+    x = sep + (geo["cell_w"] + sep) + geo["cell_w"] // 2
+    y = sep + (geo["cell_h"] + sep) + geo["cell_h"] // 2
+    assert sheet.getpixel((x, y)) == sc.SHEET_BACKGROUND
+
+
+def test_every_cell_is_fully_boxed_including_at_the_sheet_edge():
+    """A cell bounded on only two sides is where 'is this the same document
+    continuing?' ambiguity comes from."""
+    geo = _geometry()
+    sheet, _ = sc.compose_contact_sheet(_pages([1, 2, 3, 4], geo), [1, 2, 3, 4], geo)
+    mid_x, mid_y = geo["sheet_w"] // 2, geo["sheet_h"] // 2
+    assert sheet.getpixel((0, mid_y)) == sc.SEPARATOR_COLOR       # left edge
+    assert sheet.getpixel((geo["sheet_w"] - 1, mid_y)) == sc.SEPARATOR_COLOR
+    assert sheet.getpixel((mid_x, 0)) == sc.SEPARATOR_COLOR       # top edge
+    assert sheet.getpixel((mid_x, geo["sheet_h"] - 1)) == sc.SEPARATOR_COLOR
+
+
+def test_composition_flags_blank_pages():
+    geo = _geometry()
+    sheet, flags = sc.compose_contact_sheet(_pages([1, 2, 3, 4], geo), [1, 2, 3, 4], geo)
+    # Every synthetic page here is blank white.
+    assert flags["blank_pages"] == [1, 2, 3, 4]
+
+
+def test_geometry_fingerprint_changes_with_the_parameters():
+    """Without this, changing --crop-ratio silently reuses stale sheets and the
+    operator compares two runs that actually saw identical images."""
+    base = sc.compute_sheet_geometry(cols=3, rows=4, crop_ratio=0.33)
+    other = sc.compute_sheet_geometry(cols=3, rows=4, crop_ratio=0.4)
+    assert sc.geometry_fingerprint(base, page_count=110) != sc.geometry_fingerprint(other, page_count=110)
+    assert sc.geometry_fingerprint(base, page_count=110) != sc.geometry_fingerprint(base, page_count=77)
+    assert sc.geometry_fingerprint(base, page_count=110) == sc.geometry_fingerprint(base, page_count=110)
+
+
+def test_sheets_dir_is_stable_and_not_pid_tagged():
+    """Sheets are read by a human after the process exits, and a resumed run must
+    find the previous run's renders rather than redoing 110 pages."""
+    assert sc.sheets_dir("CASE_001", "DOC_001") == sc.sheets_dir("CASE_001", "DOC_001")
+    assert sc.sheets_dir("CASE_001", "DOC_001").parent == sc.SCRATCH_ROOT
+
+
 def test_manifest_entries_validate_against_the_real_schema():
     """The point of the v0.5 provenance fields is that they survive validation."""
     from _validation import load_registry, validate_instance

@@ -72,7 +72,23 @@ is cheaper per page than an 8p vertical strip while holding twice as many
 pages.** The vertical strip is strictly worse at the stated goal of saving
 tokens. → **Grid adopted.**
 
-### 4. ⚠️ Grid size is NOT settled — arithmetic and eyeballing disagree
+### 4. Grid size — SETTLED at 4×4 by rendering real sheets (build step 3)
+
+**Resolved.** Rendering the real bundle's first sheet at 2×4, 3×4, and 4×4 and
+looking at them settled this: **4×4 is legible enough**. Titles (손해 사정서,
+진 단 서, 후유장해진단서), letterheads, and even body paragraphs read clearly at a
+387×177 cell. The opening sheet also showed a real document boundary directly —
+p1-13 carry one adjuster's letterhead, p14 switches to a 진단서 — which is the
+signal this stage exists to find.
+
+The earlier concern (list items breaking down at 387px) assumed a render-then-
+downscale pipeline. Rendering each cell **directly at its final size** via a zoom
+matrix removes that loss, so the concern did not materialize. 3×4 is meaningfully
+larger and remains a one-flag change if a harder bundle needs it.
+
+The subsection below is kept as the record of why this was contested.
+
+#### Original analysis — arithmetic and eyeballing disagreed
 
 A flaw in the legibility metric surfaced while planning. Recording it.
 
@@ -114,11 +130,24 @@ Measuring overlay bbox vertical placement, body content starts at **0.02-0.20 of
 page height**. A top-1/3 crop captures the document opening. Two exceptions:
 
 - Pages with no overlay at all exist → blank-crop handling required.
-- **Sideways-scanned pages exist** (p41: a landscape financial table).
-  `page.rotation` is 0, so this is content orientation, not a PDF flag, and
-  cannot be detected from metadata. A top crop captures the table's left edge,
-  not a title. → Flag `orientation_suspect` when the content bbox is wider than
-  tall and route to the full-page path.
+- **Sideways-scanned pages exist, and there are far more than expected.**
+  Rendering the interior revealed that **p33-48 — sixteen consecutive pages — are
+  landscape tables rotated a quarter turn**, unreadable even to a human in that
+  orientation. `page.rotation` is 0 throughout, so metadata cannot reveal it.
+
+  **The originally planned detector does not work, and was verified not to.**
+  Comparing the ink bounding box's width to its height fails because a full-page
+  table fills the page whichever way it was scanned: upright p1 measured 348×419
+  and rotated p41 measured 372×531 — both taller than wide, both reported
+  upright, zero pages detected.
+
+  **Replacement (measured, working):** compare the variance of the row-projection
+  against the column-projection. Horizontal text concentrates ink into lines, so
+  density oscillates sharply scanning down the page and stays flat scanning
+  across; rotate the page and the two swap. On the real bundle, upright pages
+  scored 2.99-27.2 and rotated pages 0.43-0.98 — **no overlap**, so the threshold
+  sits at 1.5 with roughly 2× headroom either way. Verified end to end: all 16 of
+  p33-48 flagged, zero false positives on p81-96 or p1-16.
 
 ### 7. Corpus-wide token effect
 
@@ -496,8 +525,9 @@ tell whether a crop-ratio or grid change helped or hurt.
    **Done when:** the new tests pass and the existing 287 still pass (excluding
    `test_dao_forbidden_expr`'s one pre-existing failure inherited from the main
    merge).
-3. Renderer + compositor + `sheets` (Mode A) → **stop and look at real sheets.**
-   Confirm or overturn §4's grid choice before any provider code exists.
+3. ~~Renderer + compositor → **stop and look at real sheets.**~~ **Done.** Grid
+   settled at 4×4 (§4); the sideways detector was found broken and replaced with
+   a working projection-variance test (§6). `sheets` CLI still to wire up.
 4. Hand-record the ground-truth boundary baseline.
 5. Provider path (`propose`, Mode B) + resume cache + fallback + FixtureProvider tests.
 6. `approve` + `split` + `dao.replace_manifest_documents` + tests.
@@ -519,11 +549,17 @@ tell whether a crop-ratio or grid change helped or hurt.
 
 **Still open:**
 
-1. **Grid size** — arithmetic favors 4×4, eyeballing favors 3×4 or larger (§4).
-   **Settle at build step 3 by looking at real sheets.**
-2. **Fallback saturation** — if >25% of pages get flagged, halt for re-tuning or
-   spend the calls? Best judged after seeing the real trigger rate.
-3. **Is Mode A viable as the default** — can a human really review 344 pages
-   across 29 sheets in the PoC, or should Mode B be the default with humans
-   reviewing its output? Judge after seeing real sheets.
-4. **Sideways pages** — auto-route to full-page, or just flag for the human?
+1. **Fallback saturation** — if >25% of pages get flagged, halt for re-tuning or
+   spend the calls? Now sharper than when first raised: p33-48 alone is 16 pages
+   of one 110p bundle that the crop genuinely cannot judge, so the fallback will
+   fire on real input rather than rarely. Worth deciding before the provider path
+   runs against a full case.
+2. **Sideways pages** — the detector now works (§6), so the open part is only what
+   to do with a flagged page: render it rotated back for the fallback call, send
+   it as-is, or hand it to a human. Rotating it back is cheap and likely correct,
+   but has not been tested.
+3. **Is Mode A viable as the default** — 344 pages is 22 sheets at 4×4. Having
+   now seen a real sheet, a human can scan one in well under a minute, so manual
+   review looks more practical than assumed. Confirm on a full case.
+
+**Settled at step 3:** grid size (4×4, §4).

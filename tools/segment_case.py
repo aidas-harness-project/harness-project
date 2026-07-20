@@ -28,6 +28,7 @@ Two measurements from the real corpus drive the design (see the plan doc):
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -35,6 +36,11 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# Separate from _ocr_scratch/ on purpose. That directory's scratch_dir() rmtrees
+# on exit, but contact sheets must OUTLIVE the process: a human reads them to
+# approve boundaries. It is also already serving four unrelated purposes.
+SCRATCH_ROOT = ROOT / "_segmentation_scratch"
 
 METHOD_VERSION = "segment_contact_sheet_v0.1"
 
@@ -56,10 +62,14 @@ DEFAULT_CROP_RATIO = 0.33
 MIN_CROP_RATIO = 0.2
 MAX_CROP_RATIO = 0.6
 
-# Provisional: the arithmetic favours 4x4, but rendering a real page showed list
-# items under the heading breaking down at a 387px cell. Settled by eye in build
-# step 3 -- deliberately a flag, not a constant, so tuning it is not a rewrite.
-DEFAULT_GRID_COLS = 3
+# Settled by rendering the real bundle at 2x4/3x4/4x4 and looking: at a 387x177
+# cell, titles (손해 사정서, 진 단 서, 후유장해진단서), letterheads and even body
+# paragraphs read clearly, and a real boundary was visible directly (p1-13 carry
+# one letterhead; p14 switches to a 진단서). An earlier concern that list items
+# would break down at this size assumed a render-then-downscale pipeline;
+# rendering each cell straight at final size via the zoom matrix avoids that loss.
+# Still a flag, not a constant -- 3x4 is meaningfully larger for a harder bundle.
+DEFAULT_GRID_COLS = 4
 DEFAULT_GRID_ROWS = 4
 
 # Mirrors common_component_output.schema.json#/$defs/document_type. Duplicated as
@@ -557,3 +567,226 @@ def build_manifest_entries(
             "classification_confidence": None,
         })
     return entries
+
+
+# ------------------------------------------------------- render/compose --
+
+# Pure red: scanned documents contain no saturated red, so separators cannot be
+# confused with page content even after the model's own resampling.
+SEPARATOR_COLOR = (255, 0, 0)
+SHEET_BACKGROUND = (255, 255, 255)
+LABEL_TEXT_COLOR = (255, 255, 255)
+
+# 3px reads as antialiasing noise once the sheet is resampled; 4px survives.
+DEFAULT_SEPARATOR_PX = 4
+
+# Used only for the full-page fallback, where fidelity genuinely matters. Contact
+# sheet cells are rendered straight at cell size via the geometry's zoom, because
+# the long-edge cap makes any higher resolution pure waste.
+DEFAULT_FALLBACK_DPI = 110
+
+
+def sheets_dir(case_id: str, doc_id: str) -> Path:
+    """Stable per-document sheet directory -- deliberately not pid-tagged.
+
+    Sheets are reviewed by a human after the process exits, and a resumed run
+    should find the previous run's sheets rather than re-rendering 110 pages.
+    """
+    return SCRATCH_ROOT / f"{case_id}_{doc_id}"
+
+
+def geometry_fingerprint(geometry: dict, *, page_count: int) -> str:
+    """Identifies the parameters a cached sheet was rendered under.
+
+    Without this, changing --crop-ratio or --grid silently reuses stale PNGs and
+    the operator compares two runs that actually saw the same images -- a nasty
+    and nearly invisible failure.
+    """
+    payload = json.dumps({
+        "cols": geometry["cols"],
+        "rows": geometry["rows"],
+        "crop_ratio": geometry["crop_ratio"],
+        "separator_px": geometry["separator_px"],
+        "cell_w": geometry["cell_w"],
+        "cell_h": geometry["cell_h"],
+        "page_count": page_count,
+        "method_version": METHOD_VERSION,
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_label_font(size: int):
+    from PIL import ImageFont
+
+    for candidate in ("arial.ttf", "malgun.ttf", "DejaVuSans.ttf"):
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def crop_top(image, crop_ratio: float):
+    """Keeps the top fraction of a page.
+
+    Titles and form headers sit in the top fifth across this corpus, so a third
+    captures the identifying structure while letting four times as many pages
+    share one sheet.
+    """
+    width, height = image.size
+    keep = max(1, int(round(height * crop_ratio)))
+    return image.crop((0, 0, width, min(keep, height)))
+
+
+# Measured on the real 110p bundle: upright pages scored 2.99-27.2 and rotated
+# tables 0.43-0.98, with no overlap. 1.5 sits in the empty band with roughly 2x
+# headroom on the rotated side and 2x on the upright side.
+SIDEWAYS_PROJECTION_THRESHOLD = 1.5
+
+
+def orientation_ratio(image, *, ink_threshold: int = 200) -> float:
+    """Row-projection variance over column-projection variance.
+
+    Horizontal text concentrates ink into LINES, so scanning down the page the
+    ink density oscillates sharply (line, gap, line, gap) while scanning across
+    it stays comparatively flat. Rotate the page 90 degrees and the two swap.
+    Hence: > 1 means upright text, < 1 means text rotated a quarter turn.
+
+    An earlier version compared the ink bounding box's width to its height. That
+    does not work and was verified not to: on this corpus a full-page table fills
+    the page whichever way it was scanned, so p1 (upright) measured 348x419 and
+    p41 (rotated) measured 372x531 -- both taller than wide, both reported
+    upright. The bbox describes the page, not the text inside it.
+    """
+    grey = image.convert("L")
+    width, height = grey.size
+    if width < 2 or height < 2:
+        return float("inf")
+    pixels = grey.load()
+
+    rows = [0] * height
+    cols = [0] * width
+    ink = 0
+    for y in range(height):
+        for x in range(width):
+            if pixels[x, y] < ink_threshold:
+                rows[y] += 1
+                cols[x] += 1
+                ink += 1
+    if ink == 0:
+        return float("inf")  # A blank page is not rotated; it is blank.
+
+    def variance(values, scale):
+        normalized = [value / scale for value in values]
+        mean = sum(normalized) / len(normalized)
+        return sum((value - mean) ** 2 for value in normalized) / len(normalized)
+
+    row_var = variance(rows, width)
+    col_var = variance(cols, height)
+    return row_var / col_var if col_var else float("inf")
+
+
+def is_probably_sideways(image, *, threshold: float = SIDEWAYS_PROJECTION_THRESHOLD) -> bool:
+    """True when a page's text appears rotated a quarter turn.
+
+    Such pages exist in the corpus (p33-48 of the 110p bundle are landscape
+    tables) while ``page.rotation`` stays 0 -- it is content orientation, not a
+    PDF flag, so metadata cannot reveal it. A top crop of one captures a table's
+    left edge rather than a title, so the cell cannot be judged and the page is
+    routed to the full-page path instead.
+    """
+    return orientation_ratio(image) < threshold
+
+
+def render_page_images(
+    pdf_path: Path,
+    pages: list[int],
+    *,
+    zoom: float,
+    progress=None,
+) -> dict[int, "object"]:
+    """Renders the given 1-based pages at exactly the target zoom.
+
+    Rendering directly at cell size skips the intermediate full-resolution bitmap
+    entirely. tools/ocr_extract.split_to_page_images is deliberately NOT reused:
+    its DPI is hard-coded in both backends and is a quality-affecting constant on
+    the P8 OCR path, so parameterizing it would put a preview's convenience ahead
+    of OCR's blast radius.
+    """
+    import fitz
+    from PIL import Image
+
+    rendered: dict[int, object] = {}
+    with fitz.open(pdf_path) as document:
+        matrix = fitz.Matrix(zoom, zoom)
+        for page_number in pages:
+            if page_number < 1 or page_number > document.page_count:
+                raise SegmentationError(
+                    f"page {page_number} is outside {pdf_path.name}'s "
+                    f"{document.page_count} pages"
+                )
+            pixmap = document[page_number - 1].get_pixmap(matrix=matrix)
+            rendered[page_number] = Image.frombytes(
+                "RGB", (pixmap.width, pixmap.height), pixmap.samples
+            )
+            if progress:
+                progress(f"rendered page {page_number}")
+    return rendered
+
+
+def compose_contact_sheet(page_images: dict[int, "object"], sheet_pages: list[int], geometry: dict):
+    """Lays cropped page tops into a grid with red separators and page numbers.
+
+    Three choices worth keeping:
+
+    * Every cell is fully boxed, including at the sheet edge. A cell bounded on
+      only two sides is exactly where "is this the same document continuing?"
+      ambiguity comes from.
+    * Labels carry the ABSOLUTE source page number, so the model never counts
+      grid positions to answer -- which is the entire reason the numbers exist.
+    * A short final sheet keeps full canvas size with blank, unlabelled cells.
+      Shrinking it would change the geometry between sheets and break the model's
+      spatial expectation; repeating pages to fill would manufacture phantom
+      boundaries.
+    """
+    from PIL import Image, ImageDraw
+
+    cols, rows = geometry["cols"], geometry["rows"]
+    cell_w, cell_h = geometry["cell_w"], geometry["cell_h"]
+    sep = geometry["separator_px"]
+
+    sheet = Image.new("RGB", (geometry["sheet_w"], geometry["sheet_h"]), SEPARATOR_COLOR)
+    draw = ImageDraw.Draw(sheet)
+    font = _load_label_font(max(11, cell_h // 14))
+    flags = {"blank_pages": [], "sideways_pages": []}
+
+    for index in range(cols * rows):
+        col, row = index % cols, index // cols
+        x = sep + col * (cell_w + sep)
+        y = sep + row * (cell_h + sep)
+
+        if index >= len(sheet_pages):
+            # Blank filler: white, unboxed, unlabelled -- visually unambiguous.
+            draw.rectangle([x, y, x + cell_w - 1, y + cell_h - 1], fill=SHEET_BACKGROUND)
+            continue
+
+        page_number = sheet_pages[index]
+        source = page_images[page_number]
+        if is_probably_sideways(source):
+            flags["sideways_pages"].append(page_number)
+        cropped = crop_top(source, geometry["crop_ratio"])
+        if cropped.size != (cell_w, cell_h):
+            cropped = cropped.resize((cell_w, cell_h), Image.LANCZOS)
+        if not cropped.convert("L").point(lambda v: 255 if v < 200 else 0).getbbox():
+            flags["blank_pages"].append(page_number)
+
+        sheet.paste(cropped, (x, y))
+
+        label = f"p{page_number}"
+        text_box = draw.textbbox((0, 0), label, font=font)
+        chip_w = text_box[2] - text_box[0] + 10
+        chip_h = text_box[3] - text_box[1] + 8
+        draw.rectangle([x, y, x + chip_w, y + chip_h], fill=SEPARATOR_COLOR)
+        draw.text((x + 5, y + 3), label, fill=LABEL_TEXT_COLOR, font=font)
+
+    return sheet, flags
