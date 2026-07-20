@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "critic_result.schema.json",
-  "title": "critic_result.json -- blind draft review findings v0.1",
+  "title": "critic_result.json -- blind draft review findings v0.2",
   "description": "Produced by critic, on every draft report version (draft_report_v1.md in Phase 1, draft_report_v2.md in Phase 2). Structurally never reads ground truth -- see critic.md.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
@@ -25,6 +25,11 @@
           "type": "integer",
           "minimum": 0,
           "description": "Sidecar entries never referenced by a tag in the document."
+        },
+        "forbidden_literal_hit_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of listed literal forbidden phrases found in the draft by dao.py check-forbidden-expressions. Optional/additive (deliberately NOT in required) -- critic outputs written before 2026-07-18 legitimately omit it. Floor only: the listed literal phrases, not the semantic P3 pass."
         },
         "findings": {
           "type": "array",
