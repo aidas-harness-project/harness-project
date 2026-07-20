@@ -525,6 +525,55 @@ def test_composition_flags_blank_pages():
     assert flags["blank_pages"] == [1, 2, 3, 4]
 
 
+def test_sheet_variants_cover_both_quarter_turns_and_the_original():
+    """Roughly half this corpus is scanned sideways and which way is not
+    detectable, so every sheet is produced in all three orientations and whoever
+    reads them picks the legible one. Rendering is cheap; the model call is not,
+    and only one variant per sheet is ever sent."""
+    names = [name for name, _ in sc.SHEET_VARIANTS]
+    angles = [angle for _, angle in sc.SHEET_VARIANTS]
+    assert names == ["as_scanned", "cw", "ccw"]
+    assert angles == [0, -90, 90]
+
+
+def test_rotated_render_lands_on_cell_width_not_cell_height(tmp_path):
+    """A quarter turn swaps the axes, so a naive render would come out sized to
+    the wrong dimension and get squashed on paste."""
+    import fitz
+
+    pdf = tmp_path / "two.pdf"
+    doc = fitz.open()
+    for _ in range(2):
+        doc.new_page(width=595, height=841)
+    doc.save(pdf)
+    doc.close()
+
+    geo = sc.compute_sheet_geometry()
+    upright = sc.render_page_images(pdf, [1], zoom=geo["zoom"])[1]
+    turned = sc.render_page_images(pdf, [1], zoom=geo["zoom"], rotate=-90)[1]
+    assert abs(upright.size[0] - geo["cell_w"]) <= 2
+    assert abs(turned.size[0] - geo["cell_w"]) <= 2
+
+
+def test_build_sheet_set_writes_one_file_per_sheet_per_variant(tmp_path):
+    import fitz
+
+    pdf = tmp_path / "bundle.pdf"
+    doc = fitz.open()
+    for _ in range(20):  # 20 pages at 16/sheet -> 2 sheets
+        doc.new_page(width=595, height=841)
+    doc.save(pdf)
+    doc.close()
+
+    result = sc.build_sheet_set(pdf, tmp_path / "sheets")
+    assert set(result["sheets"]) == {"as_scanned", "cw", "ccw"}
+    assert all(len(paths) == 2 for paths in result["sheets"].values())
+    assert len(list((tmp_path / "sheets").glob("*.png"))) == 6
+    # The variant has to be in the filename or a reviewer cannot tell them apart.
+    for variant, paths in result["sheets"].items():
+        assert all(variant in p.name for p in paths)
+
+
 def test_geometry_fingerprint_changes_with_the_parameters():
     """Without this, changing --crop-ratio silently reuses stale sheets and the
     operator compares two runs that actually saw identical images."""

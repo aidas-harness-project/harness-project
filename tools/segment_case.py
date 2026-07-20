@@ -709,6 +709,7 @@ def render_page_images(
     pages: list[int],
     *,
     zoom: float,
+    rotate: int = 0,
     progress=None,
 ) -> dict[int, "object"]:
     """Renders the given 1-based pages at exactly the target zoom.
@@ -718,13 +719,26 @@ def render_page_images(
     its DPI is hard-coded in both backends and is a quality-affecting constant on
     the P8 OCR path, so parameterizing it would put a preview's convenience ahead
     of OCR's blast radius.
+
+    ``rotate`` turns every page by that many degrees counter-clockwise (use -90
+    for clockwise) before it reaches the compositor. Roughly half this corpus is
+    scanned a quarter turn over, and which turn is not detectable, so the
+    companion sheets are produced by rendering the same pages at -90 and +90 --
+    see build_sheet_set. The zoom is adjusted so a rotated page still lands on
+    the cell width rather than the cell height.
     """
     import fitz
     from PIL import Image
 
+    # A quarter turn swaps the axes, so to land on cell_w AFTER rotating we have
+    # to render to cell_w in the other axis first.
+    effective_zoom = zoom
+    if rotate % 180 != 0:
+        effective_zoom = zoom * (DEFAULT_PAGE_WIDTH_PT / DEFAULT_PAGE_HEIGHT_PT)
+
     rendered: dict[int, object] = {}
     with fitz.open(pdf_path) as document:
-        matrix = fitz.Matrix(zoom, zoom)
+        matrix = fitz.Matrix(effective_zoom, effective_zoom)
         for page_number in pages:
             if page_number < 1 or page_number > document.page_count:
                 raise SegmentationError(
@@ -732,9 +746,10 @@ def render_page_images(
                     f"{document.page_count} pages"
                 )
             pixmap = document[page_number - 1].get_pixmap(matrix=matrix)
-            rendered[page_number] = Image.frombytes(
-                "RGB", (pixmap.width, pixmap.height), pixmap.samples
-            )
+            image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+            if rotate % 360:
+                image = image.rotate(rotate, expand=True)
+            rendered[page_number] = image
             if progress:
                 progress(f"rendered page {page_number}")
     return rendered
@@ -794,3 +809,58 @@ def compose_contact_sheet(page_images: dict[int, "object"], sheet_pages: list[in
         draw.text((x + 5, y + 3), label, fill=LABEL_TEXT_COLOR, font=font)
 
     return sheet, flags
+
+
+# Rendered for every sheet: the scanned orientation plus both quarter turns.
+# Roughly half this corpus is scanned sideways and which way is NOT detectable --
+# an attempt at it picked the wrong direction on 3 of 9 known-rotated pages, and
+# upright control pages gave no usable baseline. Rather than guess, produce all
+# three and let whoever is reading (human or model) use the legible one.
+SHEET_VARIANTS = (("as_scanned", 0), ("cw", -90), ("ccw", 90))
+
+
+def build_sheet_set(
+    pdf_path: Path,
+    out_dir: Path,
+    *,
+    geometry: dict | None = None,
+    page_count: int | None = None,
+    variants=SHEET_VARIANTS,
+    progress=None,
+) -> dict:
+    """Renders every contact sheet in each orientation variant.
+
+    A sideways page's top crop shows a table's left edge instead of its title, so
+    a single as-scanned sheet leaves those pages unreadable with no recourse. The
+    companion turns cost only render time -- no extra model calls, since the
+    proposal path sends one variant per sheet.
+
+    Returns ``{variant: [paths]}`` plus the geometry used.
+    """
+    import fitz
+
+    geometry = geometry or compute_sheet_geometry()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if page_count is None:
+        with fitz.open(pdf_path) as document:
+            page_count = document.page_count
+
+    batches = plan_sheets(page_count, geometry["pages_per_sheet"])
+    produced: dict[str, list[Path]] = {}
+
+    for variant, angle in variants:
+        paths = []
+        for index, pages in enumerate(batches):
+            images = render_page_images(pdf_path, pages, zoom=geometry["zoom"], rotate=angle)
+            sheet, _ = compose_contact_sheet(images, pages, geometry)
+            path = out_dir / (
+                f"sheet_{index:02d}_p{pages[0]:03d}-{pages[-1]:03d}_{variant}.png"
+            )
+            sheet.save(path)
+            paths.append(path)
+            if progress:
+                progress(f"{variant} sheet {index} (p{pages[0]}-{pages[-1]})")
+        produced[variant] = paths
+
+    return {"geometry": geometry, "page_count": page_count, "sheets": produced}
