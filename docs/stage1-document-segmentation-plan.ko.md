@@ -192,10 +192,52 @@ split   CASE_ID DOC_ID --held-by NAME --run-id RUN_ID
 `parse_segmentation_response(raw, sheet_pages)` (`redact_document._parse_redaction`의
 `JSONDecoder().raw_decode` 스캔 루프 차용),
 `validate_segments(segments, page_count)`,
-**`merge_sheet_proposals(per_sheet, page_count)`** — 시트 경계를 넘어가는 문서를
-올바로 잇는다. 시트 1이 p12에서 끝나고 문서가 계속되면 p12에서 자르면 안 된다.
-**이 도구에서 가장 correctness 버그가 나기 쉬운 지점**,
+**`merge_sheet_proposals(per_sheet, page_count)`**,
 `build_manifest_entries(...)`
+
+#### 2단계 상세: 파서의 실패 방식 (기존 두 선례가 갈린다)
+
+- `redact_document._parse_redaction`은 **예외를 던진다**(`ProviderExecutionError`)
+- `intake_case._parse_content_scan_verdict`는 **dict 반환 + fail-safe**
+
+세그먼테이션은 **후자**를 따른다. 한 시트의 파싱 실패가 나머지 시트까지 죽이면 안 되고
+(비싼 비전 호출을 이미 지불했다), 계획의 "경계를 발명하지 않는다" 원칙상 실패는
+"그 시트가 다루는 페이지를 `unassigned_pages`로 남기고 경고"로 표현되어야 한다.
+→ `parse_segmentation_response`는 `{"ok": bool, "boundaries": [...],
+"continuations": [...], "needs_full_page": [...], "warning": str|None}` 반환.
+**예외를 던지지 않는다.**
+
+단, `raw_decode` 스캔 루프 자체는 `_parse_redaction`에서 그대로 차용한다
+(후행/선행 산문 내성이 필요한 이유는 동일하다).
+
+#### 2단계 상세: `merge_sheet_proposals` 알고리즘
+
+핵심 통찰: **세그먼트 경계는 `boundaries`의 합집합만으로 결정되고, 시트 경계는 아무
+의미가 없다.** `continuations`는 커버리지 검증용이지 분할 근거가 아니다. 이렇게 보면
+"시트를 넘는 문서" 문제가 자동으로 사라진다.
+
+```
+시트1: p1-12   boundaries=[1]        continuations=[2..12]
+시트2: p13-24  boundaries=[15]       continuations=[13,14,16..24]
+올바름:  SEG(1-14), SEG(15-24)
+틀림:    SEG(1-12), SEG(13-14), SEG(15-24)   <- 시트 경계에서 잘림
+```
+
+두 필드의 역할이 대칭이 아니다: **`boundaries`만 세그먼트를 만들고,
+`continuations`는 "모델이 이 페이지를 실제로 봤다"는 커버리지 확인용**이다. 그래서
+양쪽 어디에도 없는 페이지가 "모델이 빠뜨렸다"는 신호가 된다.
+
+경계 사례 처리 **(4건 모두 사용자 확정)**:
+
+| 사례 | 처리 | 근거 |
+|---|---|---|
+| **A.** p1이 boundary로 보고 안 됨 | **p1을 경계로 간주** + 경고 | 번들의 1페이지는 정의상 무언가의 첫 페이지다. 모델이 말하지 않아도 사실이 바뀌지 않는다 |
+| **B.** 어떤 페이지가 양쪽에 다 없음 | **`unassigned_pages`로 남김** | 모델이 언급조차 안 한 페이지를 앞 문서에 조용히 편입시키면 사람이 그 사실을 모른 채 승인한다. split이 미할당에서 멈추므로 반드시 사람이 본다 |
+| **C.** `needs_full_page` 페이지 | **full-page fallback으로 재확인**(§F) 후 그 답으로 확정. 2차에서도 판단 불가면 세그먼트에 `needs_full_page: true` 플래그를 남기고 사람에게 | 추측 대신 실제 근거로 판단한다. 3차 라운드는 없다 |
+| **D.** 같은 페이지가 boundary이자 continuation | **boundary 우선** + `warnings`에 모순 기록 | 오류 비용이 비대칭이다. 과분할은 사람이 시트 보고 합치면 끝이지만, 과병합은 OCR·분류·필드추출이 전부 잘못된 경계에서 돈 뒤에야 드러나고 그때는 하위 산출물이 이미 오염돼 있다 |
+
+`ok: false`인 시트가 섞여 있으면 **그 시트의 페이지 범위만** `unassigned_pages`로
+가고, 나머지 시트의 경계는 정상 처리한다.
 
 **오케스트레이션**: `segment_case(..., provider=None, progress=None, resume=True) -> dict`.
 `run_checkpoint1.run_checkpoint1()` 계약 준수 — **provider 주입식, 예외 대신 status dict
@@ -366,8 +408,22 @@ manifest는 전부-아니면-전무. 고아 `DOC_XXX.pdf`는 복구 가능하지
 
 ## 구현 순서
 
-1. `.gitignore` + 신규 스키마 + manifest v0.5; 기존 manifest 회귀 검증
-2. 순수 함수 + 테스트 (아직 I/O 없음)
+1. ~~`.gitignore` + 신규 스키마 + manifest v0.5; 기존 manifest 회귀 검증~~
+   **완료** (`a5f35ef`) — `ocr_performed` const 가드 동작 확인, 7가지 accept/reject
+   케이스 검증, 기존 manifest 6개 회귀 없음
+2. **← 지금 여기.** 순수 함수 + 테스트 (아직 I/O 없음)
+   **범위 (사용자 확정): 순수 함수와 테스트만. 렌더링/합성은 3단계로.**
+
+   `tools/segment_case.py`에 I/O 없는 함수 6개만 작성:
+   `compute_sheet_geometry`, `plan_sheets`, `parse_segmentation_response`,
+   `validate_segments`, `merge_sheet_proposals`, `build_manifest_entries`
+
+   `tests/test_segment_case.py` 신규 (§I의 기하/plan_sheets/파싱/세그먼트검증/merge
+   항목). 나머지 테스트 항목은 해당 코드가 생기는 단계에서.
+
+   **완료 기준**: 새 테스트 전부 통과 + 기존 287개 통과 유지
+   (`test_dao_forbidden_expr`의 1건은 merge에서 들어온 기존 실패라 제외)
+
 3. 렌더러 + 합성기 + `sheets`(Mode A) → **여기서 멈추고 실제 시트를 눈으로 본다.**
    provider 코드가 존재하기 전에 §4의 격자 선택을 확정하거나 뒤집는다
 4. 손으로 ground-truth 경계 베이스라인 기록
@@ -378,13 +434,20 @@ manifest는 전부-아니면-전무. 고아 `DOC_XXX.pdf`는 복구 가능하지
 
 ---
 
-## 열린 결정 (사용자 확인 필요)
+## 열린 결정
 
+**해결됨:**
+- ~~`downstream_disposition`~~ → `superseded_bundle` enum 추가로 확정, 1단계에서 구현
+  완료. `expert_review_only`를 재사용하지 않은 이유는 그 값의 조건부가
+  `non_text_verification`(사람이 사진 증거임을 확인했다는 주장)을 요구하는데, 대체된
+  번들에는 그게 거짓이기 때문 — 기록에 허위 사람 검증을 남기게 된다.
+- ~~merge 경계 사례 4건~~ → 위 표에서 확정.
+
+**남은 것:**
 1. **격자 크기** — 산수는 4×4를 지지하지만 실물 육안은 3×4 이상을 지지한다(§4).
-   3단계에서 실제 시트를 보고 확정.
+   **3단계에서 실제 시트를 보고 확정.**
 2. **Fallback 포화 시** — 25% 초과로 플래그되면 재튜닝을 위해 중단할지, 비용을 지출할지.
-3. **`downstream_disposition`** — `superseded_bundle` enum 추가(권장) vs 기존 조건부를
-   좁히는 boolean 추가.
-4. **Mode A 기본값의 실효성** — 344페이지를 사람이 29장 시트로 검토하는 노동을 PoC에서
+   실제 발동률을 본 뒤 판단하는 게 맞다.
+3. **Mode A 기본값의 실효성** — 344페이지를 사람이 29장 시트로 검토하는 노동을 PoC에서
    감당할지, Mode B 기본 + 사람 검수로 갈지. 실제 시트를 본 뒤 판단.
-5. **눕은 페이지** — full-page로 자동 우회할지, 사람에게 플래그만 할지.
+4. **눕은 페이지** — full-page로 자동 우회할지, 사람에게 플래그만 할지.

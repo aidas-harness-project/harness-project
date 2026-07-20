@@ -221,13 +221,56 @@ print paths, stop. **Zero LLM calls.**
 
 **Pure functions (testable):** `compute_sheet_geometry(...)` (encodes both caps,
 tested at boundaries), `plan_sheets(page_count, per_sheet)`,
-`parse_segmentation_response(raw, sheet_pages)` (borrow the
-`JSONDecoder().raw_decode` scan loop from `redact_document._parse_redaction`),
+`parse_segmentation_response(raw, sheet_pages)`,
 `validate_segments(segments, page_count)`,
-**`merge_sheet_proposals(per_sheet, page_count)`** — correctly joins a document
-spanning a sheet break; if sheet 1 ends at p12 mid-document, p12 must not become
-a boundary. **This is where a correctness bug is most likely.**
-`build_manifest_entries(...)`.
+`merge_sheet_proposals(per_sheet, page_count)`, `build_manifest_entries(...)`.
+
+#### Parser failure mode — the two existing precedents disagree
+
+- `redact_document._parse_redaction` **raises** (`ProviderExecutionError`).
+- `intake_case._parse_content_scan_verdict` **returns a dict and fails safe**.
+
+Segmentation follows the **second**. One sheet failing to parse must not kill the
+sheets around it — their expensive vision calls are already paid for — and under
+this plan's "never invent a boundary" rule, a failure is properly expressed as
+"leave that sheet's pages in `unassigned_pages` and warn."
+
+`parse_segmentation_response` therefore returns `{"ok": bool, "boundaries": [...],
+"continuations": [...], "needs_full_page": [...], "warning": str|None}` and
+**never raises**. The `raw_decode` scan loop itself is still borrowed verbatim
+from `_parse_redaction` — the need for tolerance to leading/trailing prose is
+identical.
+
+#### `merge_sheet_proposals` algorithm
+
+The key insight: **segment boundaries come from the union of `boundaries` alone,
+and sheet edges carry no meaning whatsoever.** `continuations` is a coverage
+check, not a basis for splitting. Seen that way, the "document spanning a sheet
+break" problem disappears rather than needing special handling.
+
+```
+sheet 1: p1-12   boundaries=[1]   continuations=[2..12]
+sheet 2: p13-24  boundaries=[15]  continuations=[13,14,16..24]
+correct: SEG(1-14), SEG(15-24)
+wrong:   SEG(1-12), SEG(13-14), SEG(15-24)   <- cut at the sheet edge
+```
+
+The two fields are **not symmetric**: only `boundaries` creates segments, while
+`continuations` records that the model actually looked at a page. That asymmetry
+is what makes a page missing from *both* lists a meaningful signal that the model
+skipped it.
+
+Edge cases — **all four confirmed with the owner**:
+
+| Case | Handling | Why |
+|---|---|---|
+| **A.** p1 not reported as a boundary | **Treat p1 as a boundary** + warn | Page 1 of a bundle is by definition the first page of something. The model not saying so does not change that. |
+| **B.** A page appears in neither list | **Leave it in `unassigned_pages`** | Silently absorbing a page the model never mentioned means a human approves without knowing. `split` halts on unassigned pages, so a human necessarily sees it. |
+| **C.** A `needs_full_page` page | **Re-check via the full-page fallback** (§F) and use that verdict. If still unjudgeable, flag the segment `needs_full_page: true` for a human | Decide on real evidence rather than a guess. There is no third round. |
+| **D.** A page in both lists (contradiction) | **Boundary wins**, contradiction recorded in `warnings` | The error costs are asymmetric. Over-splitting is fixed by a human merging two segments; over-merging surfaces only after OCR, classification, and field extraction have all run on wrong boundaries, by which point downstream artifacts are contaminated. |
+
+If some sheets returned `ok: false`, **only those sheets' page ranges** go to
+`unassigned_pages`; boundaries from the healthy sheets are processed normally.
 
 **Orchestration:** `segment_case(..., provider=None, progress=None, resume=True)
 -> dict`, following `run_checkpoint1.run_checkpoint1()`'s contract — **providers
@@ -435,8 +478,24 @@ tell whether a crop-ratio or grid change helped or hurt.
 
 ## Build order
 
-1. `.gitignore` + new schema + manifest v0.5; check existing manifests for regression.
-2. Pure functions + tests. No I/O yet.
+1. ~~`.gitignore` + new schema + manifest v0.5; check existing manifests for
+   regression.~~ **Done** (`a5f35ef`): the `ocr_performed` const guard is verified
+   to reject a proposal claiming OCR ran, 7 accept/reject cases behave as
+   intended, and all 6 existing manifests still validate.
+2. **← current.** Pure functions + tests. No I/O yet.
+   **Scope (owner-confirmed): pure functions and tests only; rendering and
+   compositing move to step 3.**
+
+   Six I/O-free functions in `tools/segment_case.py`: `compute_sheet_geometry`,
+   `plan_sheets`, `parse_segmentation_response`, `validate_segments`,
+   `merge_sheet_proposals`, `build_manifest_entries`. New
+   `tests/test_segment_case.py` covering the geometry / `plan_sheets` / parsing /
+   segment-validation / merge items from §I; the rest arrive with the code they
+   test.
+
+   **Done when:** the new tests pass and the existing 287 still pass (excluding
+   `test_dao_forbidden_expr`'s one pre-existing failure inherited from the main
+   merge).
 3. Renderer + compositor + `sheets` (Mode A) → **stop and look at real sheets.**
    Confirm or overturn §4's grid choice before any provider code exists.
 4. Hand-record the ground-truth boundary baseline.
@@ -447,15 +506,24 @@ tell whether a crop-ratio or grid change helped or hurt.
 
 ---
 
-## Open decisions (need the owner)
+## Open decisions
+
+**Settled:**
+
+- ~~`downstream_disposition`~~ → resolved as a new `superseded_bundle` enum value,
+  implemented in step 1. `expert_review_only` was not reused because its
+  conditional requires `non_text_verification` — an assertion that a human
+  confirmed photographic evidence, which is false for a superseded bundle and
+  would put a fabricated human verification into the record.
+- ~~The four `merge_sheet_proposals` edge cases~~ → settled in the table above.
+
+**Still open:**
 
 1. **Grid size** — arithmetic favors 4×4, eyeballing favors 3×4 or larger (§4).
-   Settle at build step 3 by looking at real sheets.
+   **Settle at build step 3 by looking at real sheets.**
 2. **Fallback saturation** — if >25% of pages get flagged, halt for re-tuning or
-   spend the calls?
-3. **`downstream_disposition`** — add a `superseded_bundle` enum value
-   (recommended) or a boolean narrowing the existing conditional?
-4. **Is Mode A viable as the default** — can a human really review 344 pages
+   spend the calls? Best judged after seeing the real trigger rate.
+3. **Is Mode A viable as the default** — can a human really review 344 pages
    across 29 sheets in the PoC, or should Mode B be the default with humans
    reviewing its output? Judge after seeing real sheets.
-5. **Sideways pages** — auto-route to full-page, or just flag for the human?
+4. **Sideways pages** — auto-route to full-page, or just flag for the human?
