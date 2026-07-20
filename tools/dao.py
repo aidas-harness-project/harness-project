@@ -51,6 +51,7 @@ Subcommands:
         [--reviewer NAME] [--reason TEXT]
     check-source-ledger-clear CASE_ID
     read-evidence-tags DOC_PATH
+    check-forbidden-expressions DOC_PATH
     update-run-state CASE_ID RUN_ID STAGE STATUS --held-by NAME
     set-human-input-status CASE_ID STAGE {waiting|received} --held-by NAME --run-id RUN_ID
         [--description TEXT]  (required when status is waiting)
@@ -81,6 +82,7 @@ from _validation import load_registry, validate_instance
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
 DATA = ROOT / "data"
+FORBIDDEN_TEMPLATE = ROOT / "templates" / "forbidden-expressions.md"
 KST = timezone(timedelta(hours=9))
 
 
@@ -479,6 +481,90 @@ def cmd_check_source_ledger_clear(args):
 
 TAG_RE = re.compile(r"\[E(\d+)\]")
 
+# --------------------------------------------------------- forbidden expressions --
+
+_MD_TABLE_ROW = re.compile(r"^\|(.+)\|$")
+
+
+def _normalize_expr(s: str) -> str:
+    """Normalize a forbidden-expression phrase or a draft line for matching:
+    straighten curly double-quotes, strip one layer of surrounding double-quotes,
+    collapse internal whitespace runs to a single space. Deliberately literal --
+    this is a floor, not a paraphrase detector."""
+    s = s.replace("“", '"').replace("”", '"')
+    s = re.sub(r"\s+", " ", s).strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        s = s[1:-1].strip()
+    return s
+
+
+def _load_forbidden_phrases(template_path: Path) -> list[str]:
+    """Return the normalized first-column ('위험 표현') phrases from the markdown
+    table in templates/forbidden-expressions.md. Returns [] if no parseable table
+    (caller treats that as a setup failure, never a clean draft). Raises
+    FileNotFoundError if the file is absent."""
+    text = template_path.read_text(encoding="utf-8")  # raises FileNotFoundError if absent
+    phrases = []
+    for line in text.splitlines():
+        m = _MD_TABLE_ROW.match(line.strip())
+        if not m:
+            continue
+        cells = [c.strip() for c in m.group(1).split("|")]
+        if not cells:
+            continue
+        first = cells[0]
+        # Skip the header row and the |---|---| separator row.
+        if first in ("위험 표현", "") or set(first) <= set("-: "):
+            continue
+        norm = _normalize_expr(first)
+        if norm:
+            phrases.append(norm)
+    return phrases
+
+
+def cmd_check_forbidden_expressions(args):
+    """Deterministic floor: scan a rendered draft for the listed literal phrases
+    in templates/forbidden-expressions.md. Record-only -- the critic decides
+    passed. Not exhaustive; the semantic/implied cases are the critic's P3 pass."""
+    draft_path = Path(args.doc_path)
+    try:
+        phrases = _load_forbidden_phrases(FORBIDDEN_TEMPLATE)
+    except FileNotFoundError:
+        print(f"NO_TEMPLATE: {FORBIDDEN_TEMPLATE}")
+        return 2
+    if not phrases:
+        print(f"NO_TEMPLATE: {FORBIDDEN_TEMPLATE}")
+        return 2
+    if not draft_path.exists():
+        print(f"NOT_FOUND: {draft_path}")
+        return 1
+
+    raw_lines = draft_path.read_text(encoding="utf-8").splitlines()
+    norm_lines = [_normalize_expr(ln) for ln in raw_lines]
+    norm_full = _normalize_expr(" ".join(raw_lines))
+
+    hits = []
+    for phrase in phrases:
+        line_no = None
+        for i, nl in enumerate(norm_lines, start=1):
+            if phrase in nl:
+                line_no = i
+                break
+        if line_no is None and phrase in norm_full:
+            line_no = None  # present but spans soft-wrapped lines
+        elif line_no is None:
+            continue
+        hits.append({"phrase": phrase, "line": line_no})
+
+    clean = not hits
+    print(json.dumps({
+        "clean": clean,
+        "hits": hits,
+        "source": str(FORBIDDEN_TEMPLATE.relative_to(ROOT)),
+        "note": "listed literal phrases only; not exhaustive -- semantic P3 coverage is the critic's",
+    }, ensure_ascii=False))
+    return 0 if clean else 1
+
 
 def cmd_read_evidence_tags(args):
     doc_path = Path(args.doc_path)
@@ -856,6 +942,9 @@ def main():
 
     p = sub.add_parser("read-evidence-tags"); p.add_argument("doc_path")
     p.set_defaults(fn=cmd_read_evidence_tags)
+
+    p = sub.add_parser("check-forbidden-expressions"); p.add_argument("doc_path")
+    p.set_defaults(fn=cmd_check_forbidden_expressions)
 
     p = sub.add_parser("update-run-state")
     p.add_argument("case_id"); p.add_argument("run_id"); p.add_argument("stage")
