@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ocr_result.schema.json",
-  "title": "ocr_result_{document_id}.json -- OCR quality + cross-validation log, one file per document v0.6",
+  "title": "ocr_result_{document_id}.json -- extraction quality + cross-validation log, one file per document v0.7",
   "description": "Per-page text extraction results, uncertain regions, and the P8 dual-path cross-validation outcome for ONE document. Produced by document-pipeline's checkpoint 1 -- one file per document (ocr_result_{document_id}.json), since checkpoint 1 runs once per document and a single shared file across documents would get silently overwritten by each subsequent document's write (write-contract replaces the whole file; see known-gaps.md's audit of this exact failure mode). v0.2 nested everything under a documents: [] array to cover multiple documents in one file -- v0.3 flattens that away since each file now covers exactly one document; document_id is a top-level field here, matching the filename. Propagation rule: if a later stage's evidence_reference quote overlaps an uncertain_region, that field is routed review_required: true. Only a per-document summary (ocr_quality, uncertain_region_count, cross_validation_status) is copied into document_manifest.json.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
@@ -11,26 +11,26 @@
         "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
         "ocr_engine": {
           "type": "string",
-          "description": "OCR engine/extractor used. No dedicated engine exists yet (see open-decisions.md) -- tools/ocr_extract.py uses the Claude CLI as a stand-in for both reading paths. Record that honestly here (e.g. 'claude-cli (no dedicated OCR engine, see open-decisions.md)') rather than implying a real engine exists."
+          "description": "Primary extraction provider/path used for this document. In the current provider-based P8 flow this is usually reader_a's provider:model label (for example 'openai-api:gpt-...' or 'claude-cli:claude-cli'); a future dedicated OCR engine should be recorded here when one is added. If the selected provider is LLM vision rather than a traditional OCR engine, record that honestly rather than implying engine-level OCR confidence exists."
         },
         "vision_model_name": {
           "type": "string",
-          "description": "The vision-capable model used for P8's independent blind read (harness-guardrails P8). Its output is never shown the other read before comparing -- see cross_validation per page."
+          "description": "Historical field name for P8's second reader and comparator metadata. Record reader_b's provider:model label and comparator label as produced by the run. reader_b reads the same raw page blind, before it sees reader_a's output -- see cross_validation per page."
         },
         "uncertain_confidence_threshold": {
           "$ref": "common_component_output.schema.json#/$defs/confidence",
-          "description": "Blocks below this confidence are recorded as uncertain_region. Not fixed in the schema since confidence distributions vary by engine -- record whatever value was actually used for this run. tools/ocr_extract.py's Claude-CLI stand-in does not produce a real per-block confidence signal (no dedicated OCR engine) -- when using it, set this to 1.0 and leave uncertain_regions empty per page rather than fabricating a number; P8's actual failure signal from that tool is the agreed/disagreed cross-validation outcome, not a confidence threshold."
+          "description": "Blocks below this confidence are recorded as uncertain_region. Not fixed in the schema since confidence distributions vary by engine -- record whatever value was actually used for this run. Current LLM-vision provider paths such as claude-cli/openai-api do not produce a real per-block OCR confidence signal; when no real confidence signal exists, set this to 1.0 and leave uncertain_regions empty per page rather than fabricating a number. P8's actual failure signal in that path is the agreed/disagreed cross-validation outcome, not a confidence threshold."
         },
         "extraction_method": {
-          "enum": ["embedded_text", "ocr", "mixed"],
-          "description": "Whether text came from a PDF's embedded text layer or image OCR. If embedded_text, confidence-related fields may be null."
+          "enum": ["embedded_text", "ocr", "mixed", "non_text_image"],
+          "description": "How this document entered the processed layer. non_text_image means a human verified that the document consists of visual evidence with no faithful text transcription; it is never converted into invented descriptive text and is routed to expert review only."
         },
         "encoding_detected": {
           "type": ["string", "null"],
           "description": "Detected encoding for text-file inputs. Some source-cases files use CP949 -- record it."
         },
         "ocr_status": {
-          "enum": ["completed", "failed"],
+          "enum": ["completed", "failed", "not_applicable"],
           "description": "Kept in sync with document_manifest.json's ocr_status for this document."
         },
         "pages": {
@@ -46,17 +46,59 @@
           "description": "Mean of per-page mean_confidence. null for embedded_text documents."
         },
         "ocr_quality": {
-          "enum": ["high", "medium", "low"],
+          "anyOf": [
+            { "enum": ["high", "medium", "low"] },
+            { "type": "null" }
+          ],
           "description": "Document-level quality summary, mirrored in document_manifest.json. Derivation (e.g. uncertain-region ratio, presence of failed pages) is an implementation detail but must stay consistent across runs; a majority of 'low' documents is a No-Go signal to check."
         },
         "cross_validation_status": {
-          "enum": ["agreed", "disagreed_pending_review", "disagreed_resolved", "not_run"],
+          "enum": ["agreed", "disagreed_pending_review", "disagreed_resolved", "non_text_verified", "not_run"],
           "description": "Document-level rollup of the per-page cross_validation results below. 'disagreed_pending_review' on any page means the whole document is blocked from downstream use per harness-guardrails P8 until a human resolves it. 'disagreed_resolved' is distinct from 'agreed' -- the two independent reads did NOT actually agree, a human resolved which reading was correct (see each resolved page's cross_validation.resolution) -- collapsing this into 'agreed' would misrepresent what P8 actually found. Found by actually resolving a real disagreement (CASE_012/DOC_001 page 4, I67 vs I67.8) -- there was no way to represent 'resolved' at all before this."
+        },
+        "cross_validation_mode": {
+          "enum": ["dual_technology", "single_technology_weak_p8_poc", "deferred_poc"],
+          "description": "How independent P8's two reads actually were, computed from the configured readers (not asserted). 'dual_technology' = reader_a and reader_b use genuinely different extraction technologies (e.g. a real OCR engine vs. an LLM vision model) -- real P8 independence; currently UNREACHABLE, reserved for a future dedicated OCR engine (no such reader ships today, see open-decisions.md #4). 'single_technology_weak_p8_poc' = both reads came from LLM-vision providers (claude-cli / codex-cli / openai-api), which share one extraction technology class even across vendors; a documented WEAK P8 that cannot catch a correlated confident error shared by both reads -- must never be presented as genuine dual-technology P8. 'deferred_poc' = cross-validation was intentionally not run (single-reader PoC, or a deterministic embedded-text decode where no second reading exists). This label describes reader independence only; the hard-halt on a genuine content disagreement is unchanged regardless of its value."
+        },
+        "cross_validation_note": {
+          "type": "string",
+          "description": "Human-readable justification for cross_validation_mode -- e.g. which providers/models both readers used and why the run is (or isn't) genuinely independent. Empty string when cross_validation_mode is 'dual_technology'."
         },
         "review_required": { "type": "boolean" },
         "review_reason": { "type": "string" }
       },
-      "required": ["document_id", "ocr_engine", "vision_model_name", "uncertain_confidence_threshold", "extraction_method", "ocr_status", "pages", "ocr_quality", "cross_validation_status"]
+      "required": ["document_id", "ocr_engine", "vision_model_name", "uncertain_confidence_threshold", "extraction_method", "ocr_status", "pages", "ocr_quality", "cross_validation_status", "cross_validation_mode", "cross_validation_note"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "extraction_method": { "const": "non_text_image" } },
+            "required": ["extraction_method"]
+          },
+          "then": {
+            "properties": {
+              "ocr_status": { "const": "not_applicable" },
+              "ocr_quality": { "type": "null" },
+              "cross_validation_status": { "const": "non_text_verified" },
+              "review_required": { "const": true },
+              "pages": {
+                "items": {
+                  "allOf": [
+                    { "$ref": "#/$defs/page_result" },
+                    {
+                      "properties": {
+                        "content_kind": { "const": "non_text_image" },
+                        "text_path": { "type": "null" }
+                      },
+                      "required": ["content_kind", "non_text_verification"]
+                    }
+                  ]
+                }
+              }
+            },
+            "required": ["review_required", "reviewer_role", "review_reason"]
+          }
+        }
+      ]
     }
   ],
   "$defs": {
@@ -64,6 +106,10 @@
       "type": "object",
       "properties": {
         "page": { "type": "integer", "minimum": 1 },
+        "content_kind": {
+          "enum": ["text", "non_text_image"],
+          "description": "Material kind verified for this page. non_text_image is a human decision that the page is visual evidence, not a model-generated description."
+        },
         "text_path": {
           "type": ["string", "null"],
           "pattern": "^data/processed/",
@@ -81,7 +127,18 @@
           "description": "Blocks below threshold. Required -- omission is not allowed; an empty array means 'checked, none found', distinct from 'not checked'.",
           "items": { "$ref": "#/$defs/uncertain_region" }
         },
-        "cross_validation": { "$ref": "#/$defs/cross_validation_result" }
+        "cross_validation": { "$ref": "#/$defs/cross_validation_result" },
+        "non_text_verification": {
+          "type": "object",
+          "description": "Required only when content_kind is non_text_image. This is the genuine human decision that closes the text-extraction question without choosing or fabricating a transcription.",
+          "properties": {
+            "verified_by": { "type": "string", "minLength": 1 },
+            "verified_at": { "type": "string", "format": "date-time" },
+            "note": { "type": "string", "minLength": 1 },
+            "downstream_disposition": { "const": "expert_review_only" }
+          },
+          "required": ["verified_by", "verified_at", "note", "downstream_disposition"]
+        }
       },
       "required": ["page", "text_path", "uncertain_regions", "cross_validation"]
     },
@@ -105,11 +162,11 @@
     },
     "cross_validation_result": {
       "type": "object",
-      "description": "P8's dual-path cross-validation for this page: the OCR engine's text (above) vs. a vision-capable model reading the same raw page blind, without seeing the OCR output. Diffed for material-content agreement (same names/dates/numbers/diagnoses present) -- not verbatim match.",
+      "description": "P8's dual-path cross-validation for this page: reader_a and reader_b both read the same raw page blind, without seeing each other's output, then a comparator checks material-content agreement (same names/dates/numbers/diagnoses present) rather than verbatim formatting. The two reads may be separate calls to the same provider/model or different providers; do not claim genuinely independent technologies unless the configured paths actually are independent.",
       "properties": {
         "vision_model_reading": {
           "type": "string",
-          "description": "The vision model's independent transcription/content summary of this page, produced before it ever saw the OCR text."
+          "description": "Historical field name for reader_b's independent transcription/content summary of this page, produced before it ever saw reader_a's text."
         },
         "agreement": {
           "enum": ["agreed", "disagreed"],

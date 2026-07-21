@@ -929,3 +929,223 @@ leading "배상" was the visible hint. Same user decision as the 농협
 question, sharpened: intake needs either a completeness check against the
 GT's claim scope, or an explicit acceptance that evaluation measures
 "analysis of what was provided," not "prediction of the final report."
+
+## 16. CASE_003 checkpoint 1 -- local model stack attempted then REMOVED; reader self-refusal + non-text documents -- PARTIALLY OPEN
+
+**SUPERSEDED 2026-07-21 (PR #8 review): the local model stack was removed.**
+Everything below about `local-ocr`/`local-vlm`/`local-llm`, `tools/local_runtime.py`,
+and the Instruct-Q4 model tags is retained as the historical record of why. The
+stack never reached real-content validation on a multi-document matrix and was
+single-machine (Windows/E:) only, so it was deleted rather than left as
+misleading scaffolding; a genuinely technology-independent reader (a real OCR
+engine) is deferred to `open-decisions.md` #4. The two findings that OUTLIVE the
+removal -- reader self-refusal (c) and the non-text-image document path (d) --
+are still live and summarized at the end. The "Image: {path}" misread that made
+the refusals look non-deterministic was separately root-caused and fixed; see
+item 17.
+
+Two separate problems surfaced while running CASE_003's document-pipeline
+stage:
+
+**(a) `local-vlm` (qwen3-vl:4b) and `local-llm` (qwen3:4b) both fail on
+real content, confirmed live, not assumed.** The dispatched agent's
+instruction was explicit same-provider weak-P8 (`claude-cli`/`claude-cli`,
+per `harness-guardrails-dev`'s P8 fallback section), but the agent's stage
+skill documents the fully-local `local-ocr`+`local-vlm` pair as the
+*primary* recommendation, and `tools/local_runtime.py`'s preflight passed
+-- so the agent judgment-called trying the stronger dual-technology path
+first. Result: `local-vlm` returned `done_reason=length` with an **empty
+transcription** on every real document page (reproduced across multiple
+image sizes/token budgets -- it burns its generation budget on internal
+reasoning and emits no transcription text), confirmed working on the
+smoke-test image but not real pages. `local-llm` (checkpoint 2's default
+redaction provider) failed the same way for a different reason: ~11,000
+chars of reasoning prose instead of the required JSON, no parseable
+output. **No case output was ever written from either local attempt** --
+both errored at the tool level before any DAO write, so nothing needs to
+be discarded; the agent self-corrected to `--reader-a claude-cli
+--reader-b claude-cli --comparator claude-cli --classifier-provider
+claude-cli` before writing anything. Confirms `open-decisions.md` #4's
+"not yet validated" condition for the local pair is very much still open
+-- this is a second, independent data point (beyond whatever motivated
+the original weak-P8 fallback) that the currently-configured local models
+are not fit for this document type yet.
+
+**2026-07-16 update:** the runtime defaults were replaced with explicit
+Instruct Q4 tags: `qwen3-vl:4b-instruct-q4_K_M` for vision and
+`qwen3:4b-instruct-2507-q4_K_M` for comparison/classification. The vision
+replacement fixed the empty-output failure, but the first real recheck still
+timed out because the old `qwen3:4b` comparator remained. After replacing the
+text model too, a scoped DOC_013 checkpoint-1 retry completed in 245.6 seconds:
+one page agreed and local classification succeeded. This is a useful v1 data
+point, not closure: the representative multi-document matrix and local
+redaction validation remain open. The run also exposed and fixed a state bug:
+one document's checkpoint-1 success had marked the whole
+`document_processing` stage passed before redaction/chunking; checkpoint 1 now
+keeps the stage `in_progress`, and the real run-state was corrected through the
+DAO.
+
+**(b) The dispatched background agent was killed mid-run by the
+account-level API spend cap** ("You've hit your monthly spend limit"),
+not by any harness logic. It had gotten as far as switching to the
+claude-cli fallback and starting checkpoint 1 on real documents when it
+was terminated. No `ocr_result_{doc_id}.json` had been confirmed written
+before termination -- state as of writeup: `document_manifest.json` still
+shows the pre-run `pending` skeleton for all 13 documents, only
+`page_001.md` for DOC_001 shows a fresh (2026-07-14 22:29) timestamp,
+meaning checkpoint 1 was mid-flight on the very first document when the
+cap hit. This is an operational/infra constraint, not a pipeline design
+gap -- flagged here because CASE_003 is left in a half-run state
+(`_run_state.json` shows `document_processing: in_progress`, no
+snapshot-backup exists yet since no stage has passed) and resuming needs
+a human to either raise the spend limit or wait for the monthly reset
+before re-dispatching.
+
+**Not yet resolved:** whether to (1) wait out the cap and resume
+CASE_003's document-pipeline stage from scratch (checkpoint 1 hadn't
+completed even one document), or (2) investigate a genuinely-working
+local-vlm model/config before the next attempt so the dev-phase weak-P8
+fallback stops being the only working path. Both are user decisions, not
+mechanical fixes.
+
+**UPDATE 2026-07-15 (resumed run RUN_20260714_003):** the spend cap cleared
+and the run was resumed with the claude-cli/claude-cli weak-P8 fallback.
+Two things surfaced and were addressed:
+
+- **(c) claude-cli reader self-refusal is a recurring P8 failure on real
+  case documents, not a one-off.** Across DOC_005 (p4,p9), DOC_007 (p1),
+  DOC_009 (p1), DOC_010 (p1,p2), DOC_013 (p1), one of the two
+  claude-cli reads repeatedly *refused to transcribe* and emitted
+  meta-commentary (e.g. "this looks like sensitive case data, what's the
+  authorization?", or a fabricated preamble about "the git history in this
+  repo"), while the OTHER read transcribed faithfully. compare() correctly
+  flags this one-sided noise as a disagreement, so P8 hard-halts every time
+  -- the gate is behaving correctly; the *reader* is the problem. `--safe-mode`
+  (which strips CLAUDE.md/skills) is already applied and did NOT prevent it:
+  the model self-censors from the raw document image + the neutral prompt's
+  path hints alone, not from inherited repo context. Reintroducing defensive
+  "this is sanctioned, do not refuse" framing is still forbidden (it made
+  this worse before). This is the dev-phase weak-P8's real cost and a
+  stronger argument for a genuinely different reader technology (a real OCR
+  engine, open-decisions #4) so at least one reader structurally cannot refuse
+  -- the removed local-vlm was to have been that reader but never worked on real
+  pages. Until a real OCR engine lands, the only remedy is the human-resolution
+  path below; trying a different LLM provider (codex-cli / openai-api) for the
+  offending reader may reduce the rate but cannot guarantee a fix. Rough rate
+  this run: ~5 of 12 text documents hit at least one refusal-caused disagreement.
+
+- **The human-resolution path for these disagreements was un-runnable and is
+  now wired.** `resolve_from_raw_ocr()` existed and was unit-tested but had
+  no CLI entry point, so a blocked document could not actually be resolved
+  without re-running OCR. Added `run_checkpoint1.py resolve-disagreement`
+  (loads the `_ocr_scratch/{case}_{doc}_raw.json` dual-read dump, applies a
+  human's per-page `--chosen-reading`, rolls the doc up to
+  `disagreed_resolved`). Used it to resolve DOC_005/007/009/012/013 under
+  reviewer Pyun. NB DOC_012 p1 was a GENUINE content conflict, not a refusal
+  (14,488 vs 34,488 on the 산출기초 field -- reading_b misread a form bracket
+  ']' as a leading '3'); resolved to reading_a (14,488) after direct source
+  inspection. The refusal cases and the genuine-conflict case go through the
+  exact same human-in-the-loop path -- the tool never auto-picks.
+
+- **(d) DOC_010 is a non-text document (clinical injury photographs -- an arm
+  scar measured with a tape, i.e. 후유장해 evidence), which the pipeline has no
+  first-class path for.** Both pages P8-disagreed only because one read
+  refused while the other correctly said "this is a photo, no transcribable
+  text"; there is no faithful *text* to choose. The taxonomy
+  (common_component_output document_type) has no image/photo type -- closest
+  is `other`. Forcing a photo-description into the page-text field would be
+  wrong. LEFT PENDING as a design decision (user asked for it to be handled
+  as an image/non-text document, not shoehorned into text). Needs: a
+  first-class no-text/image extraction_method + how downstream stages treat
+  such a page. Deferred, not resolved.
+
+  **CONTRACT RESOLVED 2026-07-15 (case state not yet changed):** added the
+  human-only `resolve-non-text` path and `non_text_image` /
+  `non_text_verified` / `expert_review_only` contract. It preserves the P8
+  disagreement, writes no text or classification quote, skips text redaction,
+  and makes chunk omission explicit. The implementation deliberately refuses
+  mixed documents with any validated text page. DOC_010 itself remains
+  untouched until the user separately authorizes the DAO-backed resolution.
+
+
+## 17. `transcribe_image()`'s "Image: {path}" label was misread as attachment metadata, not a Read instruction -- caused the claude-cli OCR refusals thought to be non-deterministic -- RESOLVED 2026-07-16
+
+CASE_024's Stage 2 run needed 9 manual OCR retries after both readers
+initially refused on 4 pages, attributed at the time to generic claude-cli
+vision non-determinism (queued as a follow-up investigation rather than
+fixed inline, since a prior attempt to fix a *different* refusal problem via
+defensive prompt framing had backfired). Investigating it properly found the
+refusals were not non-deterministic at all: the framing
+(`f"{prompt}
+
+Image: {image_path}"`) states the image as a trailing
+label, and the model reads that as descriptive metadata about an attachment
+that a text-only `claude -p` CLI call never actually delivers -- rather than
+as an instruction to invoke the `Read` tool on that path -- so it never even
+attempts the read and reports "no image was attached."
+
+Controlled repeats on CASE_024's actual page images confirmed this
+empirically: the label form failed **9/9** (with and without `--safe-mode`,
+including on pages that appeared to succeed on the first pass during the
+real run -- meaning the real run was silently absorbing this failure rate
+throughout, not just on the 4 pages that happened to end up flagged).
+Rewriting the same call as an explicit imperative ("Read the image file at
+{path} and then: {prompt}") succeeded **every time tested** (3/3 in the
+controlled repeat, plus 2 more ad hoc confirmations on previously-refusing
+pages). This is not a reversal of the earlier defensive-framing lesson
+(known-gaps history in `llm_providers.py`'s docstring) -- that framing
+pre-argued its own legitimacy and told the model not to refuse, which itself
+read as a prompt-injection signal; this fix carries no self-legitimizing or
+anti-refusal language, just a concrete action to take.
+
+**Cross-checked against the original failure, not just the reproduction.**
+CASE_024's original dual-read dump (`_ocr_scratch/CASE_024_DOC_002_raw.json`,
+preserved from the actual blocked run) was re-read to confirm this diagnosis
+explains what genuinely happened, not just what the reproduction produced.
+Of the 9 disagreed pages, **3 (pages 9, 41, 45) show exactly this failure
+mode verbatim** in the original reader output -- e.g. p9 reading_b: "I can't
+transcribe this image because I don't have visual access to it -- **no image
+data was included with your message, only a file path**"; p41 reading_b: "...
+**no image was actually provided in this message**"; p45 reading_b: "I don't
+have the ability to view images directly in this conversation ... I can't
+access or transcribe the contents of the file at that path." All three name
+the identical root cause the reproduction found -- a missing attachment, not
+a content-based refusal -- confirming this is the real, not merely
+plausible, cause for those pages.
+
+**The other 6 disagreed pages were NOT this bug and remain correctly
+understood as separate failure modes, already covered by item 11's fix, not
+this one:** page 40's dump shows both readers producing real transcribed
+content but each appending a different one-sided fabricated sentence
+(hallucinated content, the failure item 11's `compare()` prompt update
+specifically targets); pages 6/11/20/29/44 were genuine transcription
+disagreements or ambiguous glyphs resolved by direct human/image review, not
+refusals at all. So this fix explains 3 of CASE_024's 9 disagreements
+directly, is the majority explanation for the reader-level "refusal" pattern
+specifically (as opposed to disagreement in general), and the 9/9
+reproduction rate indicates it was very likely under way on other pages too
+that happened to still resolve to agreement by chance (e.g. one reader
+failing this way while the other transcribed correctly, with `compare()`'s
+one-sided-addition check then catching the mismatch) -- but the dump alone
+does not let every one of the 9 be individually attributed to this cause with
+certainty.
+
+**Fixed:** `ClaudeCliProvider.transcribe_image` in `tools/llm_providers.py`
+now builds `f"Read the image file at {image_path} and then: {prompt}"`.
+Regression test in `tests/test_llm_providers.py` updated to assert the new
+literal command. Full suite (271 tests, frontend excluded per its pre-existing
+fastapi gap) passes.
+
+**Found but NOT fixed -- a related risk in `compare_text()`:** the comparator
+is equally text-only and, if two independent reads both come back as
+refusals (different wording each time, so the byte-identical shortcut in
+`compare()` doesn't trigger), the comparator has no conflicting *facts* to
+find between them -- a live test confirmed the comparator can itself suffer
+the same "nothing was actually provided" misfire when asked to compare two
+refusal texts. In the one case actually observed, this was caught only by
+`compare()`'s existing fail-safe (an unparseable verdict is treated as a
+disagreement) -- not because the comparator correctly recognized the refusals
+as one-sided fabricated content per the item-11 fix. With
+`transcribe_image()` fixed, reader-side refusals should now be rare; this
+residual path is a second line of defense that has not been independently
+hardened and is not urgent to close before it recurs in practice.

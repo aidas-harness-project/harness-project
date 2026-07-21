@@ -4,10 +4,10 @@ Automates the mechanical sequence a document-pipeline subagent normally
 performs: run dual-path OCR (ocr_extract.run_ocr, in-process, not a
 subprocess-of-a-subprocess), write each agreed page (dao.py's
 write-page-text logic, called directly), classify the document from its
-first agreed page's already-transcribed TEXT (one real claude -p call --
-reasoning over text, not re-viewing the raw image, which is a smaller PII
-exposure footprint than the original design's "same vision-model call that
-read the page" -- see open-decisions.md #3), assemble and write
+first agreed page's already-transcribed TEXT (reasoning over text, not
+re-viewing the raw image, which is a smaller PII exposure footprint than
+the original design's "same vision-model call that read the page" -- see
+open-decisions.md #3), assemble and write
 ocr_result_{doc_id}.json + classification_result_{doc_id}.json, and update
 document_manifest.json's per-document fields.
 
@@ -17,6 +17,12 @@ after writing ocr_result_{doc_id}.json (cross_validation_status:
 writing classification_result or marking the run-state stage passed --
 resolving a disagreement (choosing which reading is correct, and why) is a
 human decision, not something this script does on its own.
+
+For a whole document that a genuine human verifies is non-text visual
+evidence, `resolve-non-text` records that distinct outcome without choosing a
+reader or fabricating an image description. It writes no page text and routes
+the document to expert review only. Mixed text/image documents are rejected by
+that command.
 
 ocr_result.json only retains reading_b (as cross_validation.vision_model_reading)
 -- reading_a's full text is never persisted there. So when a disagreement
@@ -38,29 +44,42 @@ checkpoint 3 (chunking, tools/chunk_text.py -- already exists, unchanged).
 
 Usage:
     python tools/run_checkpoint1.py CASE_ID DOC_ID <path to raw pdf> --held-by NAME --run-id RUN_ID
+    python tools/run_checkpoint1.py resolve-non-text CASE_ID DOC_ID \
+        --verified-by NAME --reviewer-role 의사 --note TEXT \
+        --held-by document-pipeline --run-id RUN_ID
 
 Also usable as a library -- run_checkpoint1() / resolve_from_raw_ocr()
 return a summary dict rather than just printing, so a caller (e.g. a
 scenario/branch-testing script) can inspect the outcome programmatically.
 """
 import argparse
+import contextlib
 import json
+import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-from dao import case_dir, atomic_write_json, now_iso, load_registry, validate_instance
+from dao import case_dir, atomic_write_json, now_iso, load_registry, validate_instance, read_contract_data
 from dao import acquire_lock_blocking, release_lock, atomic_write_text, processed_dir
 import dao as _dao
-from ocr_extract import run_ocr
+from llm_providers import (
+    DEFAULT_PROVIDER,
+    ProviderConfig,
+    ProviderConfigError,
+    ProviderExecutionError,
+    SUPPORTED_PROVIDERS,
+    build_provider,
+)
+from ocr_extract import build_ocr_providers, run_ocr
 
 ROOT = Path(__file__).resolve().parent.parent
 
 DOCUMENT_TYPES = ["insurance_certificate", "insurance_policy", "diagnosis_certificate",
                    "medical_record", "imaging_report", "receipt", "insurer_response", "other"]
+CLASSIFICATION_PROMPT_VERSION = "classification_v0.1"
 
 CLASSIFY_PROMPT_TEMPLATE = """You are classifying an insurance claim document by its type, from its
 already-transcribed text (not the raw image). Choose exactly one of these types:
@@ -104,15 +123,19 @@ def _write_contract(case_id, filename, data, schema_name, held_by, run_id):
     return target
 
 
-def classify_document(text: str) -> dict:
-    """One real claude -p call, reasoning over already-transcribed text
-    (no raw image view). Fails loud on an unparseable response -- same
-    fail-safe discipline as ocr_extract.compare(), not a silent guess."""
+def classify_document(text: str, classifier=None) -> dict:
+    """Classify already-transcribed text through the configured provider.
+
+    Fails loud on an unparseable response -- same fail-safe discipline as
+    ocr_extract.compare(), not a silent guess.
+    """
+    selected_classifier = classifier or build_provider(ProviderConfig(DEFAULT_PROVIDER), root=ROOT)
     prompt = CLASSIFY_PROMPT_TEMPLATE.format(types=", ".join(DOCUMENT_TYPES), text=text[:3000])
-    result = subprocess.run(["claude", "-p", prompt], capture_output=True, text=True, timeout=120, cwd=str(ROOT))
-    if result.returncode != 0:
-        sys.exit(f"error: classification claude call failed: {result.stderr.strip()}")
-    raw = result.stdout.strip()
+    try:
+        provider_result = selected_classifier.classify_document(prompt, CLASSIFICATION_PROMPT_VERSION)
+    except ProviderExecutionError as exc:
+        sys.exit(f"error: classification provider failed: {exc}")
+    raw = provider_result.text.strip()
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if not m:
         sys.exit(f"error: classification response wasn't parseable JSON, refusing to guess: {raw!r}")
@@ -122,15 +145,83 @@ def classify_document(text: str) -> dict:
         sys.exit(f"error: classification response wasn't valid JSON, refusing to guess: {raw!r}")
     if parsed.get("predicted_document_type") not in DOCUMENT_TYPES:
         sys.exit(f"error: classification returned an unknown document_type {parsed.get('predicted_document_type')!r}")
+    parsed["_provider_metadata"] = provider_result.metadata()
     return parsed
 
 
+def build_classifier_provider(
+    *,
+    classifier_provider_name: str | None = None,
+    classifier_model: str | None = None,
+    comparator_provider=None,
+    env=None,
+):
+    source_env = env if env is not None else os.environ
+    provider_name = (
+        classifier_provider_name
+        or source_env.get("HARNESS_CLASSIFIER_PROVIDER")
+        or (comparator_provider.provider_name if comparator_provider is not None else None)
+        or source_env.get("HARNESS_OCR_COMPARATOR_PROVIDER")
+        or source_env.get("HARNESS_LLM_PROVIDER")
+        or DEFAULT_PROVIDER
+    )
+    env_comparator_provider = source_env.get("HARNESS_OCR_COMPARATOR_PROVIDER")
+    comparator_model_name = (
+        comparator_provider.model_name
+        if comparator_provider is not None and provider_name == comparator_provider.provider_name
+        else None
+    )
+    env_comparator_model = (
+        source_env.get("HARNESS_OCR_COMPARATOR_MODEL")
+        if env_comparator_provider is not None and provider_name == env_comparator_provider
+        else None
+    )
+    model_name = (
+        classifier_model
+        or source_env.get("HARNESS_CLASSIFIER_MODEL")
+        or comparator_model_name
+        or env_comparator_model
+        or source_env.get("HARNESS_LLM_MODEL")
+    )
+    if comparator_provider is not None and provider_name == comparator_provider.provider_name and (
+        classifier_provider_name is None
+        and classifier_model is None
+        and not source_env.get("HARNESS_CLASSIFIER_PROVIDER")
+        and not source_env.get("HARNESS_CLASSIFIER_MODEL")
+    ):
+        return comparator_provider
+    return build_provider(ProviderConfig(provider_name, model_name), env=source_env, root=ROOT)
+
+
+def _provider_label(provider_info: dict | None) -> str:
+    if not provider_info:
+        return "claude-cli"
+    provider_name = provider_info.get("provider_name") or "unknown-provider"
+    model_name = provider_info.get("model_name") or "unknown-model"
+    return f"{provider_name}:{model_name}"
+
+
+def _classification_model_info(provider_metadata: dict) -> dict:
+    info = {
+        "model_name": _provider_label(provider_metadata),
+        "prompt_version": provider_metadata.get("prompt_version", CLASSIFICATION_PROMPT_VERSION),
+    }
+    if provider_metadata.get("provider_name"):
+        info["provider_name"] = provider_metadata["provider_name"]
+    return info
+
+
 def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
+    providers = ocr_data.get("providers", {})
+    reader_a_label = _provider_label(providers.get("reader_a"))
+    reader_b_label = _provider_label(providers.get("reader_b"))
+    comparator_label = _provider_label(providers.get("comparator"))
     pages_out = []
     for p in ocr_data["pages"]:
         agreed = p["agreement"] == "agreed"
         pages_out.append({
             "page": p["page"],
+            "content_kind": "text",
             "text_path": f"data/processed/{case_id}/{doc_id}/page_{p['page']:03d}.md" if agreed else None,
             "mean_confidence": None,
             "uncertain_regions": [],
@@ -141,17 +232,40 @@ def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
             },
         })
     any_disagreement = any(p["agreement"] == "disagreed" for p in ocr_data["pages"])
+    # Embedded-text (plain-text passthrough) documents carry their own honest
+    # extraction_method/encoding from ocr_extract._run_embedded_text -- a
+    # lossless decode, not OCR. Default to the OCR values for the image/PDF path.
+    extraction_method = ocr_data.get("extraction_method", "ocr")
+    is_embedded_text = extraction_method == "embedded_text"
     result = {
         "case_id": case_id, "run_id": run_id, "component": "document-pipeline", "status": "success",
-        "created_at": now_iso(), "model_info": {"model_name": "claude-cli", "prompt_version": "ocr_extraction_v0.1"},
+        "created_at": now_iso(),
+        "model_info": {
+            "model_name": f"reader_a={reader_a_label}; reader_b={reader_b_label}; comparator={comparator_label}",
+            "prompt_version": "ocr_extraction_v0.1",
+        },
         "document_id": doc_id,
-        "ocr_engine": "claude-cli (no dedicated OCR engine, see open-decisions.md)",
-        "vision_model_name": "claude-cli (stand-in for a dedicated second engine, see open-decisions.md)",
+        "ocr_engine": reader_a_label,
+        "vision_model_name": f"{reader_b_label}; comparator={comparator_label}",
         "uncertain_confidence_threshold": 1.0,
-        "extraction_method": "ocr", "ocr_status": "completed", "pages": pages_out,
+        "extraction_method": extraction_method, "ocr_status": "completed", "pages": pages_out,
+        "encoding_detected": ocr_data.get("encoding_detected"),
         "document_mean_confidence": None,
+        # Embedded text is a lossless decode, not a probabilistic read -- its
+        # quality is 'high' and its cross-validation status 'agreed' (the decode
+        # is its own ground truth); cross_validation_mode 'deferred_poc' below is
+        # what records that no dual-read OCR cross-check was performed.
         "ocr_quality": "low" if any_disagreement else "high",
         "cross_validation_status": "disagreed_pending_review" if any_disagreement else "agreed",
+        # P8 cross-validation strength label, computed from the actual readers by
+        # ocr_extract.run_ocr. Every current provider is LLM-vision-backed, so this
+        # is single_technology_weak_p8_poc for any reader pair -- honestly not
+        # genuine dual-technology P8 (see open-decisions.md #4). The default here
+        # is the honest weak label, never dual_technology, so a missing field can
+        # never be misread as genuine independence. (A text-passthrough document
+        # sets deferred_poc explicitly instead.)
+        "cross_validation_mode": ocr_data.get("cross_validation_mode", "single_technology_weak_p8_poc"),
+        "cross_validation_note": ocr_data.get("cross_validation_note", ""),
         "review_required": any_disagreement,
     }
     if any_disagreement:
@@ -180,15 +294,132 @@ def _reset_manifest_for_blocked_ocr(case_id, doc_id, ocr_result, held_by, run_id
         "redacted_text_path": None,
         "document_type": None,
         "classification_confidence": None,
+        "extraction_method": None,
+        "downstream_disposition": None,
+        "non_text_verification": None,
     }
     ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)
     if not ok:
         sys.exit(f"error: {message}")
 
 
-def run_checkpoint1(case_id: str, doc_id: str, pdf_path: str, held_by: str, run_id: str, progress=None) -> dict:
+@contextlib.contextmanager
+def _page_range_pdf(pdf_path: Path, case_id: str, doc_id: str, page_start: int | None, page_end: int | None):
+    """Yield either the original PDF path or a temporary PDF containing only
+    the requested 1-based inclusive page range. This supports legacy intake
+    manifests where one raw PDF was split into multiple logical DOC_XXX
+    entries by page count without mutating the immutable raw source."""
+    if page_start is None and page_end is None:
+        yield pdf_path
+        return
+    if page_start is None or page_end is None:
+        sys.exit("error: --page-start and --page-end must be provided together")
+    if page_start < 1 or page_end < page_start:
+        sys.exit(f"error: invalid page range {page_start}-{page_end}")
+    if pdf_path.suffix.lower() != ".pdf":
+        sys.exit("error: --page-start/--page-end can only be used with PDF input")
+
+    scratch_root = ROOT / "_ocr_scratch"
+    scratch_root.mkdir(exist_ok=True)
+    temp_path = scratch_root / f"{case_id}_{doc_id}_p{page_start:03d}-{page_end:03d}.pdf"
+    try:
+        import fitz
+    except ImportError:
+        fitz = None
+
+    if fitz is None:
+        _write_page_range_pdf_pypdf(pdf_path, temp_path, page_start, page_end)
+        try:
+            yield temp_path
+        finally:
+            temp_path.unlink(missing_ok=True)
+        return
+
+    src = fitz.open(pdf_path)
+    try:
+        if page_end > src.page_count:
+            sys.exit(f"error: page range {page_start}-{page_end} exceeds {pdf_path} ({src.page_count} pages)")
+        out = fitz.open()
+        try:
+            out.insert_pdf(src, from_page=page_start - 1, to_page=page_end - 1)
+            out.save(temp_path)
+        finally:
+            out.close()
+        yield temp_path
+    finally:
+        src.close()
+        temp_path.unlink(missing_ok=True)
+
+
+def _write_page_range_pdf_pypdf(pdf_path: Path, temp_path: Path, page_start: int, page_end: int) -> None:
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError:
+        sys.exit("error: pymupdf missing and pypdf not installed for --page-start/--page-end")
+
+    reader = PdfReader(str(pdf_path))
+    if page_end > len(reader.pages):
+        sys.exit(f"error: page range {page_start}-{page_end} exceeds {pdf_path} ({len(reader.pages)} pages)")
+
+    writer = PdfWriter()
+    for page_index in range(page_start - 1, page_end):
+        writer.add_page(reader.pages[page_index])
+    with temp_path.open("wb") as f:
+        writer.write(f)
+
+
+def run_checkpoint1(
+    case_id: str,
+    doc_id: str,
+    pdf_path: str,
+    held_by: str,
+    run_id: str,
+    progress=None,
+    reader_a=None,
+    reader_b=None,
+    comparator=None,
+    classifier=None,
+    reader_a_name: str | None = None,
+    reader_b_name: str | None = None,
+    comparator_name: str | None = None,
+    classifier_provider_name: str | None = None,
+    reader_a_model: str | None = None,
+    reader_b_model: str | None = None,
+    comparator_model: str | None = None,
+    classifier_model: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
+) -> dict:
     pdf_path = Path(pdf_path)
-    ocr_data = run_ocr(case_id, doc_id, pdf_path, progress=progress)
+    if reader_a is None or reader_b is None or comparator is None:
+        providers = build_ocr_providers(
+            reader_a_name=reader_a_name,
+            reader_b_name=reader_b_name,
+            comparator_name=comparator_name,
+            reader_a_model=reader_a_model,
+            reader_b_model=reader_b_model,
+            comparator_model=comparator_model,
+        )
+        reader_a = reader_a or providers["reader_a"]
+        reader_b = reader_b or providers["reader_b"]
+        comparator = comparator or providers["comparator"]
+    if classifier is None:
+        classifier = build_classifier_provider(
+            classifier_provider_name=classifier_provider_name,
+            classifier_model=classifier_model,
+            comparator_provider=comparator,
+        )
+
+    with _page_range_pdf(pdf_path, case_id, doc_id, page_start, page_end) as extraction_path:
+        ocr_data = run_ocr(
+            case_id,
+            doc_id,
+            extraction_path,
+            progress=progress,
+            reader_a=reader_a,
+            reader_b=reader_b,
+            comparator=comparator,
+        )
 
     for p in ocr_data["pages"]:
         if p["agreement"] == "agreed":
@@ -219,20 +450,21 @@ def run_checkpoint1(case_id: str, doc_id: str, pdf_path: str, held_by: str, run_
                 "ocr_result_path": str(case_dir(case_id) / f"ocr_result_{doc_id}.json"),
                 "raw_ocr_path": str(raw_ocr_path)}
 
-    return _finish_checkpoint1(case_id, doc_id, run_id, held_by, ocr_data["pages"][0]["reading_a"])
+    return _finish_checkpoint1(case_id, doc_id, run_id, held_by, ocr_data["pages"][0]["reading_a"], classifier=classifier)
 
 
-def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text):
+def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, classifier=None):
     """Shared tail: classify from page 1's text, write
     classification_result_{doc_id}.json, update document_manifest.json.
     Called both by run_checkpoint1() (no disagreement) and
     apply_disagreement_resolution() (once every page is resolved)."""
-    classification = classify_document(first_page_text)
+    classification = classify_document(first_page_text, classifier) if classifier is not None else classify_document(first_page_text)
     ocr_result = json.loads((case_dir(case_id) / f"ocr_result_{doc_id}.json").read_text(encoding="utf-8"))
+    provider_metadata = classification.get("_provider_metadata", {})
 
     classification_result = {
         "case_id": case_id, "run_id": run_id, "component": "document-pipeline", "status": "success",
-        "created_at": now_iso(), "model_info": {"model_name": "claude-cli", "prompt_version": "classification_v0.1"},
+        "created_at": now_iso(), "model_info": _classification_model_info(provider_metadata),
         "document_id": doc_id,
         "predicted_document_type": classification["predicted_document_type"],
         "document_type_label": classification.get("document_type_label", ""),
@@ -252,20 +484,159 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text):
         "cross_validation_status": ocr_result["cross_validation_status"],
         "document_type": classification["predicted_document_type"],
         "classification_confidence": classification.get("confidence", 0.5),
+        "extraction_method": ocr_result.get("extraction_method", "ocr"),
+        "downstream_disposition": "automated_text_pipeline",
+        "non_text_verification": None,
     }
     ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)
     if not ok:
         sys.exit(f"error: {message}")
 
-    _dao._update_run_state(case_id, run_id, "document_processing", "passed", held_by)
+    # Checkpoint 1 succeeding for one document does not complete the
+    # case-scoped document_processing stage. Other documents may still need
+    # checkpoint 1, and checkpoints 2 (redaction) and 3 (case chunking) have
+    # not run yet. Keep the top-level stage in progress; only the orchestrator
+    # may mark it passed after every checkpoint is complete and snapshotted.
+    _dao._update_run_state(case_id, run_id, "document_processing", "in_progress", held_by)
 
     return {"status": "passed", "case_id": case_id, "doc_id": doc_id,
             "document_type": classification["predicted_document_type"],
             "cross_validation_status": ocr_result["cross_validation_status"]}
 
 
+def resolve_as_non_text(
+    case_id: str,
+    doc_id: str,
+    *,
+    verified_by: str,
+    reviewer_role: str,
+    note: str,
+    held_by: str,
+    run_id: str,
+) -> dict:
+    """Resolve an entire P8-blocked document as human-verified visual evidence.
+
+    This deliberately does NOT choose either OCR reading and does NOT create a
+    page text file. The original disagreement remains in each page's
+    cross_validation record; the human verification only establishes that text
+    extraction is not applicable and that downstream use is expert-review-only.
+    """
+    if reviewer_role not in {"손해사정사", "의사", "법률전문가"}:
+        sys.exit(f"error: unsupported reviewer role {reviewer_role!r}")
+    if not verified_by.strip() or not note.strip():
+        sys.exit("error: --verified-by and --note must be non-empty")
+
+    ocr_result = read_contract_data(case_id, f"ocr_result_{doc_id}.json")
+    if ocr_result is None:
+        sys.exit(
+            f"error: ocr_result_{doc_id}.json not found -- run checkpoint 1 before resolving non-text content"
+        )
+    if ocr_result.get("cross_validation_status") != "disagreed_pending_review":
+        sys.exit(
+            "error: non-text resolution requires cross_validation_status "
+            f"'disagreed_pending_review', got {ocr_result.get('cross_validation_status')!r}"
+        )
+    pages = ocr_result.get("pages", [])
+    if not pages:
+        sys.exit("error: non-text resolution requires at least one page record")
+    pages_with_text = [page["page"] for page in pages if page.get("text_path")]
+    if pages_with_text:
+        sys.exit(
+            "error: whole-document non-text resolution cannot invalidate already-written page text; "
+            f"page(s) {pages_with_text} have text_path values"
+        )
+
+    # Never silently invalidate downstream artifacts from an earlier run.
+    stale = [
+        name for name in (
+            f"classification_result_{doc_id}.json",
+            f"redaction_result_{doc_id}.json",
+        )
+        if read_contract_data(case_id, name) is not None
+    ]
+    if stale:
+        sys.exit(
+            "error: non-text resolution would conflict with existing downstream contract(s): "
+            + ", ".join(stale)
+            + "; halt for a human audit instead of deleting or overwriting them"
+        )
+
+    verified_at = now_iso()
+    verification = {
+        "verified_by": verified_by,
+        "verified_at": verified_at,
+        "note": note,
+        "downstream_disposition": "expert_review_only",
+    }
+    for page in pages:
+        page["content_kind"] = "non_text_image"
+        page["text_path"] = None
+        page["mean_confidence"] = None
+        page["uncertain_regions"] = []
+        page["non_text_verification"] = dict(verification)
+
+    ocr_result.update({
+        "run_id": run_id,
+        "extraction_method": "non_text_image",
+        "ocr_status": "not_applicable",
+        "document_mean_confidence": None,
+        "ocr_quality": None,
+        "cross_validation_status": "non_text_verified",
+        "review_required": True,
+        "reviewer_role": reviewer_role,
+        "review_reason": (
+            "Human verified that this document is non-text visual evidence. "
+            "No transcription was selected or fabricated; automated downstream use is prohibited."
+        ),
+    })
+    _write_contract(
+        case_id,
+        f"ocr_result_{doc_id}.json",
+        ocr_result,
+        "ocr_result.schema.json",
+        held_by,
+        run_id,
+    )
+
+    manifest_verification = {
+        "verified_by": verified_by,
+        "verified_at": verified_at,
+        "note": note,
+        "reviewer_role": reviewer_role,
+    }
+    fields = {
+        "pages": len(pages),
+        "ocr_status": "not_applicable",
+        "ocr_text_path": None,
+        "ocr_quality": None,
+        "uncertain_region_count": 0,
+        "cross_validation_status": "non_text_verified",
+        "redacted_text_path": None,
+        "document_type": "other",
+        "classification_confidence": None,
+        "extraction_method": "non_text_image",
+        "downstream_disposition": "expert_review_only",
+        "non_text_verification": manifest_verification,
+    }
+    ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)
+    if not ok:
+        sys.exit(f"error: {message}")
+
+    # Do not mark the top-level stage passed here. Other documents plus
+    # redaction/chunking still have to finish; the orchestrator owns that state.
+    return {
+        "status": "non_text_verified",
+        "case_id": case_id,
+        "doc_id": doc_id,
+        "pages": len(pages),
+        "downstream_disposition": "expert_review_only",
+        "reviewer_role": reviewer_role,
+    }
+
+
 def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, chosen_reading: str,
-                          resolved_by: str, note: str, held_by: str, run_id: str) -> dict:
+                          resolved_by: str, note: str, held_by: str, run_id: str,
+                          classifier=None) -> dict:
     """Resolves one disagreed page using the original run_ocr() result
     (which has both reading_a and reading_b) plus a human's decision of
     which one is correct and why. Writes that page's text, updates
@@ -305,22 +676,172 @@ def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, c
 
     first_page_agreed_or_resolved = ocr_result["pages"][0]
     first_page_text = Path(ROOT / first_page_agreed_or_resolved["text_path"]).read_text(encoding="utf-8")
-    return _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text)
+    return _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, classifier=classifier)
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("case_id")
-    ap.add_argument("doc_id")
-    ap.add_argument("pdf_path")
-    ap.add_argument("--held-by", required=True)
-    ap.add_argument("--run-id", required=True)
-    args = ap.parse_args()
-
-    result = run_checkpoint1(args.case_id, args.doc_id, args.pdf_path, args.held_by, args.run_id)
+def _run_from_args(args):
+    try:
+        result = run_checkpoint1(
+            args.case_id,
+            args.doc_id,
+            args.pdf_path,
+            args.held_by,
+            args.run_id,
+            reader_a_name=args.reader_a,
+            reader_b_name=args.reader_b,
+            comparator_name=args.comparator,
+            classifier_provider_name=args.classifier_provider,
+            reader_a_model=args.reader_a_model,
+            reader_b_model=args.reader_b_model,
+            comparator_model=args.comparator_model,
+            classifier_model=args.classifier_model,
+            page_start=args.page_start,
+            page_end=args.page_end,
+        )
+    except ProviderConfigError as exc:
+        sys.exit(f"error: {exc}")
+    except ProviderExecutionError as exc:
+        sys.exit(f"error: {exc}")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if result["status"] == "blocked_disagreement":
         sys.exit(1)
+
+
+def _resolve_from_args(args):
+    """Wire the already-existing, unit-tested resolve_from_raw_ocr() to the CLI.
+
+    A P8 disagreement blocks the document pending a HUMAN decision of which
+    reading is correct (choosing the reading is never automated -- that would
+    reintroduce the very judgment P8 hands to a person). The full dual-read
+    data is recovered from _ocr_scratch/{case}_{doc}_raw.json (saved by
+    run_checkpoint1 exactly for this), so no OCR re-run is needed. --chosen-reading
+    is required; the tool does not guess."""
+    raw_path = ROOT / "_ocr_scratch" / f"{args.case_id}_{args.doc_id}_raw.json"
+    if not raw_path.exists():
+        sys.exit(
+            f"error: raw dual-read dump not found -- {raw_path}\n"
+            "resolve-disagreement needs the _ocr_scratch/{case}_{doc}_raw.json that "
+            "run_checkpoint1 writes when it blocks on a disagreement. If it was cleaned "
+            "up, re-run checkpoint 1 for this document to regenerate both readings."
+        )
+    try:
+        ocr_data = json.loads(raw_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.exit(f"error: could not read raw dual-read dump {raw_path}: {exc}")
+
+    try:
+        result = resolve_from_raw_ocr(
+            args.case_id,
+            args.doc_id,
+            ocr_data,
+            page=args.page,
+            chosen_reading=args.chosen_reading,
+            resolved_by=args.resolved_by,
+            note=args.note,
+            held_by=args.held_by,
+            run_id=args.run_id,
+        )
+    except ProviderConfigError as exc:
+        sys.exit(f"error: {exc}")
+    except ProviderExecutionError as exc:
+        sys.exit(f"error: {exc}")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _resolve_non_text_from_args(args):
+    result = resolve_as_non_text(
+        args.case_id,
+        args.doc_id,
+        verified_by=args.verified_by,
+        reviewer_role=args.reviewer_role,
+        note=args.note,
+        held_by=args.held_by,
+        run_id=args.run_id,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _add_run_arguments(parser):
+    parser.add_argument("case_id")
+    parser.add_argument("doc_id")
+    parser.add_argument("pdf_path")
+    parser.add_argument("--held-by", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--reader-a", choices=SUPPORTED_PROVIDERS, help="Provider for the first independent OCR read")
+    parser.add_argument("--reader-b", choices=SUPPORTED_PROVIDERS, help="Provider for the second independent OCR read")
+    parser.add_argument("--comparator", choices=SUPPORTED_PROVIDERS, help="Provider for OCR read comparison")
+    parser.add_argument("--classifier-provider", choices=SUPPORTED_PROVIDERS,
+                        help="Provider for document classification; defaults to the comparator provider")
+    parser.add_argument("--reader-a-model", help="Model name for --reader-a")
+    parser.add_argument("--reader-b-model", help="Model name for --reader-b")
+    parser.add_argument("--comparator-model", help="Model name for --comparator")
+    parser.add_argument("--classifier-model", help="Model name for --classifier-provider")
+    parser.add_argument("--page-start", type=int, help="1-based first source PDF page for this logical document")
+    parser.add_argument("--page-end", type=int, help="1-based last source PDF page for this logical document")
+
+
+# Reserved subcommand names dispatched explicitly; anything else is treated as
+# the legacy positional `run` invocation (CASE DOC PDF ...) for backward
+# compatibility with document-pipeline.md and existing callers.
+_SUBCOMMANDS = {"run", "resolve-disagreement", "resolve-non-text"}
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="command")
+
+    run_parser = sub.add_parser("run", help="Run checkpoint 1 (OCR + cross-validation + classification)")
+    _add_run_arguments(run_parser)
+
+    resolve_parser = sub.add_parser(
+        "resolve-disagreement",
+        help="Resolve one P8-disagreed page by selecting the correct reading (human decision)",
+    )
+    resolve_parser.add_argument("case_id")
+    resolve_parser.add_argument("doc_id")
+    resolve_parser.add_argument("--page", type=int, required=True, help="1-based page number of the disagreed page")
+    resolve_parser.add_argument("--chosen-reading", choices=["reading_a", "reading_b"], required=True,
+                                help="Which of the two independent reads the human verified as correct")
+    resolve_parser.add_argument("--resolved-by", required=True, help="Name of the human (e.g. 손해사정사) making the call")
+    resolve_parser.add_argument("--note", required=True, help="Why this reading is correct")
+    resolve_parser.add_argument("--held-by", required=True)
+    resolve_parser.add_argument("--run-id", required=True)
+
+    non_text_parser = sub.add_parser(
+        "resolve-non-text",
+        help="Record a human decision that the whole document is non-text visual evidence",
+    )
+    non_text_parser.add_argument("case_id")
+    non_text_parser.add_argument("doc_id")
+    non_text_parser.add_argument("--verified-by", required=True)
+    non_text_parser.add_argument(
+        "--reviewer-role", choices=["손해사정사", "의사", "법률전문가"], required=True,
+        help="Expert role that must review the visual evidence outside the automated text pipeline",
+    )
+    non_text_parser.add_argument("--note", required=True)
+    non_text_parser.add_argument("--held-by", required=True)
+    non_text_parser.add_argument("--run-id", required=True)
+
+    # Backward compatibility: the legacy form is `... CASE DOC PDF --held-by ...`
+    # with no subcommand token. If the first arg isn't a known subcommand (and
+    # isn't a help flag), route to the `run` parser so old invocations keep working.
+    if argv and argv[0] not in _SUBCOMMANDS and argv[0] not in ("-h", "--help"):
+        args = run_parser.parse_args(argv)
+        _run_from_args(args)
+        return
+
+    args = ap.parse_args(argv)
+    if args.command == "resolve-disagreement":
+        _resolve_from_args(args)
+    elif args.command == "resolve-non-text":
+        _resolve_non_text_from_args(args)
+    elif args.command == "run":
+        _run_from_args(args)
+    else:
+        ap.print_help()
+        sys.exit(2)
 
 
 if __name__ == "__main__":

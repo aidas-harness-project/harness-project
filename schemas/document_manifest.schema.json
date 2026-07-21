@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "document_manifest.schema.json",
-  "title": "document_manifest.json -- case document roster v0.3",
+  "title": "document_manifest.json -- case document roster v0.4",
   "description": "The list of every document in a case and its processing status. This is a shared state file updated by multiple stages in sequence, not a single component's output -- it does not use the common output envelope. Update discipline: each stage adds only its own owner fields and never modifies fields it doesn't own (owner is documented per field below). This discipline is enforced structurally by the DAO's write_contract lock (see harness-guardrails P5), not just by convention.",
   "type": "object",
   "properties": {
@@ -61,7 +61,7 @@
           "description": "owner: document-pipeline (checkpoint 1). null before OCR."
         },
         "ocr_status": {
-          "enum": ["pending", "completed", "failed"],
+          "enum": ["pending", "completed", "failed", "not_applicable"],
           "description": "owner: document-pipeline (checkpoint 1). Initialized to pending by Case Intake."
         },
         "ocr_text_path": {
@@ -82,7 +82,7 @@
         },
         "cross_validation_status": {
           "anyOf": [
-            { "enum": ["agreed", "disagreed_pending_review", "disagreed_resolved", "not_run"] },
+            { "enum": ["agreed", "disagreed_pending_review", "disagreed_resolved", "non_text_verified", "not_run"] },
             { "type": "null" }
           ],
           "description": "owner: document-pipeline (checkpoint 1). Result of P8's dual-path (OCR engine vs. blind vision-model read) cross-validation. Mirrors ocr_result_{document_id}.json's own cross_validation_status enum -- found out of sync for real when a real resolution's write was correctly rejected by schema validation (this file hadn't been updated when 'disagreed_resolved' was added there)."
@@ -104,9 +104,52 @@
             { "type": "null" }
           ],
           "description": "owner: document-pipeline (checkpoint 1). null before classification; null (not 1.0) when pre-flagged, since no inference confidence applies."
+        },
+        "extraction_method": {
+          "anyOf": [
+            { "enum": ["embedded_text", "ocr", "mixed", "non_text_image"] },
+            { "type": "null" }
+          ],
+          "description": "owner: document-pipeline (checkpoint 1). non_text_image is human-verified visual evidence that must not be converted into synthetic page text."
+        },
+        "downstream_disposition": {
+          "anyOf": [
+            { "enum": ["automated_text_pipeline", "expert_review_only"] },
+            { "type": "null" }
+          ],
+          "description": "owner: document-pipeline. expert_review_only excludes the document from text redaction, chunking, and automated downstream evidence use."
+        },
+        "non_text_verification": {
+          "type": ["object", "null"],
+          "properties": {
+            "verified_by": { "type": "string", "minLength": 1 },
+            "verified_at": { "type": "string", "format": "date-time" },
+            "note": { "type": "string", "minLength": 1 },
+            "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+          },
+          "required": ["verified_by", "verified_at", "note", "reviewer_role"]
         }
       },
-      "required": ["document_id", "file_name", "file_path", "file_format", "file_size_bytes", "ocr_status"]
+      "required": ["document_id", "file_name", "file_path", "file_format", "file_size_bytes", "ocr_status"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "downstream_disposition": { "const": "expert_review_only" } },
+            "required": ["downstream_disposition"]
+          },
+          "then": {
+            "properties": {
+              "extraction_method": { "const": "non_text_image" },
+              "ocr_status": { "const": "not_applicable" },
+              "cross_validation_status": { "const": "non_text_verified" },
+              "redacted_text_path": { "type": "null" },
+              "document_type": { "const": "other" },
+              "classification_confidence": { "type": "null" }
+            },
+            "required": ["extraction_method", "cross_validation_status", "non_text_verification"]
+          }
+        }
+      ]
     }
   }
 }

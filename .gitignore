@@ -1,6 +1,13 @@
 # Obsidian workspace/cache (개인 UI 상태 — 지식이 아님)
 .obsidian/
 
+# The `wiki` knowledge base is a SEPARATE repo, never part of this one. The
+# templates the pipeline actually consumes were vendored into `templates/` on
+# 2026-07-13 to break the live dependency (each carries a `provenance` note).
+# A local `wiki/` clone must never be re-added -- `git add` on a nested repo
+# silently records a URL-less gitlink (mode 160000) that breaks fresh clones.
+wiki/
+
 # OS
 .DS_Store
 
@@ -17,8 +24,11 @@ data/
 # Workspace Data with each run's report written by agent
 _workspace/
 
-# Per-step run backups (P10) -- regenerable snapshots, not source of truth
-outputs/*/_backups/
+# Pipeline contract outputs -- per-run generated artifacts, not source of truth
+outputs/
+
+# archived legacy files
+archive/
 
 # Transient file locks (P5) -- must never be committed
 *.lock
@@ -28,6 +38,7 @@ schemas.zip
 
 # ocr_extract.py's project-local scratch (page images) -- transient, cleaned up on exit
 _ocr_scratch/
+_redaction_scratch/
 
 # graphify knowledge-graph build output -- regenerable from the corpus, not source
 graphify-out/

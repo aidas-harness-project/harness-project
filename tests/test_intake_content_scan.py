@@ -3,15 +3,29 @@ content-blind classification -- the CASE_002 incident: DOC_002/DOC_003
 looked like plain claim documents by filename but were actually completed
 third-party loss-adjustment reports with stated payout figures).
 
-_parse_content_scan_verdict is pure and tested directly (no real claude CLI
-or page images needed). build_ledger's wiring is tested with fake plan
+_parse_content_scan_verdict is pure and tested directly (no real provider
+backend or page images needed). build_ledger's wiring is tested with fake plan
 entries -- no real PDF needed there either.
 """
-from types import SimpleNamespace
-
 import pytest
 
 import intake_case
+from llm_providers import ProviderConfig, ProviderConfigError, ProviderResult
+
+
+class FakeScanProvider:
+    provider_name = "openai-api"
+    model_name = "gpt-test"
+
+    def __init__(self, response):
+        self.response = response
+        self.prompts = []
+        self.image_paths = None
+
+    def scan_intake_content(self, prompt, prompt_version, image_paths=None):
+        self.prompts.append((prompt, prompt_version))
+        self.image_paths = list(image_paths) if image_paths is not None else None
+        return ProviderResult(self.provider_name, self.model_name, prompt_version, self.response)
 
 
 @pytest.mark.parametrize("response,expected_flagged", [
@@ -80,8 +94,6 @@ def test_scan_for_answer_key_content_uses_capped_page_count(monkeypatch, tmp_pat
     whole document -- verifies the max_pages plumbing into
     ocr_extract.split_to_page_images actually gets used, not silently
     ignored."""
-    from unittest import mock
-
     fake_pages = [tmp_path / f"page_{i:03d}.png" for i in range(1, 4)]
     for p in fake_pages:
         p.write_bytes(b"fake png bytes")
@@ -92,18 +104,98 @@ def test_scan_for_answer_key_content_uses_capped_page_count(monkeypatch, tmp_pat
         captured["max_pages"] = max_pages
         return fake_pages
 
-    def fake_run(cmd, **kw):
-        r = mock.Mock()
-        r.returncode = 0
-        r.stdout = "CLEAR"
-        r.stderr = ""
-        return r
-
     monkeypatch.setattr(intake_case, "split_to_page_images", fake_split)
-    monkeypatch.setattr(intake_case.subprocess, "run", fake_run)
+    provider = FakeScanProvider("CLEAR")
 
-    result = intake_case.scan_for_answer_key_content(tmp_path / "doc.pdf", "CASE_009", 1, n_pages=3)
+    result = intake_case.scan_for_answer_key_content(tmp_path / "doc.pdf", "CASE_009", 1, n_pages=3, provider=provider)
 
     assert captured["max_pages"] == 3
+    # 2-2 regression: the page images must reach the provider's image channel,
+    # not be embedded as file-path strings in the prompt text (dead strings to
+    # an HTTP provider -- the D2 scan would silently see nothing).
+    assert provider.image_paths == fake_pages
+    scan_prompt = provider.prompts[0][0]
+    assert "page_001.png" not in scan_prompt
     assert result["flagged"] is False
     assert result["pages_checked"] == 3
+    assert len(provider.prompts) == 1
+    assert provider.prompts[0][1] == intake_case.CONTENT_SCAN_PROMPT_VERSION
+
+
+def test_scan_for_answer_key_content_records_provider_metadata_in_flagged_evidence(monkeypatch, tmp_path):
+    fake_pages = [tmp_path / "page_001.png"]
+    fake_pages[0].write_bytes(b"fake png bytes")
+
+    monkeypatch.setattr(intake_case, "split_to_page_images", lambda doc_path, out_dir, max_pages=None: fake_pages)
+    provider = FakeScanProvider("FLAGGED: reads 보험금사정서")
+
+    result = intake_case.scan_for_answer_key_content(tmp_path / "doc.pdf", "CASE_009", 1, provider=provider)
+
+    assert result["flagged"] is True
+    assert "FLAGGED: reads 보험금사정서" in result["evidence"]
+    assert "provider=openai-api" in result["evidence"]
+    assert "model=gpt-test" in result["evidence"]
+    assert result["provider_metadata"]["provider_name"] == "openai-api"
+
+
+def test_scan_for_answer_key_content_unparseable_still_flags_with_metadata(monkeypatch, tmp_path):
+    fake_pages = [tmp_path / "page_001.png"]
+    fake_pages[0].write_bytes(b"fake png bytes")
+
+    monkeypatch.setattr(intake_case, "split_to_page_images", lambda doc_path, out_dir, max_pages=None: fake_pages)
+    provider = FakeScanProvider("garbled")
+
+    result = intake_case.scan_for_answer_key_content(tmp_path / "doc.pdf", "CASE_009", 1, provider=provider)
+
+    assert result["flagged"] is True
+    assert "garbled" in result["evidence"]
+    assert "provider=openai-api" in result["evidence"]
+
+
+def test_build_scan_provider_uses_scan_specific_environment(monkeypatch):
+    created = []
+
+    class BuiltProvider:
+        provider_name = "fixture"
+        model_name = "scan-model"
+
+    def fake_build_provider(config, **kwargs):
+        created.append(config)
+        return BuiltProvider()
+
+    monkeypatch.setattr(intake_case, "build_provider", fake_build_provider)
+
+    provider = intake_case.build_scan_provider(
+        env={"HARNESS_INTAKE_SCAN_PROVIDER": "fixture", "HARNESS_INTAKE_SCAN_MODEL": "scan-model"}
+    )
+
+    assert provider.provider_name == "fixture"
+    assert created == [ProviderConfig("fixture", "scan-model")]
+
+
+def test_build_scan_provider_missing_openai_credentials_fail_clearly():
+    with pytest.raises(ProviderConfigError) as excinfo:
+        intake_case.build_scan_provider(scan_provider_name="openai-api", env={})
+
+    assert "OPENAI_API_KEY" in str(excinfo.value)
+
+
+def test_scan_for_answer_key_content_reports_provider_config_failure_without_traceback(monkeypatch, tmp_path):
+    fake_page = tmp_path / "page_001.png"
+    fake_page.write_bytes(b"fake png bytes")
+    monkeypatch.setattr(
+        intake_case,
+        "split_to_page_images",
+        lambda doc_path, out_dir, max_pages=None: [fake_page],
+    )
+    def fail_build_scan_provider():
+        raise ProviderConfigError("missing credentials")
+
+    monkeypatch.setattr(intake_case, "build_scan_provider", fail_build_scan_provider)
+
+    with pytest.raises(SystemExit) as excinfo:
+        intake_case.scan_for_answer_key_content(tmp_path / "doc.pdf", "CASE_009", 1)
+
+    assert str(excinfo.value) == (
+        "error: content-scan provider failed for doc.pdf: missing credentials"
+    )
