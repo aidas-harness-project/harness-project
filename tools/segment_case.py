@@ -883,6 +883,21 @@ PROPOSAL_VARIANT = "as_scanned"
 # saturation policy and the schema's full_page_fallback.saturated field.
 DEFAULT_FALLBACK_CAP_RATIO = 0.25
 
+# A merged segment at or above this length is re-examined page by page by the
+# refine pass. The over-merge failure mode is specifically the repeating-form
+# runs (진료비 세부내역서, 영수증), which always surface as one long segment
+# swallowing many one-page documents -- never as a short mistake. Short
+# segments are left alone: re-checking them spends calls where the crop pass
+# was already right.
+#
+# Settled at 4 by measurement on the 110p bundle (CASE_025): threshold 5 lifted
+# recall 0.81 -> 0.91, and dropping to 4 lifted it further to 0.96 (F1 0.88 ->
+# 0.94) by pulling in the 4-page 영수증 run (p97-100) that threshold 5 left
+# merged -- it recovered p98/99/100 for the cost of one low-confidence false
+# split (p26). Below 4 the re-check would start hitting genuine 2-3 page
+# documents where the crop pass was already right.
+DEFAULT_LONG_SEGMENT_THRESHOLD = 4
+
 
 def _resume_dir(case_id: str, doc_id: str) -> Path:
     """Per-sheet response cache, stable (NOT pid-tagged) so a re-run reuses it.
@@ -927,6 +942,9 @@ def propose_boundaries(
     page_count: int | None = None,
     sheet_paths: list[Path] | None = None,
     fallback_cap_ratio: float = DEFAULT_FALLBACK_CAP_RATIO,
+    refine: bool = False,
+    refine_threshold: int = DEFAULT_LONG_SEGMENT_THRESHOLD,
+    refine_scratch_dir: Path | None = None,
     resume: bool = True,
     progress=None,
 ) -> dict:
@@ -1022,6 +1040,36 @@ def propose_boundaries(
             f"spend the extra calls. Fallback skipped; these pages stay flagged."
         )
 
+    # The full-page fallback that actually moves the number: re-examine each long
+    # merged segment page by page and split it where a boundary was over-merged.
+    # Unlike the needs_full_page path above (which the crop pass rarely triggers),
+    # this targets segment LENGTH -- the shape an over-merged repeating-form run
+    # always takes. Measured on the 110p bundle: recall 0.81 -> 0.96. Off by
+    # default; the caller opts in, since it spends one call per interior page of
+    # every long segment.
+    refinement = None
+    if refine:
+        if progress:
+            progress(f"refining long segments (length >= {refine_threshold}) full-page...")
+        refinement = refine_long_segments(
+            merged["segments"], pdf_path=pdf_path, provider=provider,
+            threshold=refine_threshold, scratch_dir=refine_scratch_dir,
+            progress=progress,
+        )
+        merged["segments"] = refinement["segments"]
+        fallback = {
+            "triggered": True,
+            "pages": refinement["pages_examined"],
+            "saturated": False,
+            "cap": fallback["cap"],
+        }
+        if refinement["new_boundaries"]:
+            merged["warnings"].append(
+                f"full-page refinement split {len(refinement['refined_indices'])} "
+                f"long segment(s) at {len(refinement['new_boundaries'])} new "
+                f"boundary/boundaries: {refinement['new_boundaries']}"
+            )
+
     method = {
         "ocr_performed": False,
         "method_version": METHOD_VERSION,
@@ -1050,6 +1098,7 @@ def propose_boundaries(
         "method": method,
         "contact_sheets": contact_sheets,
         "per_sheet": per_sheet,
+        "refinement": refinement,
     }
 
 
@@ -1077,6 +1126,229 @@ def _plan_fallback(needs_full_page: list[int], page_count: int, cap_ratio: float
         "pages": pages,
         "saturated": saturated,
         "cap": cap,
+    }
+
+
+# ------------------------------------------------ long-segment refinement --
+
+# Asked of ONE full page, not a contact sheet. The crop-only first pass misses a
+# boundary when a repeating form reprints its title every page and the model
+# reads the run as continuation; a full page shows the whole title block and
+# page-1-of-N markers a top-third crop cut off. Goes through transcribe_image
+# like every other vision call (the 9/9 label-form failure requires it).
+FULL_PAGE_PROMPT = """This is a single full page from a scanned PDF that \
+concatenates several separate documents. Decide ONE thing: does THIS page begin \
+a NEW document, or does it continue the document on the previous page?
+
+A page begins a new document if it has its own title block, a page-1-of-N \
+marker, a different form layout, or a different letterhead. A page that is the \
+2nd, 3rd, ... sheet of the same form -- same title reprinted at the top but \
+continuing the same record or bill -- is a continuation, NOT a new document. \
+When a form reprints its title on every page, treat each titled page as its own \
+document only if it is otherwise self-contained (its own totals, its own dates).
+
+Some pages are scanned rotated a quarter turn; read them in place.
+
+Reply with ONLY one JSON object:
+{"starts_new_document": true or false, \
+"type_label": "<the document's name in its own words, or null>", \
+"confidence": 0.0-1.0, "evidence": "<what you saw>"}"""
+
+FULL_PAGE_PROMPT_VERSION = "segment_full_page_v0.1"
+
+
+def parse_full_page_response(raw: str) -> dict:
+    """Parses a single-page boundary verdict. NEVER raises -- same fail-safe as
+    parse_segmentation_response: an unreadable verdict leaves the page as it was
+    (a continuation of the long segment), never inventing a split."""
+    parsed, error = _scan_for_json_object(raw)
+    if parsed is None:
+        return {"ok": False, "starts_new_document": False, "warning": error}
+    starts = parsed.get("starts_new_document")
+    if not isinstance(starts, bool):
+        return {"ok": False, "starts_new_document": False,
+                "warning": f"starts_new_document was not a boolean: {starts!r}"}
+    confidence = parsed.get("confidence")
+    if confidence is not None and (
+        isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+        or not 0.0 <= confidence <= 1.0
+    ):
+        confidence = None
+    type_guess = parsed.get("type_label")
+    return {
+        "ok": True,
+        "starts_new_document": starts,
+        "type_label": type_guess if isinstance(type_guess, str) else None,
+        "confidence": float(confidence) if confidence is not None else None,
+        "evidence": parsed.get("evidence"),
+    }
+
+
+def refine_long_segments(
+    segments: list[dict],
+    *,
+    pdf_path: Path,
+    provider,
+    threshold: int = DEFAULT_LONG_SEGMENT_THRESHOLD,
+    fallback_dpi: int = DEFAULT_FALLBACK_DPI,
+    scratch_dir: Path | None = None,
+    progress=None,
+) -> dict:
+    """Re-examines every page inside a long segment full-page, splitting it
+    wherever the model now says a new document starts.
+
+    This is the full-page fallback aimed at the real over-merge failure, which
+    is NOT a page the model flagged (needs_full_page) -- the crop pass merged
+    those confidently. So the trigger is segment LENGTH, not the model's own
+    doubt: a repeating-form run only ever over-merges into one long segment.
+
+    A segment's first page keeps its known boundary; each interior page is
+    rendered full-page and asked the single-page question. A 'yes' becomes a new
+    boundary and the long segment is cut there. Fails safe: an unreadable or
+    'no' verdict leaves the page as a continuation, so this can only ADD
+    boundaries a human then reviews, never silently remove one.
+
+    Returns ``{segments, refined_indices, pages_examined, new_boundaries,
+    calls}`` -- segments is the new full list (short ones passed through
+    untouched), the rest is for reporting and scoring.
+    """
+    from PIL import Image  # noqa: F401  (render_page_images needs it)
+
+    if scratch_dir is not None:
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+
+    # Full-page render: land the long edge near the vision cap so the whole page
+    # is legible, not a cell-sized thumbnail. A4 is taller than wide, so height
+    # is the long edge.
+    zoom = LONG_EDGE_CAP / DEFAULT_PAGE_HEIGHT_PT
+
+    # A per-page verdict cache next to the rendered pages, so a re-run -- or a
+    # threshold change that pulls in a few more segments -- reuses every page
+    # already called instead of re-paying. Each verdict is deterministic per
+    # page image and prompt version, so a cached 'p36: NEW' is still valid.
+    verdict_cache: dict[int, dict] = {}
+    cache_path = None
+    if scratch_dir is not None:
+        cache_path = scratch_dir / "_verdicts.json"
+        if cache_path.exists():
+            try:
+                stored = json.loads(cache_path.read_text(encoding="utf-8"))
+                if stored.get("prompt_version") == FULL_PAGE_PROMPT_VERSION:
+                    verdict_cache = {int(k): v for k, v in stored.get("verdicts", {}).items()}
+            except (OSError, json.JSONDecodeError):
+                verdict_cache = {}
+
+    new_segments: list[dict] = []
+    refined_indices: list[int] = []
+    pages_examined: list[int] = []
+    new_boundaries: list[int] = []
+    calls = 0
+
+    def _persist_verdicts():
+        if cache_path is None:
+            return
+        tmp = cache_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(
+            {"prompt_version": FULL_PAGE_PROMPT_VERSION,
+             "verdicts": {str(k): v for k, v in verdict_cache.items()}},
+            ensure_ascii=False), encoding="utf-8")
+        tmp.replace(cache_path)
+
+    for seg in segments:
+        start, end = seg["page_start"], seg["page_end"]
+        length = end - start + 1
+        if length < threshold:
+            new_segments.append(dict(seg))
+            continue
+
+        refined_indices.append(seg.get("segment_index"))
+        # Boundaries within this segment, always including its own start.
+        cut_points = [start]
+        cut_meta: dict[int, dict] = {}
+        for page in range(start + 1, end + 1):
+            pages_examined.append(page)
+            if page in verdict_cache:
+                verdict = verdict_cache[page]
+                if progress:
+                    mark = "NEW" if verdict["starts_new_document"] else "cont"
+                    progress(f"  full-page p{page}: {mark} (cached)")
+                if verdict["starts_new_document"]:
+                    cut_points.append(page)
+                    new_boundaries.append(page)
+                    cut_meta[page] = verdict
+                continue
+
+            images = render_page_images(pdf_path, [page], zoom=zoom)
+            image = images[page]
+            if scratch_dir is not None:
+                page_path = scratch_dir / f"fullpage_p{page:03d}.png"
+                image.save(page_path)
+            else:
+                # transcribe_image reads a file path, so a full page needs to be
+                # on disk somewhere; fall back to a temp file when no scratch dir.
+                import tempfile
+                fd = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                page_path = Path(fd.name)
+                fd.close()
+                image.save(page_path)
+
+            try:
+                result = provider.transcribe_image(page_path, FULL_PAGE_PROMPT, FULL_PAGE_PROMPT_VERSION)
+                verdict = parse_full_page_response(result.text)
+            except Exception as exc:  # noqa: BLE001
+                # A single page's provider failure must not kill a long run.
+                # Fail safe the same way an unreadable verdict does: leave the
+                # page a continuation. This can only MISS a split (a human still
+                # reviews the long segment), never invent one. NOT cached -- a
+                # transient failure should be retried on the next run.
+                verdict = {"ok": False, "starts_new_document": False,
+                           "warning": f"provider call failed: {exc}"}
+            calls += 1
+            if verdict.get("ok"):
+                verdict_cache[page] = verdict
+                _persist_verdicts()
+            if progress:
+                mark = "NEW" if verdict["starts_new_document"] else "cont"
+                progress(f"  full-page p{page}: {mark} "
+                         f"(conf {verdict.get('confidence')})")
+            if verdict["starts_new_document"]:
+                cut_points.append(page)
+                new_boundaries.append(page)
+                cut_meta[page] = verdict
+
+        # Rebuild this segment as one-or-more from its cut points.
+        for i, cut in enumerate(cut_points):
+            seg_end = (cut_points[i + 1] - 1) if i + 1 < len(cut_points) else end
+            if cut == start:
+                # The original segment's head keeps its crop-pass metadata.
+                piece = dict(seg)
+                piece["page_start"], piece["page_end"] = cut, seg_end
+            else:
+                meta = cut_meta[cut]
+                piece = {
+                    "segment_index": None,  # renumbered below
+                    "page_start": cut, "page_end": seg_end,
+                    "provisional_document_type": None,
+                    "provisional_type_label": meta.get("type_label"),
+                    "confidence": meta.get("confidence"),
+                    "boundary_evidence": meta.get("evidence"),
+                    "review_status": "pending",
+                    "needs_full_page": False,
+                    "orientation_suspect": False,
+                    "assigned_document_id": None,
+                }
+            new_segments.append(piece)
+
+    # Renumber segment_index across the whole rebuilt list.
+    for i, seg in enumerate(new_segments):
+        seg["segment_index"] = i
+
+    return {
+        "segments": new_segments,
+        "refined_indices": refined_indices,
+        "pages_examined": pages_examined,
+        "new_boundaries": sorted(new_boundaries),
+        "calls": calls,
     }
 
 
@@ -1476,9 +1748,13 @@ def _cmd_propose(args):
     _stderr(f"proposing boundaries via {provider.provider_name}/{provider.model_name} "
             f"over {len(sheet_paths)} sheet(s)...")
 
+    # Full-page render staging for the refine pass reuses the sheet dir, so the
+    # per-page renders and verdict cache survive across runs like the sheets do.
     result = propose_boundaries(
         pdf_path, case_id=args.case_id, doc_id=args.doc_id, provider=provider,
         geometry=geometry, page_count=page_count, sheet_paths=sheet_paths,
+        refine=args.refine, refine_threshold=args.refine_threshold,
+        refine_scratch_dir=out_dir / "_fullpage",
         resume=not args.no_resume, progress=_stderr,
     )
     proposal = build_proposal_document(
@@ -1488,15 +1764,24 @@ def _cmd_propose(args):
         created_at=now_iso(),
     )
     target = _write_proposal(args.case_id, args.doc_id, proposal, args.held_by, args.run_id)
-    print(json.dumps({
+    out = {
         "status": "proposed",
         "proposal_path": str(target),
         "segment_count": len(proposal["segments"]),
         "unassigned_pages": proposal["unassigned_pages"],
         "needs_full_page": result["needs_full_page"],
+        "fallback_triggered": proposal["method"]["full_page_fallback"]["triggered"],
         "fallback_saturated": proposal["method"]["full_page_fallback"]["saturated"],
         "warnings": proposal["warnings"],
-    }, ensure_ascii=False, indent=2))
+    }
+    if result.get("refinement"):
+        out["refinement"] = {
+            "long_segments_refined": len(result["refinement"]["refined_indices"]),
+            "pages_examined": len(result["refinement"]["pages_examined"]),
+            "new_boundaries": result["refinement"]["new_boundaries"],
+            "vision_calls": result["refinement"]["calls"],
+        }
+    print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1590,6 +1875,11 @@ def main(argv=None):
     _grid_and_crop(p)
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.add_argument("--no-resume", action="store_true", help="ignore the per-sheet resume cache")
+    p.add_argument("--refine", action="store_true",
+                   help="full-page re-examine long merged segments to recover over-merged "
+                        "boundaries (measured recall 0.81 -> 0.96; costs one call per interior page)")
+    p.add_argument("--refine-threshold", type=int, default=DEFAULT_LONG_SEGMENT_THRESHOLD,
+                   help=f"minimum segment length to re-examine (default {DEFAULT_LONG_SEGMENT_THRESHOLD})")
     add_provider_args(p)
     p.set_defaults(fn=_cmd_propose)
 

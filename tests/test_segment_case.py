@@ -1148,3 +1148,186 @@ def test_proposal_filename_round_trips_through_schema_name_for():
     name = sc.proposal_filename("DOC_007")
     assert name == "segmentation_proposal_DOC_007.json"
     assert schema_name_for(Path(name)) == "segmentation_proposal.schema.json"
+
+
+# ---------------------------------------------- full-page refinement --
+
+def test_parse_full_page_reads_a_clean_verdict():
+    out = sc.parse_full_page_response(_response(
+        starts_new_document=True, type_label="진료비 세부내역서",
+        confidence=0.9, evidence="new title block"))
+    assert out["ok"] is True
+    assert out["starts_new_document"] is True
+    assert out["type_label"] == "진료비 세부내역서"
+    assert out["confidence"] == 0.9
+
+
+def test_parse_full_page_fails_safe_to_continuation():
+    """An unreadable verdict must default to 'continuation' -- fail-safe means
+    never inventing a split, the same rule the sheet parser follows."""
+    out = sc.parse_full_page_response("not json at all")
+    assert out["ok"] is False
+    assert out["starts_new_document"] is False
+
+
+def test_parse_full_page_rejects_a_non_boolean_verdict():
+    out = sc.parse_full_page_response(_response(starts_new_document="yes"))
+    assert out["ok"] is False
+    assert out["starts_new_document"] is False
+
+
+class _PageVerdictProvider:
+    """Returns a canned full-page verdict keyed by the page number in the image
+    filename (fullpage_pNNN.png), so a test can script which pages split."""
+    provider_name = "fixture"
+
+    def __init__(self, new_pages):
+        self.model_name = "fixture-model"
+        self.new_pages = set(new_pages)
+        self.calls = 0
+
+    def transcribe_image(self, image_path, prompt, prompt_version):
+        from llm_providers import ProviderResult
+        import re
+        self.calls += 1
+        m = re.search(r"p(\d+)", str(image_path))
+        page = int(m.group(1)) if m else -1
+        text = _response(
+            starts_new_document=(page in self.new_pages),
+            type_label="doc" if page in self.new_pages else None,
+            confidence=0.8, evidence="e")
+        return ProviderResult(provider_name="fixture", model_name="fixture-model",
+                              prompt_version=prompt_version, text=text)
+
+
+def test_refine_splits_a_long_segment_at_recovered_boundaries(tmp_path):
+    pdf = _bundle_pdf(tmp_path, 30)
+    segments = [
+        {"segment_index": 0, "page_start": 1, "page_end": 4},   # short: untouched
+        {"segment_index": 1, "page_start": 5, "page_end": 20},  # long: re-examine
+    ]
+    # Model now says p10 and p15 start new documents.
+    provider = _PageVerdictProvider(new_pages={10, 15})
+    out = sc.refine_long_segments(
+        segments, pdf_path=pdf, provider=provider, threshold=5,
+        scratch_dir=tmp_path / "fp")
+    ranges = [(s["page_start"], s["page_end"]) for s in out["segments"]]
+    assert (1, 4) in ranges              # short segment passed through
+    assert (5, 9) in ranges              # long segment split at 10 and 15
+    assert (10, 14) in ranges
+    assert (15, 20) in ranges
+    assert out["new_boundaries"] == [10, 15]
+    # 15 interior pages (6..20) examined; the short segment never called.
+    assert provider.calls == 15
+
+
+def test_refine_leaves_a_short_segment_alone(tmp_path):
+    pdf = _bundle_pdf(tmp_path, 10)
+    segments = [{"segment_index": 0, "page_start": 1, "page_end": 3}]
+    provider = _PageVerdictProvider(new_pages=set())
+    out = sc.refine_long_segments(
+        segments, pdf_path=pdf, provider=provider, threshold=4,
+        scratch_dir=tmp_path / "fp")
+    assert provider.calls == 0  # below threshold -> no calls
+    assert [(s["page_start"], s["page_end"]) for s in out["segments"]] == [(1, 3)]
+
+
+def test_refine_never_invents_a_split_when_the_model_says_continue(tmp_path):
+    pdf = _bundle_pdf(tmp_path, 10)
+    segments = [{"segment_index": 0, "page_start": 1, "page_end": 8}]
+    provider = _PageVerdictProvider(new_pages=set())  # every page: continuation
+    out = sc.refine_long_segments(
+        segments, pdf_path=pdf, provider=provider, threshold=4,
+        scratch_dir=tmp_path / "fp")
+    assert out["new_boundaries"] == []
+    assert [(s["page_start"], s["page_end"]) for s in out["segments"]] == [(1, 8)]
+
+
+def test_refine_reuses_the_verdict_cache_on_a_second_run(tmp_path):
+    """A re-run (or a threshold change) must not re-pay for pages already
+    called -- the per-page verdict cache mirrors the sheet resume cache."""
+    pdf = _bundle_pdf(tmp_path, 10)
+    segments = [{"segment_index": 0, "page_start": 1, "page_end": 8}]
+    scratch = tmp_path / "fp"
+
+    first = _PageVerdictProvider(new_pages={5})
+    sc.refine_long_segments(segments, pdf_path=pdf, provider=first,
+                            threshold=4, scratch_dir=scratch)
+    assert first.calls == 7  # pages 2..8
+
+    second = _PageVerdictProvider(new_pages={5})
+    out = sc.refine_long_segments(segments, pdf_path=pdf, provider=second,
+                                  threshold=4, scratch_dir=scratch)
+    assert second.calls == 0  # served entirely from the verdict cache
+    assert out["new_boundaries"] == [5]  # cached verdict still splits at 5
+
+
+def test_refine_survives_a_provider_failure_on_one_page(tmp_path):
+    """A single page's provider exception must not kill the run -- it fails safe
+    to continuation, and the rest of the segment is still examined."""
+    pdf = _bundle_pdf(tmp_path, 10)
+    segments = [{"segment_index": 0, "page_start": 1, "page_end": 6}]
+
+    class _FlakyProvider:
+        provider_name = "fixture"
+        model_name = "fixture-model"
+        def __init__(self):
+            self.calls = 0
+        def transcribe_image(self, image_path, prompt, prompt_version):
+            from llm_providers import ProviderResult
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("transient provider failure")
+            return ProviderResult(provider_name="fixture", model_name="fixture-model",
+                                  prompt_version=prompt_version,
+                                  text=_response(starts_new_document=False, confidence=0.8))
+        # no cache so the failure is actually hit
+    provider = _FlakyProvider()
+    out = sc.refine_long_segments(segments, pdf_path=pdf, provider=provider,
+                                  threshold=4, scratch_dir=None)
+    assert len(out["pages_examined"]) == 5  # all interior pages still examined
+    assert out["new_boundaries"] == []      # failed page fell safe to continuation
+
+
+def test_propose_with_refine_reruns_long_segments(tmp_path):
+    """End to end through propose_boundaries: --refine splits a long segment and
+    marks the fallback triggered in the method record."""
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)  # 12 per sheet
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    # The crop pass merges everything into one long p1-12 segment...
+    sheet_provider_text = _response(
+        boundaries=[{"page": 1, "type_guess": "other", "type_label": "x",
+                     "confidence": 0.9, "evidence": "c"}],
+        continuations=list(range(2, 13)), needs_full_page=[])
+
+    class _Combined:
+        """Sheet calls (png with 'sheet' in name) get the merge response; full-page
+        calls (fullpage_pNNN.png) get a per-page verdict."""
+        provider_name = "fixture"
+        model_name = "fixture-model"
+        def __init__(self):
+            self.calls = 0
+        def transcribe_image(self, image_path, prompt, prompt_version):
+            from llm_providers import ProviderResult
+            import re
+            self.calls += 1
+            name = str(image_path)
+            if "fullpage" in name:
+                page = int(re.search(r"p(\d+)", name).group(1))
+                text = _response(starts_new_document=(page == 7), confidence=0.8)
+            else:
+                text = sheet_provider_text
+            return ProviderResult(provider_name="fixture", model_name="fixture-model",
+                                  prompt_version=prompt_version, text=text)
+
+    provider = _Combined()
+    out = sc.propose_boundaries(
+        pdf, case_id="CASE_910", doc_id="DOC_001", provider=provider,
+        geometry=geo, sheet_paths=sheets, resume=False,
+        refine=True, refine_threshold=4, refine_scratch_dir=tmp_path / "fp",
+    )
+    ranges = [(s["page_start"], s["page_end"]) for s in out["segments"]]
+    assert ranges == [(1, 6), (7, 12)]  # long p1-12 split at the recovered p7
+    assert out["method"]["full_page_fallback"]["triggered"] is True
+    assert out["refinement"]["new_boundaries"] == [7]
