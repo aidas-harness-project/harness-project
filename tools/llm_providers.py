@@ -222,15 +222,26 @@ class ClaudeCliProvider(BaseProvider):
                 last_exc = ProviderExecutionError(f"claude-cli call timed out after {timeout}s")
                 last_exc.__cause__ = exc
             else:
-                if result.returncode == 0:
+                out = result.stdout.strip()
+                # Fail closed on empty output even at exit 0. A blank string is
+                # never a valid transcription/verdict/redaction, and the CLI has
+                # been observed to exit non-zero with its diagnostic on STDOUT
+                # (e.g. a bad --model prints the reason to stdout, not stderr) --
+                # so an empty stdout can mask a real error. Better to retry/halt
+                # than to write "" into the trusted layer as if it were content.
+                if result.returncode == 0 and out:
                     raw_metadata = {
                         "command": cmd[0],
                         "returncode": result.returncode,
                         "stderr": result.stderr.strip(),
                         "attempts": attempt + 1,
                     }
-                    return self._result(result.stdout.strip(), prompt_version, raw_metadata)
-                last_exc = ProviderExecutionError(f"claude-cli call failed: {result.stderr.strip()}")
+                    return self._result(out, prompt_version, raw_metadata)
+                # Surface whatever diagnostic exists: stderr first, then stdout
+                # (where the CLI actually prints model/access errors), then a
+                # last-resort exit-code note so the message is never empty.
+                detail = result.stderr.strip() or out or f"exit {result.returncode}, no output"
+                last_exc = ProviderExecutionError(f"claude-cli call failed: {detail}")
 
             if attempt < _CLAUDE_CLI_MAX_ATTEMPTS - 1:
                 time.sleep(_CLAUDE_CLI_RETRY_SLEEP_SECONDS)
@@ -351,8 +362,13 @@ class CodexCliProvider(BaseProvider):
                 "stderr": result.stderr.strip(),
             }
             if result.returncode != 0:
-                raise ProviderExecutionError(f"codex-cli call failed: {result.stderr.strip()}")
+                detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}, no output"
+                raise ProviderExecutionError(f"codex-cli call failed: {detail}")
             text = output_path.read_text(encoding="utf-8").strip()
+            # Fail closed on empty output (same reason as the claude path): a
+            # blank result is never valid content, so never write it downstream.
+            if not text:
+                raise ProviderExecutionError("codex-cli returned empty output")
             return self._result(text, prompt_version, raw_metadata)
         finally:
             if output_path is not None:

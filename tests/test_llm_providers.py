@@ -609,3 +609,61 @@ def test_openai_truncated_response_raises(monkeypatch):
     with pytest.raises(providers.ProviderExecutionError) as excinfo:
         provider.classify_document("prompt", "classification_v0.1")
     assert "truncated" in str(excinfo.value).lower()
+
+
+def test_claude_cli_fails_closed_on_empty_output(monkeypatch, tmp_path):
+    # Failure-safety: exit 0 with empty stdout must NOT be returned as a valid
+    # (empty) transcription -- a blank result is never content. It retries, then
+    # raises.
+    def fake_run(cmd, **kwargs):
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = "   \n"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    monkeypatch.setattr(providers.time, "sleep", lambda *_: None)
+    provider = providers.ClaudeCliProvider(root=tmp_path)
+
+    with pytest.raises(providers.ProviderExecutionError):
+        provider.compare_text("prompt", "ocr_compare_v0.1")
+
+
+def test_claude_cli_error_detail_falls_back_to_stdout(monkeypatch, tmp_path):
+    # Failure-safety: the CLI prints model/access errors to STDOUT, not stderr.
+    # A non-zero exit with an empty stderr must still surface the stdout reason,
+    # never an empty message.
+    def fake_run(cmd, **kwargs):
+        result = mock.Mock()
+        result.returncode = 1
+        result.stdout = "There's an issue with the selected model (bogus)."
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    monkeypatch.setattr(providers.time, "sleep", lambda *_: None)
+    provider = providers.ClaudeCliProvider(root=tmp_path)
+
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.compare_text("prompt", "ocr_compare_v0.1")
+    assert "selected model" in str(excinfo.value)
+
+
+def test_codex_cli_fails_closed_on_empty_output(monkeypatch, tmp_path):
+    def fake_run(cmd, **kwargs):
+        # codex writes its answer to --output-last-message; simulate an empty one.
+        out_path = Path(cmd[cmd.index("--output-last-message") + 1])
+        out_path.write_text("", encoding="utf-8")
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.CodexCliProvider(root=tmp_path)
+
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.compare_text("prompt", "ocr_compare_v0.1")
+    assert "empty" in str(excinfo.value).lower()
