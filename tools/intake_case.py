@@ -169,11 +169,16 @@ def scan_for_answer_key_content(
     and this module's docstring for scope."""
     with scratch_dir(case_id, f"INTAKE_{index:03d}") as tmp_dir:
         page_paths = split_to_page_images(pdf_path, tmp_dir, max_pages=n_pages)
-        image_refs = "\n".join(f"Page {i + 1} image: {p}" for i, p in enumerate(page_paths))
-        prompt = f"{CONTENT_SCAN_PROMPT.format(n=n_pages)}\n\n{image_refs}"
+        # Pass the page images through the provider's image channel -- NOT as
+        # file paths embedded in the prompt text. Path-in-text only works for a
+        # CLI child that opens the files itself; an HTTP provider receives dead
+        # strings and scans nothing (the D2 check would silently pass-blind).
+        prompt = CONTENT_SCAN_PROMPT.format(n=n_pages)
         try:
             selected_provider = provider or build_scan_provider()
-            result = selected_provider.scan_intake_content(prompt, CONTENT_SCAN_PROMPT_VERSION)
+            result = selected_provider.scan_intake_content(
+                prompt, CONTENT_SCAN_PROMPT_VERSION, image_paths=page_paths
+            )
         except (ProviderConfigError, ProviderExecutionError) as exc:
             sys.exit(f"error: content-scan provider failed for {pdf_path.name}: {exc}")
         metadata = result.metadata()

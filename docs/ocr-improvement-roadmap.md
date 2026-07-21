@@ -1,5 +1,13 @@
 # OCR Improvement Roadmap
 
+> **SUPERSEDED 2026-07-21 (PR #8 review).** The offline local stack this roadmap
+> plans against (`tools/local_runtime.py`, `local-ocr`/`local-vlm`/`local-llm`,
+> the `.runtime/` model install) was removed: it never transcribed real Korean
+> pages reliably and was single-machine only. The provider abstraction it builds
+> on remains. A genuinely technology-independent reader (a real OCR engine) is
+> deferred to `open-decisions.md` #4; if that work is revived, this roadmap is a
+> historical reference, not a live plan, and its tool paths no longer exist.
+
 This roadmap evolves the provider-based OCR architecture incrementally. It
 keeps the `fix_codex` provider abstraction and adds local quality controls only
 after the preceding layer has been validated on representative Korean

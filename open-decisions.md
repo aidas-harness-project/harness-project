@@ -6,11 +6,11 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `document-pipeline`, checkpoint 2 (Redaction).
 
-**Current:** `tools/redact_document.py` provides an executable checkpoint-2 path. Privacy-sensitive runs use the `local-llm` provider backed by a model already present in a loopback-only Ollama deployment. Missing runtime/model fails closed; there is no external fallback. Synthetic quality checks are not yet passing: `qwen3:1.7b` returned valid JSON but failed to replace detected name/phone values, while the `qwen3:4b` CPU run was stopped after excessive latency. Local execution therefore resolves the transmission path, not redaction correctness or throughput.
+**Current:** `tools/redact_document.py` provides an executable checkpoint-2 path that redacts through the `tools/redaction.py` **Redactor abstraction**. The only implementation today is `LlmRedactor`, which rewrites each page with a configured LLM provider (dev default `codex-cli`) and then fidelity-checks the result (`redaction.verify_fidelity`): any fabricated/reordered/rewritten non-PII text or placeholder-count mismatch forces `review_required`. The *model choice* is still open -- what's settled is the seam, so a dedicated de-identification model can replace the LLM without touching the tool.
 
-**Candidate:** OpenMed -- an open-source suite of self-hosted biomedical NER models (Hugging Face), including PHI/PII de-identification. It may offer more deterministic entity handling than a general local LLM. Not yet adopted.
+**Candidate:** OpenMed -- an open-source suite of self-hosted biomedical NER models (Hugging Face), including PHI/PII de-identification. As a span-based NER model it would return entity offsets rather than a rewritten page, which the `RedactionOutcome.spans` field already anticipates; it may offer more deterministic, verifiable entity handling than a general LLM. Not yet adopted. (The earlier offline local-llm/Ollama redactor was removed -- it never produced parseable redactions on real content; see `known-gaps.md` item 16.)
 
-**To resolve:** verify current library/model maturity and integration effort before switching. Low urgency at PoC scale, but should be revisited if redaction quality or data-handling trust becomes a concern.
+**To resolve:** verify OpenMed (or another de-identification model) maturity and integration effort, then add a `NerRedactor` behind the existing seam. Low urgency at PoC scale; revisit if redaction quality or data-handling trust becomes a concern.
 
 ## 2. Document-assembly template rules
 
@@ -31,13 +31,13 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `document-pipeline`, checkpoint 1 (P8's dual-path cross-validation, `tools/ocr_extract.py`).
 
-**Current:** the offline path and E:-scoped runtime are installed with explicit Instruct Q4 tags (`qwen3-vl:4b-instruct-q4_K_M` and `qwen3:4b-instruct-2507-q4_K_M`). A synthetic image smoke test produced identical Tesseract/VLM text, and a scoped 2026-07-16 CASE_003 DOC_013 checkpoint-1 run agreed on its one page and completed local classification. These local providers refuse automatic downloads during a run and never fall back externally, so they close the external-transmission path for local runs; the risk remains in full for external CLI/API provider selections. One real page is not production validation.
+**Current:** unresolved. Every available provider (claude-cli / codex-cli / openai-api) sends the page image or extracted text to an external service. The offline local path that would have closed the on-machine transmission gap was removed (never produced usable transcriptions on real Korean pages; single-machine Windows/E: only -- `known-gaps.md` item 16). So this risk is back to open, exactly as it was before that path was attempted.
 
 **Problem:** P8's two readers must see the raw, unredacted page image (that's the point -- they have to see what's actually on the page before redaction). The comparator and classifier may also see unredacted extracted text. If any configured provider path is not under a no-data-retention arrangement, every checkpoint-1 run may send PII to that destination.
 
 **Options on the table (see conversation history for the full discussion):**
 - Establish a no-retention trust arrangement for the deployment running these reads (procurement/vendor question, not an architecture change).
-- Use the implemented local path (`local-ocr` + `local-vlm` + `local-llm`) after `tools/local_runtime.py` passes.
+- Re-introduce a genuinely working on-machine reader (a real OCR engine, tied to #4) -- but only one validated on real Korean case documents, not the removed synthetic-only stack.
 
 **To resolve:** a deployment/vendor decision, not something to default on silently.
 
@@ -45,11 +45,13 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `tools/ocr_extract.py`, used by `document-pipeline` checkpoint 1.
 
-**Current:** two offline reader technologies now exist. `local-ocr` invokes preinstalled Tesseract, while `local-vlm` sends the page image only to a preloaded loopback Ollama vision model. `local-llm` performs comparison and classification. `ocr_result.json` records the actual provider/model labels.
+**Current:** no dedicated OCR engine exists. Every P8 reader is LLM-vision-backed (claude-cli / codex-cli / openai-api), so both reads share one extraction technology class and `ocr_result.json` records `cross_validation_mode: single_technology_weak_p8_poc` honestly. `dual_technology` remains a defined-but-unreachable schema value, reserved for the day a real OCR engine is added as one of the two reading paths. `ocr_result.json` records the actual provider/model labels.
 
-**Remaining problem:** the Tesseract + vision-model pair is technologically independent, and the explicit Instruct pair now has one successful real-page result, but it still needs representative Korean insurance-document validation. One page is not evidence for tables, handwriting, stamps, skew, low resolution, medical terminology, or all critical-field types. Two `local-ocr` reads remain available only as a weaker fallback and still share Tesseract's systematic errors. P8's hard signal remains page-level agreed/disagreed.
+**Problem:** two LLM-vision reads (even from different vendors) can produce a correlated confident error that P8 cannot catch -- the protection is real but weaker than the original design intended, which assumed two genuinely different extraction technologies.
 
-**To resolve:** complete the v1 real sample matrix in `docs/ocr-improvement-roadmap.md`, including repeatability and latency, and document Korean transcription failure modes before treating the local pair as production-ready.
+**History:** an offline Tesseract (`local-ocr`) + Ollama-vision (`local-vlm`) pair was built to be that technology-independent second reader, but it never transcribed real Korean case pages (`qwen3-vl:4b` returned empty output; smoke-test only) and was single-machine (Windows/E:) -- it was removed rather than left as dead, misleading scaffolding (`known-gaps.md` item 16).
+
+**To resolve:** integrate an actual OCR engine (Tesseract validated on real Korean claim documents, Upstage OCR, or similar) as one of the two reading paths, keeping an LLM vision model as the genuinely independent second path -- and prove it on real content before flipping any run to `dual_technology`.
 
 ## 5. Whole-document non-text visual evidence
 
