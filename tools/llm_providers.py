@@ -554,8 +554,11 @@ class OpenAIApiProvider(_ApiProviderStub):
             )
 
         text = _extract_openai_output_text(parsed)
-        if text is None:
-            raise ProviderExecutionError("openai-api response did not contain output_text")
+        if text is None or not text.strip():
+            # Fail closed on empty output, matching the CLI providers: a blank
+            # string is never valid content and can mask a reasoning-only or
+            # otherwise-degenerate completion.
+            raise ProviderExecutionError("openai-api response contained no usable output_text")
         return self._result(
             text.strip(),
             prompt_version,
