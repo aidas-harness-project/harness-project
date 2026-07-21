@@ -94,8 +94,35 @@ def now_iso() -> str:
     return datetime.now(KST).isoformat()
 
 
+# --- path-safety choke point (closes traversal via case_id/doc_id/filename) ---
+# The DAO is documented as the sole safe boundary keeping callers inside
+# outputs/ and data/. That is only true if a crafted case_id/doc_id/filename
+# cannot escape the tree. Every case-scoped path is built through these guards.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _require_safe_id(kind: str, value: str) -> str:
+    if not isinstance(value, str) or not _SAFE_ID_RE.fullmatch(value):
+        sys.exit(f"error: unsafe {kind} {value!r} -- must be [A-Za-z0-9_]+ with no path separators")
+    return value
+
+
+def _require_within(base: Path, *parts: str) -> Path:
+    """Join parts under base and refuse anything that escapes it (traversal)."""
+    for p in parts:
+        if not isinstance(p, str) or not p or "\x00" in p or Path(p).is_absolute():
+            sys.exit(f"error: unsafe path component {p!r}")
+    candidate = base.joinpath(*parts)
+    base_r = base.resolve()
+    cand_r = candidate.resolve()
+    if cand_r != base_r and base_r not in cand_r.parents:
+        sys.exit(f"error: path escapes {base} -- refusing {candidate}")
+    return candidate
+
+
 def case_dir(case_id: str) -> Path:
-    d = OUTPUTS / case_id
+    _require_safe_id("case_id", case_id)
+    d = _require_within(OUTPUTS, case_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -120,7 +147,9 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 
 def processed_dir(case_id: str, doc_id: str) -> Path:
-    return DATA / "processed" / case_id / doc_id
+    _require_safe_id("case_id", case_id)
+    _require_safe_id("doc_id", doc_id)
+    return _require_within(DATA / "processed", case_id, doc_id)
 
 
 # ---------------------------------------------------------------- locking --
@@ -131,17 +160,34 @@ def lock_path(target: Path) -> Path:
 
 def read_lock(target: Path):
     lp = lock_path(target)
-    return load_json(lp) if lp.exists() else None
+    if not lp.exists():
+        return None
+    try:
+        return load_json(lp)
+    except (json.JSONDecodeError, ValueError):
+        # A lock created by O_EXCL but not yet content-filled (tiny race window):
+        # it IS held, we just can't read who by yet. Report a placeholder rather
+        # than crash or treat it as free.
+        return {"held_by": "unknown", "run_id": "unknown", "purpose": "lock being written"}
 
 
 def acquire_lock(target: Path, held_by: str, run_id: str, purpose: str):
-    """Returns None on success, or the existing lock dict if already held."""
-    existing = read_lock(target)
-    if existing is not None:
-        return existing
-    atomic_write_json(lock_path(target), {
-        "held_by": held_by, "run_id": run_id, "started_at": now_iso(), "purpose": purpose,
-    })
+    """Returns None on success, or the existing lock dict if already held.
+
+    Uses an atomic O_CREAT|O_EXCL create so two racing callers cannot both
+    observe 'no lock' and both acquire it (the prior read-then-write was TOCTOU
+    -- fleet review proved 5 processes acquiring one lock). Exactly one caller's
+    create succeeds; every other gets FileExistsError and reports the holder."""
+    lp = lock_path(target)
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return read_lock(target) or {"held_by": "unknown", "run_id": "unknown",
+                                     "purpose": "already held"}
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump({"held_by": held_by, "run_id": run_id,
+                   "started_at": now_iso(), "purpose": purpose}, f, ensure_ascii=False, indent=2)
     return None
 
 
@@ -261,7 +307,7 @@ def cmd_read_ground_truth(args):
 
 
 def cmd_read_contract(args):
-    p = case_dir(args.case_id) / args.filename
+    p = _require_within(case_dir(args.case_id), args.filename)
     if not p.exists():
         print(f"NOT_FOUND: {p}")
         return 1
@@ -271,7 +317,7 @@ def cmd_read_contract(args):
 
 def read_contract_data(case_id: str, filename: str):
     """DAO-owned structured contract read for in-process pipeline tools."""
-    p = case_dir(case_id) / filename
+    p = _require_within(case_dir(case_id), filename)
     return load_json(p)
 
 
@@ -427,7 +473,7 @@ def cmd_set_segmentation_status(args):
 
 
 def cmd_write_contract(args):
-    target = case_dir(args.case_id) / args.filename
+    target = _require_within(case_dir(args.case_id), args.filename)
     existing_lock = acquire_lock_blocking(target, args.held_by, args.run_id, args.purpose or f"write {args.filename}")
     if existing_lock is not None:
         print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
@@ -591,7 +637,7 @@ def cmd_replace_manifest_documents(args):
 
 
 def cmd_check_lock(args):
-    target = case_dir(args.case_id) / args.filename
+    target = _require_within(case_dir(args.case_id), args.filename)
     lock = read_lock(target)
     if lock is None:
         print(json.dumps({"locked": False}))
@@ -642,7 +688,7 @@ def _write_text_locked(case_id, filename, text_file, held_by, run_id, purpose=No
     against. Shared by cmd_write_text and cmd_write_reviewed_draft, same
     pattern as _update_run_state being shared by cmd_update_run_state and
     cmd_snapshot_backup."""
-    target = case_dir(case_id) / filename
+    target = _require_within(case_dir(case_id), filename)
     existing_lock = acquire_lock_blocking(target, held_by, run_id, purpose or f"write {filename}")
     if existing_lock is not None:
         print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
@@ -930,6 +976,10 @@ def _set_human_input_status(case_id, stage, status, description, held_by, run_id
         return 1
     try:
         state = load_run_state(case_id)
+        # Populate run_id from the arg (mirrors _update_run_state). Without this
+        # a human-input write on a fresh case left run_id=None -> schema-invalid
+        # state (fleet F2 root cause); the write is validated below regardless.
+        state["run_id"] = run_id or state.get("run_id")
         entries = state.setdefault("human_input_status", [])
         if status == "waiting":
             if not description:
@@ -946,6 +996,16 @@ def _set_human_input_status(case_id, stage, status, description, held_by, run_id
                 return 1
             entry["status"] = "received"
             entry["received_at"] = now_iso()
+        # Validate before persisting, same fail-don't-persist contract as
+        # _update_run_state (fleet F2: this writer was skipping the check, so
+        # e.g. request-expert-review before run_id is set wrote an invalid
+        # _run_state.json every downstream schema-gated writer would reject).
+        errors = _schema_check(state, "run_state.schema.json")
+        if errors:
+            print("SCHEMA_FAIL: run_state.json invalid; not written:")
+            for e in errors:
+                print(f"  - {e}")
+            return 1
         save_run_state(case_id, state)
         print(f"OK: {stage} -> {status}")
         return 0

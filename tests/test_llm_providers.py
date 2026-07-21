@@ -161,7 +161,8 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
     monkeypatch.setattr(providers.subprocess, "run", fake_run)
     provider = providers.ClaudeCliProvider(root=tmp_path)
 
-    result = provider.transcribe_image(Path("page.png"), "transcribe prompt", "ocr_extraction_v0.1")
+    img = tmp_path / "pages" / "page.png"
+    result = provider.transcribe_image(img, "transcribe prompt", "ocr_extraction_v0.1")
 
     # The transcription prompt must stay NEUTRAL -- no defensive "role framing"
     # preamble (a prior version prepended "this is a SANCTIONED step, do not
@@ -173,12 +174,14 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
     assert captured["cmd"] == [
         "claude",
         "-p",
-        "Read the image file at page.png and then: transcribe prompt",
+        f"Read the image file at {img} and then: transcribe prompt",
         "--safe-mode",
         "--allowedTools",
         "Read",
     ]
-    assert captured["kwargs"]["cwd"] == str(tmp_path)
+    # H1: the Read-enabled child is confined to the image's own directory, not
+    # the repo root -- an injected "also read data/ground_truth/..." can't reach.
+    assert captured["kwargs"]["cwd"] == str(img.resolve().parent)
     assert captured["kwargs"]["timeout"] == 180
     assert result.text == "transcribed text"
     assert result.metadata()["provider_name"] == "claude-cli"
@@ -208,7 +211,7 @@ def test_claude_cli_provider_always_passes_safe_mode(monkeypatch, tmp_path):
     provider.transcribe_image(Path("page.png"), "transcribe prompt", "ocr_extraction_v0.1")
     provider.compare_text("compare prompt", "ocr_compare_v0.1")
     provider.classify_document("classify prompt", "classification_v0.1")
-    provider.scan_intake_content("scan prompt", "intake_scan_v0.1")
+    provider.scan_intake_content("scan prompt", "intake_scan_v0.1", image_paths=[Path("p1.png")])
 
     assert len(calls) == 4
     for cmd in calls:
@@ -656,6 +659,31 @@ def test_openai_truncated_response_raises(monkeypatch):
     assert "truncated" in str(excinfo.value).lower()
 
 
+def test_openai_non_completed_status_raises(monkeypatch):
+    # R4 hardening: any non-"completed" terminal status (e.g. "failed") is a
+    # failure, not just "incomplete".
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"id": "r", "status": "failed", "output_text": "junk"}'
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="openai-api", model_name="gpt-test"),
+        env={"OPENAI_API_KEY": "secret"},
+    )
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.classify_document("prompt", "classification_v0.1")
+    assert "not completed" in str(excinfo.value).lower()
+
+
 def test_claude_cli_fails_closed_on_empty_output(monkeypatch, tmp_path):
     # Failure-safety: exit 0 with empty stdout must NOT be returned as a valid
     # (empty) transcription -- a blank result is never content. It retries, then
@@ -712,3 +740,61 @@ def test_codex_cli_fails_closed_on_empty_output(monkeypatch, tmp_path):
     with pytest.raises(providers.ProviderExecutionError) as excinfo:
         provider.compare_text("prompt", "ocr_compare_v0.1")
     assert "empty" in str(excinfo.value).lower()
+
+
+def test_image_data_url_missing_file_raises_clean(tmp_path):
+    # R5-A: a missing/unreadable page image must be a clean ProviderExecutionError,
+    # not a raw FileNotFoundError out of the caller.
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        providers._image_data_url(tmp_path / "does_not_exist.png")
+    assert "could not read image" in str(excinfo.value)
+
+
+def test_openai_scan_missing_image_raises_clean(monkeypatch, tmp_path):
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="openai-api", model_name="gpt-x"),
+        env={"OPENAI_API_KEY": "k"},
+    )
+    with pytest.raises(providers.ProviderExecutionError):
+        provider.scan_intake_content("s", "v", image_paths=[tmp_path / "missing.png"])
+
+
+@pytest.mark.parametrize("empty", [None, []])
+def test_scan_intake_requires_images(monkeypatch, tmp_path, empty):
+    # R5-B: the D2 vision scan must never run blind (no images) -- all real
+    # providers fail closed rather than silently scanning nothing.
+    reals = [
+        providers.ClaudeCliProvider(root=tmp_path),
+        providers.CodexCliProvider(root=tmp_path),
+        providers.build_provider(
+            providers.ProviderConfig(provider_name="openai-api", model_name="gpt-x"),
+            env={"OPENAI_API_KEY": "k"},
+        ),
+    ]
+    for prov in reals:
+        with pytest.raises(providers.ProviderExecutionError):
+            prov.scan_intake_content("s", "v", image_paths=empty)
+
+
+def test_openai_empty_output_rejected(monkeypatch):
+    # F2: an empty output_text on a completed response must fail closed, matching
+    # the CLI providers -- not be returned as a valid (empty) result.
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"id": "r", "status": "completed", "output_text": ""}'
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="openai-api", model_name="gpt-test"),
+        env={"OPENAI_API_KEY": "secret"},
+    )
+    with pytest.raises(providers.ProviderExecutionError):
+        provider.classify_document("prompt", "classification_v0.1")

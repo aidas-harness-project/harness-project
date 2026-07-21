@@ -152,3 +152,89 @@ def test_parse_pii_items_rejects_missing_array():
 def test_parse_pii_items_rejects_bad_entry():
     with pytest.raises(RedactionParseError):
         parse_pii_items('{"pii_items": [{"category": "person_name"}]}')
+
+
+# --- reviewer-found guard-coverage fixes ---
+def test_overlapping_spans_not_misclassified_as_leak():
+    # F1: a short span consumed by a longer overlapping span must NOT be treated
+    # as an unmatched leak (it was in the source, and is now redacted).
+    src = "작성자: 홍길동 (인) 서명일 2026-01-01."
+    app = apply_redaction_spans(src, [
+        {"text": "홍길동 (인)", "category": "other_pii"},
+        {"text": "홍길동", "category": "person_name"},
+    ])
+    assert app.unmatched_spans == []       # not a leak
+    assert "홍길동" not in app.redacted_text  # fully redacted
+
+
+def test_institution_glued_name_not_corrupted():
+    # Reviewer finding: a person name that is a substring of a kept institution
+    # name must not be blind-replaced; the standalone person still redacts.
+    src = "환자 김영수, 김영수병원 진료 완료"
+    app = apply_redaction_spans(src, [{"text": "김영수", "category": "person_name"}])
+    assert "김영수병원" in app.redacted_text          # institution preserved
+    assert "환자 [PERSON_NAME]" in app.redacted_text  # standalone person redacted
+    assert app.ambiguous_spans                        # glued occurrence flagged for review
+
+
+def test_name_with_particle_still_redacts():
+    # A normal name+particle (no institution suffix) must redact cleanly.
+    app = apply_redaction_spans("홍길동은 서명했다", [{"text": "홍길동", "category": "person_name"}])
+    assert app.redacted_text == "[PERSON_NAME]은 서명했다"
+
+
+def test_compound_institution_name_not_corrupted():
+    # The suffix need not be adjacent: 김영수의료재단 (재단 after 의료) is kept,
+    # but a SPACED hospital visit (김영수 병원에) still redacts the person.
+    kept = apply_redaction_spans("김영수의료재단 후원", [{"text": "김영수", "category": "person_name"}])
+    assert "김영수의료재단" in kept.redacted_text
+    spaced = apply_redaction_spans("김영수 병원에 갔다", [{"text": "김영수", "category": "person_name"}])
+    assert spaced.redacted_text == "[PERSON_NAME] 병원에 갔다"
+
+
+@pytest.mark.parametrize("leak", [
+    "900202 2345678",        # spaced RRN
+    "800101.1234567",        # dotted RRN
+    "010.5555.7777",         # dotted phone
+    "010 1234 5678",         # spaced phone
+    "02 123 4567",           # spaced landline
+    "12가 3456",             # spaced vehicle
+    "123-45-678901",         # dashed account
+    "８００１０１－１２３４５６７",  # full-width RRN
+])
+def test_scan_catches_separator_variants(leak):
+    assert scan_residual_pii(f"내용 {leak} 끝"), f"missed {leak}"
+
+
+@pytest.mark.parametrize("clean", [
+    "계약일 2023-05-14, 만기 2025-05-14",  # dashed dates
+    "기간 2020-01 ~ 2023-12",              # year-month range
+    "번호 제2023-100호",                    # document number
+    "페이지 12 / 34",                       # pagination
+])
+def test_scan_no_false_positive_on_document_numbers(clean):
+    assert scan_residual_pii(clean) == [], f"false positive on {clean!r}"
+
+
+@pytest.mark.parametrize("leak", [
+    "901010 - 1234567",      # multi-separator RRN
+    "901010-\n1234567",      # line-wrapped RRN
+    "010  1234  5678",       # double-spaced phone
+    "010-1234-\n5678",       # line-wrapped phone
+    "(02) 123-4567",         # parenthesized area code
+    "0212345678",            # contiguous landline
+    "서울12가3456",          # region-prefixed plate
+    "경기78나9012",          # region-prefixed plate 2
+])
+def test_scan_catches_fleet_separator_and_region_variants(leak):
+    assert scan_residual_pii(f"내용 {leak} 끝"), f"missed {leak}"
+
+
+@pytest.mark.parametrize("clean", [
+    "품목 12개 1234원",       # counter phrase (개 not a plate syllable)
+    "조항 1-2-3",             # short dashed clause ref
+    "만기 2025-05-14",        # date
+    "기간 2020-01 ~ 2023-12", # year-month range
+])
+def test_scan_no_fp_on_fleet_clean_cases(clean):
+    assert scan_residual_pii(clean) == [], f"false positive on {clean!r}"

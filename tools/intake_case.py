@@ -417,6 +417,31 @@ def main():
             print(f"  rejected: {rejected} -- resolve before any file in this case can copy.")
         sys.exit(1)
 
+    # D1 guard (fleet review): the raw/gt classification here is recomputed from
+    # the CURRENT args, which may differ from what was reviewed at --init-ledger
+    # (e.g. a changed --ground-truth pattern). Refuse to copy a file to a
+    # destination that disagrees with its APPROVED ledger classification -- else a
+    # file reviewed as ground_truth (the answer key) could be copied into
+    # data/raw and fed to a model. Also refuse any file that has no reviewed
+    # ledger entry at all (added to the folder after the ledger was created).
+    ledger_class = {e["file_name"]: e.get("classification") for e in ledger["files"]}
+    drift = []
+    for p in raw:
+        if p.name not in ledger_class:
+            drift.append(f"{p.name}: staged for data/raw but has no reviewed ledger entry")
+        elif ledger_class[p.name] != "raw":
+            drift.append(f"{p.name}: reviewed as {ledger_class[p.name]!r} but would copy to data/raw")
+    for p in gt:
+        if p.name not in ledger_class:
+            drift.append(f"{p.name}: staged for data/ground_truth but has no reviewed ledger entry")
+        elif ledger_class[p.name] != "ground_truth":
+            drift.append(f"{p.name}: reviewed as {ledger_class[p.name]!r} but would copy to data/ground_truth")
+    if drift:
+        print("BLOCKED: intake classification drifted from the reviewed ledger (D1):")
+        for d in drift:
+            print(f"  {d}")
+        sys.exit(1)
+
     raw_dir = ROOT / "data" / "raw" / args.case_id
     gt_dir = ROOT / "data" / "ground_truth" / args.case_id
     dest_dirs = {"raw": raw_dir, "ground_truth": gt_dir}

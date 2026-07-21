@@ -62,6 +62,16 @@ class ProviderExecutionError(RuntimeError):
     """Raised when a configured provider fails during execution."""
 
 
+def _require_scan_images(image_paths) -> None:
+    """The D2 content check is a VISION scan; running it with no images would
+    silently scan nothing and could falsely report 'clear'. Fail closed."""
+    if not image_paths:
+        raise ProviderExecutionError(
+            "scan_intake_content requires page images -- the D2 content check is a "
+            "vision scan and cannot run blind (got no image_paths)"
+        )
+
+
 def _child_safe_env(*, keep_prefixes: Sequence[str]) -> dict[str, str]:
     """A copy of os.environ with foreign provider secrets removed.
 
@@ -75,6 +85,16 @@ def _child_safe_env(*, keep_prefixes: Sequence[str]) -> dict[str, str]:
     or claude-via-Vertex (GOOGLE_*) -- add those prefixes via the
     HARNESS_CHILD_ENV_KEEP_PREFIXES env var (comma-separated), so the child keeps
     the creds it needs without editing code. Matching is case-insensitive.
+
+    KNOWN LIMITATION (accepted, not fixed): scrubbing keys on NAME SUFFIX
+    (_API_KEY / _SECRET / _TOKEN / _ACCESS_KEY) covers the conventions every real
+    LLM provider uses (OPENAI_API_KEY, GOOGLE_API_KEY, HF_TOKEN, COHERE/MISTRAL/
+    GROQ_API_KEY, ...). A secret stored under an UNCONVENTIONAL name -- a bare
+    `GEMINI_KEY` (ends _KEY, not _API_KEY), or a token in a randomly-named var --
+    would NOT be recognized as a secret and could reach the child. Closing this
+    fully needs an allowlist model (keep only known-safe vars, drop the rest),
+    which risks dropping legitimate vars; the suffix denylist is the deliberate
+    trade-off for the PoC.
     """
     extra = os.environ.get("HARNESS_CHILD_ENV_KEEP_PREFIXES", "")
     keep = tuple(p.strip().upper() for p in (*keep_prefixes, *extra.split(",")) if p.strip())
@@ -164,7 +184,8 @@ class ClaudeCliProvider(BaseProvider):
         self.root = root
         self.command = command
 
-    def _run(self, prompt: str, *, prompt_version: str, allowed_read: bool, timeout: int) -> ProviderResult:
+    def _run(self, prompt: str, *, prompt_version: str, allowed_read: bool, timeout: int,
+             read_cwd: Path | None = None) -> ProviderResult:
         # --safe-mode: the child claude -p session must see NOTHING but the
         # prompt -- no CLAUDE.md, skills, or session hooks. Without it, cwd=ROOT
         # auto-loads this project's context, and a context-aware reader
@@ -184,6 +205,14 @@ class ClaudeCliProvider(BaseProvider):
             cmd.extend(["--model", self.model_name])
         if allowed_read:
             cmd.extend(["--allowedTools", "Read"])
+
+        # D1/PII confinement (fleet review H1): a file-reading child runs with
+        # cwd set to the IMAGE directory, not the repo root -- claude's
+        # --allowedTools Read is scoped to cwd, so an injected "also read
+        # data/ground_truth/...  / another case's PII" cannot reach case data
+        # outside the scratch dir holding the rendered page image(s). Non-reading
+        # calls (compare/classify/redact) keep cwd=root; they invoke no Read.
+        cwd = str(read_cwd) if (allowed_read and read_cwd is not None) else str(self.root)
 
         # The child reads untrusted claim images; strip every non-Anthropic
         # secret from its environment so a prompt-injected read can't exfiltrate
@@ -221,7 +250,7 @@ class ClaudeCliProvider(BaseProvider):
                     encoding="utf-8",
                     errors="replace",
                     timeout=timeout,
-                    cwd=str(self.root),
+                    cwd=cwd,
                     stdin=subprocess.DEVNULL,
                     env=run_env,
                 )
@@ -277,7 +306,9 @@ class ClaudeCliProvider(BaseProvider):
     # to treat as a prompt-injection signal.
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
         framed_prompt = f"Read the image file at {image_path} and then: {prompt}"
-        return self._run(framed_prompt, prompt_version=prompt_version, allowed_read=True, timeout=180)
+        # Confine the child's Read to the image's own directory (H1).
+        return self._run(framed_prompt, prompt_version=prompt_version, allowed_read=True,
+                         timeout=180, read_cwd=Path(image_path).resolve().parent)
 
     def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, allowed_read=False, timeout=60)
@@ -288,15 +319,20 @@ class ClaudeCliProvider(BaseProvider):
     def scan_intake_content(
         self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
     ) -> ProviderResult:
+        _require_scan_images(image_paths)
         # The child opens the pages itself via its Read tool. Use the same
         # explicit-imperative form transcribe_image uses -- a trailing
         # "Image: {path}" label is read as metadata about a never-arriving
         # attachment and the Read tool is never invoked (2026-07-16 finding). An
         # HTTP provider attaches the images instead (see OpenAIApiProvider).
-        if image_paths:
-            refs = "\n".join(f"Read the image file at {p}." for p in image_paths)
-            prompt = f"{prompt}\n\n{refs}"
-        return self._run(prompt, prompt_version=prompt_version, allowed_read=True, timeout=180)
+        refs = "\n".join(f"Read the image file at {p}." for p in image_paths)
+        prompt = f"{prompt}\n\n{refs}"
+        # Confine Read to the shared image directory when the pages live in one
+        # dir (the intake scratch case), else leave unconfined (H1).
+        parents = {Path(p).resolve().parent for p in image_paths}
+        read_cwd = parents.pop() if len(parents) == 1 else None
+        return self._run(prompt, prompt_version=prompt_version, allowed_read=True,
+                         timeout=180, read_cwd=read_cwd)
 
     def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, allowed_read=False, timeout=120)
@@ -400,6 +436,7 @@ class CodexCliProvider(BaseProvider):
     def scan_intake_content(
         self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
     ) -> ProviderResult:
+        _require_scan_images(image_paths)
         return self._run(
             prompt, prompt_version=prompt_version, timeout=180, image_paths=image_paths
         )
@@ -509,11 +546,13 @@ class OpenAIApiProvider(_ApiProviderStub):
         except json.JSONDecodeError as exc:
             raise ProviderExecutionError(f"openai-api returned non-JSON response: {response_body!r}") from exc
 
-        # Truncation guard: a response cut off at the token cap comes back with
-        # status "incomplete" and PARTIAL output_text. Returning that as "the
-        # transcription"/"the redaction" would silently land a half a page in
-        # the trusted layer. Refuse it -- the caller fails closed rather than
-        # trusting a truncated read.
+        # Truncation guard (verified against the Responses API contract): a
+        # response cut off at the token cap comes back status "incomplete" with
+        # incomplete_details.reason "max_output_tokens" and PARTIAL (or, for a
+        # reasoning model, empty) output_text. Returning that as "the
+        # transcription"/"the redaction" would silently land half a page in the
+        # trusted layer. Refuse it. incomplete_details can be null even when
+        # incomplete -- hence the `or {}`.
         status = parsed.get("status")
         if status == "incomplete":
             reason = (parsed.get("incomplete_details") or {}).get("reason", "unknown")
@@ -521,10 +560,20 @@ class OpenAIApiProvider(_ApiProviderStub):
                 f"openai-api response was truncated (status=incomplete, reason={reason}); "
                 "refusing to use a partial result"
             )
+        # Any non-completed terminal status (e.g. "failed") is a failure too --
+        # only "completed" is trusted. None is left permissive (older responses
+        # may omit status; the output_text check below still fails closed).
+        if status is not None and status != "completed":
+            raise ProviderExecutionError(
+                f"openai-api response was not completed (status={status!r}); refusing to use it"
+            )
 
         text = _extract_openai_output_text(parsed)
-        if text is None:
-            raise ProviderExecutionError("openai-api response did not contain output_text")
+        if text is None or not text.strip():
+            # Fail closed on empty output, matching the CLI providers: a blank
+            # string is never valid content and can mask a reasoning-only or
+            # otherwise-degenerate completion.
+            raise ProviderExecutionError("openai-api response contained no usable output_text")
         return self._result(
             text.strip(),
             prompt_version,
@@ -556,6 +605,7 @@ class OpenAIApiProvider(_ApiProviderStub):
     def scan_intake_content(
         self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
     ) -> ProviderResult:
+        _require_scan_images(image_paths)
         # The whole point of the D2 scan is that the model SEES the page images.
         # Attach them as image content parts; a bare text prompt naming file
         # paths reaches the API as dead strings the server cannot open.
@@ -673,9 +723,15 @@ def _normalize_provider_name(provider_name: str) -> str:
 
 
 def _image_data_url(image_path: Path) -> str:
-    mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
-    encoded = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
-    return f"data:{mime_type};base64,{encoded}"
+    path = Path(image_path)
+    mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        # A missing/unreadable page image must surface as a clean provider error,
+        # not a raw FileNotFoundError traceback out of the caller.
+        raise ProviderExecutionError(f"could not read image {path}: {exc}") from exc
+    return f"data:{mime_type};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 def _image_content_parts(image_paths: Sequence[Path]) -> list[dict[str, Any]]:

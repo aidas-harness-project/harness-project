@@ -295,3 +295,22 @@ def test_init_ledger_uses_scan_provider_and_leaves_files_pending(isolated_intake
     assert raw_entries, "test setup should include raw-proposed PDFs"
     assert all(entry["review_status"] == "pending" for entry in raw_entries)
     assert all("content_warning" in entry for entry in raw_entries)
+
+
+def test_execute_blocks_when_classification_drifts_from_ledger(isolated_intake, monkeypatch):
+    """Fleet D1 fix: a file reviewed+approved as ground_truth must never be
+    copied to data/raw because --execute was run with different args than
+    --init-ledger. The guard blocks the whole case rather than contaminate raw."""
+    src = _make_source_case(isolated_intake)
+    _write_approved_ledger("CASE_009", src, [
+        ("claim_form_kim.pdf", "raw", "approved"),
+        ("diagnosis_kim.pdf", "raw", "approved"),
+        ("최종손해사정서.pdf", "ground_truth", "approved"),
+    ])
+    # Execute with a --ground-truth pattern matching nothing -> the fresh
+    # classification would route the answer key to data/raw. Guard must block.
+    with pytest.raises(SystemExit):
+        _run_main(monkeypatch, [str(src), "CASE_009", "--execute", "--run-id",
+                                "RUN_20260713_001", "--ground-truth", "*does-not-match*"])
+    raw_dir = isolated_intake / "data" / "raw" / "CASE_009"
+    assert not raw_dir.exists() or not list(raw_dir.glob("*"))
