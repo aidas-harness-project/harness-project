@@ -645,3 +645,483 @@ def test_manifest_entries_validate_against_the_real_schema():
     )
     manifest = {"case_id": "CASE_001", "documents": entries}
     assert validate_instance(manifest, "document_manifest.schema.json", schemas, registry) == []
+
+
+# ----------------------------------------------------- provider path --
+
+class _SequencedProvider:
+    """A FixtureProvider-shaped stub returning a canned response per sheet, and
+    counting transcribe_image calls so a resume test can assert none were made.
+
+    Sheets are called in order, so the Nth call gets responses[N]. A short list
+    repeats its last entry -- convenient for "every sheet says the same thing".
+    """
+    provider_name = "fixture"
+
+    def __init__(self, responses, *, model_name="fixture-model"):
+        self.model_name = model_name
+        self._responses = list(responses)
+        self.calls = 0
+
+    def transcribe_image(self, image_path, prompt, prompt_version):
+        from llm_providers import ProviderResult
+        idx = min(self.calls, len(self._responses) - 1)
+        text = self._responses[idx]
+        self.calls += 1
+        return ProviderResult(
+            provider_name=self.provider_name,
+            model_name=self.model_name,
+            prompt_version=prompt_version,
+            text=text,
+        )
+
+
+def _bundle_pdf(tmp_path, pages):
+    import fitz
+    pdf = tmp_path / "bundle.pdf"
+    doc = fitz.open()
+    for _ in range(pages):
+        doc.new_page(width=595, height=841)
+    doc.save(pdf)
+    doc.close()
+    return pdf
+
+
+def _sheet_files(tmp_path, count):
+    from PIL import Image
+    paths = []
+    for i in range(count):
+        p = tmp_path / f"sheet_{i}.png"
+        Image.new("RGB", (10, 10), (255, 255, 255)).save(p)
+        paths.append(p)
+    return paths
+
+
+def test_propose_merges_sheets_and_records_an_honest_method(tmp_path):
+    """One 12-cell sheet, a boundary at p1 and p6; the method block reflects the
+    real provider and geometry, and ocr_performed is const-false."""
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)  # 12 per sheet
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    provider = _SequencedProvider([_response(
+        boundaries=[
+            {"page": 1, "type_guess": "other", "type_label": "표지",
+             "confidence": 0.9, "evidence": "cover"},
+            {"page": 6, "type_guess": "receipt", "type_label": "영수증",
+             "confidence": 0.7, "evidence": "new form"},
+        ],
+        continuations=[2, 3, 4, 5, 7, 8, 9, 10, 11, 12],
+        needs_full_page=[],
+    )])
+
+    out = sc.propose_boundaries(
+        pdf, case_id="CASE_900", doc_id="DOC_001", provider=provider,
+        geometry=geo, sheet_paths=sheets, resume=False,
+    )
+
+    assert [(s["page_start"], s["page_end"]) for s in out["segments"]] == [(1, 5), (6, 12)]
+    assert out["method"]["ocr_performed"] is False
+    assert out["method"]["mode"] == "vision_proposal"
+    assert out["method"]["provider_name"] == "fixture"
+    assert out["method"]["model_name"] == "fixture-model"
+    assert out["method"]["grid_cols"] == 3 and out["method"]["grid_rows"] == 4
+    assert provider.calls == 1
+
+
+def test_propose_output_assembles_into_a_schema_valid_proposal(tmp_path):
+    """The whole point of the method/segment shapes is that they validate."""
+    from _validation import load_registry, validate_instance
+
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    provider = _SequencedProvider([_response(
+        boundaries=[{"page": 1, "type_guess": "other", "type_label": "표지",
+                     "confidence": 0.9, "evidence": "cover"}],
+        continuations=list(range(2, 13)),
+        needs_full_page=[],
+    )])
+    out = sc.propose_boundaries(
+        pdf, case_id="CASE_900", doc_id="DOC_001", provider=provider,
+        geometry=geo, sheet_paths=sheets, resume=False,
+    )
+    doc = sc.build_proposal_document(
+        out, case_id="CASE_900", source_document_id="DOC_001",
+        source_file_name="bundle.pdf",
+        source_file_path="data/raw/CASE_900/DOC_001.pdf",
+        page_count=12, created_at="2026-07-21T00:00:00Z",
+    )
+    schemas, registry = load_registry()
+    assert validate_instance(doc, "segmentation_proposal.schema.json", schemas, registry) == []
+    assert doc["review_status"] == "pending"
+    assert all(s["review_status"] == "pending" for s in doc["segments"])
+
+
+def test_a_second_run_reuses_the_cache_and_calls_the_provider_zero_times(tmp_path):
+    """An interrupted propose must not re-pay for sheets it already called --
+    the exact loss ocr_extract's resume cache came out of."""
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    resp = [_response(
+        boundaries=[{"page": 1, "type_guess": "other", "type_label": "x",
+                     "confidence": 0.9, "evidence": "cover"}],
+        continuations=list(range(2, 13)), needs_full_page=[],
+    )]
+
+    first = _SequencedProvider(resp)
+    sc.propose_boundaries(pdf, case_id="CASE_901", doc_id="DOC_001",
+                          provider=first, geometry=geo, sheet_paths=sheets, resume=True)
+    assert first.calls == 1
+
+    second = _SequencedProvider(resp)
+    out = sc.propose_boundaries(pdf, case_id="CASE_901", doc_id="DOC_001",
+                                provider=second, geometry=geo, sheet_paths=sheets, resume=True)
+    assert second.calls == 0  # served entirely from cache
+    assert [(s["page_start"], s["page_end"]) for s in out["segments"]] == [(1, 12)]
+
+    # Clean up this test's stable (non-tmp) resume dir.
+    import shutil
+    shutil.rmtree(sc._resume_dir("CASE_901", "DOC_001"), ignore_errors=True)
+
+
+def test_a_geometry_change_invalidates_the_cache(tmp_path):
+    """Reusing a sheet rendered under a different crop/grid would compare a run
+    against images it never saw -- the near-invisible bug the fingerprint guards."""
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    resp = [_response(
+        boundaries=[{"page": 1, "type_guess": "other", "type_label": "x",
+                     "confidence": 0.9, "evidence": "c"}],
+        continuations=list(range(2, 13)), needs_full_page=[],
+    )]
+
+    geo_a = sc.compute_sheet_geometry(cols=3, rows=4, crop_ratio=0.33)
+    p1 = _SequencedProvider(resp)
+    sc.propose_boundaries(pdf, case_id="CASE_902", doc_id="DOC_001",
+                          provider=p1, geometry=geo_a, sheet_paths=sheets, resume=True)
+
+    geo_b = sc.compute_sheet_geometry(cols=3, rows=4, crop_ratio=0.4)
+    p2 = _SequencedProvider(resp)
+    sc.propose_boundaries(pdf, case_id="CASE_902", doc_id="DOC_001",
+                          provider=p2, geometry=geo_b, sheet_paths=sheets, resume=True)
+    assert p2.calls == 1  # different geometry -> cache miss -> real call
+
+    import shutil
+    shutil.rmtree(sc._resume_dir("CASE_902", "DOC_001"), ignore_errors=True)
+
+
+def test_fallback_saturation_flags_without_triggering(tmp_path):
+    """More needs_full_page pages than the cap allows: the fallback is skipped
+    and the pages stay flagged, per the plan's tuning-signal policy."""
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    # 5 of 12 pages need a full-page look; cap at 0.25*12 = 3.
+    provider = _SequencedProvider([_response(
+        boundaries=[{"page": 1, "type_guess": "other", "type_label": "x",
+                     "confidence": 0.9, "evidence": "c"}],
+        continuations=[7, 8, 9, 10, 11, 12],
+        needs_full_page=[2, 3, 4, 5, 6],
+    )])
+    out = sc.propose_boundaries(
+        pdf, case_id="CASE_903", doc_id="DOC_001", provider=provider,
+        geometry=geo, sheet_paths=sheets, resume=False,
+    )
+    fb = out["method"]["full_page_fallback"]
+    assert fb["saturated"] is True
+    assert fb["triggered"] is False
+    assert fb["cap"] == 3
+    assert set(fb["pages"]) == {2, 3, 4, 5, 6}
+    assert any("saturated" in w for w in out["warnings"])
+
+
+def test_a_parse_failed_sheet_leaves_its_pages_unassigned(tmp_path):
+    """One sheet's garbage response must not discard the other sheet, and must
+    never invent a boundary -- its pages fall through to unassigned."""
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)  # 12 per sheet
+    pdf = _bundle_pdf(tmp_path, 24)  # 2 sheets
+    sheets = _sheet_files(tmp_path, 2)
+    good = _response(
+        boundaries=[{"page": 1, "type_guess": "other", "type_label": "x",
+                     "confidence": 0.9, "evidence": "c"}],
+        continuations=list(range(2, 13)), needs_full_page=[],
+    )
+    provider = _SequencedProvider([good, "not json at all"])
+    out = sc.propose_boundaries(
+        pdf, case_id="CASE_904", doc_id="DOC_001", provider=provider,
+        geometry=geo, sheet_paths=sheets, resume=False,
+    )
+    # Sheet 0 (p1-12) segments cleanly; sheet 1 (p13-24) failed -> unassigned.
+    assert [(s["page_start"], s["page_end"]) for s in out["segments"]] == [(1, 12)]
+    assert set(out["unassigned_pages"]) == set(range(13, 25))
+
+
+def test_propose_rejects_a_sheet_path_count_mismatch(tmp_path):
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    pdf = _bundle_pdf(tmp_path, 24)  # plans 2 sheets
+    provider = _SequencedProvider(["{}"])
+    with pytest.raises(sc.SegmentationError):
+        sc.propose_boundaries(
+            pdf, case_id="CASE_905", doc_id="DOC_001", provider=provider,
+            geometry=geo, sheet_paths=_sheet_files(tmp_path, 1), resume=False,
+        )
+
+
+# ------------------------------------------------------- approve/split --
+
+def _proposal(segments, *, page_count=12, review_status="pending", unassigned=None):
+    return {
+        "case_id": "CASE_900", "source_document_id": "DOC_001",
+        "source_file_name": "bundle.pdf",
+        "source_file_path": "data/raw/CASE_900/DOC_001.pdf",
+        "source_page_count": page_count,
+        "created_at": "2026-07-21T00:00:00Z", "updated_at": "2026-07-21T00:00:00Z",
+        "review_status": review_status,
+        "reviewed_by": None, "reviewed_at": None, "rejection_reason": None,
+        "method": {"ocr_performed": False, "method_version": "v", "mode": "vision_proposal",
+                   "crop_ratio": 0.33, "grid_cols": 3, "grid_rows": 4},
+        "segments": segments,
+        "unassigned_pages": unassigned or [],
+        "warnings": [],
+    }
+
+
+def _seg(index, start, end, status="pending"):
+    return {"segment_index": index, "page_start": start, "page_end": end,
+            "review_status": status, "provisional_document_type": None,
+            "provisional_type_label": None, "confidence": None,
+            "boundary_evidence": None, "needs_full_page": False,
+            "orientation_suspect": False, "assigned_document_id": None}
+
+
+def test_case_level_approval_advances_the_gate_and_sweeps_pending_segments():
+    prop = _proposal([_seg(0, 1, 5), _seg(1, 6, 12)])
+    out = sc.apply_approval(prop, reviewer="Rekhet", now="2026-07-21T01:00:00Z")
+    assert out["review_status"] == "approved"
+    assert out["reviewed_by"] == "Rekhet"
+    assert all(s["review_status"] == "approved" for s in out["segments"])
+    # Pure: the input is untouched.
+    assert prop["review_status"] == "pending"
+
+
+def test_bulk_approval_does_not_un_reject_a_segment():
+    prop = _proposal([_seg(0, 1, 5), _seg(1, 6, 12, status="rejected")])
+    out = sc.apply_approval(prop, reviewer="R", now="t")
+    assert out["segments"][0]["review_status"] == "approved"
+    assert out["segments"][1]["review_status"] == "rejected"  # preserved
+
+
+def test_editing_a_range_marks_it_edited_so_the_correction_is_recorded():
+    prop = _proposal([_seg(0, 1, 5), _seg(1, 6, 12)])
+    out = sc.apply_approval(prop, reviewer="R", now="t", segment_index=1, edit=(7, 12))
+    assert out["segments"][1]["page_start"] == 7
+    assert out["segments"][1]["review_status"] == "edited"
+
+
+def test_approving_a_single_segment_leaves_the_case_gate_alone():
+    prop = _proposal([_seg(0, 1, 5), _seg(1, 6, 12)])
+    out = sc.apply_approval(prop, reviewer="R", now="t", segment_index=0)
+    assert out["segments"][0]["review_status"] == "approved"
+    assert out["review_status"] == "pending"  # case gate not advanced by a per-segment approve
+
+
+def test_approval_rejects_an_out_of_range_segment_index():
+    prop = _proposal([_seg(0, 1, 12)])
+    with pytest.raises(sc.SegmentationError):
+        sc.apply_approval(prop, reviewer="R", now="t", segment_index=5)
+
+
+def test_split_readiness_requires_case_approval():
+    prop = _proposal([_seg(0, 1, 12, status="approved")], review_status="pending")
+    errors = sc.split_readiness_errors(prop)
+    assert any("case-level" in e for e in errors)
+
+
+def test_split_readiness_blocks_on_unassigned_pages():
+    prop = _proposal([_seg(0, 1, 11, status="approved")],
+                     review_status="approved", unassigned=[12])
+    errors = sc.split_readiness_errors(prop)
+    assert any("unassigned" in e for e in errors)
+
+
+def test_split_readiness_blocks_on_a_pending_or_rejected_segment():
+    prop = _proposal([_seg(0, 1, 5, status="approved"), _seg(1, 6, 12, status="pending")],
+                     review_status="approved")
+    assert any("not approved/edited" in e for e in sc.split_readiness_errors(prop))
+    prop["segments"][1]["review_status"] = "rejected"
+    assert any("was rejected" in e for e in sc.split_readiness_errors(prop))
+
+
+def test_split_readiness_runs_validate_segments():
+    """An edit that introduced an overlap must be caught before splitting."""
+    prop = _proposal([_seg(0, 1, 7, status="approved"), _seg(1, 5, 12, status="edited")],
+                     review_status="approved")
+    assert any("overlap" in e for e in sc.split_readiness_errors(prop))
+
+
+def test_split_readiness_passes_a_clean_approved_proposal():
+    prop = _proposal([_seg(0, 1, 5, status="approved"), _seg(1, 6, 12, status="edited")],
+                     review_status="approved")
+    assert sc.split_readiness_errors(prop) == []
+
+
+def test_next_document_index_continues_past_the_highest_existing_id():
+    manifest = {"documents": [{"document_id": "DOC_001"}, {"document_id": "DOC_004"},
+                              {"document_id": "GT_002"}]}
+    assert sc._next_document_index(manifest) == 5
+
+
+class _FakeDao:
+    """Captures a replace_manifest_documents call instead of touching disk."""
+    def __init__(self, *, ok=True, message="PASS"):
+        self.ok = ok
+        self.message = message
+        self.calls = []
+
+    def replace_manifest_documents(self, case_id, bundle_id, bundle_fields,
+                                   new_documents, held_by, run_id, **kw):
+        self.calls.append({"case_id": case_id, "bundle_id": bundle_id,
+                           "bundle_fields": bundle_fields, "new_documents": new_documents})
+        return self.ok, self.message
+
+
+def _manifest_with_bundle(bundle_id="DOC_001"):
+    return {"case_id": "CASE_900", "documents": [{
+        "document_id": bundle_id, "file_name": f"{bundle_id}.pdf",
+        "file_path": f"data/raw/CASE_900/{bundle_id}.pdf", "file_format": "pdf",
+        "file_size_bytes": 1234, "ocr_status": "pending",
+        "source_file_name": "bundle.pdf",
+    }]}
+
+
+def test_split_writes_one_pdf_per_segment_with_correct_page_counts(tmp_path):
+    pdf = _bundle_pdf(tmp_path, 12)
+    prop = _proposal([_seg(0, 1, 5, status="approved"), _seg(1, 6, 12, status="approved")],
+                     review_status="approved")
+    dao = _FakeDao()
+    # Point ROOT's data/raw at tmp so the test never writes into the real tree.
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        out = sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_1", dao=dao,
+        )
+    finally:
+        sc.ROOT = orig_root
+
+    assert out["status"] == "split"
+    assert out["new_document_ids"] == ["DOC_002", "DOC_003"]
+    import fitz
+    p2 = tmp_path / "data" / "raw" / "CASE_900" / "DOC_002.pdf"
+    p3 = tmp_path / "data" / "raw" / "CASE_900" / "DOC_003.pdf"
+    with fitz.open(p2) as d:
+        assert d.page_count == 5
+    with fitz.open(p3) as d:
+        assert d.page_count == 7
+
+
+def test_split_marks_the_bundle_superseded_and_records_provenance(tmp_path):
+    pdf = _bundle_pdf(tmp_path, 12)
+    prop = _proposal([_seg(0, 1, 12, status="approved")], review_status="approved")
+    dao = _FakeDao()
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_1", dao=dao,
+        )
+    finally:
+        sc.ROOT = orig_root
+
+    call = dao.calls[0]
+    assert call["bundle_fields"]["downstream_disposition"] == "superseded_bundle"
+    assert call["bundle_fields"]["ocr_status"] == "not_applicable"
+    assert call["bundle_fields"]["segmentation_proposal_path"].endswith("DOC_001.json")
+    entry = call["new_documents"][0]
+    assert entry["source_file_name"] == "bundle.pdf"
+    assert entry["source_page_start"] == 1 and entry["source_page_end"] == 12
+    assert entry["document_type"] is None  # checkpoint 1 owns it, not segmentation
+
+
+def test_split_result_manifest_validates_against_the_real_schema(tmp_path):
+    """The superseded bundle + new entries must together satisfy the schema's
+    conditional for a superseded_bundle disposition."""
+    from _validation import load_registry, validate_instance
+
+    pdf = _bundle_pdf(tmp_path, 12)
+    prop = _proposal([_seg(0, 1, 6, status="approved"), _seg(1, 7, 12, status="approved")],
+                     review_status="approved")
+    dao = _FakeDao()
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_1", dao=dao,
+        )
+    finally:
+        sc.ROOT = orig_root
+
+    # Reconstruct what replace_manifest_documents would have written.
+    manifest = _manifest_with_bundle()
+    manifest["documents"][0].update(dao.calls[0]["bundle_fields"])
+    manifest["documents"].extend(dao.calls[0]["new_documents"])
+    schemas, registry = load_registry()
+    assert validate_instance(manifest, "document_manifest.schema.json", schemas, registry) == []
+
+
+def test_split_refuses_a_not_ready_proposal(tmp_path):
+    pdf = _bundle_pdf(tmp_path, 12)
+    prop = _proposal([_seg(0, 1, 12)], review_status="pending")  # nothing approved
+    dao = _FakeDao()
+    out = sc.split_bundle(
+        prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+        proposal_path="p.json", manifest=_manifest_with_bundle(),
+        held_by="R", run_id="RUN_1", dao=dao,
+    )
+    assert out["status"] == "not_ready"
+    assert dao.calls == []  # never reached the manifest write
+
+
+def test_split_is_idempotent_when_entries_already_exist(tmp_path):
+    pdf = _bundle_pdf(tmp_path, 12)
+    prop = _proposal([_seg(0, 1, 12, status="approved")], review_status="approved")
+    manifest = _manifest_with_bundle()
+    # Simulate a prior split: a per-document entry already carries this range.
+    manifest["documents"].append({
+        "document_id": "DOC_002", "file_name": "DOC_002.pdf",
+        "file_path": "data/raw/CASE_900/DOC_002.pdf", "file_format": "pdf",
+        "file_size_bytes": 10, "ocr_status": "pending",
+        "source_file_name": "bundle.pdf", "source_page_start": 1, "source_page_end": 12,
+    })
+    dao = _FakeDao()
+    out = sc.split_bundle(
+        prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+        proposal_path="p.json", manifest=manifest, held_by="R", run_id="RUN_1", dao=dao,
+    )
+    assert out["status"] == "already_split"
+    assert dao.calls == []
+
+
+def test_split_reports_orphans_when_the_manifest_write_fails(tmp_path):
+    pdf = _bundle_pdf(tmp_path, 12)
+    prop = _proposal([_seg(0, 1, 12, status="approved")], review_status="approved")
+    dao = _FakeDao(ok=False, message="LOCKED: held_by=other")
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        out = sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="p.json", manifest=_manifest_with_bundle(),
+            held_by="R", run_id="RUN_1", dao=dao,
+        )
+    finally:
+        sc.ROOT = orig_root
+    assert out["status"] == "manifest_write_failed"
+    assert len(out["orphan_pdfs"]) == 1  # the child PDF exists but nothing trusts it
