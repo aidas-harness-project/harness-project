@@ -771,3 +771,27 @@ def test_scan_intake_requires_images(monkeypatch, tmp_path, empty):
     for prov in reals:
         with pytest.raises(providers.ProviderExecutionError):
             prov.scan_intake_content("s", "v", image_paths=empty)
+
+
+def test_openai_empty_output_rejected(monkeypatch):
+    # F2: an empty output_text on a completed response must fail closed, matching
+    # the CLI providers -- not be returned as a valid (empty) result.
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"id": "r", "status": "completed", "output_text": ""}'
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="openai-api", model_name="gpt-test"),
+        env={"OPENAI_API_KEY": "secret"},
+    )
+    with pytest.raises(providers.ProviderExecutionError):
+        provider.classify_document("prompt", "classification_v0.1")

@@ -24,9 +24,12 @@ value). Two deterministic guards address it:
     (phone / RRN / email / vehicle plate / long digit run) that survived.
 Per the checkpoint-2 privacy policy, either signal is treated as a possible
 leak and HARD-FAILS the document (raise, write nothing) -- it is not written to
-the processed layer for later review. Over-redaction risk (a span too short or
-matching implausibly many times) is privacy-safe, so it is not hard-failed;
-those spans are left un-redacted and routed to review instead.
+the processed layer for later review. Spans that cannot be safely auto-redacted
+(too short, implausibly frequent, or glued to an institution suffix where a
+blind replace-all would corrupt a kept entity name) are LEFT IN PLACE and
+flagged for human review rather than hard-failed. Note this bucket can hold both
+over-redaction risk and residual under-redaction (a real value left in the
+text), so a review flag is not a safety guarantee -- a human must resolve it.
 
 Residual limitation: `scan_residual_pii` only catches *structured* PII. An
 unstructured value the model misses (a bare name/address with no format) is not
@@ -98,17 +101,44 @@ Reply with ONLY one JSON object in this exact shape:
 # ---------------------------------------------------------------------------
 # S3: residual structured-PII scan (deterministic)
 # ---------------------------------------------------------------------------
+# Separators seen between number groups in real documents: hyphen, dot, space
+# (incl. the full-width variants, which _normalize_widths folds to ASCII first).
+_SEP = r"[-.\s]"
+# The fixed set of Hangul syllables used in the middle of a Korean vehicle plate
+# (passenger + common commercial/special). Deliberately NOT all of 가-힣.
+_PLATE_SYLLABLES = (
+    "가나다라마거너더러머버서어저고노도로모보소오조구누두루무부수우주바사아자하허호배육해공국합"
+)
 # Lookarounds require a non-digit boundary so these do not fire inside longer
-# numbers. Calibrated NOT to match dates (4-2-2), comma-grouped amounts, or KCD
-# codes -- proven in tests/test_redaction.py.
+# numbers. Calibrated NOT to match dates (4-2-2, last group only 2 digits),
+# comma-grouped amounts, KCD codes, or clause refs -- proven in
+# tests/test_redaction.py. Separators are accepted in -, ., and space forms so a
+# spaced/dotted RRN or phone cannot slip past (reviewer finding).
 _RESIDUAL_PII_PATTERNS = {
-    "resident_registration_number": re.compile(r"(?<!\d)\d{6}-\d{7}(?!\d)"),
-    "phone_number_dashed": re.compile(r"(?<!\d)\d{2,3}-\d{3,4}-\d{4}(?!\d)"),
+    "resident_registration_number": re.compile(rf"(?<!\d)\d{{6}}{_SEP}?\d{{7}}(?!\d)"),
+    "phone_number_separated": re.compile(rf"(?<!\d)\d{{2,3}}{_SEP}\d{{3,4}}{_SEP}\d{{4}}(?!\d)"),
     "phone_number_mobile": re.compile(r"(?<!\d)01[0-9]\d{7,8}(?!\d)"),
+    # account/長 numbers written with dashes: 3+ / 2+ / 4+ groups. The final
+    # group requires >=4 digits, which a date (…-NN) never has, so dates don't hit.
+    "account_number_dashed": re.compile(r"(?<!\d)\d{3,}-\d{2,}-\d{4,}(?!\d)"),
     "email": re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+", re.IGNORECASE),
-    "vehicle_number": re.compile(r"\d{2,3}[가-힣]\d{4}"),
+    # Korean plate middle syllable is from a FIXED set -- restricting to it (vs
+    # any 가-힣) avoids false-positives on counter phrases like "12개 1234" (개 is
+    # not a plate syllable) while still catching spaced plates like "12가 3456".
+    "vehicle_number": re.compile(
+        rf"(?<![가-힣\d])\d{{2,3}}[{_PLATE_SYLLABLES}]{_SEP}?\d{{4}}(?!\d)"
+    ),
     "long_digit_run": re.compile(r"(?<!\d)\d{11,}(?!\d)"),
 }
+
+# Full-width digits ０-９ and full-width separators to their ASCII equivalents,
+# so a value typed in full-width (common in Korean IME output) can't evade the
+# ASCII-oriented patterns above.
+_WIDTH_FOLD = {ord(fw): ord(ascii_) for fw, ascii_ in zip("０１２３４５６７８９－．", "0123456789-.")}
+
+
+def _normalize_widths(text: str) -> str:
+    return text.translate(_WIDTH_FOLD)
 
 
 def scan_residual_pii(redacted_text: str) -> list[dict[str, str]]:
@@ -117,9 +147,10 @@ def scan_residual_pii(redacted_text: str) -> list[dict[str, str]]:
     Returns a list of {kind, sample} hits (empty == clean). Only structured
     formats are detectable this way; unstructured PII (bare names) is out of
     scope. A non-empty result is treated as a possible leak by the caller."""
+    scanned = _normalize_widths(redacted_text)
     hits: list[dict[str, str]] = []
     for kind, pattern in _RESIDUAL_PII_PATTERNS.items():
-        for m in pattern.finditer(redacted_text):
+        for m in pattern.finditer(scanned):
             hits.append({"kind": kind, "sample": m.group(0)})
     return hits
 
@@ -127,18 +158,54 @@ def scan_residual_pii(redacted_text: str) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 # S1: deterministic span substitution
 # ---------------------------------------------------------------------------
+# Hangul institution suffixes: when a name-like PII span is glued immediately
+# before one of these, replacing it would corrupt a KEPT entity name the pipeline
+# depends on (e.g. a hospital 김영수병원 named after a person 김영수). Those
+# occurrences are left in place and flagged for review instead of blindly
+# replaced. Particles (은/는/이/가/…) are NOT here, so a normal name+particle
+# ("홍길동은") still redacts cleanly.
+_INSTITUTION_SUFFIXES = (
+    "병원", "의원", "약국", "의료원", "한의원", "치과", "센터", "보험", "화재",
+    "은행", "증권", "대학교", "대학", "학교", "회사", "그룹", "상사", "공사",
+    "재단", "협회", "조합", "지점", "연구소", "클리닉", "법인",
+)
+# Categories where a value can be a substring of kept text (names). Structured
+# categories (phone/RRN/…) are implausible substrings, so they replace-all.
+_NAME_CATEGORIES = {"person_name", "other_pii"}
+
+
 @dataclass
 class RedactionApplication:
     redacted_text: str
     items_redacted: int
     categories: list[str]
-    # PII the model named but not found verbatim in the source (0 occurrences):
-    # a misread/reformat leaving the real value in place, or model noise.
+    # PII the model named but NOT present verbatim anywhere in the SOURCE (not
+    # merely consumed by an overlapping longer span): a misread/reformat that
+    # leaves the real value in the text, or model noise. Treated as a leak.
     unmatched_spans: list[dict[str, str]] = field(default_factory=list)
-    # Spans not applied because replace-all would risk over-redacting kept text
-    # (length <= 1, or implausibly many occurrences). Privacy-safe, review-only.
+    # Spans left un-redacted and flagged for human review -- NOT necessarily
+    # privacy-safe: this bucket holds both over-redaction risk (a <=1-char or
+    # implausibly-frequent span not blindly replaced) AND under-redaction (a real
+    # value left in place, e.g. a name glued to an institution suffix, or a
+    # 1-char surname). A human must resolve these; the residual text may still
+    # contain the value.
     ambiguous_spans: list[dict[str, str]] = field(default_factory=list)
     applied_spans: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _replace_span(working: str, text: str, placeholder: str, category: str):
+    """Replace occurrences of `text` with `placeholder`.
+
+    For name-like categories, an occurrence glued immediately before an
+    institution suffix is LEFT in place (replacing it would corrupt a kept
+    entity name). Returns (new_working, replaced_count, glued_count)."""
+    if category not in _NAME_CATEGORIES:
+        count = working.count(text)
+        return working.replace(text, placeholder), count, 0
+    suffix_alt = "|".join(re.escape(s) for s in _INSTITUTION_SUFFIXES)
+    glued = len(re.findall(re.escape(text) + rf"(?={suffix_alt})", working))
+    new_working, replaced = re.subn(re.escape(text) + rf"(?!{suffix_alt})", placeholder, working)
+    return new_working, replaced, glued
 
 
 def apply_redaction_spans(source_text: str, pii_items: list[dict[str, str]]) -> RedactionApplication:
@@ -175,19 +242,31 @@ def apply_redaction_spans(source_text: str, pii_items: list[dict[str, str]]) -> 
         if len(text.strip()) <= 1:
             ambiguous.append({"text": text, "category": category, "reason": "span too short (<=1 char)"})
             continue
-        count = working.count(text)
-        if count == 0:
+        # Leak decision keys on the ORIGINAL source, not the mutated working text.
+        # A value present in the source but with 0 occurrences left in `working`
+        # was already covered by an overlapping longer span -- it is redacted, not
+        # leaked, so it must NOT be misclassified as unmatched (which would
+        # hard-fail a fully-redacted document).
+        if source_text.count(text) == 0:
             unmatched.append({"text": text, "category": category})
             continue
-        if count > _HIGH_OCCURRENCE_FLAG:
+        work_count = working.count(text)
+        if work_count == 0:
+            continue  # already redacted via an overlapping longer span
+        if work_count > _HIGH_OCCURRENCE_FLAG:
             ambiguous.append({"text": text, "category": category,
-                              "reason": f"{count} occurrences (implausible; not redacted)"})
+                              "reason": f"{work_count} occurrences (implausible; left un-redacted for review)"})
             continue
         placeholder = CATEGORY_TO_PLACEHOLDER.get(category, _DEFAULT_PLACEHOLDER)
-        working = working.replace(text, placeholder)
-        total += count
-        categories.add(category)
-        applied.append({"text": text, "category": category, "occurrences": count})
+        working, replaced, glued = _replace_span(working, text, placeholder, category)
+        if replaced:
+            total += replaced
+            categories.add(category)
+            applied.append({"text": text, "category": category, "occurrences": replaced})
+        if glued:
+            ambiguous.append({"text": text, "category": category,
+                              "reason": f"{glued} occurrence(s) left un-redacted -- glued to an "
+                                        "institution suffix (would corrupt a kept entity name)"})
 
     return RedactionApplication(
         redacted_text=working,
