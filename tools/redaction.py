@@ -101,9 +101,11 @@ Reply with ONLY one JSON object in this exact shape:
 # ---------------------------------------------------------------------------
 # S3: residual structured-PII scan (deterministic)
 # ---------------------------------------------------------------------------
-# Separators seen between number groups in real documents: hyphen, dot, space
-# (incl. the full-width variants, which _normalize_widths folds to ASCII first).
-_SEP = r"[-.\s]"
+# Separators between number groups: hyphen, dot, whitespace (incl. newline, and
+# the full-width variants that _normalize_widths folds first). `+` (one-or-more)
+# so a value wrapped across a line ("010-1234-\n5678") or double-spaced still
+# matches -- the earlier single-separator form let those slip (fleet finding).
+_SEP = r"[-.\s]+"
 # The fixed set of Hangul syllables used in the middle of a Korean vehicle plate
 # (passenger + common commercial/special). Deliberately NOT all of 가-힣.
 _PLATE_SYLLABLES = (
@@ -112,21 +114,25 @@ _PLATE_SYLLABLES = (
 # Lookarounds require a non-digit boundary so these do not fire inside longer
 # numbers. Calibrated NOT to match dates (4-2-2, last group only 2 digits),
 # comma-grouped amounts, KCD codes, or clause refs -- proven in
-# tests/test_redaction.py. Separators are accepted in -, ., and space forms so a
-# spaced/dotted RRN or phone cannot slip past (reviewer finding).
+# tests/test_redaction.py. Separators accepted as -, ., whitespace (incl.
+# newline) in any run, plus optional ()-wrapped area codes, so multi-separator /
+# line-wrapped RRN & phone cannot slip past (fleet finding).
 _RESIDUAL_PII_PATTERNS = {
-    "resident_registration_number": re.compile(rf"(?<!\d)\d{{6}}{_SEP}?\d{{7}}(?!\d)"),
-    "phone_number_separated": re.compile(rf"(?<!\d)\d{{2,3}}{_SEP}\d{{3,4}}{_SEP}\d{{4}}(?!\d)"),
-    "phone_number_mobile": re.compile(r"(?<!\d)01[0-9]\d{7,8}(?!\d)"),
-    # account/長 numbers written with dashes: 3+ / 2+ / 4+ groups. The final
+    "resident_registration_number": re.compile(rf"(?<!\d)\d{{6}}(?:{_SEP})?\d{{7}}(?!\d)"),
+    "phone_number_separated": re.compile(rf"(?<!\d)\(?\d{{2,3}}\)?{_SEP}\d{{3,4}}{_SEP}\d{{4}}(?!\d)"),
+    # Contiguous phone: any 10-11 digit run beginning 0 (mobile 01x… and landline
+    # 02x…), subsumes the old 01x-only pattern and catches "0212345678".
+    "phone_number_contiguous": re.compile(r"(?<!\d)0\d{9,10}(?!\d)"),
+    # account/long numbers written with dashes: 3+ / 2+ / 4+ groups. The final
     # group requires >=4 digits, which a date (…-NN) never has, so dates don't hit.
     "account_number_dashed": re.compile(r"(?<!\d)\d{3,}-\d{2,}-\d{4,}(?!\d)"),
     "email": re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+", re.IGNORECASE),
     # Korean plate middle syllable is from a FIXED set -- restricting to it (vs
     # any 가-힣) avoids false-positives on counter phrases like "12개 1234" (개 is
-    # not a plate syllable) while still catching spaced plates like "12가 3456".
+    # not a plate syllable). Only a preceding DIGIT is excluded (not Hangul), so
+    # a region-prefixed plate "서울12가3456" is caught.
     "vehicle_number": re.compile(
-        rf"(?<![가-힣\d])\d{{2,3}}[{_PLATE_SYLLABLES}]{_SEP}?\d{{4}}(?!\d)"
+        rf"(?<!\d)\d{{2,3}}[{_PLATE_SYLLABLES}](?:{_SEP})?\d{{4}}(?!\d)"
     ),
     "long_digit_run": re.compile(r"(?<!\d)\d{11,}(?!\d)"),
 }

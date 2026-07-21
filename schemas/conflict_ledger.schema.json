@@ -55,7 +55,19 @@
           "format": "date-time"
         }
       },
-      "required": ["conflict_id", "raised_by_stage", "field_or_topic", "sources", "verdict"]
+      "required": ["conflict_id", "raised_by_stage", "field_or_topic", "sources", "verdict"],
+      "if": {
+        "properties": { "verdict": { "enum": ["resolved", "false_positive"] } },
+        "required": ["verdict"]
+      },
+      "then": {
+        "comment": "A resolved/false_positive entry MUST carry a non-empty resolution_note and a resolved_at -- the P6 audit trail. Prose-only before (fleet F7); a hand-edited or forked ledger could persist a resolution with no recorded reason.",
+        "properties": {
+          "resolution_note": { "type": "string", "minLength": 1 },
+          "resolved_at": { "type": "string", "format": "date-time" }
+        },
+        "required": ["resolution_note", "resolved_at"]
+      }
     }
   }
 }

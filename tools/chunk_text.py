@@ -36,22 +36,38 @@ sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 
-PAGE_MARKER_RE = re.compile(r"<<<PAGE page=(\d+)>>>\n?")
+# (?m)^ anchors the marker to the START OF A LINE. Checkpoint 2 always emits the
+# marker as its own leading line; requiring line-start means an identical string
+# occurring INSIDE real page content (a coincidental or adversarial
+# "<<<PAGE page=99>>>" mid-line) is NOT mistaken for a page boundary -- the
+# in-band-signaling corruption the fleet review found (F1).
+PAGE_MARKER_RE = re.compile(r"(?m)^<<<PAGE page=(\d+)>>>\n?")
 
 
 def split_pages(redacted_text: str) -> list[tuple[int, str]]:
-    """Returns [(page_number, page_text), ...] in order. Exits if the text
-    has no page markers at all -- that means checkpoint 2 didn't assemble
-    it with the expected convention, and page boundaries can't be
-    recovered from an unmarked blob (fail loud, don't guess)."""
+    """Returns [(page_number, page_text), ...] in order. Fails loud (never
+    guesses) on: no markers, content before the first marker, or page numbers
+    that are not strictly increasing -- any of which means the redacted_text.md
+    convention was violated and page boundaries can't be trusted."""
     matches = list(PAGE_MARKER_RE.finditer(redacted_text))
     if not matches:
         sys.exit("error: no <<<PAGE page=N>>> markers found -- redacted_text.md was not "
                   "assembled with the expected page-boundary convention "
                   "(see document-pipeline.md checkpoint 2).")
+    # Content before the first marker would be silently dropped -- refuse (F2).
+    if redacted_text[:matches[0].start()].strip():
+        sys.exit("error: content found before the first <<<PAGE>>> marker -- "
+                  "redacted_text.md is malformed; refusing to silently drop it.")
     pages = []
+    prev_page = 0
     for i, m in enumerate(matches):
         page_num = int(m.group(1))
+        # Strictly increasing page numbers (F3): a duplicate or out-of-order
+        # page makes downstream evidence_reference page lookups ambiguous.
+        if page_num <= prev_page:
+            sys.exit(f"error: page numbers not strictly increasing ({prev_page} -> {page_num}) "
+                      "-- refusing to build ambiguous chunks.")
+        prev_page = page_num
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(redacted_text)
         # .strip("\n") only -- removes the delimiter's own formatting
