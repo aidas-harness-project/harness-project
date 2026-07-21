@@ -208,11 +208,31 @@ with no gap/overlap) → **checkpoint 1 ran real dual-path OCR on a resulting DO
 and passed** (p1 손해사정서 표지, both reads agreed, classified `other`). So a
 segmentation output feeds the existing pipeline unchanged.
 
-Not yet tried: 3×4 (larger cells may help the model tell repeating small-print
-forms apart, addressing the over-merge FNs). The 4×4/3×4 choice from finding 4
-stands as SETTLED for legibility; whether 3×4 measurably lifts recall on the
-repeating-form runs is a separate, now-answerable question — the scorer makes it
-a number, not a guess.
+**3×4 tried — and it is worse, the opposite of the hypothesis.** Same bundle,
+same provider, same baseline, `--grid 3x4` (RUN_20260721_002):
+
+| grid | precision | recall | F1 | segments | vision calls | needs_full_page |
+|---|---|---|---|---|---|---|
+| **4×4** | 0.95 | **0.81** | **0.88** | 60 | 7 | 0 |
+| 3×4 | 0.90 | **0.50** | 0.64 | 39 | 10 | 3 |
+
+The guess was "bigger cells → the model reads small-print forms better → higher
+recall." It failed: 3×4's recall collapsed 0.81 → 0.50, over-merges jumped 13 →
+35 — it merged the whole p52–72 세부내역서 back run (every page titled, which
+4×4 got right) and much of the receipt run into single segments.
+
+The lever was not cell size, it was **page density per sheet.** 4×4 puts 16
+pages side by side, so the model compares adjacent pages readily and calls each
+boundary; 3×4's 12 pages tipped it toward "these repeating forms are one block."
+needs_full_page appearing *only* on 3×4 (despite larger cells) is the same
+signal — it deferred judgement rather than made it. For this corpus's
+repeating-form problem, denser is better.
+
+**Grid SETTLED at 4×4 — now on accuracy, not just legibility (finding 4).** It
+scores far higher (F1 0.88 vs 0.64) *and* costs fewer calls (7 vs 10). The
+over-merge FNs at p36/p43/p66–73 are a model-behavior limit of the crop-only
+first pass, not something a grid change fixes; the full-page fallback (built but
+not yet executed) is the lever left for them.
 
 ---
 
