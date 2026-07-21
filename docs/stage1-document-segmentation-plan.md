@@ -231,8 +231,43 @@ repeating-form problem, denser is better.
 **Grid SETTLED at 4×4 — now on accuracy, not just legibility (finding 4).** It
 scores far higher (F1 0.88 vs 0.64) *and* costs fewer calls (7 vs 10). The
 over-merge FNs at p36/p43/p66–73 are a model-behavior limit of the crop-only
-first pass, not something a grid change fixes; the full-page fallback (built but
-not yet executed) is the lever left for them.
+first pass, not something a grid change fixes; the full-page fallback is the
+lever left for them — measured next.
+
+### 9. Full-page fallback — the lever for over-merge, measured (build step 7+)
+
+The over-merge FNs are NOT pages the model flagged (`needs_full_page` was 0 on
+the 4×4 run — the crop pass merged them *confidently*, at confidence 0.7). So a
+fallback keyed on the model's own doubt never touches them. The one that works
+is keyed on segment **length**: a merged repeating-form run always surfaces as
+one long segment, so every segment at/above a threshold is re-examined page by
+page, full-page, and split where a boundary was over-merged. Fails safe — an
+unreadable or "continue" verdict leaves the page a continuation, so it can only
+ADD a boundary a human reviews, never silently remove one.
+
+Measured on the same 4×4 CASE_025 run, `refine_long_segments` at two thresholds:
+
+| run | precision | recall | F1 | over-merge FNs | extra vision calls |
+|---|---|---|---|---|---|
+| no fallback | 0.95 | 0.81 | 0.88 | 13 | 0 |
+| threshold 5 | 0.94 | 0.91 | 0.93 | 6 | 39 |
+| **threshold 4** | 0.93 | **0.96** | **0.94** | **3** | 45 |
+
+Threshold 5 recovered the 세부내역서 front run (p36, p43 — exactly the
+baseline) and most of the back run. Dropping to 4 additionally pulled in the
+4-page 영수증 run (p97–100) that threshold 5 left merged, recovering p98/99/100
+for the cost of one low-confidence false split (p26). The full-page pass
+correctly KEEPS the genuine 13-page 손해사정서 (p2–13) merged — only p3 slipped,
+at confidence 0.72 — so it does not shred real multi-page documents. The
+remaining 3 FNs (p66/71/72) are a repeating-form limit the model does not
+resolve even full-page.
+
+**Threshold SETTLED at 4.** Recall 0.81 → 0.96, F1 0.88 → 0.94, for ~45 extra
+calls on this bundle (one per interior page of a long segment). Wired into
+`propose --refine` (off by default; the caller opts into the spend), with a
+per-page verdict cache so a re-run or threshold change reuses called pages. The
+CLI path was run end-to-end (`propose --refine`, RUN_20260721_003) and scored
+F1 0.94, confirming the wired path matches the experiment.
 
 ---
 
