@@ -183,6 +183,15 @@ def test_name_with_particle_still_redacts():
     assert app.redacted_text == "[PERSON_NAME]은 서명했다"
 
 
+def test_compound_institution_name_not_corrupted():
+    # The suffix need not be adjacent: 김영수의료재단 (재단 after 의료) is kept,
+    # but a SPACED hospital visit (김영수 병원에) still redacts the person.
+    kept = apply_redaction_spans("김영수의료재단 후원", [{"text": "김영수", "category": "person_name"}])
+    assert "김영수의료재단" in kept.redacted_text
+    spaced = apply_redaction_spans("김영수 병원에 갔다", [{"text": "김영수", "category": "person_name"}])
+    assert spaced.redacted_text == "[PERSON_NAME] 병원에 갔다"
+
+
 @pytest.mark.parametrize("leak", [
     "900202 2345678",        # spaced RRN
     "800101.1234567",        # dotted RRN
