@@ -157,17 +157,34 @@ def lock_path(target: Path) -> Path:
 
 def read_lock(target: Path):
     lp = lock_path(target)
-    return load_json(lp) if lp.exists() else None
+    if not lp.exists():
+        return None
+    try:
+        return load_json(lp)
+    except (json.JSONDecodeError, ValueError):
+        # A lock created by O_EXCL but not yet content-filled (tiny race window):
+        # it IS held, we just can't read who by yet. Report a placeholder rather
+        # than crash or treat it as free.
+        return {"held_by": "unknown", "run_id": "unknown", "purpose": "lock being written"}
 
 
 def acquire_lock(target: Path, held_by: str, run_id: str, purpose: str):
-    """Returns None on success, or the existing lock dict if already held."""
-    existing = read_lock(target)
-    if existing is not None:
-        return existing
-    atomic_write_json(lock_path(target), {
-        "held_by": held_by, "run_id": run_id, "started_at": now_iso(), "purpose": purpose,
-    })
+    """Returns None on success, or the existing lock dict if already held.
+
+    Uses an atomic O_CREAT|O_EXCL create so two racing callers cannot both
+    observe 'no lock' and both acquire it (the prior read-then-write was TOCTOU
+    -- fleet review proved 5 processes acquiring one lock). Exactly one caller's
+    create succeeds; every other gets FileExistsError and reports the holder."""
+    lp = lock_path(target)
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return read_lock(target) or {"held_by": "unknown", "run_id": "unknown",
+                                     "purpose": "already held"}
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump({"held_by": held_by, "run_id": run_id,
+                   "started_at": now_iso(), "purpose": purpose}, f, ensure_ascii=False, indent=2)
     return None
 
 
@@ -726,6 +743,10 @@ def _set_human_input_status(case_id, stage, status, description, held_by, run_id
         return 1
     try:
         state = load_run_state(case_id)
+        # Populate run_id from the arg (mirrors _update_run_state). Without this
+        # a human-input write on a fresh case left run_id=None -> schema-invalid
+        # state (fleet F2 root cause); the write is validated below regardless.
+        state["run_id"] = run_id or state.get("run_id")
         entries = state.setdefault("human_input_status", [])
         if status == "waiting":
             if not description:
@@ -742,6 +763,16 @@ def _set_human_input_status(case_id, stage, status, description, held_by, run_id
                 return 1
             entry["status"] = "received"
             entry["received_at"] = now_iso()
+        # Validate before persisting, same fail-don't-persist contract as
+        # _update_run_state (fleet F2: this writer was skipping the check, so
+        # e.g. request-expert-review before run_id is set wrote an invalid
+        # _run_state.json every downstream schema-gated writer would reject).
+        errors = _schema_check(state, "run_state.schema.json")
+        if errors:
+            print("SCHEMA_FAIL: run_state.json invalid; not written:")
+            for e in errors:
+                print(f"  - {e}")
+            return 1
         save_run_state(case_id, state)
         print(f"OK: {stage} -> {status}")
         return 0
