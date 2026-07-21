@@ -142,16 +142,13 @@ def test_replace_reads_fresh_after_the_lock(isolated_dao, monkeypatch):
 
 
 def test_replace_with_stage_updates_run_state(isolated_dao):
-    # Segmentation is the tail of intake, so it records under the "intake" stage.
-    # (A dedicated stage name lands with the step-8 pipeline integration, added
-    # to run_state's enum in the same change per the D4 rule.)
     _seed_manifest(isolated_dao)
     ok, message = dao.replace_manifest_documents(
         "CASE_900", "DOC_001", _SUPERSEDE, [_new_doc("DOC_002", 1, 12)],
-        "tester", "RUN_20260721_001", stage="intake")
+        "tester", "RUN_20260721_001", stage="document_segmentation")
     assert ok, message
     state = dao.load_run_state("CASE_900")
-    assert state["stages"][0]["stage_name"] == "intake"
+    assert state["stages"][0]["stage_name"] == "document_segmentation"
     assert state["stages"][0]["status"] == "passed"
 
 

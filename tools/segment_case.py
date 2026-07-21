@@ -1611,6 +1611,7 @@ def split_bundle(
 
     ok, message = dao.replace_manifest_documents(
         case_id, bundle_id, bundle_fields, new_documents, held_by, run_id,
+        stage="document_segmentation",
         purpose=f"split {source_file_name} into {len(new_documents)} document(s)",
     )
     if not ok:

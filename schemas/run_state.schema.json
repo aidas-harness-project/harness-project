@@ -25,6 +25,7 @@
       "description": "Canonical stage names -- the ONLY values any producer (tool or agent) may write. Snake_case, versioned where the pipeline genuinely runs the stage once per draft version. If a new stage is added to the pipeline, it gets added here in the same change (D4).",
       "enum": [
         "intake",
+        "document_segmentation",
         "document_processing",
         "indexing",
         "policy_clause_processing",
