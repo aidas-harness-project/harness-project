@@ -269,6 +269,42 @@ per-page verdict cache so a re-run or threshold change reuses called pages. The
 CLI path was run end-to-end (`propose --refine`, RUN_20260721_003) and scored
 F1 0.94, confirming the wired path matches the experiment.
 
+### 10. A second bundle surfaced a sheet-edge continuation drop — merge fixed
+
+Running a *different* case (CASE_026, the 59p 기왕증·퇴행성 bundle) as a second
+example put 9 pages (p33–41) into `unassigned_pages`, which CASE_025 never did.
+The cause was not vision failure and not the type enum: the raw model response
+for the sheet holding p33 **read the page correctly** — its own evidence says
+"unlike the p33-p41 form" — and classed it a continuation of the 진료비
+내역서(입원) 한방 document that began back on p28. But it **omitted p33 from the
+`continuations` array at the sheet boundary** (it listed p34.. but skipped p33),
+a simple enumeration slip where one sheet ends and the next begins. merge then
+saw p33 as named by no sheet and, under case B, left it — and the whole run
+after it — unassigned, tearing a 14-page document apart.
+
+Fixed in `merge_sheet_proposals` with a **continuation-absorption rule**: a page
+that no sheet named but that lies *strictly between two boundaries* is interior
+to the earlier boundary's document and is absorbed into it. This is the direct
+consequence of the merge's founding idea (boundaries alone make segments; sheet
+edges mean nothing) — a non-boundary page inside a document's span belongs to it
+whether or not the model enumerated it. Case B's safety is preserved exactly: a
+gap *after the last boundary* has no enclosing document, so it stays unassigned
+(a genuine model drop, not a sheet-edge slip). Absorbed pages are surfaced as a
+warning, not silently swallowed, so a human still sees which pages were inferred.
+Re-merging CASE_026 from the cached responses: p33–41 absorbed into p28–41,
+unassigned 9 → 0. Two tests pin the two sides (absorb between boundaries; leave
+a post-last-boundary gap unassigned).
+
+Also surfaced but NOT yet resolved: the split/merge granularity for
+repeating-form runs is document-type-dependent — receipts/계산서 (each page a
+distinct transaction, its own amount) should split, while itemized statements /
+charts / records (one claim or record spanning pages, the title just a repeated
+header) should merge. CASE_025's rule ("every titled page is its own document")
+and CASE_026's need ("merge the 내역서 run") are the two sides of this. The
+settled direction is **amount-based**: individual-transaction documents split,
+record documents merge. Implementing that as a type-aware rule (and reconciling
+CASE_025's back-run baseline to it) is a follow-up, tracked in `known-gaps.md`.
+
 ---
 
 ## Branch strategy

@@ -242,6 +242,47 @@ def test_document_spanning_a_sheet_break_stays_one_segment():
     assert merged["unassigned_pages"] == []
 
 
+def test_continuation_omitted_at_a_sheet_edge_is_absorbed_not_unassigned():
+    """CASE_026's exact bug: a 문서 begins on sheet 1 (p1) and continues onto
+    sheet 2, but the model forgot to list the sheet-2 first page (p13) in
+    continuations -- it named p14.. but skipped p13. Without absorption, merge
+    tore p13 (and the run after it) out as unassigned. p13 is strictly between
+    boundaries p1 and p15, so it belongs to p1's document."""
+    pages = sc.plan_sheets(24, 12)
+    merged = sc.merge_sheet_proposals(
+        [
+            _sheet(boundaries=[1], continuations=range(2, 13)),
+            # p13 omitted from continuations -- the model's sheet-edge slip.
+            _sheet(boundaries=[15], continuations=[14] + list(range(16, 25))),
+        ],
+        page_count=24,
+        sheet_pages=pages,
+    )
+    spans = [(s["page_start"], s["page_end"]) for s in merged["segments"]]
+    assert spans == [(1, 14), (15, 24)]     # p13 absorbed into p1's document
+    assert merged["unassigned_pages"] == []
+    assert any("absorbed" in w for w in merged["warnings"])  # surfaced, not silent
+
+
+def test_a_gap_after_the_last_boundary_is_still_unassigned():
+    """Absorption must not reach past the final boundary: a page after the last
+    document's start that no sheet named is a genuine model drop, not an interior
+    continuation -- there is no enclosing document to absorb it into. This is the
+    line that keeps case B intact."""
+    pages = sc.plan_sheets(24, 12)
+    merged = sc.merge_sheet_proposals(
+        [
+            _sheet(boundaries=[1], continuations=range(2, 13)),
+            # last boundary is p15; p20 named by nothing, past the last boundary.
+            _sheet(boundaries=[15], continuations=[13, 14, 16, 17, 18, 19, 21, 22, 23, 24]),
+        ],
+        page_count=24,
+        sheet_pages=pages,
+    )
+    assert 20 in merged["unassigned_pages"]
+    assert any("human review" in w for w in merged["warnings"])
+
+
 def test_case_a_missing_first_boundary_is_treated_as_one():
     """Page 1 of a bundle necessarily begins some document; the model's silence
     does not change that."""

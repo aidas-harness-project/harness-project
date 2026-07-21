@@ -1149,3 +1149,36 @@ as one-sided fabricated content per the item-11 fix. With
 `transcribe_image()` fixed, reader-side refusals should now be rare; this
 residual path is a second line of defense that has not been independently
 hardened and is not urgent to close before it recurs in practice.
+
+## 18. Stage 1 segmentation: repeating-form split/merge granularity is document-type-dependent -- OPEN
+
+Two real bundles pulled the segmentation granularity rule in opposite
+directions, and they are both right -- for different document types.
+
+* **CASE_025 (110p, 후유장해):** the 진료비 세부내역서 / 영수증 back run reprints
+  its title on every page, and the owner's ground-truth rule was "every titled
+  page is its own document." `--refine` was built and tuned to SPLIT these runs
+  (recall 0.81 -> 0.96).
+* **CASE_026 (59p, 기왕증):** the 진료비 내역서(입원) 한방 run (p28-41) is one
+  claim spanning 14 pages, its title just a repeated page header -- it must
+  MERGE, not split.
+
+Same visual pattern (repeated title on consecutive same-form pages), opposite
+correct answer. The settled direction (owner decision, 2026-07-21) is
+**amount-based**: a page that is an independent transaction with its own
+amount (영수증 / 계산서 / 납입확인서) starts a new document; a page that
+continues one claim or record (내역서 / 세부내역 / 차트 / 의무기록, title
+reprinted as a header) is a continuation. This is NOT yet implemented -- the
+current `--refine` splits every titled page in a long run regardless of type,
+so it over-splits record runs like CASE_026's. What's needed: make the split
+decision type-aware (the full-page verdict already surfaces
+`starts_new_document` + a type label + "its own totals/dates" reasoning in
+`FULL_PAGE_PROMPT`, so the signal exists -- it just isn't gated on document
+class yet), and reconcile CASE_025's back-run baseline to the amount-based rule
+(under it, that run's per-page split may itself be wrong for the 내역서 pages).
+
+NOT the same as the merge fix landed 2026-07-21: that closed a *sheet-edge
+continuation omission* (a page the model correctly read as a continuation but
+forgot to list, absorbed into its enclosing document -- see plan doc finding
+10). That fix is orthogonal and complete; this item is the remaining
+type-aware granularity question.
