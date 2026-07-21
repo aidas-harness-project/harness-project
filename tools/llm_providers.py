@@ -75,6 +75,16 @@ def _child_safe_env(*, keep_prefixes: Sequence[str]) -> dict[str, str]:
     or claude-via-Vertex (GOOGLE_*) -- add those prefixes via the
     HARNESS_CHILD_ENV_KEEP_PREFIXES env var (comma-separated), so the child keeps
     the creds it needs without editing code. Matching is case-insensitive.
+
+    KNOWN LIMITATION (accepted, not fixed): scrubbing keys on NAME SUFFIX
+    (_API_KEY / _SECRET / _TOKEN / _ACCESS_KEY) covers the conventions every real
+    LLM provider uses (OPENAI_API_KEY, GOOGLE_API_KEY, HF_TOKEN, COHERE/MISTRAL/
+    GROQ_API_KEY, ...). A secret stored under an UNCONVENTIONAL name -- a bare
+    `GEMINI_KEY` (ends _KEY, not _API_KEY), or a token in a randomly-named var --
+    would NOT be recognized as a secret and could reach the child. Closing this
+    fully needs an allowlist model (keep only known-safe vars, drop the rest),
+    which risks dropping legitimate vars; the suffix denylist is the deliberate
+    trade-off for the PoC.
     """
     extra = os.environ.get("HARNESS_CHILD_ENV_KEEP_PREFIXES", "")
     keep = tuple(p.strip().upper() for p in (*keep_prefixes, *extra.split(",")) if p.strip())
