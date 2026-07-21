@@ -91,8 +91,35 @@ def now_iso() -> str:
     return datetime.now(KST).isoformat()
 
 
+# --- path-safety choke point (closes traversal via case_id/doc_id/filename) ---
+# The DAO is documented as the sole safe boundary keeping callers inside
+# outputs/ and data/. That is only true if a crafted case_id/doc_id/filename
+# cannot escape the tree. Every case-scoped path is built through these guards.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _require_safe_id(kind: str, value: str) -> str:
+    if not isinstance(value, str) or not _SAFE_ID_RE.fullmatch(value):
+        sys.exit(f"error: unsafe {kind} {value!r} -- must be [A-Za-z0-9_]+ with no path separators")
+    return value
+
+
+def _require_within(base: Path, *parts: str) -> Path:
+    """Join parts under base and refuse anything that escapes it (traversal)."""
+    for p in parts:
+        if not isinstance(p, str) or not p or "\x00" in p or Path(p).is_absolute():
+            sys.exit(f"error: unsafe path component {p!r}")
+    candidate = base.joinpath(*parts)
+    base_r = base.resolve()
+    cand_r = candidate.resolve()
+    if cand_r != base_r and base_r not in cand_r.parents:
+        sys.exit(f"error: path escapes {base} -- refusing {candidate}")
+    return candidate
+
+
 def case_dir(case_id: str) -> Path:
-    d = OUTPUTS / case_id
+    _require_safe_id("case_id", case_id)
+    d = _require_within(OUTPUTS, case_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -117,7 +144,9 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 
 def processed_dir(case_id: str, doc_id: str) -> Path:
-    return DATA / "processed" / case_id / doc_id
+    _require_safe_id("case_id", case_id)
+    _require_safe_id("doc_id", doc_id)
+    return _require_within(DATA / "processed", case_id, doc_id)
 
 
 # ---------------------------------------------------------------- locking --
@@ -258,7 +287,7 @@ def cmd_read_ground_truth(args):
 
 
 def cmd_read_contract(args):
-    p = case_dir(args.case_id) / args.filename
+    p = _require_within(case_dir(args.case_id), args.filename)
     if not p.exists():
         print(f"NOT_FOUND: {p}")
         return 1
@@ -268,12 +297,12 @@ def cmd_read_contract(args):
 
 def read_contract_data(case_id: str, filename: str):
     """DAO-owned structured contract read for in-process pipeline tools."""
-    p = case_dir(case_id) / filename
+    p = _require_within(case_dir(case_id), filename)
     return load_json(p)
 
 
 def cmd_write_contract(args):
-    target = case_dir(args.case_id) / args.filename
+    target = _require_within(case_dir(args.case_id), args.filename)
     existing_lock = acquire_lock_blocking(target, args.held_by, args.run_id, args.purpose or f"write {args.filename}")
     if existing_lock is not None:
         print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
@@ -358,7 +387,7 @@ def cmd_patch_manifest_document(args):
 
 
 def cmd_check_lock(args):
-    target = case_dir(args.case_id) / args.filename
+    target = _require_within(case_dir(args.case_id), args.filename)
     lock = read_lock(target)
     if lock is None:
         print(json.dumps({"locked": False}))
@@ -409,7 +438,7 @@ def _write_text_locked(case_id, filename, text_file, held_by, run_id, purpose=No
     against. Shared by cmd_write_text and cmd_write_reviewed_draft, same
     pattern as _update_run_state being shared by cmd_update_run_state and
     cmd_snapshot_backup."""
-    target = case_dir(case_id) / filename
+    target = _require_within(case_dir(case_id), filename)
     existing_lock = acquire_lock_blocking(target, held_by, run_id, purpose or f"write {filename}")
     if existing_lock is not None:
         print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
