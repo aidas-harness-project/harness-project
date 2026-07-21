@@ -154,7 +154,16 @@ def main():
 
     doc_text, sidecar = render(spec)
 
-    out_path = ROOT / spec["output_path"]
+    # Containment (fleet F8): output_path must stay under outputs/. An absolute
+    # or ../ path would otherwise escape (Path('/x') / abs discards ROOT), letting
+    # a spec write anywhere on disk.
+    rel = spec["output_path"]
+    if Path(rel).is_absolute() or ".." in Path(rel).parts:
+        sys.exit(f"error: output_path {rel!r} must be a relative path under outputs/")
+    out_path = (ROOT / rel).resolve()
+    outputs_root = (ROOT / "outputs").resolve()
+    if outputs_root != out_path and outputs_root not in out_path.parents:
+        sys.exit(f"error: output_path {rel!r} escapes outputs/ -- refusing")
     sidecar_path = out_path.with_suffix(".evidence.json")
     sidecar["generated_at"] = now_iso()
 

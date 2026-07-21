@@ -1149,3 +1149,44 @@ as one-sided fabricated content per the item-11 fix. With
 `transcribe_image()` fixed, reader-side refusals should now be rare; this
 residual path is a second line of defense that has not been independently
 hardened and is not urgent to close before it recurs in practice.
+
+## 18. Full review-fleet findings -- fixed set + deferred set (2026-07-22)
+
+An 8-reviewer adversarial fleet went over `main`. The clear, verified fixes
+landed (see the CLAUDE.md 2026-07-22 row). These are the findings deliberately
+DEFERRED, with why:
+
+- **D1 is not sealed against Bash-based reads.** The new `.claude/settings.json`
+  deny-glob blocks the *Read tool* on `data/ground_truth`/`source-cases`, and the
+  DAO traversal is closed, but an agent with the Bash tool can still `cat`/`python`
+  the answer key. A complete seal needs OS-level permissions (or moving/encrypting
+  ground truth keyed on the human-review flag). Tracked as the real structural
+  boundary for production; the PoC accepts prompt+Read-deny isolation.
+- **Per-field manifest ownership not enforced.** `patch-manifest-document` +
+  `document_manifest.schema.json` allow any stage to rewrite any field (no
+  `additionalProperties:false`, no owner check). `additionalProperties:false`
+  was NOT added because it could reject existing valid manifests with extra
+  fields; per-field ownership needs a write-time owner map. Deferred.
+- **P8 halt is wrapper-level, not DAO-level.** `dao write-page-text` will persist
+  a page an agent hand-labels; the halt is guaranteed only via `run_checkpoint1`.
+  A DAO guard (refuse write-page-text for a `disagreed` page without a
+  `resolution`) would make it structural. Deferred.
+- **Unstructured / ordinary-word over-redaction.** A person name that is a
+  substring of a KEPT ordinary word (영수 -> 영수증) is still blind-replaced with
+  no signal; `scan_residual_pii` covers only structured PII. Fully closing this
+  needs offset-based (NER) redaction -- open-decisions.md #1.
+- **document_assembly orphan `[E#]` tags.** A hand-written `[E#]` in section
+  content produces a tag with no sidecar entry; caught downstream by the critic,
+  not structurally by the assembler. Deferred.
+- **D2 content scan is `.pdf`-only and first-5-pages-only**, and is defeatable by
+  an injected "CLEAR" in the page image. It is explicitly a human-review signal,
+  not a structural gate; a `.hwp`/`.docx` answer key or a report with its
+  conclusion on page 6+ gets no content check. Deferred (needs format coverage).
+- **`fork_case` rewrites only top-level `case_id`.** Embedded case-id-derived
+  paths (backup_path, file_path, redacted_text_path) still point at the source
+  case after a fork. Deferred.
+- **Frontend has no auth / CSRF / rate limits.** ACCEPTED, not fixed: per review
+  decision the pipeline viewer is a localhost-only dev tool. The one D1-relevant
+  frontend hole (serving ground-truth files) WAS fixed. If the frontend is ever
+  exposed, auth + CSRF + upload/spawn caps + scrubbing the `/run` child env
+  become required.
