@@ -86,10 +86,14 @@ AGREE_RE = re.compile(r"\bAGREE\b")
 # hallucinated readings and a spurious P8 disagreement (CASE_024/DOC_001, a
 # CP949 Korean note read as "an AI assistant's message about running iconv").
 TEXT_SUFFIXES = {".txt", ".md", ".text"}
-# Encodings tried in order for a text-file decode. CP949 first: source-cases
-# Korean text files are CP949 (see ocr_result.schema.json encoding_detected),
-# and CP949 is a strict superset of ASCII so pure-ASCII files still decode.
-TEXT_ENCODINGS = ("cp949", "utf-8", "euc-kr")
+# Encodings tried in order for a text-file decode. utf-8-sig FIRST -- not cp949 --
+# on purpose: UTF-8 is self-validating (invalid UTF-8 reliably raises), so a real
+# UTF-8 file always decodes here and a cp949/euc-kr file falls through cleanly
+# (its bytes are almost never valid UTF-8). Trying cp949 first risked silently
+# mojibake-decoding a UTF-8 file, and plain "utf-8" leaves a BOM as a stray
+# ﻿ in the text; utf-8-sig fixes both (strips a BOM if present). The reported
+# encoding maps utf-8-sig -> "utf-8" (see decode_text_file).
+TEXT_ENCODINGS = ("utf-8-sig", "cp949", "euc-kr")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
 
 
@@ -104,9 +108,17 @@ def decode_text_file(doc_path: Path) -> tuple[str, str]:
     raw = doc_path.read_bytes()
     for enc in TEXT_ENCODINGS:
         try:
-            return raw.decode(enc), enc
+            text = raw.decode(enc)
         except UnicodeDecodeError:
             continue
+        # Fail closed on an empty/whitespace-only source: embedded-text bypasses
+        # P8, so a silent empty page would enter the trusted layer with no
+        # cross-check. An empty document is anomalous -- surface it.
+        if not text.strip():
+            raise ProviderExecutionError(
+                f"{doc_path} decoded ({enc}) to empty/whitespace-only text; not a usable document"
+            )
+        return text, ("utf-8" if enc == "utf-8-sig" else enc)
     raise ProviderExecutionError(
         f"could not decode {doc_path} as text with any of {TEXT_ENCODINGS}; "
         "not forcing it through vision OCR"
