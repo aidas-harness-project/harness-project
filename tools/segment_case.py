@@ -12,9 +12,11 @@ text: segmentation_proposal.schema.json pins ``ocr_performed`` to a const false 
 a proposal claiming otherwise fails validation. Real OCR remains
 document-pipeline's checkpoint 1, on the resulting per-document PDFs.
 
-This module currently holds the pure, I/O-free half of that flow (build step 2 of
-docs/stage1-document-segmentation-plan.md); rendering, compositing, the provider
-path, and the split itself land in later steps.
+This module implements the complete Stage 1 tool flow: contact-sheet rendering,
+provider-backed boundary proposal, targeted full-page fallback, optional
+long-segment refinement, human approval, and approved PDF splitting. The
+orchestrator remains responsible for invoking these commands in order and for
+waiting at the human gate.
 
 Two measurements from the real corpus drive the design (see the plan doc):
 
@@ -1076,6 +1078,38 @@ def propose_boundaries(
             f"ratio or grid is likely wrong for this bundle -- retune rather than "
             f"spend the extra calls. Fallback skipped; these pages stay flagged."
         )
+    elif fallback["pages"]:
+        if progress:
+            progress(
+                f"re-checking {len(fallback['pages'])} crop-ambiguous page(s) full-page..."
+            )
+        resolution = resolve_needs_full_page(
+            per_sheet,
+            pages=fallback["pages"],
+            pdf_path=pdf_path,
+            provider=provider,
+            scratch_dir=refine_scratch_dir,
+            progress=progress,
+        )
+        per_sheet = resolution["per_sheet"]
+        # Re-merge from the corrected per-sheet facts. A successful full-page
+        # verdict replaces the crop-pass uncertainty with either a boundary or
+        # a continuation; an unreadable/failed verdict stays in
+        # needs_full_page and therefore remains visible to the human gate.
+        merged = merge_sheet_proposals(per_sheet, page_count, sheet_pages=batches)
+        fallback.update({
+            "triggered": True,
+            "resolved_pages": resolution["resolved_pages"],
+            "unresolved_pages": resolution["unresolved_pages"],
+            "new_boundaries": resolution["new_boundaries"],
+            "calls": resolution["calls"],
+        })
+        if resolution["unresolved_pages"]:
+            merged["warnings"].append(
+                f"full-page fallback could not resolve {len(resolution['unresolved_pages'])} "
+                f"page(s); they remain flagged for human review: "
+                f"{resolution['unresolved_pages']}"
+            )
 
     # The full-page fallback that actually moves the number: re-examine each long
     # merged segment page by page and split it where a boundary was over-merged.
@@ -1095,10 +1129,13 @@ def propose_boundaries(
         )
         merged["segments"] = refinement["segments"]
         fallback = {
+            **fallback,
             "triggered": True,
-            "pages": refinement["pages_examined"],
-            "saturated": False,
-            "cap": fallback["cap"],
+            # Preserve crop-ambiguous pages in `pages`; refinement has its own
+            # explicit accounting so the artifact does not conflate the two
+            # different reasons a full-page call happened.
+            "refinement_pages": refinement["pages_examined"],
+            "refinement_calls": refinement["calls"],
         }
         if refinement["new_boundaries"]:
             merged["warnings"].append(
@@ -1148,21 +1185,25 @@ def _plan_fallback(needs_full_page: list[int], page_count: int, cap_ratio: float
     full_page_fallback shape either way -- the artifact records what happened,
     which is diagnosable later without re-running.
 
-    NOTE (step 5 scope): the actual second vision pass is not wired yet. This
-    plans and gates it -- the pages that WOULD be re-checked, whether the run is
-    saturated, the cap -- so the proposal honestly records the decision. Running
-    the batched re-render + re-call lands with the split step (step 6/7), where
-    a real E2E run first shows how often it even fires.
+    The caller performs one full-page call per listed page when this is not
+    saturated. Keeping the spend decision here makes the 25% cap independently
+    testable and keeps saturation an all-or-nothing tuning signal.
     """
     pages = sorted(set(needs_full_page))
     cap = int(page_count * cap_ratio)
     saturated = len(pages) > cap
     return {
-        # Not triggered in step 5: planned-and-gated only, never executed yet.
         "triggered": False,
         "pages": pages,
         "saturated": saturated,
         "cap": cap,
+        "prompt_version": FULL_PAGE_PROMPT_VERSION,
+        "resolved_pages": [],
+        "unresolved_pages": list(pages),
+        "new_boundaries": [],
+        "calls": 0,
+        "refinement_pages": [],
+        "refinement_calls": 0,
     }
 
 
@@ -1173,16 +1214,36 @@ def _plan_fallback(needs_full_page: list[int], page_count: int, cap_ratio: float
 # reads the run as continuation; a full page shows the whole title block and
 # page-1-of-N markers a top-third crop cut off. Goes through transcribe_image
 # like every other vision call (the 9/9 label-form failure requires it).
+#
+# Split-biased on purpose (owner decision 2026-07-21, known-gaps item 18): a
+# reprinted title block IS a new-document signal, full stop -- we do NOT try to
+# tell "own totals/dates" record pages apart from per-transaction receipts and
+# keep records merged. Over-splitting is the cheap error (a human merges two
+# segments from the sheets in seconds); over-merging only surfaces after OCR,
+# classification, and extraction have all run on the wrong boundaries. The ONLY
+# continuation is a page with NO title block of its own -- a bare table/body
+# that visibly runs on from the page before it (a "page 2/N" with the header
+# printed only on page 1). This deliberately splits repeating-form runs like
+# CASE_026's 내역서 pages; the type-aware "records merge, receipts split" rule
+# is the deferred alternative, not this.
 FULL_PAGE_PROMPT = """This is a single full page from a scanned PDF that \
 concatenates several separate documents. Decide ONE thing: does THIS page begin \
 a NEW document, or does it continue the document on the previous page?
 
-A page begins a new document if it has its own title block, a page-1-of-N \
-marker, a different form layout, or a different letterhead. A page that is the \
-2nd, 3rd, ... sheet of the same form -- same title reprinted at the top but \
-continuing the same record or bill -- is a continuation, NOT a new document. \
-When a form reprints its title on every page, treat each titled page as its own \
-document only if it is otherwise self-contained (its own totals, its own dates).
+Treat THIS page as beginning a new document if it shows its OWN title block (a \
+form/document title printed at the top), a page-1-of-N marker, a different form \
+layout, or a different letterhead -- EVEN IF the page immediately before it had \
+the same title. A reprinted title is a new-document signal, not a continuation: \
+when a run of pages each carry the same title at the top, treat EACH titled page \
+as its own document.
+
+Treat THIS page as a continuation ONLY when it has NO title block of its own -- \
+a bare continuation of a table or body text that plainly runs on from the \
+previous page (for example a wide itemized table whose header printed only on \
+its first page and whose later pages are rows with no title).
+
+When unsure, prefer "new document": splitting too finely is easily corrected \
+downstream, merging two real documents is not.
 
 Some pages are scanned rotated a quarter turn; read them in place.
 
@@ -1191,7 +1252,10 @@ Reply with ONLY one JSON object:
 "type_label": "<the document's name in its own words, or null>", \
 "confidence": 0.0-1.0, "evidence": "<what you saw>"}"""
 
-FULL_PAGE_PROMPT_VERSION = "segment_full_page_v0.1"
+# v0.2: split-biased rewrite (see the comment above and known-gaps item 18).
+# Bumping the version invalidates any cached verdict written under v0.1 so a
+# re-run re-asks under the new instruction rather than trusting a stale answer.
+FULL_PAGE_PROMPT_VERSION = "segment_full_page_v0.2"
 
 
 def parse_full_page_response(raw: str) -> dict:
@@ -1218,6 +1282,187 @@ def parse_full_page_response(raw: str) -> dict:
         "type_label": type_guess if isinstance(type_guess, str) else None,
         "confidence": float(confidence) if confidence is not None else None,
         "evidence": parsed.get("evidence"),
+    }
+
+
+def _inspect_full_pages(
+    pages: list[int],
+    *,
+    pdf_path: Path,
+    provider,
+    scratch_dir: Path | None = None,
+    progress=None,
+) -> dict:
+    """Returns cached-or-fresh full-page boundary verdicts for ``pages``.
+
+    Both targeted crop-ambiguity fallback and optional long-segment refinement
+    use the same prompt, render, and per-page cache. Sharing this helper avoids
+    paying twice when a page is first named in ``needs_full_page`` and later
+    falls inside a long segment selected by ``--refine``.
+
+    A provider or parse failure is returned as ``ok: false`` and is deliberately
+    not cached: a transient failure should be retried next run. Callers decide
+    the safe action (targeted fallback keeps the page flagged; refinement keeps
+    the existing continuation).
+    """
+    if scratch_dir is not None:
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+
+    zoom = LONG_EDGE_CAP / DEFAULT_PAGE_HEIGHT_PT
+    verdict_cache: dict[int, dict] = {}
+    cache_path = None
+    if scratch_dir is not None:
+        cache_path = scratch_dir / "_verdicts.json"
+        if cache_path.exists():
+            try:
+                stored = json.loads(cache_path.read_text(encoding="utf-8"))
+                if stored.get("prompt_version") == FULL_PAGE_PROMPT_VERSION:
+                    verdict_cache = {
+                        int(k): v for k, v in stored.get("verdicts", {}).items()
+                    }
+            except (OSError, json.JSONDecodeError):
+                verdict_cache = {}
+
+    def persist_verdicts():
+        if cache_path is None:
+            return
+        tmp = cache_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(
+            {
+                "prompt_version": FULL_PAGE_PROMPT_VERSION,
+                "verdicts": {str(k): v for k, v in verdict_cache.items()},
+            },
+            ensure_ascii=False,
+        ), encoding="utf-8")
+        tmp.replace(cache_path)
+
+    verdicts: dict[int, dict] = {}
+    calls = 0
+    for page in sorted(set(pages)):
+        if page in verdict_cache:
+            verdict = verdict_cache[page]
+            verdicts[page] = verdict
+            if progress:
+                mark = "NEW" if verdict["starts_new_document"] else "cont"
+                progress(f"  full-page p{page}: {mark} (cached)")
+            continue
+
+        images = render_page_images(pdf_path, [page], zoom=zoom)
+        image = images[page]
+        temporary_path = scratch_dir is None
+        if scratch_dir is not None:
+            page_path = scratch_dir / f"fullpage_p{page:03d}.png"
+            image.save(page_path)
+        else:
+            import tempfile
+            fd = tempfile.NamedTemporaryFile(suffix=f"_fullpage_p{page:03d}.png", delete=False)
+            page_path = Path(fd.name)
+            fd.close()
+            image.save(page_path)
+
+        try:
+            result = provider.transcribe_image(
+                page_path, FULL_PAGE_PROMPT, FULL_PAGE_PROMPT_VERSION
+            )
+            verdict = parse_full_page_response(result.text)
+        except Exception as exc:  # noqa: BLE001
+            verdict = {
+                "ok": False,
+                "starts_new_document": False,
+                "warning": f"provider call failed: {exc}",
+            }
+        finally:
+            if temporary_path:
+                page_path.unlink(missing_ok=True)
+
+        calls += 1
+        verdicts[page] = verdict
+        if verdict.get("ok"):
+            verdict_cache[page] = verdict
+            persist_verdicts()
+        if progress:
+            mark = "NEW" if verdict["starts_new_document"] else "cont"
+            progress(f"  full-page p{page}: {mark} (conf {verdict.get('confidence')})")
+
+    return {"verdicts": verdicts, "calls": calls}
+
+
+def resolve_needs_full_page(
+    per_sheet: list[dict],
+    *,
+    pages: list[int],
+    pdf_path: Path,
+    provider,
+    scratch_dir: Path | None = None,
+    progress=None,
+) -> dict:
+    """Replaces crop-pass uncertainty with a full-page boundary verdict.
+
+    A resolved page becomes exactly one of boundary/continuation and is removed
+    from ``needs_full_page``. Under the owner-set split-biased rule, a full-page
+    title means boundary; no title means continuation. An unreadable verdict or
+    provider failure changes nothing, so the proposal still flags the page and
+    the human gate remains load-bearing.
+    """
+    import copy
+
+    updated = copy.deepcopy(per_sheet)
+    inspection = _inspect_full_pages(
+        pages,
+        pdf_path=pdf_path,
+        provider=provider,
+        scratch_dir=scratch_dir,
+        progress=progress,
+    )
+    resolved_pages: list[int] = []
+    unresolved_pages: list[int] = []
+    new_boundaries: list[int] = []
+
+    for page in sorted(set(pages)):
+        verdict = inspection["verdicts"].get(page, {"ok": False})
+        if not verdict.get("ok"):
+            unresolved_pages.append(page)
+            continue
+
+        found = False
+        for sheet in updated:
+            needs = set(sheet.get("needs_full_page", []))
+            if page not in needs:
+                continue
+            found = True
+            needs.discard(page)
+            sheet["needs_full_page"] = sorted(needs)
+            sheet["continuations"] = sorted(
+                p for p in set(sheet.get("continuations", [])) if p != page
+            )
+            sheet["boundaries"] = [
+                item for item in sheet.get("boundaries", []) if item.get("page") != page
+            ]
+            if verdict["starts_new_document"]:
+                sheet["boundaries"].append({
+                    "page": page,
+                    "type_guess": None,
+                    "type_label": verdict.get("type_label"),
+                    "confidence": verdict.get("confidence"),
+                    "evidence": verdict.get("evidence"),
+                })
+                sheet["boundaries"].sort(key=lambda item: item["page"])
+                new_boundaries.append(page)
+            else:
+                sheet["continuations"] = sorted(set(sheet["continuations"]) | {page})
+        if found:
+            resolved_pages.append(page)
+        else:
+            # Defensive: the caller derived pages from per_sheet, so this would
+            # indicate an internal bookkeeping bug. Do not claim it was resolved.
+            unresolved_pages.append(page)
+
+    return {
+        "per_sheet": updated,
+        "resolved_pages": resolved_pages,
+        "unresolved_pages": unresolved_pages,
+        "new_boundaries": new_boundaries,
+        "calls": inspection["calls"],
     }
 
 
@@ -1249,47 +1494,11 @@ def refine_long_segments(
     calls}`` -- segments is the new full list (short ones passed through
     untouched), the rest is for reporting and scoring.
     """
-    from PIL import Image  # noqa: F401  (render_page_images needs it)
-
-    if scratch_dir is not None:
-        scratch_dir.mkdir(parents=True, exist_ok=True)
-
-    # Full-page render: land the long edge near the vision cap so the whole page
-    # is legible, not a cell-sized thumbnail. A4 is taller than wide, so height
-    # is the long edge.
-    zoom = LONG_EDGE_CAP / DEFAULT_PAGE_HEIGHT_PT
-
-    # A per-page verdict cache next to the rendered pages, so a re-run -- or a
-    # threshold change that pulls in a few more segments -- reuses every page
-    # already called instead of re-paying. Each verdict is deterministic per
-    # page image and prompt version, so a cached 'p36: NEW' is still valid.
-    verdict_cache: dict[int, dict] = {}
-    cache_path = None
-    if scratch_dir is not None:
-        cache_path = scratch_dir / "_verdicts.json"
-        if cache_path.exists():
-            try:
-                stored = json.loads(cache_path.read_text(encoding="utf-8"))
-                if stored.get("prompt_version") == FULL_PAGE_PROMPT_VERSION:
-                    verdict_cache = {int(k): v for k, v in stored.get("verdicts", {}).items()}
-            except (OSError, json.JSONDecodeError):
-                verdict_cache = {}
-
     new_segments: list[dict] = []
     refined_indices: list[int] = []
     pages_examined: list[int] = []
     new_boundaries: list[int] = []
     calls = 0
-
-    def _persist_verdicts():
-        if cache_path is None:
-            return
-        tmp = cache_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(
-            {"prompt_version": FULL_PAGE_PROMPT_VERSION,
-             "verdicts": {str(k): v for k, v in verdict_cache.items()}},
-            ensure_ascii=False), encoding="utf-8")
-        tmp.replace(cache_path)
 
     for seg in segments:
         start, end = seg["page_start"], seg["page_end"]
@@ -1302,52 +1511,18 @@ def refine_long_segments(
         # Boundaries within this segment, always including its own start.
         cut_points = [start]
         cut_meta: dict[int, dict] = {}
-        for page in range(start + 1, end + 1):
-            pages_examined.append(page)
-            if page in verdict_cache:
-                verdict = verdict_cache[page]
-                if progress:
-                    mark = "NEW" if verdict["starts_new_document"] else "cont"
-                    progress(f"  full-page p{page}: {mark} (cached)")
-                if verdict["starts_new_document"]:
-                    cut_points.append(page)
-                    new_boundaries.append(page)
-                    cut_meta[page] = verdict
-                continue
-
-            images = render_page_images(pdf_path, [page], zoom=zoom)
-            image = images[page]
-            if scratch_dir is not None:
-                page_path = scratch_dir / f"fullpage_p{page:03d}.png"
-                image.save(page_path)
-            else:
-                # transcribe_image reads a file path, so a full page needs to be
-                # on disk somewhere; fall back to a temp file when no scratch dir.
-                import tempfile
-                fd = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                page_path = Path(fd.name)
-                fd.close()
-                image.save(page_path)
-
-            try:
-                result = provider.transcribe_image(page_path, FULL_PAGE_PROMPT, FULL_PAGE_PROMPT_VERSION)
-                verdict = parse_full_page_response(result.text)
-            except Exception as exc:  # noqa: BLE001
-                # A single page's provider failure must not kill a long run.
-                # Fail safe the same way an unreadable verdict does: leave the
-                # page a continuation. This can only MISS a split (a human still
-                # reviews the long segment), never invent one. NOT cached -- a
-                # transient failure should be retried on the next run.
-                verdict = {"ok": False, "starts_new_document": False,
-                           "warning": f"provider call failed: {exc}"}
-            calls += 1
-            if verdict.get("ok"):
-                verdict_cache[page] = verdict
-                _persist_verdicts()
-            if progress:
-                mark = "NEW" if verdict["starts_new_document"] else "cont"
-                progress(f"  full-page p{page}: {mark} "
-                         f"(conf {verdict.get('confidence')})")
+        inspect_pages = list(range(start + 1, end + 1))
+        inspection = _inspect_full_pages(
+            inspect_pages,
+            pdf_path=pdf_path,
+            provider=provider,
+            scratch_dir=scratch_dir,
+            progress=progress,
+        )
+        pages_examined.extend(inspect_pages)
+        calls += inspection["calls"]
+        for page in inspect_pages:
+            verdict = inspection["verdicts"][page]
             if verdict["starts_new_document"]:
                 cut_points.append(page)
                 new_boundaries.append(page)
@@ -1810,6 +1985,12 @@ def _cmd_propose(args):
         "needs_full_page": result["needs_full_page"],
         "fallback_triggered": proposal["method"]["full_page_fallback"]["triggered"],
         "fallback_saturated": proposal["method"]["full_page_fallback"]["saturated"],
+        "fallback_resolved_pages": proposal["method"]["full_page_fallback"].get(
+            "resolved_pages", []
+        ),
+        "fallback_unresolved_pages": proposal["method"]["full_page_fallback"].get(
+            "unresolved_pages", []
+        ),
         "warnings": proposal["warnings"],
     }
     if result.get("refinement"):

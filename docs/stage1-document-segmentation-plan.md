@@ -1,715 +1,379 @@
-# Stage 1 Redesign: Case Intake & Document Segmentation
+# Stage 1: Case Intake & Document Segmentation
 
-> A Korean-language copy of this document is kept at
-> `stage1-document-segmentation-plan.ko.md` for the project owner. This English
-> version is authoritative per `CLAUDE.md`'s documentation-language rule; if the
-> two drift, this one wins.
+## Status
 
-## Context
+Implemented on `feature/stage1` as of 2026-07-21.
 
-The pipeline currently treats **one source PDF as one logical document
-(`DOC_XXX`)**. The real material in `source-cases/` does not work that way:
+Stage 1 is no longer plain file intake. It is the pre-OCR stage that isolates
+ground truth, turns each approved raw bundle into logical documents, and blocks
+Stage 2 until a human has approved every proposed page range.
 
-| Pages | File |
-|---|---|
-| 110p | 배상-상완골 근위부 골절OP |
-| 77p | 배상 한화손보 손해사정서 |
-| 59p | 배상 손해사정서 |
-| 21-23p | 뇌혈관질환진단비 (4 insurers) |
+This document describes the implementation that exists now. It is not a build
+plan or a chronological work log. Historical measurements are retained only
+where they explain a current default.
 
-A single bundle concatenates claim forms, diagnosis certificates, medical
-records, receipts, and insurer responses. OCR'ing that as one document means
-every downstream stage (classification, field extraction, evidence citation)
-operates on wrong document boundaries.
+## 1. Scope and non-goals
 
-**Goal:** split bundles into logical documents *before* OCR. Stage 1's output is
-**document structure, not text**.
+Stage 1 owns:
 
-Stage 1 explicitly does not do: full OCR, text transcription, final document
-typing, redaction, chunking.
+1. D2-gated raw/ground-truth intake.
+2. Low-resolution page previews and contact sheets for raw PDF bundles.
+3. Pre-OCR visual boundary proposals.
+4. Targeted full-page fallback for pages the crop pass cannot judge.
+5. Optional full-page refinement of long, probably over-merged segments.
+6. Human review of every proposed page range.
+7. Splitting an approved bundle into logical `DOC_XXX.pdf` files.
+8. Provenance-preserving manifest replacement through the DAO.
 
----
+Stage 1 does **not** perform:
 
-## Measured findings (the basis for this design)
+- OCR or text transcription;
+- final document classification;
+- PII redaction;
+- chunking or evidence extraction;
+- autonomous approval of a model proposal.
 
-These are measurements against the real PDFs, not assumptions.
+`segmentation_proposal.schema.json` pins `method.ocr_performed` to `false` with
+a JSON Schema `const`. Stage 1's output is document structure, not text.
 
-### 1. Cheap text-based boundary detection is impossible
+## 2. How Stage 1 is connected to the pipeline
 
-```
-110p bundle: pages with embedded text = 0 / 110  (all 9 PDFs identical)
-```
+The harness does not have a standalone `run_pipeline.py` executable. Pipeline
+execution is agentic: the `loss-adjustment-pipeline` skill is the orchestrator.
+When a user asks Claude or Codex to process a case, that orchestrator must run
+Stage 1 in the order below and must not dispatch `document-pipeline` until the
+segmentation gate is clear.
 
-Every page is a scan/capture image. Filename- and embedded-text-based boundary
-detection is ruled out at the source. **Vision is the only available signal** —
-confirmed by data, not assumed.
+Stage 1 itself has no dedicated agent identity. It is owned by the orchestrator
+plus deterministic tools:
 
-### 2. Structural signals (image count/size) don't find boundaries either
+- `tools/intake_case.py`
+- `tools/segment_case.py`
+- `tools/dao.py`
 
-Scanning per-page embedded-image count and largest-overlay dimensions across all
-pages produced a "change" marker on nearly every page — signal-to-noise too poor
-to use. The 2→24 image-count swings track capture method, not document
-boundaries. No free LLM-less prefilter is available.
+`document-pipeline` begins at Stage 2. It consumes the logical documents Stage 1
+created, skips entries marked `superseded_bundle`, and independently classifies
+each logical document after OCR.
 
-*Recorded deliberately: this is the answer to "why didn't you use a cheaper
-method?"*
+This means the new Stage 1 runs automatically only in the sense that the
+orchestrator skill requires it. There is no separate process-level runner that
+can enforce the call when someone bypasses the skill and invokes Stage 2 tools
+directly.
 
-### 3. Vertical strips are self-defeating — grid layout adopted instead
+## 3. Required execution sequence
 
-Claude vision caps the **long edge at 1568px and total pixels at ~1.15M**.
-Stacking pages vertically makes height the long edge, so fitting height to 1568
-**shrinks the width along with it**.
-
-| Layout | Final size | Tokens/page |
-|---|---|---|
-| Vertical strip, 15p | **222 × 1568 — width collapses** | 31 |
-| Vertical strip, 8p | 416 × 1568 | 108.8 |
-| 4×4 grid, 16p | 1568 × 731 | 95.8 |
-
-A grid costs ~1533 tokens per sheet **regardless of layout** (the pixel budget
-binds), so packing more pages per sheet is purely cheaper per page. **A 4×4 grid
-is cheaper per page than an 8p vertical strip while holding twice as many
-pages.** The vertical strip is strictly worse at the stated goal of saving
-tokens. → **Grid adopted.**
-
-### 4. Grid size — SETTLED at 4×4 by rendering real sheets (build step 3)
-
-**Resolved.** Rendering the real bundle's first sheet at 2×4, 3×4, and 4×4 and
-looking at them settled this: **4×4 is legible enough**. Titles (손해 사정서,
-진 단 서, 후유장해진단서), letterheads, and even body paragraphs read clearly at a
-387×177 cell. The opening sheet also showed a real document boundary directly —
-p1-13 carry one adjuster's letterhead, p14 switches to a 진단서 — which is the
-signal this stage exists to find.
-
-The earlier concern (list items breaking down at 387px) assumed a render-then-
-downscale pipeline. Rendering each cell **directly at its final size** via a zoom
-matrix removes that loss, so the concern did not materialize. 3×4 is meaningfully
-larger and remains a one-flag change if a harder bundle needs it.
-
-The subsection below is kept as the record of why this was contested.
-
-#### Original analysis — arithmetic and eyeballing disagreed
-
-A flaw in the legibility metric surfaced while planning. Recording it.
-
-Arithmetically a 16pt title in a 4×4 grid renders at 10.5px (independently
-reproduced). But rendering a real page and looking at it, **at a 387px cell the
-section heading is readable while the list items beneath it are already breaking
-down.** At 544px (2 columns) the same page is comfortably legible including the
-list items.
-
-Cause: **"16pt title height" did not represent legibility.** Judging document
-type needs the form structure and line items under the title, and those are set
-in smaller type.
-
-| Grid | p/sheet | Cell | 16pt title | Tokens/p | 110p |
-|---|---|---|---|---|---|
-| 2×4 | 8 | 555×259 | 14.9px | 192 | 14 sheets |
-| **3×4** | 12 | 453×211 | 12.2px | 128 | 10 sheets |
-| 4×4 | 16 | 392×183 | 10.5px | 96 | 7 sheets |
-
-**→ Default to 3×4 provisionally, but expose `--grid COLSxROWS` and settle it by
-looking at real sheets** (a hard stop in build step 3). Do not hard-code: this
-must be a tuning decision, not a rewrite.
-
-### 5. Render DPI doesn't affect final quality — render low, resize ourselves
-
-```
-dpi 100/150/200 → identical final output (the long-edge cap binds)
-```
-
-High-DPI rendering is pure waste. Rendering **directly at cell size** with
-`fitz.Matrix(zoom, zoom)` removes the intermediate full-res PNG entirely.
-`ocr_extract.split_to_page_images` hard-codes DPI in both backends
-(`ocr_extract.py:188`, `:226`) and that constant is **quality-affecting on the P8
-OCR path** — leave it alone. Stage 1 renders independently.
-
-### 6. Content starts at the top of the page — with two exceptions
-
-Measuring overlay bbox vertical placement, body content starts at **0.02-0.20 of
-page height**. A top-1/3 crop captures the document opening. Two exceptions:
-
-- Pages with no overlay at all exist → blank-crop handling required.
-- **Roughly half the bundle is scanned rotated a quarter turn** (one long run
-  around p29-73 plus a shorter one near the end). `page.rotation` is 0 throughout
-  — content orientation, not a PDF flag — so metadata cannot reveal it.
-
-  **The resolution is to do nothing about it.** Pages are sent to the model in
-  whatever orientation they were scanned, with one prompt line saying some are
-  rotated. Verified on a real 4×4 sheet spanning p65-80 (p65-73 rotated): the
-  model read **all 9 rotated cells, none unreadable**, and found the p74 document
-  boundary at **0.92 confidence**, citing the orientation-and-layout switch itself
-  as its evidence. It also correctly hedged on p65 (confidence 0.45,
-  `needs_full_page`) because a top strip cannot show whether p65 continues from
-  p64 on the previous sheet.
-
-  Straightening was considered and rejected: detecting *which way* a page is
-  turned did not work (wrong direction on 3 of 9 known-rotated pages, and upright
-  controls gave no usable baseline), and rendering both directions costs +57% to
-  +100% more sheets against a design whose whole point is fewer tokens.
-
-  **Every sheet is rendered three times: as-scanned, +90°, −90°**
-  (`build_sheet_set`, `SHEET_VARIANTS`). Since which way a page is turned is not
-  detectable, produce all three and let whoever is reading — a human doing manual
-  review, or the model — use the legible one. Rendering is cheap (~0.2s a sheet)
-  and costs no extra model calls, because only one variant per sheet is ever
-  sent. Filenames carry the variant (`sheet_02_p033-048_cw.png`).
-
-  This is what makes manual review possible at all: an as-scanned sheet of a
-  sideways run shows table left-edges instead of titles, so without the companion
-  turns a reviewer has no recourse for half the bundle. Verified on the real
-  p33-48 sheet — unreadable as-scanned, and in the `_cw` variant the 진료비
-  세부내역서 titles on p36 and p43 are plainly legible.
-
-  **No orientation detector ships.** An earlier version had one and it was
-  deleted: with all three variants available, a flag saying "this page might be
-  sideways" gates nothing, transforms nothing, and feeds nothing but a log line —
-  while still costing real attention to calibrate (threshold tuned twice against
-  measurements that shift with render size; a false positive on an upright page
-  caught only by a human reading the output). Detecting a condition nobody acts
-  on is not a feature.
-
-### 7. Corpus-wide token effect
-
-344 pages at 3×4 → 29 sheets → ~44,000 tokens, versus one call per page (344
-calls, ~527,000 tokens). **~92% reduction.** The goal is met.
-
-### 8. First real end-to-end run — measured accuracy (build step 7)
-
-CASE_025 (the 110p bundle, intaken lightly as one DOC_001), `propose --grid 4x4
---provider claude-cli`, RUN_20260721_001. Seven real vision calls, all parsed
-(0 parse failures), 0 unassigned pages, 0 `needs_full_page`, fallback not
-saturated. Scored against the 70-boundary hand baseline
-(`_segmentation_scratch/CASE_BASELINE_DOC_001/BASELINE.md`):
-
-| metric | value |
-|---|---|
-| precision | 0.95 |
-| recall | 0.81 |
-| **F1** | **0.88** |
-
-The errors landed exactly where the baseline predicted they would — the
-repeating-form runs:
-
-* **False positives (over-split, cheap): p2, p21, p23.** p2 is the 손해사정서
-  cover→body transition read as a new document; p21/p23 are mid-record pages in
-  the p18–26 의무기록 whose similar forms looked like new starts. A human
-  merges these from the sheets in seconds.
-* **False negatives (over-merge, costly): p36, p43, p66–73, p98–100.** The model
-  reads a repeating form as *continuation* and misses the boundary. p36/p43 are
-  the 세부내역서 front run where the title reprints only every ~7 pages; p66–73
-  is the back run where it reprints every page (8 receipts merged into one);
-  p98–100 is the same in the 영수증 run. This is the exact asymmetry the
-  baseline's "채점에서 가장 틀리기 쉬운 구간" note called out.
-
-The whole chain was exercised live: sheets → 7 vision calls → score → approve →
-split (60 DOC_XXX PDFs, bundle marked superseded, 110 pages covered contiguous
-with no gap/overlap) → **checkpoint 1 ran real dual-path OCR on a resulting DOC
-and passed** (p1 손해사정서 표지, both reads agreed, classified `other`). So a
-segmentation output feeds the existing pipeline unchanged.
-
-**3×4 tried — and it is worse, the opposite of the hypothesis.** Same bundle,
-same provider, same baseline, `--grid 3x4` (RUN_20260721_002):
-
-| grid | precision | recall | F1 | segments | vision calls | needs_full_page |
-|---|---|---|---|---|---|---|
-| **4×4** | 0.95 | **0.81** | **0.88** | 60 | 7 | 0 |
-| 3×4 | 0.90 | **0.50** | 0.64 | 39 | 10 | 3 |
-
-The guess was "bigger cells → the model reads small-print forms better → higher
-recall." It failed: 3×4's recall collapsed 0.81 → 0.50, over-merges jumped 13 →
-35 — it merged the whole p52–72 세부내역서 back run (every page titled, which
-4×4 got right) and much of the receipt run into single segments.
-
-The lever was not cell size, it was **page density per sheet.** 4×4 puts 16
-pages side by side, so the model compares adjacent pages readily and calls each
-boundary; 3×4's 12 pages tipped it toward "these repeating forms are one block."
-needs_full_page appearing *only* on 3×4 (despite larger cells) is the same
-signal — it deferred judgement rather than made it. For this corpus's
-repeating-form problem, denser is better.
-
-**Grid SETTLED at 4×4 — now on accuracy, not just legibility (finding 4).** It
-scores far higher (F1 0.88 vs 0.64) *and* costs fewer calls (7 vs 10). The
-over-merge FNs at p36/p43/p66–73 are a model-behavior limit of the crop-only
-first pass, not something a grid change fixes; the full-page fallback is the
-lever left for them — measured next.
-
-### 9. Full-page fallback — the lever for over-merge, measured (build step 7+)
-
-The over-merge FNs are NOT pages the model flagged (`needs_full_page` was 0 on
-the 4×4 run — the crop pass merged them *confidently*, at confidence 0.7). So a
-fallback keyed on the model's own doubt never touches them. The one that works
-is keyed on segment **length**: a merged repeating-form run always surfaces as
-one long segment, so every segment at/above a threshold is re-examined page by
-page, full-page, and split where a boundary was over-merged. Fails safe — an
-unreadable or "continue" verdict leaves the page a continuation, so it can only
-ADD a boundary a human reviews, never silently remove one.
-
-Measured on the same 4×4 CASE_025 run, `refine_long_segments` at two thresholds:
-
-| run | precision | recall | F1 | over-merge FNs | extra vision calls |
-|---|---|---|---|---|---|
-| no fallback | 0.95 | 0.81 | 0.88 | 13 | 0 |
-| threshold 5 | 0.94 | 0.91 | 0.93 | 6 | 39 |
-| **threshold 4** | 0.93 | **0.96** | **0.94** | **3** | 45 |
-
-Threshold 5 recovered the 세부내역서 front run (p36, p43 — exactly the
-baseline) and most of the back run. Dropping to 4 additionally pulled in the
-4-page 영수증 run (p97–100) that threshold 5 left merged, recovering p98/99/100
-for the cost of one low-confidence false split (p26). The full-page pass
-correctly KEEPS the genuine 13-page 손해사정서 (p2–13) merged — only p3 slipped,
-at confidence 0.72 — so it does not shred real multi-page documents. The
-remaining 3 FNs (p66/71/72) are a repeating-form limit the model does not
-resolve even full-page.
-
-**Threshold SETTLED at 4.** Recall 0.81 → 0.96, F1 0.88 → 0.94, for ~45 extra
-calls on this bundle (one per interior page of a long segment). Wired into
-`propose --refine` (off by default; the caller opts into the spend), with a
-per-page verdict cache so a re-run or threshold change reuses called pages. The
-CLI path was run end-to-end (`propose --refine`, RUN_20260721_003) and scored
-F1 0.94, confirming the wired path matches the experiment.
-
-### 10. A second bundle surfaced a sheet-edge continuation drop — merge fixed
-
-Running a *different* case (CASE_026, the 59p 기왕증·퇴행성 bundle) as a second
-example put 9 pages (p33–41) into `unassigned_pages`, which CASE_025 never did.
-The cause was not vision failure and not the type enum: the raw model response
-for the sheet holding p33 **read the page correctly** — its own evidence says
-"unlike the p33-p41 form" — and classed it a continuation of the 진료비
-내역서(입원) 한방 document that began back on p28. But it **omitted p33 from the
-`continuations` array at the sheet boundary** (it listed p34.. but skipped p33),
-a simple enumeration slip where one sheet ends and the next begins. merge then
-saw p33 as named by no sheet and, under case B, left it — and the whole run
-after it — unassigned, tearing a 14-page document apart.
-
-Fixed in `merge_sheet_proposals` with a **continuation-absorption rule**: a page
-that no sheet named but that lies *strictly between two boundaries* is interior
-to the earlier boundary's document and is absorbed into it. This is the direct
-consequence of the merge's founding idea (boundaries alone make segments; sheet
-edges mean nothing) — a non-boundary page inside a document's span belongs to it
-whether or not the model enumerated it. Case B's safety is preserved exactly: a
-gap *after the last boundary* has no enclosing document, so it stays unassigned
-(a genuine model drop, not a sheet-edge slip). Absorbed pages are surfaced as a
-warning, not silently swallowed, so a human still sees which pages were inferred.
-Re-merging CASE_026 from the cached responses: p33–41 absorbed into p28–41,
-unassigned 9 → 0. Two tests pin the two sides (absorb between boundaries; leave
-a post-last-boundary gap unassigned).
-
-Also surfaced but NOT yet resolved: the split/merge granularity for
-repeating-form runs is document-type-dependent — receipts/계산서 (each page a
-distinct transaction, its own amount) should split, while itemized statements /
-charts / records (one claim or record spanning pages, the title just a repeated
-header) should merge. CASE_025's rule ("every titled page is its own document")
-and CASE_026's need ("merge the 내역서 run") are the two sides of this. The
-settled direction is **amount-based**: individual-transaction documents split,
-record documents merge. Implementing that as a type-aware rule (and reconciling
-CASE_025's back-run baseline to it) is a follow-up, tracked in `known-gaps.md`.
-
----
-
-## Branch strategy
-
-Branch `feature/stage1` from `fix_codex` (owner's decision).
-
-Rationale: `fix_codex` already merged `main` (`a3f60cf`) and is a superset, and
-the `tools/llm_providers.py` (884 lines, new) and `ocr_extract.py` improvements
-this work reuses exist only on `fix_codex`.
-
-**Conflict management:**
-- `outputs/` and `data/` are already gitignored (`.gitignore:22,28`), so run
-  artifacts never enter a commit.
-- The main deliverables are **new files** → minimal conflict surface.
-- **The one real conflict point is `tools/dao.py`.** `main` recently added
-  `check-forbidden-expressions` in the middle of the parser list (line 987). →
-  Append any new subcommand **at the end of the list only**; touch no existing
-  lines.
-
----
-
-## Implementation plan
-
-### A. New schema: `schemas/segmentation_proposal.schema.json`
-
-Written to `outputs/CASE_XXX/segmentation_proposal_{source_doc_id}.json` — one
-file per bundle, following the `ocr_result_{doc_id}.json` precedent (a shared
-flat filename lets the second write destroy the first). This is shared review
-state, not a component output, so like `source_ledger.schema.json` it does not
-use the common output envelope.
-
-Key fields:
-
-- `case_id`, `source_document_id`, `source_file_name`, `source_file_path`
-  (pattern `^data/raw/`), `source_page_count`, `review_status`
-  (`pending|approved|rejected`), `reviewed_by`/`reviewed_at`/`rejection_reason`
-- `unassigned_pages[]` — pages covered by no segment, as **explicit data** rather
-  than something a reviewer has to compute
-- `method`:
-  - **`ocr_performed` as `{"const": false}`** — not merely `false`. The schema
-    structurally refuses a proposal claiming OCR happened. Cheapest possible
-    enforcement of the stage boundary.
-  - `method_version`, `mode` (`manual|vision_proposal` — Modes B and C are both
-    `vision_proposal`, distinguished by provider fields; do not encode the
-    backend as a mode), `provider_name`/`model_name`/`prompt_version`/
-    `provider_metadata`, `render_dpi`, `crop_ratio`, `grid_cols`/`grid_rows`,
-    `sheet_pixel_budget{long_edge,total_pixels}` (so a token-cost regression is
-    diagnosable from the artifact alone), `contact_sheets[]`,
-    `full_page_fallback{triggered,pages,saturated,cap}`
-- `segments[]`: `segment_index`, `page_start`/`page_end` (both inclusive),
-  `provisional_document_type` (enum|null), **`provisional_type_label` (free
-  text)** — the closed enum often has no good bucket and forcing one loses
-  information, so keep the model's own wording; `confidence`,
-  `boundary_evidence` (what makes human review possible in bounded time),
-  `review_status` (`pending|approved|edited|rejected`), `needs_full_page`,
-  `orientation_suspect`, `assigned_document_id`
-
-JSON Schema cannot express "contiguous, non-overlapping, within range" — enforce
-in `validate_segments()` (pure function). Do not fake it with `allOf`.
-
-### B. `document_manifest.schema.json` v0.4 → v0.5
-
-Add (owner: Case Intake/Segmentation): `source_file_name`, `source_page_start`,
-`source_page_end`, `segmentation_proposal_path`, `provisional_document_type`.
-
-**`provisional_document_type` needs an explicit annotation:** *"A pre-OCR visual
-guess. Not authoritative. checkpoint 1 owns `document_type` and must run its own
-classification — unlike `pre_flagged_type`, which is human-asserted and IS
-trusted."* Without that written down, someone will wire it into the
-classification short-circuit.
-
-One narrow conditional: if `source_page_start` is present, `source_file_name` and
-`source_page_end` are required (a page range never exists half-specified).
-`page_end >= page_start` cannot be expressed in JSON Schema — that's the tool's
-job.
-
-`required` stays unchanged so existing manifests remain valid. Run
-`validate_output.py` over existing manifests after the bump.
-
-### C. `tools/segment_case.py`
-
-**CLI (subcommands):**
-
-```
-sheets  CASE_ID DOC_ID [--crop-ratio 0.33] [--grid 3x4] [--dpi 110]
-propose CASE_ID DOC_ID [--mode manual|vision] [provider args] [--resume]
-show    CASE_ID DOC_ID
-approve CASE_ID DOC_ID --reviewer NAME [--segment N] [--edit N=start-end]
-split   CASE_ID DOC_ID --held-by NAME --run-id RUN_ID
+For every new case:
+
+1. Run intake and complete the D2 `_source_ledger.json` human review.
+2. Identify each raw PDF that is a multi-document bundle.
+3. Render contact sheets with `segment_case.py sheets` if a human wants to
+   inspect them before using a model.
+4. Run `segment_case.py propose`; the crop pass and targeted full-page fallback
+   run automatically.
+5. Optionally add `--refine` to re-examine long segments full-page.
+6. Halt and wait for a genuine human to inspect the proposal and sheets.
+7. Apply human approvals or range corrections.
+8. Run `segment_case.py split`.
+9. Confirm the bundle is `superseded_bundle` and its logical children exist in
+   the manifest.
+10. Only then dispatch `document-pipeline`.
+
+The current implementation requires the orchestrator/operator to identify
+which raw PDFs are bundles. Automatic bundle-selection rules based on page
+count or filename are not implemented.
+
+## 4. Contact-sheet design
+
+### 4.1 Why vision is required
+
+The measured 110-page sample contained zero pages with embedded text. Structural
+PDF signals such as image count and overlay size changed on too many pages to
+serve as useful boundaries. Pre-OCR vision is therefore the available signal
+for this corpus.
+
+### 4.2 Grid and crop defaults
+
+Current defaults:
+
+- grid: 4 columns × 4 rows;
+- capacity: 16 pages per sheet;
+- crop: top 0.33 of each page;
+- saturated-red 4px cell borders;
+- absolute page labels such as `p41`;
+- fixed-size white cells for unused positions on the final sheet;
+- vision caps: 1568px long edge and approximately 1.15M total pixels.
+
+Vertical strips were rejected because the long-edge cap collapses their width.
+A 15-page strip was estimated at about 222×1568px, while a 4×4 sheet retains
+about 1568×731px and costs fewer tokens per page.
+
+Cells are rendered directly at their final width with a PyMuPDF zoom matrix.
+The tool does not create a high-resolution intermediate image and then shrink
+it.
+
+### 4.3 Rotation handling
+
+Every sheet can be rendered in three variants:
+
+- `as_scanned`
+- `cw`
+- `ccw`
+
+The companion rotations exist for human review. The proposal model receives
+only `as_scanned`; its prompt tells it to read quarter-turned cells in place.
+An earlier orientation detector was removed because it did not gate any action
+and produced unreliable direction guesses.
+
+All sheet artifacts live under gitignored `_segmentation_scratch/` and must
+survive process exit so a human can inspect the exact images used.
+
+## 5. Boundary proposal
+
+### 5.1 Contact-sheet pass
+
+The proposal prompt asks for:
+
+- `boundaries`: pages that start a document, with type label, confidence, and
+  visible evidence;
+- `continuations`: pages that continue the previous document;
+- `needs_full_page`: pages whose top crop is insufficient.
+
+The provider call always goes through `provider.transcribe_image()`. Supported
+CLI selections are `claude-cli`, `codex-cli`, `openai-api`, and `fixture`;
+`anthropic-api` is selectable but its execution adapter is not implemented.
+
+The parser fails safe. Invalid JSON, out-of-sheet page numbers, or malformed
+fields produce no invented boundaries. Only the failed sheet's pages become
+unassigned; valid neighboring sheets remain usable.
+
+### 5.2 Merge semantics
+
+Only `boundaries` create segments. Sheet edges never create segments, and
+`continuations` are coverage evidence rather than split instructions.
+
+Rules:
+
+1. If page 1 was examined but omitted as a boundary, add it and warn.
+2. If a page is both a boundary and a continuation, boundary wins and the
+   contradiction is recorded.
+3. A page no sheet named stays unassigned unless it lies strictly between two
+   known boundaries.
+4. An unnamed page strictly enclosed by known boundaries is absorbed into the
+   earlier document and reported in warnings. This handles enumeration slips at
+   sheet edges.
+5. An unnamed page after the last known boundary stays unassigned.
+6. Any unassigned page blocks `split`.
+
+## 6. Full-page decision policy
+
+The owner-set policy as of 2026-07-21 is deliberately split-biased:
+
+- a page with its own document/form title starts a new logical document;
+- a repeated title also starts a new document;
+- a page with no title of its own, even after full-page inspection, continues
+  the preceding document;
+- an unreadable or failed full-page verdict is not converted into either fact;
+  it remains flagged for human review.
+
+This replaces the earlier unimplemented idea of merging record-like forms but
+splitting receipt-like forms based on amount or document type.
+
+### 6.1 Targeted crop-ambiguity fallback
+
+This pass is automatic during `propose`.
+
+1. Collect and deduplicate `needs_full_page` pages from all contact sheets.
+2. Compute the cap as `int(page_count * 0.25)`.
+3. If the page count exceeds the cap, mark fallback `saturated`, execute zero
+   fallback calls, and leave every page flagged. Saturation means the grid or
+   crop is unsuitable and should be retuned rather than hidden by spending.
+4. Otherwise render each named page full-page and ask the single-page boundary
+   prompt.
+5. A successful title verdict replaces the crop uncertainty with a boundary.
+6. A successful no-title verdict replaces it with a continuation.
+7. A parse/provider failure leaves `needs_full_page` intact.
+
+### 6.2 Optional long-segment refinement
+
+The crop model can confidently over-merge repeating forms without setting
+`needs_full_page`. `propose --refine` addresses that separate failure mode.
+
+- segments of length at least 4 are selected by default;
+- every interior page is inspected full-page;
+- the pass may add boundaries but never remove an existing boundary;
+- failed verdicts remain continuations, so no split is invented;
+- it is off by default because it can add many provider calls.
+
+Targeted fallback and refinement share the same per-page verdict cache and
+`segment_full_page_v0.2` prompt version. A page inspected by the first path is
+not paid for again by the second.
+
+## 7. Resume and cache behavior
+
+The tool uses stable, non-PID scratch paths.
+
+- one cached result per contact sheet;
+- geometry fingerprint covers grid, crop, page count, and pixel geometry;
+- geometry changes invalidate sheet-response reuse;
+- full-page verdicts are cached per page;
+- full-page prompt-version changes invalidate the verdict cache;
+- cache files use temporary-write then atomic replace;
+- provider/parse failures are not cached.
+
+This preserves paid model work across interruption without trusting stale
+images or stale prompts.
+
+## 8. Human review gate
+
+`segmentation_proposal_{DOC_ID}.json` begins with case and segment review states
+set to `pending`.
+
+`split` refuses unless all conditions hold:
+
+- case-level `review_status == approved`;
+- every segment is `approved` or `edited`;
+- no unassigned pages remain;
+- segment ranges are ordered, in range, non-overlapping, and structurally
+  valid.
+
+The model never approves its own proposal. `approve` supports bulk approval,
+single-segment approval, and range edits. It does not currently provide rich
+add/delete/merge operations for segments; complex corrections require a
+reviewed replacement proposal written through the DAO.
+
+## 9. Split and provenance
+
+After approval, `split`:
+
+1. writes one new PDF per approved segment under `data/raw/CASE_XXX/`;
+2. allocates document IDs after the highest existing `DOC_NNN`;
+3. records `source_file_name`, inclusive source page range, proposal path, and
+   provisional labels on each child;
+4. marks the original bundle `downstream_disposition: superseded_bundle` and
+   `ocr_status: not_applicable`;
+5. calls `dao.replace_manifest_documents()` once under an exclusive lock;
+6. updates the `document_segmentation` run-state stage;
+7. returns `already_split` on an idempotent rerun.
+
+The bundle entry is retained rather than deleted so the immutable-source to
+logical-document audit chain survives. `data/raw/` is intake's output layer;
+Stage 1 creates new files there but never modifies the original bundle or
+anything under `source-cases/`.
+
+If PDF creation succeeds but the manifest transaction fails, the files are
+reported as orphans and no downstream stage trusts them because the manifest
+does not name them.
+
+## 10. CLI reference
+
+```text
+python tools/segment_case.py sheets  CASE_ID DOC_ID [--grid 4x4] [--crop-ratio 0.33]
+
+python tools/segment_case.py propose CASE_ID DOC_ID \
+  --held-by NAME --run-id RUN_ID \
+  [--grid 4x4] [--crop-ratio 0.33] \
+  [--provider {claude-cli,codex-cli,anthropic-api,openai-api,fixture}] \
+  [--model MODEL] [--no-resume] [--refine] [--refine-threshold 4]
+
+python tools/segment_case.py show    CASE_ID DOC_ID
+
+python tools/segment_case.py approve CASE_ID DOC_ID \
+  --reviewer NAME --run-id RUN_ID \
+  [--segment N] [--edit N=start-end] [--held-by NAME]
+
+python tools/segment_case.py split   CASE_ID DOC_ID \
+  --held-by NAME --run-id RUN_ID
 ```
 
-`sheets` is Mode A and the PoC default: render sheets, write a proposal skeleton,
-print paths, stop. **Zero LLM calls.**
+`sheets` performs no model call. `propose` writes through the DAO. `show` reads
+through the DAO. `approve` is a human action recorded through the DAO. `split`
+creates logical PDFs and atomically updates the manifest through the DAO.
 
-**Pure functions (testable):** `compute_sheet_geometry(...)` (encodes both caps,
-tested at boundaries), `plan_sheets(page_count, per_sheet)`,
-`parse_segmentation_response(raw, sheet_pages)`,
-`validate_segments(segments, page_count)`,
-`merge_sheet_proposals(per_sheet, page_count)`, `build_manifest_entries(...)`.
+## 11. Measured results retained as defaults
 
-#### Parser failure mode — the two existing precedents disagree
+### CASE_025, 110 pages
 
-- `redact_document._parse_redaction` **raises** (`ProviderExecutionError`).
-- `intake_case._parse_content_scan_verdict` **returns a dict and fails safe**.
+Crop-only 4×4 result:
 
-Segmentation follows the **second**. One sheet failing to parse must not kill the
-sheets around it — their expensive vision calls are already paid for — and under
-this plan's "never invent a boundary" rule, a failure is properly expressed as
-"leave that sheet's pages in `unassigned_pages` and warn."
+- 7 contact-sheet calls;
+- precision 0.95;
+- recall 0.81;
+- F1 0.88;
+- zero parse failures and zero unassigned pages.
 
-`parse_segmentation_response` therefore returns `{"ok": bool, "boundaries": [...],
-"continuations": [...], "needs_full_page": [...], "warning": str|None}` and
-**never raises**. The `raw_decode` scan loop itself is still borrowed verbatim
-from `_parse_redaction` — the need for tolerance to leading/trailing prose is
-identical.
+The same bundle at 3×4 produced precision 0.90, recall 0.50, and F1 0.64 with
+10 calls. Page density, not larger cells, was the useful signal for repeating
+forms. This settled 4×4 as the default.
 
-#### `merge_sheet_proposals` algorithm
+Long-segment refinement at threshold 4 raised recall to 0.96 and F1 to 0.94 at
+the cost of about 45 additional full-page calls. This settled the optional
+refinement threshold but did not make refinement the default.
 
-The key insight: **segment boundaries come from the union of `boundaries` alone,
-and sheet edges carry no meaning whatsoever.** `continuations` is a coverage
-check, not a basis for splitting. Seen that way, the "document spanning a sheet
-break" problem disappears rather than needing special handling.
+The exercised chain was sheets → propose → score → approve → split → real
+Stage 2 checkpoint on one resulting logical document.
 
-```
-sheet 1: p1-12   boundaries=[1]   continuations=[2..12]
-sheet 2: p13-24  boundaries=[15]  continuations=[13,14,16..24]
-correct: SEG(1-14), SEG(15-24)
-wrong:   SEG(1-12), SEG(13-14), SEG(15-24)   <- cut at the sheet edge
-```
+### CASE_026, 59 pages
 
-The two fields are **not symmetric**: only `boundaries` creates segments, while
-`continuations` records that the model actually looked at a page. That asymmetry
-is what makes a page missing from *both* lists a meaningful signal that the model
-skipped it.
+A sheet-edge enumeration omission left pages 33–41 unassigned even though the
+model described them as continuing the document that began on page 28. The
+enclosed-page absorption rule reduced unassigned pages from 9 to 0 while
+preserving the rule that a gap after the final boundary remains unassigned.
 
-Edge cases — **all four confirmed with the owner**:
+## 12. Validation coverage
 
-| Case | Handling | Why |
-|---|---|---|
-| **A.** p1 not reported as a boundary | **Treat p1 as a boundary** + warn | Page 1 of a bundle is by definition the first page of something. The model not saying so does not change that. |
-| **B.** A page appears in neither list | **Leave it in `unassigned_pages`** | Silently absorbing a page the model never mentioned means a human approves without knowing. `split` halts on unassigned pages, so a human necessarily sees it. |
-| **C.** A `needs_full_page` page | **Re-check via the full-page fallback** (§F) and use that verdict. If still unjudgeable, flag the segment `needs_full_page: true` for a human | Decide on real evidence rather than a guess. There is no third round. |
-| **D.** A page in both lists (contradiction) | **Boundary wins**, contradiction recorded in `warnings` | The error costs are asymmetric. Over-splitting is fixed by a human merging two segments; over-merging surfaces only after OCR, classification, and field extraction have all run on wrong boundaries, by which point downstream artifacts are contaminated. |
+`tests/test_segment_case.py` covers:
 
-If some sheets returned `ok: false`, **only those sheets' page ranges** go to
-`unassigned_pages`; boundaries from the healthy sheets are processed normally.
+- geometry and pixel caps;
+- page batching and partial sheets;
+- parser failure and contradiction handling;
+- sheet-edge merge behavior;
+- contact-sheet rendering and rotations;
+- resume-cache invalidation;
+- targeted full-page fallback, saturation, and unresolved verdicts;
+- full-page title/no-title policy;
+- long-segment refinement and shared verdict caching;
+- human approval and split readiness;
+- PDF split provenance and idempotency.
 
-**Orchestration:** `segment_case(..., provider=None, progress=None, resume=True)
--> dict`, following `run_checkpoint1.run_checkpoint1()`'s contract — **providers
-injectable, returns a status dict rather than raising, `sys.exit` only in
-`main()`**. (`intake_case.scan_for_answer_key_content` `sys.exit`s from library
-code — borrow its structure, not that.)
+Related tests cover segmentation scoring, schema validation, and atomic manifest
+replacement. No test reads or writes the real `outputs/` or `data/` trees.
 
-**Scratch:** new `_segmentation_scratch/` (needs a `.gitignore` entry). **Do not
-use `ocr_extract.scratch_dir`** — it rmtrees in `finally`, and sheets must
-outlive the process for human review.
+## 13. Current limitations and owner decisions still needed
 
-### D. Contact sheet compositor (Pillow 11.1.0; Malgun Gothic confirmed present)
+The implementation is functional, but these product/operations decisions are
+not settled by code:
 
-- Render at `zoom = cell_w / 595.0` **directly at cell size** → crop → no resize
-- **4px red separators** (3px reads as antialiasing noise after downscale). Pure
-  red `(255,0,0)` — no scanned document contains saturated red, so it's maximally
-  separable. **Box every cell fully, including sheet edges**; a cell bounded on
-  only two sides is exactly where "is this the same document continuing?"
-  ambiguity comes from.
-- **Page numbers:** red chip with white text at each cell's top-left (highest
-  available contrast against arbitrary scan content). Use the **absolute source
-  page number** (`p41`, not `cell 5`) — the whole point is that the model never
-  counts positions. Load fonts defensively (`arial` → `DejaVuSans` →
-  `load_default`).
-- **Partial sheets:** keep the canvas full size; leave unused cells white with no
-  box and no label. Shrinking the sheet breaks the model's spatial expectation
-  across sheets; repeating pages to fill guarantees phantom boundaries.
-- **Blank/sideways pages:** mark `(blank)` or `orientation_suspect` → full-page
-  path.
+1. **Pipeline entrypoint:** keep the current agentic orchestrator-only execution,
+   or add a standalone deterministic runner that cannot skip Stage 1.
+2. **Bundle selection:** require operator selection, or implement automatic
+   candidate rules based on page count, filename, and/or a cheap visual check.
+3. **Human correction interface:** keep DAO-level proposal replacement for
+   complex edits, extend the CLI with add/delete/merge/split operations, or add
+   frontend support.
+4. **Fallback cap for small bundles:** keep exact `int(page_count * 0.25)`, which
+   yields a zero-page cap for one-to-three-page files, or guarantee a minimum of
+   one fallback page.
+5. **Refinement default:** keep `--refine` opt-in, enable it for every bundle, or
+   trigger it from a cheaper heuristic.
+6. **Pre-redaction provider policy:** approve an external provider under an
+   appropriate no-retention arrangement, or defer real use until a validated
+   local vision path exists.
+7. **Dependency packaging:** add a root Python dependency manifest/environment
+   so Claude and Codex run the same tested versions of PyMuPDF, Pillow,
+   jsonschema, and pytest.
 
-### E. Vision prompt
+## 14. Implementation map
 
-**Gotchas (documented real failure modes):**
-
-- **Route every vision call through `provider.transcribe_image()`.** It applies
-  the working imperative framing (`f"Read the image file at {path} and then:
-  {prompt}"`). The label form failed **9/9** in controlled repeats. Never call
-  `_run` directly. Side benefit: **Mode C works with no provider-class changes**,
-  since `LocalVlmProvider` refuses everything except `transcribe_image`
-  (`llm_providers.py:620-635`).
-- **No self-legitimizing framing.** No "this is a sanctioned step," no "do not
-  refuse," no role-play preamble — prior versions were read as prompt injection
-  and refused. A genuine layout-analysis request does not argue for itself.
-
-Response shape:
-
-```json
-{"boundaries": [{"page": 13, "type_label": "후유장해진단서",
-                 "type_guess": "diagnosis_certificate",
-                 "confidence": 0.7, "evidence": "..."}],
- "continuations": [14, 15, 16],
- "needs_full_page": [4, 17]}
-```
-
-**Parse-failure policy:** unlike `_parse_content_scan_verdict`, which fails safe
-toward `flagged=True`, there is no safe default segmentation. On a parse failure,
-emit **zero segments**, leave those pages in `unassigned_pages`, keep
-`review_status: pending`, and record a warning. "No proposal, human does it" is
-the fail-safe here. **Never invent a boundary from a failed parse.**
-
-### F. Fallback (second call) — watch for saturation
-
-100%-scanned input plus small cells means `needs_full_page` may fire far more
-than expected. If 40 of 110 pages get flagged, the fallback becomes the main path
-and costs more than rendering full pages would have.
-
-1. Union and dedupe `needs_full_page` across sheets.
-2. **Over `--max-full-page-fallback` (default 25% of pages): record
-   `saturated: true`, skip the fallback entirely, route to human review.**
-   Saturation means the crop ratio or grid is wrong for this bundle — a **tuning
-   signal**, not something to paper over with a large spend.
-3. Under the cap: render only those pages full-page, 1-2 per sheet, and **batch**
-   them (not N individual calls).
-4. No third round — a page still unjudgeable at full page is a human decision.
-
-### G. Split execution and manifest merge
-
-`split` refuses unless case-level `review_status == approved` **and** every
-segment is `approved`/`edited` **and** `validate_segments` is clean — mirroring
-`intake_case.py:405-413`, where one unresolved entry blocks everything.
-
-**Add `dao.replace_manifest_documents(case_id, documents, held_by, run_id) ->
-(ok, message)`.** `write_manifest` overwrites wholesale and
-`patch_manifest_document` patches one entry; neither can add N entries while
-retiring one. Follow `patch_manifest_document`'s tuple-return convention and
-**read under the lock** — that is the entire reason that function exists
-(known-gaps item 7).
-
-**Supersede the bundle entry; do not delete it.** Deleting orphans
-`_intake_record.json`'s crosswalk and any `_source_ledger.json` reference, and
-erases the audit trail from immutable source to logical document.
-
-⚠️ **Schema collision:** `downstream_disposition: expert_review_only` triggers a
-conditional (`document_manifest.schema.json:134-152`) requiring
-`non_text_verification` — semantics meaning "a human confirmed this is
-photographic evidence." That is **wrong** for a superseded bundle. → **Recommend
-adding a `superseded_bundle` enum value** (smaller and more honest; any consumer
-switching on that field gets a value meaning what actually happened). Requires an
-enum addition plus a grep for consumers.
-
-New entries: `DOC_{n:03d}` from max+1 (never reuse the bundle's id);
-`insert_pdf(from_page, to_page)` (the `intake_case.py:454-457` pattern);
-`file_path` with forward slashes even on Windows; `file_size_bytes` from `stat()`
-**after** `save()`; `ocr_status: "pending"`; `pages: null` (owned by
-document-pipeline).
-
-**Guardrail note (required in the docstring and `pipeline.md`):** the split
-writes to `data/raw/`. What is immutable is `source-cases/`; `data/raw/` is
-intake's *output*, and segmentation is part of intake, so it is a legitimate
-writer. Say so explicitly — this is exactly the kind of thing a future reader
-will flag as a violation. Segmentation only creates new files there, never
-modifies existing ones.
-
-**Idempotency:** if entries matching `source_file_name` + `source_page_start`
-exist, report `already_split` and exit 0.
-
-### H. Halt / resume discipline
-
-Mirror `ocr_extract._resume_cache_dir` (`ocr_extract.py:290-315`) — that design
-came out of a real 75-page loss.
-
-`_segmentation_scratch/_resume/{case_id}_{doc_id}/`, **stable, not pid-tagged**,
-one JSON per sheet (parsed result + raw text + provider metadata). Check cache
-before each call and report `(cached)` via `progress()`. Save with the
-tmp-write-then-`replace()` atomic pattern so an interrupt mid-write never leaves
-a half-sheet resume would trust. Corrupt JSON → `None` → re-call.
-
-**The sheet images are themselves a cache.** Rendering 110 pages costs real time.
-Store a geometry hash (`crop_ratio`, grid, dpi, page list) in `_sheets_meta.json`
-beside the PNGs and invalidate on mismatch — otherwise changing `--crop-ratio`
-silently reuses stale sheets, a nasty and nearly invisible bug.
-
-On `split` failure, follow `run_checkpoint1`'s four-part discipline
-(`run_checkpoint1.py:430-450`): persist forensics → reset owned fields → mark
-run-state `failed` → return a status dict, exiting only in `main()`. **Build the
-full new `documents` list in memory and write once**, so the manifest is
-atomic-or-nothing even if PDF writing partially succeeded. An orphaned
-`DOC_XXX.pdf` is recoverable; a manifest entry pointing at a nonexistent file is
-not.
-
-### I. Test plan
-
-New `tests/test_segment_case.py`. All filesystem tests on `tmp_path`; providers
-via `FixtureProvider`.
-
-- **Geometry:** every combination of 3×4/4×4/2×4 × crop 0.25/0.33/0.5 asserts both
-  caps hold; an impossible request raises.
-- **`plan_sheets`:** (110,12) → 10 sheets with last of 2; (12,12) → exactly 1
-  (off-by-one guard); (1,12) → 1.
-- **Parsing:** clean JSON; trailing prose; leading prose; unparseable → zero
-  segments + warning + pending and specifically **does not invent a boundary**; a
-  page number not on the sheet → parse failure; `needs_full_page` deduped.
-- **Segment validation:** overlaps rejected; gaps → `unassigned_pages`; reversed
-  ranges rejected; out-of-range rejected.
-- **`merge_sheet_proposals`:** a document spanning a sheet break stays one segment
-  (p1-14, not split at 12) — **the highest-value test in the file**.
-- **Fallback:** under cap → call happens and overrides; over cap → `saturated`
-  with **zero provider calls** (assert the call count) and case stays pending.
-- **Schema:** a proposal with `ocr_performed: true` **fails** validation (proves
-  the `const` guard).
-- **Split:** a synthetic 10p PDF (built in-test with `fitz`), 3 segments → 3
-  `DOC_XXX.pdf` with correct page counts and provenance; bundle entry retained and
-  marked superseded; re-run is idempotent.
-- **Resume:** cache hit → provider not called (assert count); corrupt cache →
-  re-called without crashing; geometry mismatch invalidates cached PNGs.
-
-**Real end-to-end** (costs real provider calls):
-
-```
-1) Run `sheets`; open the PNGs. Are the red lines and numbers legible? Can you
-   tell document types apart?  → settle the grid size here (§4).
-2) Hand-record the true boundaries → ground-truth baseline.
-3) Run `propose --mode vision`; score precision/recall against the baseline;
-   count needs_full_page; check that p41-class sideways pages were flagged.
-4) `approve` + `split`, then confirm `run_checkpoint1` runs cleanly on one
-   resulting DOC_XXX.
-```
-
-**Step 2's hand baseline gets built regardless** — without it there is no way to
-tell whether a crop-ratio or grid change helped or hurt.
-
-### J. Integration points
-
-- **`.claude/agents/document-pipeline.md`** — document the new provenance fields
-  under checkpoint 1 and state that **`provisional_document_type` must not be
-  trusted** (unlike `pre_flagged_type` it is not human-asserted, so checkpoint 1
-  still runs its own classification); superseded bundle entries are skipped.
-- **`pipeline.md:30`** — retitle Stage 1 to "Case Intake & Document
-  Segmentation", describe the contact-sheet → proposal → approval → split flow,
-  and state **"No OCR at this stage — the output is document structure, not
-  text."**
-- **`CLAUDE.md`** — add `segment_case.py` to `## Tools` plus a changelog entry.
-- **`.claude/skills/loss-adjustment-pipeline/SKILL.md`** — the orchestrator needs
-  to know Stage 1 now has a human gate that blocks Stage 2.
-- **`tools/sync_agents.py`** — run after editing anything under `.claude/`; never
-  hand-edit generated copies.
-- **`.gitignore`** — add `_segmentation_scratch/`.
-- **`known-gaps.md`** — (1) `intake_case.scan_for_answer_key_content` still uses
-  the broken label form and was never migrated; (2) the sideways-scanned-page
-  class.
-- **`open-decisions.md`** — the grid choice (§4) and the `downstream_disposition`
-  collision (§G) are genuine open decisions, not settled details.
-
----
-
-## Build order
-
-1. ~~`.gitignore` + new schema + manifest v0.5; check existing manifests for
-   regression.~~ **Done** (`a5f35ef`): the `ocr_performed` const guard is verified
-   to reject a proposal claiming OCR ran, 7 accept/reject cases behave as
-   intended, and all 6 existing manifests still validate.
-2. **← current.** Pure functions + tests. No I/O yet.
-   **Scope (owner-confirmed): pure functions and tests only; rendering and
-   compositing move to step 3.**
-
-   Six I/O-free functions in `tools/segment_case.py`: `compute_sheet_geometry`,
-   `plan_sheets`, `parse_segmentation_response`, `validate_segments`,
-   `merge_sheet_proposals`, `build_manifest_entries`. New
-   `tests/test_segment_case.py` covering the geometry / `plan_sheets` / parsing /
-   segment-validation / merge items from §I; the rest arrive with the code they
-   test.
-
-   **Done when:** the new tests pass and the existing 287 still pass (excluding
-   `test_dao_forbidden_expr`'s one pre-existing failure inherited from the main
-   merge).
-3. ~~Renderer + compositor → **stop and look at real sheets.**~~ **Done.** Grid
-   settled at 4×4 (§4); the sideways detector was found broken and replaced with
-   a working projection-variance test (§6). `sheets` CLI still to wire up.
-4. Hand-record the ground-truth boundary baseline.
-5. Provider path (`propose`, Mode B) + resume cache + fallback + FixtureProvider tests.
-6. `approve` + `split` + `dao.replace_manifest_documents` + tests.
-7. Real end-to-end run; score against step 4.
-8. Docs → `sync_agents.py` → `pytest`.
-
----
-
-## Open decisions
-
-**Settled:**
-
-- ~~`downstream_disposition`~~ → resolved as a new `superseded_bundle` enum value,
-  implemented in step 1. `expert_review_only` was not reused because its
-  conditional requires `non_text_verification` — an assertion that a human
-  confirmed photographic evidence, which is false for a superseded bundle and
-  would put a fabricated human verification into the record.
-- ~~The four `merge_sheet_proposals` edge cases~~ → settled in the table above.
-
-**Still open:**
-
-1. **Fallback saturation** — if a lot of pages get flagged, halt for re-tuning or
-   spend the calls? The picture improved: rotated pages were the feared driver,
-   and the live test showed the model reading them rather than punting, flagging
-   only 4 of 16 pages for full-page review (25%, right at the cap). Two of those
-   four were sheet-edge pages where a full-page look genuinely cannot help — the
-   ambiguity is about the PREVIOUS sheet, not resolution. Worth deciding whether
-   sheet-edge hedges should even count toward saturation.
-2. **Is Mode A viable as the default** — 344 pages is 22 sheets at 4×4. Having now
-   seen real sheets, a human can scan one in well under a minute, so manual review
-   looks more practical than assumed. Confirm on a full case.
-
-**Settled at step 3:** grid size (4×4, §4); rotated-page handling (leave them
-rotated, tell the model — §6, verified against a live call).
+- `tools/segment_case.py` — rendering, proposal, fallback, refine, approval,
+  and split.
+- `schemas/segmentation_proposal.schema.json` — proposal and review contract.
+- `schemas/document_manifest.schema.json` — provenance and superseded-bundle
+  fields.
+- `tools/dao.py` — atomic manifest replacement and contract access.
+- `tools/score_segmentation.py` — boundary precision/recall/F1 scoring.
+- `tests/test_segment_case.py` — Stage 1 behavior.
+- `tests/test_dao_replace_manifest.py` — manifest transaction behavior.
+- `.claude/skills/loss-adjustment-pipeline/SKILL.md` — actual agentic
+  orchestration requirement.
+- `.claude/agents/document-pipeline.md` and generated Codex counterpart — Stage
+  2 handoff behavior.

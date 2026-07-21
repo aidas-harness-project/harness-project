@@ -877,6 +877,106 @@ def test_fallback_saturation_flags_without_triggering(tmp_path):
     assert any("saturated" in w for w in out["warnings"])
 
 
+def test_crop_ambiguous_pages_are_actually_rechecked_full_page(tmp_path):
+    """Under the cap, needs_full_page is an executed second pass, not merely
+    metadata. A titled full page becomes a boundary; a titleless one becomes a
+    continuation and both uncertainty flags clear."""
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    sheet_text = _response(
+        boundaries=[{"page": 1, "type_guess": "other", "type_label": "x",
+                     "confidence": 0.9, "evidence": "c"}],
+        continuations=[2, 3, 4, 6, 7, 9, 10, 11, 12],
+        needs_full_page=[5, 8],
+    )
+
+    class _TargetedFallbackProvider:
+        provider_name = "fixture"
+        model_name = "fixture-model"
+        def __init__(self):
+            self.calls = 0
+        def transcribe_image(self, image_path, prompt, prompt_version):
+            from llm_providers import ProviderResult
+            import re
+            self.calls += 1
+            name = str(image_path)
+            if "fullpage" not in name:
+                text = sheet_text
+            else:
+                page = int(re.search(r"p(\d+)", name).group(1))
+                text = _response(
+                    starts_new_document=(page == 5),
+                    type_label="진단서" if page == 5 else None,
+                    confidence=0.9,
+                    evidence="own title" if page == 5 else "no title",
+                )
+            return ProviderResult(
+                provider_name=self.provider_name,
+                model_name=self.model_name,
+                prompt_version=prompt_version,
+                text=text,
+            )
+
+    provider = _TargetedFallbackProvider()
+    out = sc.propose_boundaries(
+        pdf, case_id="CASE_911", doc_id="DOC_001", provider=provider,
+        geometry=geo, sheet_paths=sheets, resume=False,
+        refine_scratch_dir=tmp_path / "fp",
+    )
+
+    assert provider.calls == 3  # one sheet + two targeted full-page calls
+    assert [(s["page_start"], s["page_end"]) for s in out["segments"]] == [
+        (1, 4), (5, 12),
+    ]
+    assert out["needs_full_page"] == []
+    fallback = out["method"]["full_page_fallback"]
+    assert fallback["triggered"] is True
+    assert fallback["resolved_pages"] == [5, 8]
+    assert fallback["unresolved_pages"] == []
+    assert fallback["new_boundaries"] == [5]
+
+
+def test_failed_targeted_fallback_stays_flagged_for_human_review(tmp_path):
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    sheet_text = _response(
+        boundaries=[{"page": 1, "type_guess": "other", "type_label": "x",
+                     "confidence": 0.9, "evidence": "c"}],
+        continuations=[2, 3, 4, 6, 7, 8, 9, 10, 11, 12],
+        needs_full_page=[5],
+    )
+
+    class _FailingFallbackProvider:
+        provider_name = "fixture"
+        model_name = "fixture-model"
+        def transcribe_image(self, image_path, prompt, prompt_version):
+            from llm_providers import ProviderResult
+            if "fullpage" in str(image_path):
+                raise RuntimeError("vision unavailable")
+            return ProviderResult(
+                provider_name=self.provider_name,
+                model_name=self.model_name,
+                prompt_version=prompt_version,
+                text=sheet_text,
+            )
+
+    out = sc.propose_boundaries(
+        pdf, case_id="CASE_912", doc_id="DOC_001",
+        provider=_FailingFallbackProvider(), geometry=geo,
+        sheet_paths=sheets, resume=False, refine_scratch_dir=tmp_path / "fp",
+    )
+
+    assert out["needs_full_page"] == [5]
+    assert out["segments"][0]["needs_full_page"] is True
+    fallback = out["method"]["full_page_fallback"]
+    assert fallback["triggered"] is True
+    assert fallback["resolved_pages"] == []
+    assert fallback["unresolved_pages"] == [5]
+    assert any("remain flagged for human review" in w for w in out["warnings"])
+
+
 def test_a_parse_failed_sheet_leaves_its_pages_unassigned(tmp_path):
     """One sheet's garbage response must not discard the other sheet, and must
     never invent a boundary -- its pages fall through to unassigned."""
@@ -1215,6 +1315,13 @@ def test_parse_full_page_rejects_a_non_boolean_verdict():
     out = sc.parse_full_page_response(_response(starts_new_document="yes"))
     assert out["ok"] is False
     assert out["starts_new_document"] is False
+
+
+def test_full_page_prompt_encodes_the_owner_set_title_rule():
+    assert "OWN title block" in sc.FULL_PAGE_PROMPT
+    assert "EACH titled page" in sc.FULL_PAGE_PROMPT
+    assert "continuation ONLY when it has NO title block" in sc.FULL_PAGE_PROMPT
+    assert sc.FULL_PAGE_PROMPT_VERSION == "segment_full_page_v0.2"
 
 
 class _PageVerdictProvider:
