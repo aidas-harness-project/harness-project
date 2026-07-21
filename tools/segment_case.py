@@ -425,12 +425,41 @@ def merge_sheet_proposals(
     elif not boundaries and not failed_pages:
         warnings.append("no document boundaries were reported for any page")
 
-    # Cases B and the failed-sheet rule: a page is only assignable if some sheet
-    # actually accounted for it.
+    # A page some sheet actually named (boundary or continuation) and that no
+    # failed sheet lost.
     assignable = {
         page for page in range(1, page_count + 1)
         if page in mentioned and page not in failed_pages
     }
+
+    # Continuation-absorption: a page BETWEEN two boundaries that no sheet named
+    # is nonetheless interior to the earlier boundary's document, UNLESS a failed
+    # sheet was responsible for it. This closes the sheet-boundary gap that made
+    # CASE_026's p33-41 unassigned: the model correctly read p33 as continuing
+    # the p28 문서 but forgot to list it in `continuations` at the sheet edge, so
+    # merge tore a 14-page document apart. The load-bearing idea already is
+    # "boundaries alone make segments, sheet edges mean nothing" -- so a
+    # non-boundary page strictly inside a document IS part of it, whether or not
+    # the model happened to enumerate it. Absorbed pages are still surfaced as a
+    # warning (not silently swallowed), preserving case B's visibility: a human
+    # sees exactly which pages were inferred rather than stated. A page after the
+    # LAST boundary that no sheet named stays unassigned -- there is no enclosing
+    # document to absorb it into, so the model genuinely dropped it.
+    boundary_set = set(boundaries)
+    absorbed: list[int] = []
+    if boundaries:
+        last_boundary = boundaries[-1]
+        for page in range(1, page_count + 1):
+            if page in assignable or page in failed_pages:
+                continue
+            if page in boundary_set:
+                continue
+            # Strictly inside the span of some document: after the first boundary
+            # and not past the final one (the final segment's tail is open, so a
+            # gap there is a real drop, not an interior page).
+            if boundaries[0] < page <= last_boundary:
+                assignable.add(page)
+                absorbed.append(page)
 
     segments: list[dict] = []
     for position, start in enumerate(boundaries):
@@ -462,6 +491,14 @@ def merge_sheet_proposals(
             "orientation_suspect": False,
             "assigned_document_id": None,
         })
+
+    if absorbed:
+        warnings.append(
+            f"{len(absorbed)} page(s) no sheet named were absorbed into the "
+            f"enclosing document as continuations (a model omission at a sheet "
+            f"boundary, not a real gap): {sorted(absorbed)[:20]}"
+            f"{'...' if len(absorbed) > 20 else ''}"
+        )
 
     covered_pages = {p for seg in segments for p in range(seg["page_start"], seg["page_end"] + 1)}
     unassigned = sorted(set(range(1, page_count + 1)) - covered_pages)
