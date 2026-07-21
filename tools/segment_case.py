@@ -601,6 +601,10 @@ def build_manifest_entries(
             "source_page_start": segment["page_start"],
             "source_page_end": segment["page_end"],
             "segmentation_proposal_path": proposal_path,
+            "segmentation_status": "completed",
+            "segmentation_reviewed_by": None,
+            "segmentation_reviewed_at": None,
+            "segmentation_review_note": None,
             "pages": None,
             "ocr_status": "pending",
             "ocr_text_path": None,
@@ -1816,6 +1820,7 @@ def split_bundle(
     # bundle, and a segmentation_proposal_path pointing at what superseded it.
     bundle_fields = {
         "downstream_disposition": "superseded_bundle",
+        "segmentation_status": "completed",
         "ocr_status": "not_applicable",
         "redacted_text_path": None,
         "segmentation_proposal_path": proposal_path,

@@ -193,6 +193,8 @@ def test_execute_writes_manifest_matching_the_renamed_files(isolated_intake, mon
     assert doc_ids == {"DOC_001", "DOC_002"}
     for d in manifest["documents"]:
         assert d["ocr_status"] == "pending"
+        assert d["segmentation_status"] == "pending_review"
+        assert d["segmentation_reviewed_by"] is None
         assert d["file_path"].startswith("data/raw/CASE_009/")
 
 

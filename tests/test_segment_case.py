@@ -480,6 +480,7 @@ def test_manifest_entries_record_provenance_and_leave_document_type_null():
     assert first["classification_confidence"] is None
     assert first["ocr_status"] == "pending"
     assert first["pages"] is None
+    assert first["segmentation_status"] == "completed"
 
 
 def test_manifest_file_paths_use_forward_slashes_on_every_host():
@@ -675,7 +676,7 @@ def test_prompt_offers_the_real_enum_values():
 
 
 def test_manifest_entries_validate_against_the_real_schema():
-    """The point of the v0.5 provenance fields is that they survive validation."""
+    """The provenance and v0.6 segmentation-gate fields survive validation."""
     from _validation import load_registry, validate_instance
 
     schemas, registry = load_registry()

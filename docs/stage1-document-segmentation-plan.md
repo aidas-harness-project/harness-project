@@ -55,18 +55,21 @@ plus deterministic tools:
 created, skips entries marked `superseded_bundle`, and independently classifies
 each logical document after OCR.
 
-This means the new Stage 1 runs automatically only in the sense that the
-orchestrator skill requires it. There is no separate process-level runner that
-can enforce the call when someone bypasses the skill and invokes Stage 2 tools
-directly.
+There is no standalone pipeline runner, but Stage 2 can no longer silently
+bypass Stage 1. `run_checkpoint1.py` performs a case-wide DAO preflight before
+provider construction or PDF access and returns `blocked_segmentation` with zero
+OCR/output work when the gate is not clear.
 
 ## 3. Required execution sequence
 
 For every new case:
 
 1. Run intake and complete the D2 `_source_ledger.json` human review.
-2. Identify each raw PDF that is a multi-document bundle.
-3. Render contact sheets with `segment_case.py sheets` if a human wants to
+2. Every intaken PDF starts `segmentation_status: pending_review`. A genuine
+   human records `required` or `not_required` through `dao.py
+   set-segmentation-status`; an agent does not make this decision.
+3. For every PDF marked `required`, render contact sheets with
+   `segment_case.py sheets` if a human wants to
    inspect them before using a model.
 4. Run `segment_case.py propose`; the crop pass and targeted full-page fallback
    run automatically.
@@ -74,13 +77,15 @@ For every new case:
 6. Halt and wait for a genuine human to inspect the proposal and sheets.
 7. Apply human approvals or range corrections.
 8. Run `segment_case.py split`.
-9. Confirm the bundle is `superseded_bundle` and its logical children exist in
-   the manifest.
-10. Only then dispatch `document-pipeline`.
+9. Confirm the bundle is `superseded_bundle`, its status and children are
+   `completed`, and its logical children exist in the manifest.
+10. Run `dao.py check-segmentation-ready CASE_ID`.
+11. Only when that returns clear, dispatch `document-pipeline`.
 
-The current implementation requires the orchestrator/operator to identify
-which raw PDFs are bundles. Automatic bundle-selection rules based on page
-count or filename are not implemented.
+The current implementation requires a human to identify which raw PDFs are
+bundles. Automatic bundle-selection rules based on page count or filename are
+not implemented. This human decision is now explicit and auditable rather than
+an unrecorded orchestrator assumption.
 
 ## 4. Contact-sheet design
 
@@ -225,6 +230,25 @@ images or stale prompts.
 
 ## 8. Human review gate
 
+There are two distinct human gates.
+
+### 8.1 Bundle decision gate
+
+Each new PDF starts `pending_review`. A human records one of:
+
+- `required`: this PDF is a bundle and must be segmented;
+- `not_required`: this PDF is already one logical document.
+
+The DAO records reviewer, timestamp, and optional note. Only the split tool can
+write `completed`; non-PDF inputs are `not_applicable`. A legacy PDF missing the
+field fails closed as `pending_review`.
+
+Before checkpoint 1 performs any provider or PDF work, it checks the entire
+case. Any pending decision or required-but-unsplit bundle blocks Stage 2, as
+does attempting to process the retained superseded bundle instead of a child.
+
+### 8.2 Boundary approval gate
+
 `segmentation_proposal_{DOC_ID}.json` begins with case and segment review states
 set to `pending`.
 
@@ -255,6 +279,9 @@ After approval, `split`:
 6. updates the `document_segmentation` run-state stage;
 7. returns `already_split` on an idempotent rerun.
 
+The split transaction also changes the retained bundle and every logical child
+to `segmentation_status: completed`.
+
 The bundle entry is retained rather than deleted so the immutable-source to
 logical-document audit chain survives. `data/raw/` is intake's output layer;
 Stage 1 creates new files there but never modifies the original bundle or
@@ -283,6 +310,12 @@ python tools/segment_case.py approve CASE_ID DOC_ID \
 
 python tools/segment_case.py split   CASE_ID DOC_ID \
   --held-by NAME --run-id RUN_ID
+
+python tools/dao.py set-segmentation-status CASE_ID DOC_ID \
+  {required|not_required} --reviewer NAME [--note TEXT] \
+  --held-by NAME --run-id RUN_ID
+
+python tools/dao.py check-segmentation-ready CASE_ID [--doc-id DOC_ID]
 ```
 
 `sheets` performs no model call. `propose` writes through the DAO. `show` reads
@@ -333,6 +366,8 @@ preserving the rule that a gap after the final boundary remains unassigned.
 - full-page title/no-title policy;
 - long-segment refinement and shared verdict caching;
 - human approval and split readiness;
+- case-wide Stage-2 preflight, legacy fail-closed behavior, and attributable
+  bundle decisions;
 - PDF split provenance and idempotency.
 
 Related tests cover segmentation scoring, schema validation, and atomic manifest
@@ -343,8 +378,9 @@ replacement. No test reads or writes the real `outputs/` or `data/` trees.
 The implementation is functional, but these product/operations decisions are
 not settled by code:
 
-1. **Pipeline entrypoint:** keep the current agentic orchestrator-only execution,
-   or add a standalone deterministic runner that cannot skip Stage 1.
+1. **Pipeline entrypoint:** the Stage-2 preflight now prevents segmentation
+   bypass; decide later whether a standalone deterministic runner is still
+   useful for full-sequence automation.
 2. **Bundle selection:** require operator selection, or implement automatic
    candidate rules based on page count, filename, and/or a cheap visual check.
 3. **Human correction interface:** keep DAO-level proposal replacement for

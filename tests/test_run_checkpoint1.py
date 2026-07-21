@@ -30,7 +30,10 @@ def _seed_manifest(tmp_path, case_id, doc_id):
     dao.atomic_write_json(out_dir / "document_manifest.json", {
         "case_id": case_id, "created_at": dao.now_iso(),
         "documents": [{"document_id": doc_id, "file_name": f"{doc_id}.pdf", "file_path": f"data/raw/{case_id}/{doc_id}.pdf",
-                       "file_format": "pdf", "file_size_bytes": 1000, "ocr_status": "pending"}],
+                       "file_format": "pdf", "file_size_bytes": 1000, "ocr_status": "pending",
+                       "segmentation_status": "not_required",
+                       "segmentation_reviewed_by": "fixture reviewer",
+                       "segmentation_reviewed_at": dao.now_iso()}],
     })
 
 
@@ -63,6 +66,36 @@ class FakeClassifier:
     def classify_document(self, prompt, prompt_version):
         self.prompts.append((prompt, prompt_version))
         return ProviderResult(self.provider_name, self.model_name, prompt_version, self.response)
+
+
+def test_checkpoint1_blocks_before_any_provider_or_pdf_work_when_segmentation_is_pending(
+        tmp_path, monkeypatch):
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dao.atomic_write_json(out_dir / "document_manifest.json", {
+        "case_id": "CASE_009", "created_at": dao.now_iso(),
+        "documents": [{
+            "document_id": "DOC_001", "file_name": "DOC_001.pdf",
+            "file_path": "data/raw/CASE_009/DOC_001.pdf", "file_format": "pdf",
+            "file_size_bytes": 1000, "ocr_status": "pending",
+            "segmentation_status": "pending_review",
+        }],
+    })
+    monkeypatch.setattr(
+        rc1, "run_ocr",
+        lambda *args, **kwargs: pytest.fail("OCR must not run before segmentation clears"),
+    )
+
+    sentinel = object()
+    result = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "missing.pdf", "tester", "RUN_20260721_001",
+        reader_a=sentinel, reader_b=sentinel, comparator=sentinel,
+        classifier=sentinel,
+    )
+
+    assert result["status"] == "blocked_segmentation"
+    assert result["blockers"][0]["segmentation_status"] == "pending_review"
+    assert not (out_dir / "ocr_result_DOC_001.json").exists()
 
 
 def test_page_range_pdf_falls_back_to_pypdf(tmp_path, monkeypatch):

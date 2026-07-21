@@ -38,6 +38,9 @@ Subcommands:
     read-page-text CASE_ID DOC_ID PAGE
     read-ground-truth CASE_ID --caller-stage STAGE --version {v1|v2}
     read-contract CASE_ID FILENAME
+    check-segmentation-ready CASE_ID [--doc-id DOC_ID]
+    set-segmentation-status CASE_ID DOC_ID {required|not_required}
+        --reviewer NAME --held-by NAME --run-id RUN_ID [--note TEXT]
     write-contract CASE_ID FILENAME --data-file PATH --schema-name NAME
         [--run-id RUN_ID] [--stage STAGE]
     patch-manifest-document CASE_ID DOC_ID --fields-file PATH --held-by NAME --run-id RUN_ID
@@ -270,6 +273,157 @@ def read_contract_data(case_id: str, filename: str):
     """DAO-owned structured contract read for in-process pipeline tools."""
     p = case_dir(case_id) / filename
     return load_json(p)
+
+
+def _effective_segmentation_status(document: dict) -> str:
+    """Returns the structural Stage-1 status, including legacy inference.
+
+    Old manifests predate ``segmentation_status``. A split child is safely
+    recognizable from its source-page provenance, and non-PDF inputs never need
+    PDF segmentation. Every other legacy PDF fails closed to pending_review so
+    a missing field cannot bypass the new Stage-2 gate.
+    """
+    status = document.get("segmentation_status")
+    if status:
+        return status
+    if document.get("downstream_disposition") == "superseded_bundle":
+        return "completed"
+    if isinstance(document.get("source_page_start"), int):
+        return "completed"
+    if document.get("file_format") != "pdf":
+        return "not_applicable"
+    return "pending_review"
+
+
+def check_segmentation_ready(case_id: str, target_doc_id: str | None = None) -> dict:
+    """Case-wide Stage-2 preflight read through the DAO.
+
+    Stage 2 is unsafe while even one PDF is awaiting the human bundle decision
+    or is known to require segmentation. The check is case-wide rather than
+    target-only because processing one logical-looking document while another
+    bundle remains unsplit would still mean the case entered Stage 2 early.
+    """
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        return {
+            "clear": False,
+            "case_id": case_id,
+            "target_document_id": target_doc_id,
+            "blockers": [],
+            "error": "document_manifest.json not found",
+        }
+
+    documents = manifest.get("documents", [])
+    target = None
+    if target_doc_id is not None:
+        target = next((d for d in documents if d.get("document_id") == target_doc_id), None)
+        if target is None:
+            return {
+                "clear": False,
+                "case_id": case_id,
+                "target_document_id": target_doc_id,
+                "blockers": [],
+                "error": f"document_id {target_doc_id} not found in document_manifest.json",
+            }
+
+    blockers = []
+    for document in documents:
+        status = _effective_segmentation_status(document)
+        if status in {"pending_review", "required"}:
+            blockers.append({
+                "document_id": document.get("document_id"),
+                "segmentation_status": status,
+                "reason": (
+                    "PDF bundle decision has not been reviewed"
+                    if status == "pending_review"
+                    else "document is marked as a bundle and has not been split"
+                ),
+            })
+
+    if target is not None and target.get("downstream_disposition") == "superseded_bundle":
+        blockers.append({
+            "document_id": target_doc_id,
+            "segmentation_status": "completed",
+            "reason": "target is the retained superseded bundle; process its logical children instead",
+        })
+
+    return {
+        "clear": not blockers,
+        "case_id": case_id,
+        "target_document_id": target_doc_id,
+        "blockers": blockers,
+        "error": None,
+    }
+
+
+def cmd_check_segmentation_ready(args):
+    result = check_segmentation_ready(args.case_id, args.doc_id)
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result["clear"] else 1
+
+
+def set_segmentation_status(case_id: str, document_id: str, status: str,
+                            reviewer: str, note: str | None,
+                            held_by: str, run_id: str):
+    """Records the genuine human bundle/non-bundle decision via the DAO.
+
+    Only the two review outcomes are accepted here. ``pending_review`` is owned
+    by intake and ``completed`` by the split tool, so neither can be fabricated
+    through this human-review command.
+    """
+    if status not in {"required", "not_required"}:
+        return False, "FAIL: status must be required or not_required"
+    target = case_dir(case_id) / "document_manifest.json"
+    existing_lock = acquire_lock_blocking(
+        target, held_by, run_id,
+        f"record segmentation review for {document_id}: {status}",
+    )
+    if existing_lock is not None:
+        return False, (
+            f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+            f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}"
+        )
+    try:
+        if not target.exists():
+            return False, f"FAIL: no document_manifest.json for {case_id}"
+        # Fresh read happens only after the lock is held. A concurrent split
+        # therefore cannot turn the target into a superseded bundle between our
+        # eligibility check and the write.
+        manifest = json.loads(target.read_text(encoding="utf-8"))
+        document = next(
+            (d for d in manifest.get("documents", []) if d.get("document_id") == document_id),
+            None,
+        )
+        if document is None:
+            return False, f"FAIL: document_id {document_id} not found in document_manifest.json"
+        if document.get("file_format") != "pdf":
+            return False, f"FAIL: {document_id} is not a PDF; segmentation is not applicable"
+        if document.get("downstream_disposition") == "superseded_bundle":
+            return False, f"FAIL: {document_id} is already a superseded bundle"
+        document.update({
+            "segmentation_status": status,
+            "segmentation_reviewed_by": reviewer,
+            "segmentation_reviewed_at": now_iso(),
+            "segmentation_review_note": note,
+        })
+        manifest["updated_at"] = now_iso()
+        errors = _schema_check(manifest, "document_manifest.schema.json")
+        if errors:
+            return False, "FAIL: schema validation errors for " + str(target) + " -- not written:\n" + \
+                "\n".join(f"  - {e}" for e in errors)
+        atomic_write_json(target, manifest)
+        return True, f"PASS: set {document_id} segmentation_status={status} in {target}"
+    finally:
+        release_lock(target)
+
+
+def cmd_set_segmentation_status(args):
+    ok, message = set_segmentation_status(
+        args.case_id, args.doc_id, args.status, args.reviewer, args.note,
+        args.held_by, args.run_id,
+    )
+    print(message)
+    return 0 if ok else 1
 
 
 def cmd_write_contract(args):
@@ -1006,6 +1160,17 @@ def main():
 
     p = sub.add_parser("read-contract"); p.add_argument("case_id"); p.add_argument("filename")
     p.set_defaults(fn=cmd_read_contract)
+
+    p = sub.add_parser("check-segmentation-ready")
+    p.add_argument("case_id"); p.add_argument("--doc-id")
+    p.set_defaults(fn=cmd_check_segmentation_ready)
+
+    p = sub.add_parser("set-segmentation-status")
+    p.add_argument("case_id"); p.add_argument("doc_id")
+    p.add_argument("status", choices=["required", "not_required"])
+    p.add_argument("--reviewer", required=True); p.add_argument("--note")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_set_segmentation_status)
 
     p = sub.add_parser("write-contract")
     p.add_argument("case_id"); p.add_argument("filename")

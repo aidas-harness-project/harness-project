@@ -437,10 +437,14 @@ def main():
         dest = raw_dir / f"{doc_id}{f.suffix.lower()}"
         shutil.copy2(f, dest)
         raw_id_map[f.name] = (doc_id, dest)
+        file_format = file_format_for(f.suffix)
         manifest_documents.append({
             "document_id": doc_id, "file_name": dest.name, "file_path": f"data/raw/{args.case_id}/{dest.name}",
-            "file_format": file_format_for(f.suffix), "file_size_bytes": dest.stat().st_size,
+            "file_format": file_format, "file_size_bytes": dest.stat().st_size,
             "pre_flagged_type": None, "pages": None, "ocr_status": "pending",
+            "segmentation_status": "pending_review" if file_format == "pdf" else "not_applicable",
+            "segmentation_reviewed_by": None, "segmentation_reviewed_at": None,
+            "segmentation_review_note": None,
             "ocr_text_path": None, "ocr_quality": None, "uncertain_region_count": None,
             "cross_validation_status": None, "redacted_text_path": None,
             "document_type": None, "classification_confidence": None,
@@ -468,6 +472,9 @@ def main():
                     "file_path": f"data/raw/{args.case_id}/{out_path.name}",
                     "file_format": "pdf", "file_size_bytes": None,  # filled in after save() below
                     "pre_flagged_type": None, "pages": None, "ocr_status": "pending",
+                    "segmentation_status": "pending_review",
+                    "segmentation_reviewed_by": None, "segmentation_reviewed_at": None,
+                    "segmentation_review_note": None,
                     "ocr_text_path": None, "ocr_quality": None, "uncertain_region_count": None,
                     "cross_validation_status": None, "redacted_text_path": None,
                     "document_type": None, "classification_confidence": None,
