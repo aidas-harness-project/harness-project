@@ -196,15 +196,21 @@ class RedactionApplication:
 def _replace_span(working: str, text: str, placeholder: str, category: str):
     """Replace occurrences of `text` with `placeholder`.
 
-    For name-like categories, an occurrence glued immediately before an
-    institution suffix is LEFT in place (replacing it would corrupt a kept
-    entity name). Returns (new_working, replaced_count, glued_count)."""
+    For name-like categories, an occurrence glued (no space/punctuation) into a
+    Hangul run that ends in an institution suffix is LEFT in place -- replacing
+    it would corrupt a kept entity name (김영수병원, and compounds like
+    김영수의료재단 where the suffix isn't immediately adjacent). A name followed by
+    a particle or a SPACED institution word (홍길동은, 김영수 병원) still redacts,
+    because the intervening space breaks the Hangul-only run. Returns
+    (new_working, replaced_count, glued_count)."""
     if category not in _NAME_CATEGORIES:
         count = working.count(text)
         return working.replace(text, placeholder), count, 0
     suffix_alt = "|".join(re.escape(s) for s in _INSTITUTION_SUFFIXES)
-    glued = len(re.findall(re.escape(text) + rf"(?={suffix_alt})", working))
-    new_working, replaced = re.subn(re.escape(text) + rf"(?!{suffix_alt})", placeholder, working)
+    # name directly followed by up to a short Hangul run ending in a suffix
+    inst = rf"(?=[가-힣]{{0,10}}(?:{suffix_alt}))"
+    glued = len(re.findall(re.escape(text) + inst, working))
+    new_working, replaced = re.subn(re.escape(text) + rf"(?![가-힣]{{0,10}}(?:{suffix_alt}))", placeholder, working)
     return new_working, replaced, glued
 
 
