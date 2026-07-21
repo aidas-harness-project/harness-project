@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "common_component_output.schema.json",
-  "title": "Common component output contract v0.2",
+  "title": "Common component output contract v0.3",
   "description": "Fields every pipeline component's output JSON includes in common. Judgment-type outputs add the safety fields (source_grounded, hallucination_risk_check, prohibited_language_check). See harness-guardrails (P1) for the rules this schema enforces.",
   "type": "object",
   "properties": {
@@ -112,8 +112,36 @@
       ]
     },
     "taxonomy_code": {
-      "description": "Denial/reduction-reason R-code. See pipeline.md's taxonomy section.",
-      "enum": ["R01", "R02", "R03", "R04", "R05", "R06", "R07", "R08", "R09", "R99"]
+      "description": "Denial/reduction-reason R-code. See pipeline.md's taxonomy section. x-codebook carries the loss-adjuster-reviewed Korean label and observed frequency tier; frequency is taxonomy metadata, not evidence or model confidence.",
+      "enum": [
+        "R01", "R02", "R03", "R04", "R05", "R06", "R07", "R08", "R09",
+        "R10", "R11", "R12", "R13", "R14", "R15", "R16", "R17", "R18",
+        "R19", "R20", "R21", "R99"
+      ],
+      "x-codebook": {
+        "R01": { "label_ko": "기왕증 / 기존 질환 기여도", "frequency": "high" },
+        "R02": { "label_ko": "장해율 과다", "frequency": "high" },
+        "R03": { "label_ko": "손해액 과다", "frequency": "high" },
+        "R04": { "label_ko": "약관상 지급요건 미충족", "frequency": "high" },
+        "R05": { "label_ko": "면책사항", "frequency": "high" },
+        "R06": { "label_ko": "치료 필요성 부족", "frequency": "high" },
+        "R07": { "label_ko": "과잉진료 / 비급여 적정성", "frequency": "medium" },
+        "R08": { "label_ko": "서류 부족", "frequency": "low" },
+        "R09": { "label_ko": "동일 사유 재청구", "frequency": "low" },
+        "R10": { "label_ko": "기존장해·동일 부위 장해 공제", "frequency": "high" },
+        "R11": { "label_ko": "피해자 과실상계", "frequency": "high" },
+        "R12": { "label_ko": "자기부담금·약정 공제금액 적용", "frequency": "low" },
+        "R13": { "label_ko": "중복보상·실손 비례보상", "frequency": "medium" },
+        "R14": { "label_ko": "가입금액·보상한도·일수한도 적용", "frequency": "low" },
+        "R15": { "label_ko": "면책기간·감액기간 적용", "frequency": "medium" },
+        "R16": { "label_ko": "치료기간·입원일수 일부 불인정", "frequency": "medium" },
+        "R17": { "label_ko": "치료항목·비급여 비용 일부 불인정", "frequency": "medium" },
+        "R18": { "label_ko": "소득·휴업기간·가동기간 일부 불인정", "frequency": "high" },
+        "R19": { "label_ko": "의료자문 결과에 따른 감액", "frequency": "high" },
+        "R20": { "label_ko": "계약 전 알릴의무 위반에 따른 비례감액", "frequency": "high" },
+        "R21": { "label_ko": "산재·타보험·제3자 기지급액 공제", "frequency": "medium" },
+        "R99": { "label_ko": "기타 / 분류 불가", "frequency": "medium" }
+      }
     },
     "severity": {
       "enum": ["low", "medium", "high"]
