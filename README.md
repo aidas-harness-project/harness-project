@@ -115,6 +115,15 @@ LLM-vision-backed, so any P8 reader pair is a documented weak cross-validation
 technology-independent reader (a real OCR engine) is deferred -- see
 `open-decisions.md` #4.
 
+A CLI child that reads document images runs with a secret-scrubbed environment
+(other providers' API keys are stripped so a prompt-injected read can't
+exfiltrate them). A deployment that backs a CLI with a cloud provider whose
+credentials are not prefixed by the CLI's family name -- claude-via-Bedrock
+(`AWS_SECRET_ACCESS_KEY`), claude-via-Vertex (`GOOGLE_*`) -- must add those
+prefixes via `HARNESS_CHILD_ENV_KEEP_PREFIXES` (comma-separated) so the child
+keeps the creds it needs. Checkpoint-2 redaction defaults to `--provider
+codex-cli` (override with `HARNESS_REDACTION_PROVIDER`).
+
 ## Tools
 
 | Command | Purpose |
@@ -123,7 +132,7 @@ technology-independent reader (a real OCR engine) is deferred -- see
 | `python tools/validate_output.py <file.json>` | Standalone schema validation |
 | `python tools/intake_case.py <source-cases folder> <CASE_ID>` | Case intake with the D2 per-file review ledger |
 | `python tools/document_assembly.py --sections-file <spec.json> --held-by <agent> --run-id <run>` | Renders narrative reports, auto-generates `[E#]` citation tags and sidecar |
-| `python tools/redact_document.py CASE_ID DOC_ID --held-by <agent> --run-id <run>` | Checkpoint-2 PII redaction via the Redactor abstraction, with per-page fidelity verification |
+| `python tools/redact_document.py CASE_ID DOC_ID --held-by <agent> --run-id <run>` | Checkpoint-2 PII redaction via the Redactor abstraction: the LLM identifies PII spans, substitution is deterministic; a detected leak hard-fails the document |
 | `python tools/sync_agents.py` | Regenerates `.codex/agents/*.toml` and `.agents/skills/*/SKILL.md` from canonical `.claude/` definitions |
 | `pytest` | Runs the DAO/tooling test suite |
 
