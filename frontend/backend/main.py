@@ -271,6 +271,14 @@ def source_file(case_id: str, name: str):
     if any(c in UPLOAD_FORBIDDEN_CHARS for c in name):
         raise HTTPException(400, "invalid file name")
     ledger = dao.load_json(dao.source_ledger_path(case_id)) or {}
+    # D1: never serve a ground-truth (answer-key) file through the UI. The
+    # ledger lists EVERY intake file, including class 'ground_truth' -- the
+    # final adjuster reports that harness-guardrails-dev forbids exposing. Only
+    # 'raw' documents may be viewed here. (Fleet review C2 -- verified this
+    # endpoint would otherwise hand out CASE_021/022's ground truth.)
+    entry = next((e for e in ledger.get("files", []) if e.get("file_name") == name), None)
+    if entry is None or entry.get("classification") != "raw":
+        raise HTTPException(403, "refusing to serve a non-raw (ground-truth) source file")
     candidates = [UPLOAD_DIR / case_id / name]
     source_dir = ledger.get("source_dir")
     if source_dir and ".." not in Path(source_dir).parts:

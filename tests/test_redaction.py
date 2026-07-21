@@ -214,3 +214,27 @@ def test_scan_catches_separator_variants(leak):
 ])
 def test_scan_no_false_positive_on_document_numbers(clean):
     assert scan_residual_pii(clean) == [], f"false positive on {clean!r}"
+
+
+@pytest.mark.parametrize("leak", [
+    "901010 - 1234567",      # multi-separator RRN
+    "901010-\n1234567",      # line-wrapped RRN
+    "010  1234  5678",       # double-spaced phone
+    "010-1234-\n5678",       # line-wrapped phone
+    "(02) 123-4567",         # parenthesized area code
+    "0212345678",            # contiguous landline
+    "서울12가3456",          # region-prefixed plate
+    "경기78나9012",          # region-prefixed plate 2
+])
+def test_scan_catches_fleet_separator_and_region_variants(leak):
+    assert scan_residual_pii(f"내용 {leak} 끝"), f"missed {leak}"
+
+
+@pytest.mark.parametrize("clean", [
+    "품목 12개 1234원",       # counter phrase (개 not a plate syllable)
+    "조항 1-2-3",             # short dashed clause ref
+    "만기 2025-05-14",        # date
+    "기간 2020-01 ~ 2023-12", # year-month range
+])
+def test_scan_no_fp_on_fleet_clean_cases(clean):
+    assert scan_residual_pii(clean) == [], f"false positive on {clean!r}"
