@@ -1357,3 +1357,266 @@ def split_bundle(
         "new_document_ids": [d["document_id"] for d in new_documents],
         "new_pdf_paths": [str(p) for p in written_paths],
     }
+
+
+# ----------------------------------------------------------------- CLI --
+
+def proposal_filename(source_document_id: str) -> str:
+    """One file per bundle. schema_name_for strips the _DOC_NNN suffix back to
+    segmentation_proposal.schema.json, so this writes through the ordinary
+    write-contract path with no special DAO casing."""
+    return f"segmentation_proposal_{source_document_id}.json"
+
+
+def _write_proposal(case_id, source_document_id, proposal, held_by, run_id):
+    """DAO-governed proposal write, in-process (not a write-contract subprocess).
+
+    Same lock -> validate -> atomic-write contract write-contract itself uses:
+    a schema failure here is a segment_case.py bug, not agent output, so it
+    fails loud and persists nothing.
+    """
+    from dao import (case_dir, atomic_write_json, load_registry, validate_instance,
+                     acquire_lock_blocking, release_lock)
+
+    schemas, registry = load_registry()
+    errors = validate_instance(proposal, "segmentation_proposal.schema.json", schemas, registry)
+    if errors:
+        raise SegmentationError(
+            "assembled proposal fails its own schema -- this is a segment_case.py bug:\n"
+            + "\n".join(f"  - {e}" for e in errors)
+        )
+    filename = proposal_filename(source_document_id)
+    target = case_dir(case_id) / filename
+    lock = acquire_lock_blocking(target, held_by, run_id, f"write {filename}")
+    if lock is not None:
+        raise SegmentationError(
+            f"{target} is locked by {lock['held_by']} (run {lock['run_id']})"
+        )
+    try:
+        atomic_write_json(target, proposal)
+    finally:
+        release_lock(target)
+    return target
+
+
+def _read_proposal(case_id, source_document_id):
+    from dao import read_contract_data
+    return read_contract_data(case_id, proposal_filename(source_document_id))
+
+
+def _manifest_bundle(case_id, doc_id):
+    """The bundle's manifest entry, or None. Its file_path locates the PDF."""
+    from dao import read_contract_data
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    for doc in manifest.get("documents", []):
+        if doc.get("document_id") == doc_id:
+            return manifest, doc
+    return manifest, None
+
+
+def _stderr(msg):
+    print(msg, file=sys.stderr)
+
+
+def _cmd_sheets(args):
+    """Mode A / the PoC default: render every contact sheet variant and stop.
+    No model call. A human reads the sheets and either enters ranges by hand or
+    runs `propose`."""
+    _, bundle = _manifest_bundle(args.case_id, args.doc_id)
+    if bundle is None:
+        _stderr(f"error: {args.doc_id} not in {args.case_id}'s manifest")
+        return 1
+    pdf_path = ROOT / bundle["file_path"]
+    cols, rows = _parse_grid(args.grid)
+    geometry = compute_sheet_geometry(cols=cols, rows=rows, crop_ratio=args.crop_ratio)
+    out_dir = sheets_dir(args.case_id, args.doc_id)
+    result = build_sheet_set(pdf_path, out_dir, geometry=geometry, progress=_stderr)
+    print(json.dumps({
+        "status": "sheets_rendered",
+        "sheet_dir": str(out_dir),
+        "variants": {v: [str(p) for p in paths] for v, paths in result["sheets"].items()},
+        "page_count": result["page_count"],
+        "geometry": geometry,
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_propose(args):
+    """Mode B: send one contact sheet per vision call and write the proposal."""
+    from dao import now_iso
+    from llm_providers import build_provider, parse_provider_config
+
+    _, bundle = _manifest_bundle(args.case_id, args.doc_id)
+    if bundle is None:
+        _stderr(f"error: {args.doc_id} not in {args.case_id}'s manifest")
+        return 1
+    pdf_path = ROOT / bundle["file_path"]
+    cols, rows = _parse_grid(args.grid)
+    geometry = compute_sheet_geometry(cols=cols, rows=rows, crop_ratio=args.crop_ratio)
+
+    # Reuse an already-rendered sheet set (sheets subcommand or a prior propose);
+    # render the proposal variant if none exists. Only the as_scanned variant is
+    # sent -- the model reads sideways cells in place (SEGMENT_PROMPT).
+    out_dir = sheets_dir(args.case_id, args.doc_id)
+    import fitz
+    with fitz.open(pdf_path) as document:
+        page_count = document.page_count
+    batches = plan_sheets(page_count, geometry["pages_per_sheet"])
+    sheet_paths = [
+        out_dir / f"sheet_{i:02d}_p{pages[0]:03d}-{pages[-1]:03d}_{PROPOSAL_VARIANT}.png"
+        for i, pages in enumerate(batches)
+    ]
+    if not all(p.exists() for p in sheet_paths):
+        _stderr("rendering contact sheets (proposal variant)...")
+        build_sheet_set(pdf_path, out_dir, geometry=geometry,
+                        variants=((PROPOSAL_VARIANT, 0),), progress=_stderr)
+
+    config = parse_provider_config(args)
+    provider = build_provider(config)
+    _stderr(f"proposing boundaries via {provider.provider_name}/{provider.model_name} "
+            f"over {len(sheet_paths)} sheet(s)...")
+
+    result = propose_boundaries(
+        pdf_path, case_id=args.case_id, doc_id=args.doc_id, provider=provider,
+        geometry=geometry, page_count=page_count, sheet_paths=sheet_paths,
+        resume=not args.no_resume, progress=_stderr,
+    )
+    proposal = build_proposal_document(
+        result, case_id=args.case_id, source_document_id=args.doc_id,
+        source_file_name=bundle.get("source_file_name") or bundle.get("file_name"),
+        source_file_path=bundle["file_path"], page_count=page_count,
+        created_at=now_iso(),
+    )
+    target = _write_proposal(args.case_id, args.doc_id, proposal, args.held_by, args.run_id)
+    print(json.dumps({
+        "status": "proposed",
+        "proposal_path": str(target),
+        "segment_count": len(proposal["segments"]),
+        "unassigned_pages": proposal["unassigned_pages"],
+        "needs_full_page": result["needs_full_page"],
+        "fallback_saturated": proposal["method"]["full_page_fallback"]["saturated"],
+        "warnings": proposal["warnings"],
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_show(args):
+    proposal = _read_proposal(args.case_id, args.doc_id)
+    if proposal is None:
+        _stderr(f"error: no proposal for {args.case_id}/{args.doc_id}")
+        return 1
+    print(json.dumps(proposal, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_approve(args):
+    from dao import now_iso
+    proposal = _read_proposal(args.case_id, args.doc_id)
+    if proposal is None:
+        _stderr(f"error: no proposal for {args.case_id}/{args.doc_id}")
+        return 1
+    edit = None
+    if args.edit is not None:
+        try:
+            idx_str, span = args.edit.split("=")
+            start_str, end_str = span.split("-")
+            args.segment = int(idx_str)
+            edit = (int(start_str), int(end_str))
+        except ValueError:
+            _stderr("error: --edit must look like N=start-end, e.g. 3=7-12")
+            return 1
+    updated = apply_approval(
+        proposal, reviewer=args.reviewer, now=now_iso(),
+        segment_index=args.segment, edit=edit,
+    )
+    _write_proposal(args.case_id, args.doc_id, updated, args.held_by or "segment_case.py",
+                    args.run_id)
+    print(json.dumps({"status": "approval_applied",
+                      "review_status": updated["review_status"],
+                      "not_ready": split_readiness_errors(updated)},
+                     ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_split(args):
+    proposal = _read_proposal(args.case_id, args.doc_id)
+    if proposal is None:
+        _stderr(f"error: no proposal for {args.case_id}/{args.doc_id}")
+        return 1
+    manifest, bundle = _manifest_bundle(args.case_id, args.doc_id)
+    if bundle is None:
+        _stderr(f"error: {args.doc_id} not in {args.case_id}'s manifest")
+        return 1
+    result = split_bundle(
+        proposal, case_id=args.case_id, bundle_id=args.doc_id,
+        bundle_pdf_path=ROOT / bundle["file_path"],
+        proposal_path=f"outputs/{args.case_id}/{proposal_filename(args.doc_id)}",
+        manifest=manifest, held_by=args.held_by, run_id=args.run_id, progress=_stderr,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["status"] in ("split", "already_split") else 1
+
+
+def _parse_grid(grid: str) -> tuple[int, int]:
+    try:
+        cols, rows = grid.lower().split("x")
+        return int(cols), int(rows)
+    except ValueError:
+        raise SegmentationError(f"--grid must look like COLSxROWS, e.g. 4x4, got {grid!r}")
+
+
+def main(argv=None):
+    import argparse
+    from llm_providers import add_provider_args
+
+    parser = argparse.ArgumentParser(
+        description="Stage 1 document segmentation: split a raw bundle into logical documents."
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def _grid_and_crop(p):
+        p.add_argument("--grid", default=f"{DEFAULT_GRID_COLS}x{DEFAULT_GRID_ROWS}",
+                       help="contact-sheet grid, COLSxROWS (default 4x4)")
+        p.add_argument("--crop-ratio", type=float, default=DEFAULT_CROP_RATIO,
+                       help="fraction of each page height kept from the top (default 0.33)")
+
+    p = sub.add_parser("sheets", help="render contact sheets and stop (no model call)")
+    p.add_argument("case_id"); p.add_argument("doc_id")
+    _grid_and_crop(p)
+    p.set_defaults(fn=_cmd_sheets)
+
+    p = sub.add_parser("propose", help="propose boundaries via a vision provider")
+    p.add_argument("case_id"); p.add_argument("doc_id")
+    _grid_and_crop(p)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.add_argument("--no-resume", action="store_true", help="ignore the per-sheet resume cache")
+    add_provider_args(p)
+    p.set_defaults(fn=_cmd_propose)
+
+    p = sub.add_parser("show", help="print the current proposal")
+    p.add_argument("case_id"); p.add_argument("doc_id")
+    p.set_defaults(fn=_cmd_show)
+
+    p = sub.add_parser("approve", help="approve the case gate, a segment, or an edited range")
+    p.add_argument("case_id"); p.add_argument("doc_id")
+    p.add_argument("--reviewer", required=True)
+    p.add_argument("--segment", type=int, help="approve only this segment index")
+    p.add_argument("--edit", help="edit a range then approve it: N=start-end, e.g. 3=7-12")
+    p.add_argument("--held-by"); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=_cmd_approve)
+
+    p = sub.add_parser("split", help="split the approved bundle into per-document PDFs")
+    p.add_argument("case_id"); p.add_argument("doc_id")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=_cmd_split)
+
+    args = parser.parse_args(argv)
+    try:
+        return args.fn(args)
+    except SegmentationError as exc:
+        _stderr(f"error: {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
