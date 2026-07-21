@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "denial_reason_result.schema.json",
   "title": "denial_reason_result.json -- insurer's stated position, extracted and classified v0.2",
-  "description": "Extracts denial/reduction/non-payment reasons from an insurer-response document and classifies each against the R-code taxonomy. Produced by denial-response, which is dependency-triggered (runs whenever a flagged insurer-response document's processed text exists) rather than phase-gated -- see pipeline.md. Judgment-type output; include the safety fields (source_grounded etc.) from common_component_output.schema.json.",
+  "description": "Extracts denial/reduction/non-payment reasons from an insurer-response document and classifies each against the R-code taxonomy. Produced by denial-response, which is dependency-triggered (runs whenever a flagged insurer-response document's processed text exists) rather than phase-gated -- see pipeline.md. The loss-adjuster-reviewed frequency tier is fixed taxonomy metadata in common_component_output.schema.json's taxonomy_code.x-codebook; it is deliberately not copied into each case result or used as confidence. Judgment-type output; include the safety fields (source_grounded etc.) from common_component_output.schema.json.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
