@@ -3,22 +3,34 @@
 `redact_document.py` talks only to a `Redactor`, never to a provider or a
 prompt directly. That seam lets a future dedicated de-identification model
 (e.g. an OpenMed NER pipeline -- open-decisions.md #1) drop in as a new
-`Redactor` subclass without touching the tool: an NER redactor takes raw text
-and returns entity spans, which is a different shape from an LLM that takes a
-rendered prompt and returns rewritten text, but both produce a
-`RedactionOutcome`.
+`Redactor` subclass without touching the tool.
 
-Today the only implementation is `LlmRedactor`, which wraps any
-`llm_providers` provider (`codex-cli` by default in dev). It owns the prompt
-template and the JSON parsing that used to live in the tool.
+Design: span substitution, not page rewriting.
+------------------------------------------------
+The LLM's only job is to IDENTIFY PII values (copy each verbatim from the page
+and tag its category). The redacted text is then built DETERMINISTICALLY by
+`apply_redaction_spans`: it takes the original source text and replaces only the
+identified PII strings with placeholders. Because the output is the source with
+spans swapped -- never the model's own prose -- omission and fabrication of
+non-PII content are structurally impossible (the failure class that contaminated
+the OCR layer, known-gaps 11/14/15).
 
-Every outcome is checked for fidelity before the tool trusts it: an LLM asked
-to rewrite a whole page can silently drop, reorder, or fabricate non-PII text
-(the same failure class that contaminated the OCR layer -- known-gaps 11/14/15),
-and unlike checkpoint 1 there is no second reader to catch it. `verify_fidelity`
-enforces that everything BETWEEN the placeholders is a verbatim, in-order slice
-of the source; any drift is surfaced as a warning and forces human review
-rather than being trusted.
+That pivot flips the dominant failure mode to UNDER-redaction (a missed PII
+value). Two deterministic guards address it:
+  * `apply_redaction_spans` reports `unmatched_spans` -- PII the model named but
+    that is not present verbatim in the source (a misread/reformat that leaves
+    the real value in the text, or model noise).
+  * `scan_residual_pii` regex-scans the finished output for STRUCTURED PII
+    (phone / RRN / email / vehicle plate / long digit run) that survived.
+Per the checkpoint-2 privacy policy, either signal is treated as a possible
+leak and HARD-FAILS the document (raise, write nothing) -- it is not written to
+the processed layer for later review. Over-redaction risk (a span too short or
+matching implausibly many times) is privacy-safe, so it is not hard-failed;
+those spans are left un-redacted and routed to review instead.
+
+Residual limitation: `scan_residual_pii` only catches *structured* PII. An
+unstructured value the model misses (a bare name/address with no format) is not
+caught here -- only a real NER redactor closes that fully (open-decisions.md #1).
 """
 from __future__ import annotations
 
@@ -28,137 +40,212 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
-PROMPT_VERSION = "pii_redaction_v0.2"
+PROMPT_VERSION = "pii_redaction_v0.3"
 
-# The eight stable placeholders the model may emit. Kept in sync with the prompt.
-PLACEHOLDERS = (
-    "[PERSON_NAME]", "[RESIDENT_REGISTRATION_NUMBER]", "[PHONE_NUMBER]",
-    "[ADDRESS]", "[EMAIL]", "[ACCOUNT_NUMBER]", "[VEHICLE_NUMBER]", "[OTHER_PII]",
-)
-_PLACEHOLDER_RE = re.compile("|".join(re.escape(p) for p in PLACEHOLDERS))
+# category -> placeholder. Unknown categories collapse to [OTHER_PII].
+CATEGORY_TO_PLACEHOLDER = {
+    "person_name": "[PERSON_NAME]",
+    "resident_registration_number": "[RESIDENT_REGISTRATION_NUMBER]",
+    "phone_number": "[PHONE_NUMBER]",
+    "address": "[ADDRESS]",
+    "email": "[EMAIL]",
+    "account_number": "[ACCOUNT_NUMBER]",
+    "vehicle_number": "[VEHICLE_NUMBER]",
+    "other_pii": "[OTHER_PII]",
+}
+_DEFAULT_PLACEHOLDER = "[OTHER_PII]"
 
-# Redaction scope, settled after CASE_012/CASE_021 redacted the same content
-# differently (document-pipeline.md). Carried in the prompt itself so the model
-# actually sees it -- the agent spec's copy never reached the LLM before.
+# A single PII value appearing more than this many times on one page is
+# implausible -- far more likely a short common substring the model mis-tagged,
+# whose blind replace-all would corrupt kept text. Such spans are not redacted;
+# they are flagged for review instead (over-redaction guard).
+_HIGH_OCCURRENCE_FLAG = 20
+
+# Redaction scope, settled after CASE_012/CASE_021 (document-pipeline.md).
+# Carried in the prompt so the model actually sees it.
 REDACTION_SCOPE = (
-    "Redact every natural person's name regardless of capacity -- claimant, "
-    "patient, physician, adjuster, insurer staff, and corporate signatories "
-    "such as a 대표이사 (a CEO's name in an official document is still a natural "
-    "person's name). Redact all phone/fax numbers, street addresses, email "
-    "addresses, resident registration numbers, account numbers, vehicle "
-    "registration numbers, and policy/certificate/license numbers, INCLUDING "
-    "published corporate contact info (complaint-desk hotlines, published office "
-    "addresses). Do NOT redact corporate or institutional entity names "
-    "themselves (insurer names, hospital names) -- downstream stages key on "
-    "them. Do NOT redact dates, monetary amounts, diagnoses, or policy clauses."
+    "PII = every natural person's name regardless of capacity (claimant, "
+    "patient, physician, adjuster, insurer staff, corporate signatories such as "
+    "a 대표이사), resident registration numbers, phone/fax numbers, street "
+    "addresses, email addresses, account numbers, and vehicle registration "
+    "numbers -- INCLUDING published corporate contact info (complaint-desk "
+    "hotlines, office addresses). NOT PII: corporate/institutional entity names "
+    "(insurer names, hospital names), dates, monetary amounts, diagnoses, and "
+    "policy clauses -- never list those."
 )
 
-PROMPT_TEMPLATE = """Redact personally identifying information from the validated OCR text below.
+PROMPT_TEMPLATE = """Identify every piece of personally identifying information (PII) in the page text below.
 
 {scope}
 
-Replace each detected value with one of these stable placeholders:
-[PERSON_NAME], [RESIDENT_REGISTRATION_NUMBER], [PHONE_NUMBER], [ADDRESS],
-[EMAIL], [ACCOUNT_NUMBER], [VEHICLE_NUMBER], or [OTHER_PII].
+Do NOT rewrite, translate, summarize, reformat, or redact the text yourself.
+Your ONLY job is to list each PII value, copied EXACTLY (character for
+character) as it appears in the text, with its category. If a value appears
+multiple times, list it once. If there is no PII, return an empty list.
 
-Do not summarize, translate, correct, reorder, or omit non-PII content. Preserve
-all line breaks and all non-PII text EXACTLY, character for character -- only the
-PII values themselves may change (into a placeholder). Do not treat a value as
-safe merely because it looks like a sample, alias, or pseudonym. A value is
-already redacted only when it is one of the bracketed placeholders listed above.
-
-For example, "홍길동 / 010-1234-5678 / 골절" must become
-"[PERSON_NAME] / [PHONE_NUMBER] / 골절" with items_redacted=2.
+Categories: person_name, resident_registration_number, phone_number, address,
+email, account_number, vehicle_number, other_pii.
 
 Reply with ONLY one JSON object in this exact shape:
-{{"redacted_text":"...", "items_redacted":0,
-  "categories":["person_name"]}}
+{{"pii_items": [{{"text": "홍길동", "category": "person_name"}},
+  {{"text": "010-1234-5678", "category": "phone_number"}}]}}
 
---- Validated page text ---
+--- Page text ---
 {text}
 """
 
 
+# ---------------------------------------------------------------------------
+# S3: residual structured-PII scan (deterministic)
+# ---------------------------------------------------------------------------
+# Lookarounds require a non-digit boundary so these do not fire inside longer
+# numbers. Calibrated NOT to match dates (4-2-2), comma-grouped amounts, or KCD
+# codes -- proven in tests/test_redaction.py.
+_RESIDUAL_PII_PATTERNS = {
+    "resident_registration_number": re.compile(r"(?<!\d)\d{6}-\d{7}(?!\d)"),
+    "phone_number_dashed": re.compile(r"(?<!\d)\d{2,3}-\d{3,4}-\d{4}(?!\d)"),
+    "phone_number_mobile": re.compile(r"(?<!\d)01[0-9]\d{7,8}(?!\d)"),
+    "email": re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+", re.IGNORECASE),
+    "vehicle_number": re.compile(r"\d{2,3}[가-힣]\d{4}"),
+    "long_digit_run": re.compile(r"(?<!\d)\d{11,}(?!\d)"),
+}
+
+
+def scan_residual_pii(redacted_text: str) -> list[dict[str, str]]:
+    """Regex-scan finished redacted text for structured PII that survived.
+
+    Returns a list of {kind, sample} hits (empty == clean). Only structured
+    formats are detectable this way; unstructured PII (bare names) is out of
+    scope. A non-empty result is treated as a possible leak by the caller."""
+    hits: list[dict[str, str]] = []
+    for kind, pattern in _RESIDUAL_PII_PATTERNS.items():
+        for m in pattern.finditer(redacted_text):
+            hits.append({"kind": kind, "sample": m.group(0)})
+    return hits
+
+
+# ---------------------------------------------------------------------------
+# S1: deterministic span substitution
+# ---------------------------------------------------------------------------
 @dataclass
-class RedactionOutcome:
+class RedactionApplication:
     redacted_text: str
     items_redacted: int
     categories: list[str]
-    provider_metadata: dict[str, Any] | None = None
-    # Non-empty when fidelity verification found drift (dropped/reordered/
-    # fabricated non-PII text, or a placeholder-count mismatch). A non-empty
-    # list forces human review -- the tool never trusts a drifting redaction.
-    fidelity_warnings: list[str] = field(default_factory=list)
-    # Reserved for a future span-based (NER) redactor; unused by LlmRedactor.
-    spans: list[dict[str, Any]] | None = None
+    # PII the model named but not found verbatim in the source (0 occurrences):
+    # a misread/reformat leaving the real value in place, or model noise.
+    unmatched_spans: list[dict[str, str]] = field(default_factory=list)
+    # Spans not applied because replace-all would risk over-redacting kept text
+    # (length <= 1, or implausibly many occurrences). Privacy-safe, review-only.
+    ambiguous_spans: list[dict[str, str]] = field(default_factory=list)
+    applied_spans: list[dict[str, Any]] = field(default_factory=list)
 
 
-class Redactor(Protocol):
-    method: str
+def apply_redaction_spans(source_text: str, pii_items: list[dict[str, str]]) -> RedactionApplication:
+    """Build redacted text by replacing only the identified PII strings in the
+    SOURCE with their category placeholders -- deterministic, so all non-PII
+    content is preserved by construction.
 
-    def redact_page(self, text: str) -> RedactionOutcome: ...
+    Longest spans are replaced first so a longer PII value (e.g. a full address)
+    is substituted before a shorter one that may sit inside it; placeholders
+    contain no Korean/PII characters so they never re-match. Exact (verbatim)
+    matching only -- a near-miss becomes an unmatched span, never a silent drop."""
+    # Dedup by text (first category wins), drop empties.
+    seen: set[str] = set()
+    items: list[dict[str, str]] = []
+    for it in pii_items:
+        text = it.get("text") or ""
+        if not text.strip() or text in seen:
+            continue
+        seen.add(text)
+        items.append({"text": text, "category": it.get("category") or "other_pii"})
+
+    # Longest first.
+    items.sort(key=lambda it: len(it["text"]), reverse=True)
+
+    working = source_text
+    total = 0
+    categories: set[str] = set()
+    unmatched: list[dict[str, str]] = []
+    ambiguous: list[dict[str, str]] = []
+    applied: list[dict[str, Any]] = []
+
+    for it in items:
+        text, category = it["text"], it["category"]
+        if len(text.strip()) <= 1:
+            ambiguous.append({"text": text, "category": category, "reason": "span too short (<=1 char)"})
+            continue
+        count = working.count(text)
+        if count == 0:
+            unmatched.append({"text": text, "category": category})
+            continue
+        if count > _HIGH_OCCURRENCE_FLAG:
+            ambiguous.append({"text": text, "category": category,
+                              "reason": f"{count} occurrences (implausible; not redacted)"})
+            continue
+        placeholder = CATEGORY_TO_PLACEHOLDER.get(category, _DEFAULT_PLACEHOLDER)
+        working = working.replace(text, placeholder)
+        total += count
+        categories.add(category)
+        applied.append({"text": text, "category": category, "occurrences": count})
+
+    return RedactionApplication(
+        redacted_text=working,
+        items_redacted=total,
+        categories=sorted(categories),
+        unmatched_spans=unmatched,
+        ambiguous_spans=ambiguous,
+        applied_spans=applied,
+    )
 
 
-def _normalize_ws(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+_PLACEHOLDER_RE = re.compile("|".join(re.escape(p) for p in CATEGORY_TO_PLACEHOLDER.values()))
 
 
-def verify_fidelity(source_text: str, redacted_text: str, items_redacted: int) -> list[str]:
-    """Confirm the redaction only substituted placeholders for PII and left
-    everything else intact, in order. Returns a list of drift warnings (empty
-    == clean).
-
-    The check: split the redacted text on placeholder tokens; each literal chunk
-    between placeholders must appear in the source, at or after the previous
-    chunk's position (whitespace-normalized). A summarized, reordered, corrected,
-    or fabricated page breaks this -- its between-placeholder text is no longer a
-    verbatim in-order slice of the source. Also cross-checks the self-reported
-    items_redacted against the actual placeholder count.
-
-    Scope and limitation: this catches the dangerous direction -- text appearing
-    in the redacted output that was NOT in the source (fabrication, reordering,
-    rewriting), the same class that contaminated the OCR layer. It does NOT catch
-    silent omission of non-PII content that sat between two placeholders, because
-    the PII spans it was allowed to remove are unknown; a chunk that legitimately
-    replaced PII is indistinguishable from one that also swallowed adjacent
-    non-PII text. Omission is the less dangerous failure (lost info, not injected
-    false info) and is left to human review of the redacted_text itself."""
-    warnings: list[str] = []
-
-    placeholder_count = len(_PLACEHOLDER_RE.findall(redacted_text))
-    if placeholder_count != items_redacted:
-        warnings.append(
-            f"items_redacted={items_redacted} does not match the "
-            f"{placeholder_count} placeholder(s) actually present in the redacted text"
-        )
-
-    haystack = _normalize_ws(source_text)
+def is_built_from_source(redacted_text: str, source_text: str) -> bool:
+    """Defense-in-depth invariant: with placeholders removed, the redacted text
+    must be an in-order sequence of source slices. Always true for output of
+    apply_redaction_spans; a violation means a substitution bug, not model
+    error. (Whitespace-normalized, since we never alter whitespace ourselves.)"""
+    hay = re.sub(r"\s+", " ", source_text).strip()
     cursor = 0
     for chunk in _PLACEHOLDER_RE.split(redacted_text):
-        needle = _normalize_ws(chunk)
+        needle = re.sub(r"\s+", " ", chunk).strip()
         if not needle:
             continue
-        found = haystack.find(needle, cursor)
+        found = hay.find(needle, cursor)
         if found == -1:
-            preview = needle[:40] + ("..." if len(needle) > 40 else "")
-            warnings.append(
-                "redacted text contains non-PII content not found verbatim/in-order "
-                f"in the source (possible drop, reorder, rewrite, or fabrication): {preview!r}"
-            )
-            # Keep scanning from where we were; report each drift chunk.
-            continue
+            return False
         cursor = found + len(needle)
-    return warnings
+    return True
 
 
+# ---------------------------------------------------------------------------
+# S2: span-based LLM contract (parse)
+# ---------------------------------------------------------------------------
 class RedactionParseError(RuntimeError):
     """Raised when a redaction response cannot be parsed into the required shape."""
 
 
-def parse_redaction_response(raw: str) -> dict:
+class RedactionLeakError(RuntimeError):
+    """Raised when redaction output shows a possible PII leak (residual
+    structured PII, or a model-named value not found verbatim in the source).
+    Per the checkpoint-2 policy this hard-fails the document -- the redacted text
+    is never written to the processed layer."""
+
+
+_ALLOWED_CATEGORIES = set(CATEGORY_TO_PLACEHOLDER)
+
+
+def parse_pii_items(raw: str) -> list[dict[str, str]]:
+    """Extract the {pii_items:[{text,category}]} object from a model reply.
+
+    Unknown categories are coerced to other_pii rather than rejected (the value
+    is still redacted); shape violations fail closed."""
     decoder = json.JSONDecoder()
     start = 0
     saw_brace = False
+    parsed = None
     while True:
         brace = raw.find("{", start)
         if brace == -1:
@@ -170,24 +257,45 @@ def parse_redaction_response(raw: str) -> dict:
             break
         except json.JSONDecodeError:
             start = brace + 1
-            continue
-    if not isinstance(parsed, dict):
-        raise RedactionParseError(f"redaction response JSON must be an object: {raw!r}")
-    if not isinstance(parsed.get("redacted_text"), str):
-        raise RedactionParseError("redaction response omitted string redacted_text")
-    if not isinstance(parsed.get("items_redacted"), int) or parsed["items_redacted"] < 0:
-        raise RedactionParseError("redaction response items_redacted must be a non-negative integer")
-    categories = parsed.get("categories", [])
-    if not isinstance(categories, list) or any(not isinstance(item, str) for item in categories):
-        raise RedactionParseError("redaction response categories must be an array of strings")
-    parsed["categories"] = categories
-    return parsed
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("pii_items"), list):
+        raise RedactionParseError(f"redaction response must be an object with a pii_items array: {raw!r}")
+    items: list[dict[str, str]] = []
+    for entry in parsed["pii_items"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("text"), str):
+            raise RedactionParseError(f"each pii_item must be an object with a string text: {entry!r}")
+        category = entry.get("category")
+        if not isinstance(category, str) or category not in _ALLOWED_CATEGORIES:
+            category = "other_pii"
+        items.append({"text": entry["text"], "category": category})
+    return items
+
+
+@dataclass
+class RedactionOutcome:
+    redacted_text: str
+    items_redacted: int
+    categories: list[str]
+    provider_metadata: dict[str, Any] | None = None
+    # Review-forcing, non-leak flags (over-redaction risk). A leak hard-fails
+    # before an outcome is ever produced, so this never carries a leak.
+    review_warnings: list[str] = field(default_factory=list)
+    spans: list[dict[str, Any]] | None = None
+
+
+# ---------------------------------------------------------------------------
+# S4: the redactor
+# ---------------------------------------------------------------------------
+class Redactor(Protocol):
+    method: str
+
+    def redact_page(self, text: str) -> RedactionOutcome: ...
 
 
 class LlmRedactor:
-    """Redactor backed by an llm_providers provider that rewrites the page."""
+    """Redactor backed by an llm_providers provider. The provider IDENTIFIES PII
+    spans; substitution and all safety checks are deterministic and local."""
 
-    method = "llm_redaction"
+    method = "llm_span_redaction"
 
     def __init__(self, provider, *, scope: str = REDACTION_SCOPE):
         self.provider = provider
@@ -200,14 +308,37 @@ class LlmRedactor:
     def redact_page(self, text: str) -> RedactionOutcome:
         prompt = PROMPT_TEMPLATE.format(scope=self.scope, text=text)
         result = self.provider.redact_text(prompt, PROMPT_VERSION)
-        parsed = parse_redaction_response(result.text)
-        outcome = RedactionOutcome(
-            redacted_text=parsed["redacted_text"],
-            items_redacted=parsed["items_redacted"],
-            categories=parsed["categories"],
+        items = parse_pii_items(result.text)
+        app = apply_redaction_spans(text, items)
+
+        # Hard-fail on any possible leak (checkpoint-2 privacy policy): a
+        # structured PII pattern surviving in the output, or PII the model named
+        # that is not present verbatim in the source (real value may remain).
+        residual = scan_residual_pii(app.redacted_text)
+        if residual or app.unmatched_spans:
+            reasons = []
+            if residual:
+                reasons.append("residual structured PII in output: "
+                               + ", ".join(f"{h['kind']}={h['sample']!r}" for h in residual))
+            if app.unmatched_spans:
+                reasons.append("model-named PII not found verbatim in source: "
+                               + ", ".join(repr(s["text"]) for s in app.unmatched_spans))
+            raise RedactionLeakError("; ".join(reasons))
+
+        # Defense-in-depth: my own output must be source-with-spans-swapped.
+        if not is_built_from_source(app.redacted_text, text):
+            raise RedactionLeakError(
+                "internal invariant failed: redacted text is not an in-order slice of the source"
+            )
+
+        review_warnings = [
+            f"span not redacted ({s['reason']}): {s['text']!r}" for s in app.ambiguous_spans
+        ]
+        return RedactionOutcome(
+            redacted_text=app.redacted_text,
+            items_redacted=app.items_redacted,
+            categories=app.categories,
             provider_metadata=result.metadata(),
+            review_warnings=review_warnings,
+            spans=app.applied_spans,
         )
-        outcome.fidelity_warnings = verify_fidelity(
-            text, outcome.redacted_text, outcome.items_redacted
-        )
-        return outcome
