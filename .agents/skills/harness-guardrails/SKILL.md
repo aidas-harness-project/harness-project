@@ -41,7 +41,7 @@ The pipeline does not pick one of these on its own — it's a human decision eve
 
 ## P5. Shared-file editing requires an exclusive lock
 
-Every write path in `tools/dao.py` (`write-contract`, `write-page-text`, `write-redacted-text`, `add-conflict-entry`, `set-conflict-verdict`, `update-run-state`, `snapshot-backup`, `set-ledger-status`) creates a sidecar lock file — `<filename>.lock` — before making any edit, and deletes it immediately after the edit is complete. This is structural, not something an agent has to remember to do itself — an agent never writes to a shared file by any path other than these DAO subcommands.
+Every write path in `tools/dao.py` (`write-contract`, `write-page-text`, `write-redacted-text`, `write-text`, `write-reviewed-draft`, `patch-manifest-document`, `add-conflict-entry`, `set-conflict-verdict`, `update-run-state`, `set-human-input-status`, `snapshot-backup`, `set-ledger-status`) creates a sidecar lock file — `<filename>.lock` — before making any edit, and deletes it immediately after the edit is complete. The lock is acquired with an atomic `O_EXCL` create, so two racing callers cannot both acquire a free lock. This is structural, not something an agent has to remember to do itself — an agent never writes to a shared file by any path other than these DAO subcommands.
 
 Lock file contents (required):
 
