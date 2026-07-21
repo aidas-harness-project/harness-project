@@ -27,12 +27,30 @@ def test_split_pages_recovers_exact_verbatim_text():
     assert pages == [(1, "first page\nsecond line"), (2, "second page")]
 
 
-def test_split_pages_handles_non_sequential_or_out_of_order_numbers():
-    """Page numbers come from the marker itself, not position in the list --
-    a chunker shouldn't silently assume 1,2,3,... order."""
-    text = "<<<PAGE page=5>>>\ntext for page five\n<<<PAGE page=3>>>\ntext for page three\n"
-    pages = ct.split_pages(text)
-    assert pages == [(5, "text for page five"), (3, "text for page three")]
+def test_split_pages_rejects_out_of_order_page_numbers():
+    """Out-of-order / duplicate page numbers make downstream evidence-reference
+    page lookups ambiguous -- fail loud rather than build ambiguous chunks
+    (fleet review F3). Gaps (1 -> 5) are still allowed."""
+    with pytest.raises(SystemExit):
+        ct.split_pages("<<<PAGE page=5>>>\nfive\n<<<PAGE page=3>>>\nthree\n")
+    with pytest.raises(SystemExit):
+        ct.split_pages("<<<PAGE page=1>>>\na\n<<<PAGE page=1>>>\nb\n")  # duplicate
+    # a gap is fine -- page numbers come from the marker, not position
+    assert ct.split_pages("<<<PAGE page=1>>>\na\n<<<PAGE page=5>>>\nb\n") == [(1, "a"), (5, "b")]
+
+
+def test_split_pages_ignores_in_band_marker_inside_content():
+    # An identical marker string occurring mid-line inside real page content is
+    # NOT a boundary (line-start anchored) -- no spurious page fabricated (F1).
+    pages = ct.split_pages("<<<PAGE page=1>>>\nbody with inline <<<PAGE page=99>>> text\n"
+                           "<<<PAGE page=2>>>\npage two")
+    assert [p for p, _ in pages] == [1, 2]
+    assert "<<<PAGE page=99>>>" in pages[0][1]  # kept as verbatim content
+
+
+def test_split_pages_rejects_pre_marker_content():
+    with pytest.raises(SystemExit):
+        ct.split_pages("PREAMBLE before any marker\n<<<PAGE page=1>>>\nbody")
 
 
 def test_split_pages_fails_loud_with_no_markers():
