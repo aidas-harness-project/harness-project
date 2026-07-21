@@ -8,12 +8,12 @@ extraneous content (a fabricated appendix, meta-commentary, anything one
 reading has that the other lacks entirely) as a disagreement even when the
 core facts otherwise match.
 
-The reader/comparator backends are provider-configurable. The recommended
-fully local P8 configuration pairs local-ocr (Tesseract) for reader A with
-local-vlm (an Ollama vision model) for reader B, then uses local-llm for the
-text comparison. This gives the two readers different extraction
-technologies while keeping every call on the machine. Local providers never
-download dependencies and never fall back externally.
+The reader/comparator backends are provider-configurable (claude-cli /
+codex-cli / openai-api). All available providers are LLM-vision-backed, so any
+reader pair is a documented weak-P8 (see _classify_cross_validation): the two
+reads share one extraction technology class and cannot catch a correlated
+confident error. A genuinely technology-independent reader (a real OCR engine)
+is deferred -- see open-decisions.md #4.
 
 This tool does not write any contract file itself -- it prints page-level
 results as JSON. document-pipeline reads that JSON, writes each page's
@@ -26,9 +26,7 @@ cleaned up on exit), not system /tmp.
 Usage:
     python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf
     python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf \
-        --reader-a local-ocr --reader-a-model kor+eng:6 \
-        --reader-b local-vlm --reader-b-model qwen3-vl:4b-instruct-q4_K_M \
-        --comparator local-llm --comparator-model qwen3:4b-instruct-2507-q4_K_M
+        --reader-a claude-cli --reader-b codex-cli --comparator claude-cli
 """
 import argparse
 import contextlib
@@ -344,17 +342,17 @@ def run_ocr(
     if not doc_path.exists():
         sys.exit(f"error: document not found -- {doc_path}")
 
-    if reader_a is None or reader_b is None or comparator is None:
-        providers = build_ocr_providers()
-        reader_a = reader_a or providers["reader_a"]
-        reader_b = reader_b or providers["reader_b"]
-        comparator = comparator or providers["comparator"]
-
     # Plain-text sources take a deterministic decode path, never vision OCR.
     # This must precede any provider/scratch/image work: there is nothing to
     # transcribe, split, or cross-validate for a text file.
     if doc_path.suffix.lower() in TEXT_SUFFIXES:
         return _run_embedded_text(case_id, doc_id, doc_path, progress=progress)
+
+    if reader_a is None or reader_b is None or comparator is None:
+        providers = build_ocr_providers()
+        reader_a = reader_a or providers["reader_a"]
+        reader_b = reader_b or providers["reader_b"]
+        comparator = comparator or providers["comparator"]
 
     cache_dir = _resume_cache_dir(case_id, doc_id)
 
@@ -464,27 +462,31 @@ def _run_embedded_text(case_id: str, doc_id: str, doc_path: Path, progress=None)
 
 def _classify_cross_validation(reader_a, reader_b) -> tuple[str, str]:
     """Label P8's cross-validation strength honestly, computed from the actual
-    readers rather than hard-coded, so the label self-corrects when the reader
-    pair changes. Two reads from the same provider (the PoC's claude-cli path,
-    until the local dual-technology pair is validated -- open-decisions.md #4)
-    are a documented weak-P8: they cannot catch a correlated confident error,
-    since both readings share one extraction technology. The hard-halt on a
-    genuine content disagreement is unchanged regardless of this label -- what
+    readers rather than hard-coded. Every provider available today is
+    LLM-vision-backed (claude-cli / codex-cli / openai-api): even two different
+    vendors share the same extraction *technology class* and can produce a
+    correlated confident error, so any current reader pair is a documented
+    weak-P8. `dual_technology` stays a defined schema value but is currently
+    unreachable -- it is reserved for a future genuinely-independent reader (a
+    real OCR engine), deferred per open-decisions.md #4. The hard-halt on a
+    genuine content disagreement is unchanged regardless of this label; what
     this records is reader *independence*, not disagreement tolerance."""
-    same_provider = reader_a.provider_name == reader_b.provider_name
-    same_model = getattr(reader_a, "model_name", None) == getattr(reader_b, "model_name", None)
-    if same_provider and same_model:
-        return (
-            "single_technology_weak_p8_poc",
-            f"Both readers are {reader_a.provider_name} (model "
-            f"{getattr(reader_a, 'model_name', 'n/a')}); one extraction technology "
-            "self-checking against itself. PoC-phase provider strategy: validate the "
-            "pipeline on a commercial LLM before switching to the local dual-technology "
-            "pair. This is NOT genuine dual-technology P8 -- it cannot detect a "
-            "correlated confident error shared by both reads. Genuine two-technology "
-            "independence is deferred to the local-transition step (open-decisions.md #4).",
+    a_label = f"{reader_a.provider_name} (model {getattr(reader_a, 'model_name', 'n/a')})"
+    b_label = f"{reader_b.provider_name} (model {getattr(reader_b, 'model_name', 'n/a')})"
+    if a_label == b_label:
+        pair_desc = f"Both readers are {a_label}; one model self-checking against itself."
+    else:
+        pair_desc = (
+            f"reader_a is {a_label} and reader_b is {b_label} -- two different "
+            "LLM-vision backends, but the same extraction technology class."
         )
-    return ("dual_technology", "")
+    return (
+        "single_technology_weak_p8_poc",
+        pair_desc
+        + " This is NOT genuine dual-technology P8 -- it cannot detect a correlated "
+        "confident error shared by both LLM reads. A genuinely technology-independent "
+        "reader (a real OCR engine) is deferred (open-decisions.md #4).",
+    )
 
 
 def main():
