@@ -357,6 +357,85 @@ def cmd_patch_manifest_document(args):
     return 0 if ok else 1
 
 
+def replace_manifest_documents(case_id: str, bundle_id: str, bundle_fields: dict,
+                               new_documents: list, held_by: str, run_id: str,
+                               stage: str | None = None, purpose: str | None = None):
+    """Atomically replace ONE bundle's manifest entry with a modified bundle
+    entry PLUS N new per-document entries -- segmentation's split step.
+
+    Neither existing manifest write path fits: write-contract overwrites the
+    whole file (and reads unlocked, before the lock, so a concurrent write is
+    lost) and patch-manifest-document touches exactly one existing entry. Split
+    is 'mutate the bundle in place AND append its children' as a single unit --
+    if only half of it landed, the manifest would either lose the bundle's
+    audit record or point at DOC_XXX entries with no bundle to trace them back
+    to. So this does the whole thing under one lock hold, reading AFTER the lock
+    (like patch_manifest_document, and unlike the generic read+write-contract
+    path -- see known-gaps item 7), and validates before anything is written.
+
+    bundle_fields is merged onto the existing bundle entry (typically
+    downstream_disposition: superseded_bundle, ocr_status: not_applicable,
+    segmentation_proposal_path, plus a null redacted_text_path the schema
+    requires). new_documents are appended as-is. Returns (ok, message) -- the
+    same tuple contract patch_manifest_document uses, so a CLI wrapper and an
+    in-process caller (segment_case.py split) share one implementation.
+    """
+    target = case_dir(case_id) / "document_manifest.json"
+    existing_lock = acquire_lock_blocking(target, held_by, run_id,
+                                          purpose or f"split bundle {bundle_id} into {len(new_documents)} document(s)")
+    if existing_lock is not None:
+        return False, (f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+                        f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+    try:
+        if not target.exists():
+            return False, f"FAIL: no document_manifest.json for {case_id}"
+        manifest = json.loads(target.read_text(encoding="utf-8"))
+        bundle = next((d for d in manifest["documents"] if d["document_id"] == bundle_id), None)
+        if bundle is None:
+            return False, f"FAIL: bundle document_id {bundle_id} not found in document_manifest.json"
+
+        # New ids must not collide with anything already in the manifest -- the
+        # bundle survives as a superseded record, so its id (and every existing
+        # id) stays taken. Catching this here rather than trusting the caller
+        # keeps the file from ever holding two entries with one id.
+        existing_ids = {d["document_id"] for d in manifest["documents"]}
+        new_ids = [d["document_id"] for d in new_documents]
+        collisions = sorted(set(new_ids) & existing_ids)
+        if collisions:
+            return False, f"FAIL: new document ids already exist in the manifest: {collisions}"
+        if len(new_ids) != len(set(new_ids)):
+            return False, f"FAIL: new_documents contains duplicate document ids: {new_ids}"
+
+        bundle.update(bundle_fields)
+        manifest["documents"].extend(new_documents)
+        manifest["updated_at"] = now_iso()
+
+        errors = _schema_check(manifest, "document_manifest.schema.json")
+        if errors:
+            return False, "FAIL: schema validation errors for " + str(target) + " -- not written:\n" + \
+                "\n".join(f"  - {e}" for e in errors)
+        atomic_write_json(target, manifest)
+        if stage:
+            state = _update_run_state(case_id, run_id, stage, "passed", held_by)
+            if state is None:
+                return True, f"PASS: split {bundle_id} into {len(new_documents)} document(s) in {target}\n" \
+                    "WARNING: split succeeded, but run-state could not be updated (lock contention) -- " \
+                    "run-state may now lag behind actual progress; retry the run-state update."
+        return True, f"PASS: split {bundle_id} into {len(new_documents)} document(s) in {target}"
+    finally:
+        release_lock(target)
+
+
+def cmd_replace_manifest_documents(args):
+    bundle_fields = json.loads(Path(args.bundle_fields_file).read_text(encoding="utf-8"))
+    new_documents = json.loads(Path(args.new_documents_file).read_text(encoding="utf-8"))
+    ok, message = replace_manifest_documents(
+        args.case_id, args.bundle_id, bundle_fields, new_documents,
+        args.held_by, args.run_id, stage=args.stage, purpose=args.purpose)
+    print(message)
+    return 0 if ok else 1
+
+
 def cmd_check_lock(args):
     target = case_dir(args.case_id) / args.filename
     lock = read_lock(target)
@@ -941,6 +1020,14 @@ def main():
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.add_argument("--purpose"); p.add_argument("--stage")
     p.set_defaults(fn=cmd_patch_manifest_document)
+
+    p = sub.add_parser("replace-manifest-documents")
+    p.add_argument("case_id"); p.add_argument("bundle_id")
+    p.add_argument("--bundle-fields-file", required=True, help="JSON object merged into the bundle's entry (e.g. downstream_disposition: superseded_bundle)")
+    p.add_argument("--new-documents-file", required=True, help="JSON array of new per-document manifest entries to append")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.add_argument("--purpose"); p.add_argument("--stage")
+    p.set_defaults(fn=cmd_replace_manifest_documents)
 
     p = sub.add_parser("write-page-text")
     p.add_argument("case_id"); p.add_argument("doc_id"); p.add_argument("page", type=int)

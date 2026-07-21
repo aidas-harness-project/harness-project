@@ -864,3 +864,496 @@ def build_sheet_set(
         produced[variant] = paths
 
     return {"geometry": geometry, "page_count": page_count, "sheets": produced}
+
+
+# ------------------------------------------------------- provider path --
+
+# The sheet variant actually SENT to the model. The companion turns exist for a
+# human reading unreadable cells; the model is told to read sideways cells in
+# place (SEGMENT_PROMPT), so it gets one variant per sheet. as_scanned is the
+# honest default -- it is what the page really is, and rotating first would
+# force a guess at which way, the exact guess build_sheet_set refuses to make.
+PROPOSAL_VARIANT = "as_scanned"
+
+# A page needing a full-page look is expected operational noise on a 100%-scan
+# corpus. But if too many pages need it, the fallback stops being a cheap
+# second look and becomes the main cost -- at which point the crop ratio or
+# grid is simply wrong for this bundle and a human should retune, not pay to
+# paper over it. Default cap: a quarter of the bundle. Mirrors the plan's
+# saturation policy and the schema's full_page_fallback.saturated field.
+DEFAULT_FALLBACK_CAP_RATIO = 0.25
+
+
+def _resume_dir(case_id: str, doc_id: str) -> Path:
+    """Per-sheet response cache, stable (NOT pid-tagged) so a re-run reuses it.
+
+    One JSON per sheet holding the parsed result plus the raw response and
+    provider metadata. Mirrors ocr_extract._resume_cache_dir, which came out of
+    a real 75-page loss: an interrupted propose run must not re-pay for sheets
+    it already called. Kept separate from the sheet-image dir so clearing one
+    never clears the other.
+    """
+    return SCRATCH_ROOT / "_resume" / f"{case_id}_{doc_id}"
+
+
+def _load_cached_sheet(cache_dir: Path, sheet_index: int) -> dict | None:
+    path = cache_dir / f"sheet_{sheet_index:02d}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        # A half-written or corrupt cache entry re-calls that sheet rather than
+        # being trusted -- the same fail-open ocr_extract uses.
+        return None
+
+
+def _save_cached_sheet(cache_dir: Path, sheet_index: int, payload: dict) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    # Atomic: an interrupt mid-write leaves the old entry (or none), never a
+    # half-sheet a later resume would trust.
+    tmp = cache_dir / f"sheet_{sheet_index:02d}.json.tmp"
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(cache_dir / f"sheet_{sheet_index:02d}.json")
+
+
+def propose_boundaries(
+    pdf_path: Path,
+    *,
+    case_id: str,
+    doc_id: str,
+    provider,
+    geometry: dict | None = None,
+    page_count: int | None = None,
+    sheet_paths: list[Path] | None = None,
+    fallback_cap_ratio: float = DEFAULT_FALLBACK_CAP_RATIO,
+    resume: bool = True,
+    progress=None,
+) -> dict:
+    """Runs one vision call per contact sheet and merges the responses.
+
+    Provider-injected and returns a plain dict -- no sys.exit, no provider
+    construction here -- so a test drives it with FixtureProvider and the CLI
+    wrapper (or a future orchestrator) owns process exit. This mirrors
+    run_checkpoint1.run_checkpoint1's contract deliberately.
+
+    Every vision call goes through provider.transcribe_image, which prepends the
+    "Read the image file at {path} and then:" imperative the recorded 9/9 label
+    failure requires. One sheet's parse failure never discards the others (their
+    calls are already paid for): a failed sheet's pages fall through to
+    unassigned_pages via merge_sheet_proposals.
+
+    Returns ``{segments, unassigned_pages, needs_full_page, warnings, method,
+    contact_sheets, per_sheet}`` -- enough for build_proposal_document to
+    assemble a schema-valid proposal without re-deriving anything.
+    """
+    import fitz
+
+    geometry = geometry or compute_sheet_geometry()
+    if page_count is None:
+        with fitz.open(pdf_path) as document:
+            page_count = document.page_count
+
+    batches = plan_sheets(page_count, geometry["pages_per_sheet"])
+    if sheet_paths is not None and len(sheet_paths) != len(batches):
+        raise SegmentationError(
+            f"got {len(sheet_paths)} sheet paths for {len(batches)} planned sheets"
+        )
+
+    cache_dir = _resume_dir(case_id, doc_id)
+    fingerprint = geometry_fingerprint(geometry, page_count=page_count)
+
+    per_sheet: list[dict] = []
+    contact_sheets: list[dict] = []
+    provider_metadata: dict | None = None
+
+    for index, pages in enumerate(batches):
+        sheet_path = sheet_paths[index] if sheet_paths else None
+        cached = _load_cached_sheet(cache_dir, index) if resume else None
+        # Invalidate a cache entry rendered under a different geometry: reusing
+        # it would compare a run against sheets it never actually saw -- the
+        # nasty, near-invisible bug geometry_fingerprint exists to prevent.
+        if cached is not None and cached.get("fingerprint") != fingerprint:
+            cached = None
+
+        if cached is not None:
+            parsed = cached["parsed"]
+            if provider_metadata is None:
+                provider_metadata = cached.get("provider_metadata")
+            if progress:
+                progress(f"sheet {index} (p{pages[0]}-{pages[-1]}) (cached)")
+        else:
+            prompt = build_segment_prompt(pages, geometry)
+            result = provider.transcribe_image(
+                Path(sheet_path), prompt, SEGMENT_PROMPT_VERSION
+            )
+            parsed = parse_segmentation_response(result.text, pages)
+            provider_metadata = result.metadata()
+            if resume:
+                _save_cached_sheet(cache_dir, index, {
+                    "fingerprint": fingerprint,
+                    "parsed": parsed,
+                    "raw_response": result.text,
+                    "provider_metadata": provider_metadata,
+                })
+            if progress:
+                status = "ok" if parsed.get("ok") else "parse-failed"
+                progress(f"sheet {index} (p{pages[0]}-{pages[-1]}) [{status}]")
+
+        per_sheet.append(parsed)
+        contact_sheets.append({
+            "sheet_index": index,
+            "path": str(sheet_path) if sheet_path else "",
+            "page_start": pages[0],
+            "page_end": pages[-1],
+            "page_numbers": list(pages),
+        })
+
+    merged = merge_sheet_proposals(per_sheet, page_count, sheet_pages=batches)
+
+    fallback = _plan_fallback(
+        merged["needs_full_page"], page_count, fallback_cap_ratio
+    )
+    if fallback["saturated"]:
+        merged["warnings"].append(
+            f"full-page fallback saturated: {len(fallback['pages'])} page(s) "
+            f"needed a full-page look but the cap is {fallback['cap']}; the crop "
+            f"ratio or grid is likely wrong for this bundle -- retune rather than "
+            f"spend the extra calls. Fallback skipped; these pages stay flagged."
+        )
+
+    method = {
+        "ocr_performed": False,
+        "method_version": METHOD_VERSION,
+        "mode": "vision_proposal",
+        "provider_name": getattr(provider, "provider_name", None),
+        "model_name": getattr(provider, "model_name", None),
+        "prompt_version": SEGMENT_PROMPT_VERSION,
+        "provider_metadata": provider_metadata,
+        "render_dpi": DEFAULT_FALLBACK_DPI,
+        "crop_ratio": geometry["crop_ratio"],
+        "grid_cols": geometry["cols"],
+        "grid_rows": geometry["rows"],
+        "sheet_pixel_budget": {
+            "long_edge": max(geometry["sheet_w"], geometry["sheet_h"]),
+            "total_pixels": geometry["total_pixels"],
+        },
+        "contact_sheets": contact_sheets,
+        "full_page_fallback": fallback,
+    }
+
+    return {
+        "segments": merged["segments"],
+        "unassigned_pages": merged["unassigned_pages"],
+        "needs_full_page": merged["needs_full_page"],
+        "warnings": merged["warnings"],
+        "method": method,
+        "contact_sheets": contact_sheets,
+        "per_sheet": per_sheet,
+    }
+
+
+def _plan_fallback(needs_full_page: list[int], page_count: int, cap_ratio: float) -> dict:
+    """Decides whether the full-page second look runs, and records the decision.
+
+    The plan's step F: a run needing more full-page looks than the cap allows is
+    a tuning signal, not a spend problem, so the whole fallback is SKIPPED and
+    the pages stay flagged for a human. This returns the schema's
+    full_page_fallback shape either way -- the artifact records what happened,
+    which is diagnosable later without re-running.
+
+    NOTE (step 5 scope): the actual second vision pass is not wired yet. This
+    plans and gates it -- the pages that WOULD be re-checked, whether the run is
+    saturated, the cap -- so the proposal honestly records the decision. Running
+    the batched re-render + re-call lands with the split step (step 6/7), where
+    a real E2E run first shows how often it even fires.
+    """
+    pages = sorted(set(needs_full_page))
+    cap = int(page_count * cap_ratio)
+    saturated = len(pages) > cap
+    return {
+        # Not triggered in step 5: planned-and-gated only, never executed yet.
+        "triggered": False,
+        "pages": pages,
+        "saturated": saturated,
+        "cap": cap,
+    }
+
+
+def build_proposal_document(
+    proposal: dict,
+    *,
+    case_id: str,
+    source_document_id: str,
+    source_file_name: str,
+    source_file_path: str,
+    page_count: int,
+    created_at: str,
+    updated_at: str | None = None,
+) -> dict:
+    """Assembles a segmentation_proposal.schema.json instance from a
+    propose_boundaries result.
+
+    Kept separate from propose_boundaries so the assembly is a pure, testable
+    dict transform -- and so a manual-mode skeleton (no provider) can build the
+    same envelope with an empty segment list down the road. review_status starts
+    pending on both the proposal and every segment: only a human advances them,
+    and split refuses until they do.
+    """
+    return {
+        "case_id": case_id,
+        "source_document_id": source_document_id,
+        "source_file_name": source_file_name,
+        "source_file_path": source_file_path,
+        "source_page_count": page_count,
+        "created_at": created_at,
+        "updated_at": updated_at or created_at,
+        "review_status": "pending",
+        "reviewed_by": None,
+        "reviewed_at": None,
+        "rejection_reason": None,
+        "method": proposal["method"],
+        "segments": proposal["segments"],
+        "unassigned_pages": proposal["unassigned_pages"],
+        "warnings": proposal["warnings"],
+    }
+
+
+# ------------------------------------------------------- approve/split --
+
+# What split refuses to proceed on. A proposal is ready only when a human moved
+# the case-level gate to approved AND every segment is approved or edited AND no
+# page is unassigned AND the ranges pass validate_segments. Any one failing
+# halts the whole thing -- the same all-or-nothing gate intake_case uses, for
+# the same reason: a single unreviewed boundary means a human has not actually
+# seen the split they would be authorizing.
+_SPLIT_READY_SEGMENT_STATES = {"approved", "edited"}
+
+
+def apply_approval(
+    proposal: dict,
+    *,
+    reviewer: str,
+    now: str,
+    segment_index: int | None = None,
+    edit: tuple[int, int] | None = None,
+) -> dict:
+    """Returns a copy of the proposal with an approval applied. Pure -- no I/O.
+
+    Three shapes, matching the CLI:
+      * segment_index None            -> approve the CASE-level gate and every
+                                          still-pending segment in one stroke.
+      * segment_index set, edit None  -> approve just that segment as proposed.
+      * segment_index set, edit set   -> change that segment's range to
+                                          (start, end) and mark it 'edited', so
+                                          the record shows the model was corrected.
+
+    Editing a range does not re-run validate_segments here; split does that on
+    the whole set before it touches anything, which is where an edit that
+    introduced an overlap or a reversed range must be caught.
+    """
+    import copy
+
+    updated = copy.deepcopy(proposal)
+    segments = updated.get("segments", [])
+
+    if segment_index is not None:
+        if segment_index < 0 or segment_index >= len(segments):
+            raise SegmentationError(
+                f"segment_index {segment_index} out of range (0..{len(segments) - 1})"
+            )
+        seg = segments[segment_index]
+        if edit is not None:
+            start, end = edit
+            seg["page_start"] = start
+            seg["page_end"] = end
+            seg["review_status"] = "edited"
+        else:
+            seg["review_status"] = "approved"
+    else:
+        # Case-level approval: advance the gate and sweep up pending segments.
+        # A segment already 'edited' or 'rejected' keeps its state -- this only
+        # promotes the ones a reviewer left pending, so a bulk approve never
+        # silently un-rejects something.
+        updated["review_status"] = "approved"
+        updated["reviewed_by"] = reviewer
+        updated["reviewed_at"] = now
+        for seg in segments:
+            if seg.get("review_status") == "pending":
+                seg["review_status"] = "approved"
+
+    updated["updated_at"] = now
+    return updated
+
+
+def split_readiness_errors(proposal: dict) -> list[str]:
+    """Every reason this proposal is not ready to split (empty means ready).
+
+    Reports all problems at once rather than one per run, like
+    validate_segments -- a reviewer fixing a proposal wants the whole list, not
+    a fix-one-rerun-find-the-next loop.
+    """
+    errors: list[str] = []
+    if proposal.get("review_status") != "approved":
+        errors.append(
+            f"case-level review_status is {proposal.get('review_status')!r}, not 'approved'"
+        )
+    unassigned = proposal.get("unassigned_pages") or []
+    if unassigned:
+        errors.append(
+            f"{len(unassigned)} page(s) are still unassigned and must be resolved "
+            f"before splitting: {unassigned[:20]}{'...' if len(unassigned) > 20 else ''}"
+        )
+    segments = proposal.get("segments", [])
+    if not segments:
+        errors.append("proposal has no segments to split")
+    for index, seg in enumerate(segments):
+        state = seg.get("review_status")
+        if state == "rejected":
+            errors.append(f"segment {index} (p{seg.get('page_start')}-{seg.get('page_end')}) was rejected")
+        elif state not in _SPLIT_READY_SEGMENT_STATES:
+            errors.append(
+                f"segment {index} (p{seg.get('page_start')}-{seg.get('page_end')}) is "
+                f"{state!r}, not approved/edited"
+            )
+    page_count = proposal.get("source_page_count")
+    if isinstance(page_count, int):
+        errors.extend(validate_segments(segments, page_count))
+    return errors
+
+
+def _next_document_index(manifest: dict) -> int:
+    """One past the highest DOC_NNN already in the manifest.
+
+    The bundle's own id is never reused -- it survives as a superseded record,
+    so its number stays taken and new documents number strictly after every
+    existing one.
+    """
+    highest = 0
+    for doc in manifest.get("documents", []):
+        doc_id = doc.get("document_id", "")
+        if doc_id.startswith("DOC_"):
+            try:
+                highest = max(highest, int(doc_id[4:]))
+            except ValueError:
+                continue
+    return highest + 1
+
+
+def split_bundle(
+    proposal: dict,
+    *,
+    case_id: str,
+    bundle_id: str,
+    bundle_pdf_path: Path,
+    proposal_path: str,
+    manifest: dict,
+    held_by: str,
+    run_id: str,
+    dao=None,
+    progress=None,
+) -> dict:
+    """Splits an approved bundle into per-document PDFs and updates the manifest.
+
+    Returns a status dict (no sys.exit, dao injected) -- run_checkpoint1's
+    contract. Order matters for recoverability: the new documents list is built
+    fully in memory, every child PDF is written to data/raw/, and only then is
+    the manifest updated in ONE call. A half-written manifest is unrecoverable
+    (an entry pointing at a file that does not exist), whereas an orphan
+    DOC_XXX.pdf with no manifest entry is harmless and re-runnable -- so the
+    manifest write is last and atomic.
+
+    Idempotent: if the manifest already holds an entry with this bundle's
+    source_file_name and one of the proposal's page ranges, the split already
+    ran and this reports already_split without rewriting anything.
+
+    Guardrail note: this WRITES to data/raw/. That is not a P-rule violation --
+    source-cases/ is the immutable raw material; data/raw/ is intake's own
+    output tree, and segmentation is part of intake, so it is a legitimate
+    writer here. It only ever CREATES new DOC_XXX.pdf files; it never modifies
+    the bundle PDF or any existing data/raw/ file.
+    """
+    import fitz
+
+    if dao is None:
+        import dao as dao  # noqa: PLW0127  (inject in tests; default to the real DAO)
+
+    errors = split_readiness_errors(proposal)
+    if errors:
+        return {"status": "not_ready", "errors": errors}
+
+    segments = proposal["segments"]
+    source_file_name = proposal["source_file_name"]
+
+    # Idempotency: a prior split leaves per-document entries carrying this
+    # bundle's source_file_name. If any already match a proposed range, treat
+    # the whole split as done rather than minting duplicate DOC_XXX.pdf files.
+    proposed_ranges = {(s["page_start"], s["page_end"]) for s in segments}
+    for doc in manifest.get("documents", []):
+        if (doc.get("source_file_name") == source_file_name
+                and (doc.get("source_page_start"), doc.get("source_page_end")) in proposed_ranges):
+            return {"status": "already_split",
+                    "message": f"{source_file_name} already has split entries in the manifest"}
+
+    start_index = _next_document_index(manifest)
+    raw_dir = ROOT / "data" / "raw" / case_id
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    new_documents: list[dict] = []
+    written_paths: list[Path] = []
+    file_sizes: dict[int, int] = {}
+
+    with fitz.open(bundle_pdf_path) as source:
+        for offset, seg in enumerate(segments):
+            doc_id = f"DOC_{start_index + offset:03d}"
+            out_path = raw_dir / f"{doc_id}.pdf"
+            with fitz.open() as out:
+                # insert_pdf is 0-based inclusive; segments are 1-based inclusive.
+                out.insert_pdf(source, from_page=seg["page_start"] - 1, to_page=seg["page_end"] - 1)
+                out.save(out_path)
+            written_paths.append(out_path)
+            file_sizes[seg["page_start"]] = out_path.stat().st_size  # size AFTER save
+            if progress:
+                progress(f"wrote {doc_id}.pdf (p{seg['page_start']}-{seg['page_end']})")
+
+    new_documents = build_manifest_entries(
+        segments,
+        case_id=case_id,
+        source_file_name=source_file_name,
+        proposal_path=proposal_path,
+        start_index=start_index,
+        file_sizes=file_sizes,
+    )
+
+    # Mark the bundle superseded rather than deleting it: deleting orphans the
+    # _intake_record.json crosswalk and _source_ledger.json references and drops
+    # the immutable-source -> logical-document audit trail. The schema requires
+    # ocr_status not_applicable and a null redacted_text_path on a superseded
+    # bundle, and a segmentation_proposal_path pointing at what superseded it.
+    bundle_fields = {
+        "downstream_disposition": "superseded_bundle",
+        "ocr_status": "not_applicable",
+        "redacted_text_path": None,
+        "segmentation_proposal_path": proposal_path,
+    }
+
+    ok, message = dao.replace_manifest_documents(
+        case_id, bundle_id, bundle_fields, new_documents, held_by, run_id,
+        purpose=f"split {source_file_name} into {len(new_documents)} document(s)",
+    )
+    if not ok:
+        # The child PDFs are on disk but the manifest did not update. They are
+        # orphans -- harmless and overwritten on a clean re-run (same doc ids,
+        # since start_index is recomputed from the unchanged manifest) -- so we
+        # leave them rather than deleting work a retry can reuse. The caller
+        # halts on a non-ok status; nothing downstream trusts these until the
+        # manifest names them.
+        return {"status": "manifest_write_failed", "message": message,
+                "orphan_pdfs": [str(p) for p in written_paths]}
+
+    return {
+        "status": "split",
+        "message": message,
+        "new_document_ids": [d["document_id"] for d in new_documents],
+        "new_pdf_paths": [str(p) for p in written_paths],
+    }
