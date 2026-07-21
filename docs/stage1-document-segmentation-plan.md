@@ -174,6 +174,46 @@ page height**. A top-1/3 crop captures the document opening. Two exceptions:
 344 pages at 3×4 → 29 sheets → ~44,000 tokens, versus one call per page (344
 calls, ~527,000 tokens). **~92% reduction.** The goal is met.
 
+### 8. First real end-to-end run — measured accuracy (build step 7)
+
+CASE_025 (the 110p bundle, intaken lightly as one DOC_001), `propose --grid 4x4
+--provider claude-cli`, RUN_20260721_001. Seven real vision calls, all parsed
+(0 parse failures), 0 unassigned pages, 0 `needs_full_page`, fallback not
+saturated. Scored against the 70-boundary hand baseline
+(`_segmentation_scratch/CASE_BASELINE_DOC_001/BASELINE.md`):
+
+| metric | value |
+|---|---|
+| precision | 0.95 |
+| recall | 0.81 |
+| **F1** | **0.88** |
+
+The errors landed exactly where the baseline predicted they would — the
+repeating-form runs:
+
+* **False positives (over-split, cheap): p2, p21, p23.** p2 is the 손해사정서
+  cover→body transition read as a new document; p21/p23 are mid-record pages in
+  the p18–26 의무기록 whose similar forms looked like new starts. A human
+  merges these from the sheets in seconds.
+* **False negatives (over-merge, costly): p36, p43, p66–73, p98–100.** The model
+  reads a repeating form as *continuation* and misses the boundary. p36/p43 are
+  the 세부내역서 front run where the title reprints only every ~7 pages; p66–73
+  is the back run where it reprints every page (8 receipts merged into one);
+  p98–100 is the same in the 영수증 run. This is the exact asymmetry the
+  baseline's "채점에서 가장 틀리기 쉬운 구간" note called out.
+
+The whole chain was exercised live: sheets → 7 vision calls → score → approve →
+split (60 DOC_XXX PDFs, bundle marked superseded, 110 pages covered contiguous
+with no gap/overlap) → **checkpoint 1 ran real dual-path OCR on a resulting DOC
+and passed** (p1 손해사정서 표지, both reads agreed, classified `other`). So a
+segmentation output feeds the existing pipeline unchanged.
+
+Not yet tried: 3×4 (larger cells may help the model tell repeating small-print
+forms apart, addressing the over-merge FNs). The 4×4/3×4 choice from finding 4
+stands as SETTLED for legibility; whether 3×4 measurably lifts recall on the
+repeating-form runs is a separate, now-answerable question — the scorer makes it
+a number, not a guess.
+
 ---
 
 ## Branch strategy

@@ -1125,3 +1125,26 @@ def test_split_reports_orphans_when_the_manifest_write_fails(tmp_path):
         sc.ROOT = orig_root
     assert out["status"] == "manifest_write_failed"
     assert len(out["orphan_pdfs"]) == 1  # the child PDF exists but nothing trusts it
+
+
+# ------------------------------------------------------------- CLI --
+
+def test_grid_parser_accepts_colsxrows():
+    assert sc._parse_grid("4x4") == (4, 4)
+    assert sc._parse_grid("3X4") == (3, 4)  # case-insensitive
+
+
+def test_grid_parser_rejects_garbage():
+    for bad in ["4", "4x", "axb", "4x4x4", ""]:
+        with pytest.raises(sc.SegmentationError):
+            sc._parse_grid(bad)
+
+
+def test_proposal_filename_round_trips_through_schema_name_for():
+    """The whole reason no DAO carve-out was needed: the per-bundle filename must
+    resolve back to the proposal schema via the standard suffix stripping."""
+    from _validation import schema_name_for
+    from pathlib import Path
+    name = sc.proposal_filename("DOC_007")
+    assert name == "segmentation_proposal_DOC_007.json"
+    assert schema_name_for(Path(name)) == "segmentation_proposal.schema.json"
