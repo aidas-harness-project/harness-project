@@ -161,7 +161,8 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
     monkeypatch.setattr(providers.subprocess, "run", fake_run)
     provider = providers.ClaudeCliProvider(root=tmp_path)
 
-    result = provider.transcribe_image(Path("page.png"), "transcribe prompt", "ocr_extraction_v0.1")
+    img = tmp_path / "pages" / "page.png"
+    result = provider.transcribe_image(img, "transcribe prompt", "ocr_extraction_v0.1")
 
     # The transcription prompt must stay NEUTRAL -- no defensive "role framing"
     # preamble (a prior version prepended "this is a SANCTIONED step, do not
@@ -173,12 +174,14 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
     assert captured["cmd"] == [
         "claude",
         "-p",
-        "Read the image file at page.png and then: transcribe prompt",
+        f"Read the image file at {img} and then: transcribe prompt",
         "--safe-mode",
         "--allowedTools",
         "Read",
     ]
-    assert captured["kwargs"]["cwd"] == str(tmp_path)
+    # H1: the Read-enabled child is confined to the image's own directory, not
+    # the repo root -- an injected "also read data/ground_truth/..." can't reach.
+    assert captured["kwargs"]["cwd"] == str(img.resolve().parent)
     assert captured["kwargs"]["timeout"] == 180
     assert result.text == "transcribed text"
     assert result.metadata()["provider_name"] == "claude-cli"
