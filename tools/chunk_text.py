@@ -9,8 +9,9 @@ exact substrings, never regenerates text via a model call, so that
 guarantee is structural rather than a prompting instruction.
 
 One chunk per page (page_start == page_end always) -- simplest, guaranteed-
-correct boundaries. Runs once per case across every document that has a
-redacted_text.md, producing one combined result (see
+correct boundaries. Runs once per case across every text document that has
+a redacted_text.md, producing one combined result and an explicit exclusion
+list for human-verified non-text documents (see
 page_chunks.schema.json's "for a case's documents" framing -- one file for
 the whole case, not one per document). chunk_id is sequential across every
 document passed in, in the order given.
@@ -21,7 +22,8 @@ stdout, and document-pipeline writes page_chunks.json via
 dao.py write-contract, so the write stays locked/schema-validated/backed up.
 
 Usage:
-    python tools/chunk_text.py CASE_ID DOC_ID [DOC_ID ...]
+    python tools/chunk_text.py CASE_ID DOC_ID [DOC_ID ...] \
+        --exclude-non-text DOC_ID
 """
 import argparse
 import json
@@ -78,19 +80,40 @@ def chunk_document(case_id: str, doc_id: str, chunk_id_start: int) -> tuple[list
     return chunks, n
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("case_id")
-    ap.add_argument("doc_ids", nargs="+", metavar="DOC_ID")
-    args = ap.parse_args()
+def assemble_chunks(case_id: str, doc_ids: list[str], excluded_non_text: list[str]) -> dict:
+    """Build checkpoint 3 without fabricating text for visual evidence."""
+    overlap = sorted(set(doc_ids) & set(excluded_non_text))
+    if overlap:
+        sys.exit(f"error: document(s) cannot be both chunked and excluded as non-text: {overlap}")
+    if len(set(excluded_non_text)) != len(excluded_non_text):
+        sys.exit("error: duplicate --exclude-non-text document id")
+    if not doc_ids and not excluded_non_text:
+        sys.exit("error: provide at least one text DOC_ID or --exclude-non-text DOC_ID")
 
     all_chunks = []
     next_id = 1
-    for doc_id in args.doc_ids:
-        chunks, next_id = chunk_document(args.case_id, doc_id, next_id)
+    for doc_id in doc_ids:
+        chunks, next_id = chunk_document(case_id, doc_id, next_id)
         all_chunks.extend(chunks)
+    return {
+        "chunks": all_chunks,
+        "excluded_documents": [
+            {"document_id": doc_id, "reason": "non_text_expert_review_only"}
+            for doc_id in excluded_non_text
+        ],
+    }
 
-    print(json.dumps({"chunks": all_chunks}, ensure_ascii=False))
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("case_id")
+    ap.add_argument("doc_ids", nargs="*", metavar="DOC_ID")
+    ap.add_argument(
+        "--exclude-non-text", action="append", default=[], metavar="DOC_ID",
+        help="Human-verified non-text document omitted from chunks and routed to expert review only",
+    )
+    args = ap.parse_args()
+    print(json.dumps(assemble_chunks(args.case_id, args.doc_ids, args.exclude_non_text), ensure_ascii=False))
 
 
 if __name__ == "__main__":

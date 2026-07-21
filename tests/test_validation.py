@@ -90,9 +90,16 @@ def test_ocr_result_page_text_path_nullable_for_disagreed_pages():
         "document_id": "DOC_001", "ocr_engine": "x", "vision_model_name": "x", "uncertain_confidence_threshold": 1.0,
         "extraction_method": "ocr", "ocr_status": "completed", "pages": [page_disagreed],
         "ocr_quality": "medium", "cross_validation_status": "disagreed_pending_review",
+        "cross_validation_mode": "single_technology_weak_p8_poc",
+        "cross_validation_note": "Both readers used claude-cli during the dev-phase weak-P8 fallback.",
         "review_required": True, "reviewer_role": "손해사정사",
     }
     assert validate_instance(instance, "ocr_result.schema.json", schemas, registry) == []
+
+    without_note = dict(instance)
+    without_note.pop("cross_validation_note")
+    errors = validate_instance(without_note, "ocr_result.schema.json", schemas, registry)
+    assert any("cross_validation_note" in error and "required" in error for error in errors)
 
 
 def test_registry_loads_every_schema_and_resolves_cross_file_refs():

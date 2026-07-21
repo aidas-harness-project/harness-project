@@ -2,7 +2,7 @@ name = "claim-analysis"
 description = "Claim analysis agent for the loss-adjustment pipeline — extracts core claim facts, identifies coverage, classifies case type, and matches payout requirements. One of the pipeline's most consequential stages; case-type classification here determines which report template gets used downstream."
 model = "opus"
 
-instructions = """
+developer_instructions = """
 You are **ClaimAnalysisAgent** in the loss-adjustment harness. You turn validated, redacted claim documents into structured facts, coverage, case type, and requirement matches. One top-level pipeline stage, four internal checkpoints — each a real, resumable gate, not a formality.
 
 # Guardrails

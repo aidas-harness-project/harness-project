@@ -79,3 +79,57 @@ def test_write_reviewed_draft_rejects_invalid_version(isolated_dao, make_args, t
 
     with pytest.raises(SystemExit):
         dao.cmd_write_reviewed_draft(args)
+
+
+def test_read_page_text_returns_only_validated_processed_page(isolated_dao, make_args, capsys):
+    page_path = isolated_dao / "data" / "processed" / "CASE_009" / "DOC_001" / "page_001.md"
+    page_path.parent.mkdir(parents=True)
+    page_path.write_text("검증된 페이지 텍스트", encoding="utf-8")
+
+    rc = dao.cmd_read_page_text(make_args(page=1))
+
+    assert rc == 0
+    assert capsys.readouterr().out == "검증된 페이지 텍스트"
+
+
+def test_read_page_text_fails_when_checkpoint1_page_is_missing(isolated_dao, make_args, capsys):
+    rc = dao.cmd_read_page_text(make_args(page=3))
+
+    assert rc == 1
+    assert "NOT_EXTRACTED" in capsys.readouterr().out
+
+
+def test_read_document_text_reports_non_text_instead_of_requesting_reextraction(
+    isolated_dao, make_args, capsys
+):
+    manifest_path = isolated_dao / "outputs" / "CASE_009" / "document_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    dao.atomic_write_json(manifest_path, {
+        "case_id": "CASE_009",
+        "documents": [{
+            "document_id": "DOC_001",
+            "file_name": "DOC_001.pdf",
+            "file_path": "data/raw/CASE_009/DOC_001.pdf",
+            "file_format": "pdf",
+            "file_size_bytes": 1,
+            "ocr_status": "not_applicable",
+            "downstream_disposition": "expert_review_only",
+        }],
+    })
+
+    rc = dao.cmd_read_document_text(make_args())
+
+    assert rc == 1
+    assert "NON_TEXT_EXPERT_REVIEW_ONLY" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("page", [0, -1])
+def test_read_page_text_rejects_non_positive_page_numbers(isolated_dao, make_args, capsys, page):
+    unexpected_path = isolated_dao / "data" / "processed" / "CASE_009" / "DOC_001" / f"page_{page:03d}.md"
+    unexpected_path.parent.mkdir(parents=True)
+    unexpected_path.write_text("must not be read", encoding="utf-8")
+
+    rc = dao.cmd_read_page_text(make_args(page=page))
+
+    assert rc == 1
+    assert capsys.readouterr().out == f"ERROR: page must be >= 1 (got {page})\n"

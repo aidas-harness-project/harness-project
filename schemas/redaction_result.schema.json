@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "redaction_result.schema.json",
   "title": "redaction_result_{document_id}.json -- PII redaction record, one file per document v0.2",
-  "description": "Record of what was redacted from one document's OCR'd text before it entered the processed layer. Produced by document-pipeline's checkpoint 2 -- one file per document (redaction_result_{document_id}.json), since checkpoint 2 runs once per document and a single shared file across documents would get silently overwritten by each subsequent document's write (write-contract replaces the whole file; see known-gaps.md's audit of this exact failure mode, first found in ocr_result.json). v0.1 nested everything under a documents: [] array to cover multiple documents in one file -- v0.2 flattens that away since each file now covers exactly one document. Mechanism is a general LLM for now (see open-decisions.md #1 -- OpenMed, a self-hosted PHI/PII NER suite, is a flagged candidate replacement, not yet adopted).",
+  "description": "Record of what was redacted from one document's OCR'd text before it entered the processed layer. Produced by document-pipeline's checkpoint 2 through tools/redact_document.py, which redacts through the tools/redaction.py Redactor abstraction (today an LLM provider that only IDENTIFIES PII spans, which are then substituted deterministically in the source so non-PII is preserved by construction; a dedicated de-identification model such as OpenMed NER can drop in -- see open-decisions.md #1) -- one file per document. A possible PII leak (structured PII surviving in the output, or a model-named value not present verbatim in the source) hard-fails the document and this file is never written; over-redaction risk sets review_required true.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -10,7 +10,7 @@
       "properties": {
         "method": {
           "type": "string",
-          "description": "e.g. 'general_llm' or 'openmed_ner' once adopted"
+          "description": "Redactor method label, e.g. 'llm_span_redaction' (the current LlmRedactor: LLM identifies PII spans, substitution is deterministic) or 'openmed_ner' once a dedicated de-identification model is adopted"
         },
         "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
         "redacted_text_path": {

@@ -27,6 +27,17 @@ For skills: the containing folder gets a `-dev` suffix (e.g. `harness-guardrails
 
 This convention is itself dev-only guidance — it stops mattering once there's no dev/prod split left to track.
 
+## (Dev-only, temporary) P8 same-provider fallback
+
+**Dev-phase default:** use `claude-cli` for both P8 readers (checkpoint 2's redaction default is `codex-cli`). Every available provider (claude-cli / codex-cli / openai-api) is LLM-vision-backed, so this — and any two-LLM reader pair — is a **documented weak-P8**, not equivalent to dual-technology cross-validation. This is the PoC provider strategy: validate the pipeline on commercial LLMs while a genuinely technology-independent reader remains unavailable (see `open-decisions.md` #4).
+
+The switch condition is a **genuinely technology-independent second reader (a real OCR engine) validated against real Korean case documents** — which does not exist in this repo today. An earlier offline Tesseract/Ollama stack was built to be that reader but never transcribed real pages reliably (`known-gaps.md` item 16) and was removed. Until a real OCR engine is added and proven on real content, treat every configurable reader pair as weak P8 and record it honestly.
+
+- **Record it honestly in `ocr_result.json`**: `reader_a`/`reader_b` = `"claude-cli:claude-cli"`, `cross_validation_mode = "single_technology_weak_p8_poc"`, and a `cross_validation_note` stating no independent second technology was available at run time. Never let a same-provider run look like genuine P8.
+- **Disagreement handling is unchanged — hard-halt stays.** What is relaxed is *reader independence*, never *disagreement tolerance*. A genuine content disagreement between the two claude-cli reads still halts with no tolerance threshold.
+- Each `claude-cli` reader is invoked with a **neutral transcription prompt** (`llm_providers.py` `ClaudeCliProvider.transcribe_image`: the shared `TRANSCRIBE_PROMPT` referencing the image as an explicit Read instruction — no "role framing" preamble). `ClaudeCliProvider._run()` enforces `--safe-mode`, so child `claude -p` sessions do **not** inherit `CLAUDE.md`, hooks, or skills context. **Do not reintroduce a defensive framing block** ("this is a SANCTIONED step, do not refuse, do not mention guardrails…"): that language reads as a prompt-injection signal and *causes* the very self-refusal it's trying to prevent — it was tried on DOC_001, failed, and was reverted. No `CLAUDE.md` carve-out is needed, and none should exist.
+- **Dev-only. Must not ship to prod** — in production `harness-guardrails` P8 (genuine dual-path independence) applies. Remove this same-provider fallback once a real OCR engine gives a genuinely technology-independent reader pair (`open-decisions.md` #4).
+
 ## D4. Directory/stage references must stay in sync with reality
 
 Skill and agent docs that name specific directories or pipeline stages must stay in sync with the real structure. When the project's directory structure or stage names change, every doc referencing the old path/name gets updated in the same change — not left stale for someone to trip over later. If a stale reference is found (a skill says one thing, reality is another), that mismatch gets fixed immediately, not noted and deferred.

@@ -35,6 +35,7 @@ cannot do; the orchestrator/agent owns that loop.
 
 Subcommands:
     read-document-text CASE_ID DOC_ID
+    read-page-text CASE_ID DOC_ID PAGE
     read-ground-truth CASE_ID --caller-stage STAGE --version {v1|v2}
     read-contract CASE_ID FILENAME
     write-contract CASE_ID FILENAME --data-file PATH --schema-name NAME
@@ -196,6 +197,18 @@ def save_run_state(case_id: str, state: dict) -> None:
 # ------------------------------------------------------------------ nouns --
 
 def cmd_read_document_text(args):
+    manifest = read_contract_data(args.case_id, "document_manifest.json")
+    if manifest is not None:
+        entry = next(
+            (item for item in manifest.get("documents", []) if item.get("document_id") == args.doc_id),
+            None,
+        )
+        if entry and entry.get("downstream_disposition") == "expert_review_only":
+            print(
+                f"NON_TEXT_EXPERT_REVIEW_ONLY: {args.doc_id} is human-verified non-text visual evidence. "
+                "No processed text exists and automated downstream use is prohibited."
+            )
+            return 1
     processed = DATA / "processed" / args.case_id / args.doc_id
     redacted = processed / "redacted_text.md"
     if redacted.exists():
@@ -204,6 +217,24 @@ def cmd_read_document_text(args):
     print(f"NOT_EXTRACTED: {args.doc_id} has no processed text yet. "
           f"Invoke document-pipeline to produce it -- do not read the raw source directly (harness-guardrails P2).")
     return 1
+
+
+def cmd_read_page_text(args):
+    """Read one validated checkpoint-1 page from the processed layer.
+
+    This command exists for checkpoint 2 so redaction never opens a raw
+    source or reaches into data/processed outside the DAO boundary.
+    """
+    if args.page < 1:
+        print(f"ERROR: page must be >= 1 (got {args.page})")
+        return 1
+    page_path = processed_dir(args.case_id, args.doc_id) / f"page_{args.page:03d}.md"
+    if not page_path.exists():
+        print(f"NOT_EXTRACTED: {args.doc_id} page {args.page} has no validated processed text yet. "
+              "Complete document-pipeline checkpoint 1 first.")
+        return 1
+    print(page_path.read_text(encoding="utf-8"), end="")
+    return 0
 
 
 def human_review_flag_path(case_id: str, version: str) -> Path:
@@ -233,6 +264,12 @@ def cmd_read_contract(args):
         return 1
     print(p.read_text(encoding="utf-8"))
     return 0
+
+
+def read_contract_data(case_id: str, filename: str):
+    """DAO-owned structured contract read for in-process pipeline tools."""
+    p = case_dir(case_id) / filename
+    return load_json(p)
 
 
 def cmd_write_contract(args):
@@ -879,6 +916,10 @@ def main():
 
     p = sub.add_parser("read-document-text"); p.add_argument("case_id"); p.add_argument("doc_id")
     p.set_defaults(fn=cmd_read_document_text)
+
+    p = sub.add_parser("read-page-text"); p.add_argument("case_id"); p.add_argument("doc_id")
+    p.add_argument("page", type=int)
+    p.set_defaults(fn=cmd_read_page_text)
 
     p = sub.add_parser("read-ground-truth"); p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)
     p.add_argument("--version", required=True, choices=["v1", "v2"])

@@ -85,8 +85,9 @@ the English-only rule):
 
 ## Running the pipeline
 
-Open this repository in Claude Code and ask in natural language; the
-`loss-adjustment-pipeline` skill orchestrates the agents in order.
+Open this repository in Claude Code or a Codex-compatible workspace and ask
+in natural language; the `loss-adjustment-pipeline` skill orchestrates the
+agents in order.
 
 ```
 "Process CASE_003"          -> full initial run (intake through evaluation)
@@ -100,6 +101,29 @@ Run-mode detection (initial / full rerun / partial rerun / resume-from-
 interruption) and per-stage rules are defined in
 `.claude/skills/loss-adjustment-pipeline/SKILL.md`.
 
+Checkpoint 1's P8 extraction gate is provider-configurable. `claude-cli`
+remains the backward-compatible default. Codex environments can select
+`codex-cli` for `--reader-a`, `--reader-b`, `--comparator`, and
+`--classifier-provider`; it runs `codex exec`, reuses the local Codex login,
+and does not require an API key. `CODEX_API_KEY` is only an optional fallback
+for unattended CI. The provider accepts an optional model through the
+existing `--*-model` arguments; set `HARNESS_CODEX_COMMAND` to override the
+`codex` executable. API-backed providers such as `openai-api` remain
+available when their credentials are present. All available providers are
+LLM-vision-backed, so any P8 reader pair is a documented weak cross-validation
+(`cross_validation_mode: single_technology_weak_p8_poc`); a genuinely
+technology-independent reader (a real OCR engine) is deferred -- see
+`open-decisions.md` #4.
+
+A CLI child that reads document images runs with a secret-scrubbed environment
+(other providers' API keys are stripped so a prompt-injected read can't
+exfiltrate them). A deployment that backs a CLI with a cloud provider whose
+credentials are not prefixed by the CLI's family name -- claude-via-Bedrock
+(`AWS_SECRET_ACCESS_KEY`), claude-via-Vertex (`GOOGLE_*`) -- must add those
+prefixes via `HARNESS_CHILD_ENV_KEEP_PREFIXES` (comma-separated) so the child
+keeps the creds it needs. Checkpoint-2 redaction defaults to `--provider
+codex-cli` (override with `HARNESS_REDACTION_PROVIDER`).
+
 ## Tools
 
 | Command | Purpose |
@@ -108,6 +132,7 @@ interruption) and per-stage rules are defined in
 | `python tools/validate_output.py <file.json>` | Standalone schema validation |
 | `python tools/intake_case.py <source-cases folder> <CASE_ID>` | Case intake with the D2 per-file review ledger |
 | `python tools/document_assembly.py --sections-file <spec.json> --held-by <agent> --run-id <run>` | Renders narrative reports, auto-generates `[E#]` citation tags and sidecar |
+| `python tools/redact_document.py CASE_ID DOC_ID --held-by <agent> --run-id <run>` | Checkpoint-2 PII redaction via the Redactor abstraction: the LLM identifies PII spans, substitution is deterministic; a detected leak hard-fails the document |
 | `python tools/sync_agents.py` | Regenerates `.codex/agents/*.toml` and `.agents/skills/*/SKILL.md` from canonical `.claude/` definitions |
 | `pytest` | Runs the DAO/tooling test suite |
 

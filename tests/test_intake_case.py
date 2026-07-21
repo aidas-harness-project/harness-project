@@ -5,9 +5,9 @@ DAO-backed write, and the --execute path's DOC_XXX/GT_XXX rename +
 manifest-write + _intake_record.json crosswalk end to end (known-gaps.md
 item 4: this path had zero coverage before this file).
 
-No real `claude` CLI calls -- these tests never touch --init-ledger's
-content pre-check (that's test_intake_content_scan.py's job); ledgers
-here are written directly, already resolved, to exercise --execute.
+No real provider calls -- most tests never touch --init-ledger's content
+pre-check (that's test_intake_content_scan.py's job); ledgers here are
+written directly, already resolved, to exercise --execute.
 """
 import json
 
@@ -137,7 +137,7 @@ def _make_source_case(tmp_path, name="test-case"):
 
 def _write_approved_ledger(case_id, source_dir, files_and_status):
     """files_and_status: list of (file_name, classification, review_status).
-    Bypasses --init-ledger's real content-scan subprocess call entirely --
+    Bypasses --init-ledger's real content-scan provider call entirely --
     these tests exercise --execute, not D2's content check (that's
     test_intake_content_scan.py's job)."""
     entries = []
@@ -257,3 +257,39 @@ def test_dry_run_does_not_write_anything(isolated_intake, monkeypatch, capsys):
     assert not (isolated_intake / "outputs").exists()
     assert not (isolated_intake / "data").exists()
     assert "dry run" in capsys.readouterr().out
+
+
+def test_init_ledger_uses_scan_provider_and_leaves_files_pending(isolated_intake, monkeypatch):
+    src = _make_source_case(isolated_intake)
+    scan_calls = []
+
+    class ScanProvider:
+        provider_name = "fixture"
+        model_name = "scan-model"
+
+    def fake_build_scan_provider(scan_provider_name=None, scan_model=None, env=None):
+        scan_calls.append((scan_provider_name, scan_model))
+        return ScanProvider()
+
+    def fake_scan(pdf_path, case_id, index, n_pages=intake_case.CONTENT_SCAN_PAGES, provider=None):
+        return {
+            "flagged": True,
+            "evidence": f"FLAGGED: scan-provider={provider.provider_name}",
+            "pages_checked": 1,
+            "provider_metadata": {"provider_name": provider.provider_name, "model_name": provider.model_name},
+        }
+
+    monkeypatch.setattr(intake_case, "build_scan_provider", fake_build_scan_provider)
+    monkeypatch.setattr(intake_case, "scan_for_answer_key_content", fake_scan)
+
+    _run_main(
+        monkeypatch,
+        [str(src), "CASE_009", "--init-ledger", "--scan-provider", "fixture", "--scan-model", "scan-model"],
+    )
+
+    ledger = json.loads((isolated_intake / "outputs" / "CASE_009" / "_source_ledger.json").read_text(encoding="utf-8"))
+    raw_entries = [entry for entry in ledger["files"] if entry["classification"] == "raw"]
+    assert scan_calls == [("fixture", "scan-model")]
+    assert raw_entries, "test setup should include raw-proposed PDFs"
+    assert all(entry["review_status"] == "pending" for entry in raw_entries)
+    assert all("content_warning" in entry for entry in raw_entries)

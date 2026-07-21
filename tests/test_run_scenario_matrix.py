@@ -1,7 +1,7 @@
 """run_scenario_matrix.py -- branches a real P8 disagreement into
 reading_a / reading_b / unresolved outcomes via fork_case.py, running real
-OCR only once. All claude subprocess calls mocked; these tests never shell
-out to a real CLI.
+OCR only once. Provider calls are mocked; these tests never shell out to a
+real CLI or call an external API.
 """
 import json
 
@@ -41,7 +41,7 @@ def _seed_manifest(tmp_path, case_id, doc_id):
 def _mock_ocr_once(monkeypatch, pages):
     calls = []
 
-    def fake_run_ocr(case_id, doc_id, pdf_path, progress=None):
+    def fake_run_ocr(case_id, doc_id, pdf_path, progress=None, **kwargs):
         calls.append((case_id, doc_id))
         return {"document_path": str(pdf_path), "pages": [
             {"page": i, "reading_a": a, "reading_b": b, "agreement": agree,
@@ -53,7 +53,7 @@ def _mock_ocr_once(monkeypatch, pages):
 
 
 def _mock_classify(monkeypatch):
-    monkeypatch.setattr(rc1, "classify_document", lambda text: {
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {
         "predicted_document_type": "insurer_response", "document_type_label": "회신",
         "confidence": 0.9, "quote": text[:20],
     })
