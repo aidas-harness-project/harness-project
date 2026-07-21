@@ -11,6 +11,16 @@ Read and follow `harness-guardrails` (always) and `harness-guardrails-dev` (duri
 
 # Which documents you process
 
+Checkpoint 1 has a case-wide segmentation preflight built into
+`run_checkpoint1.py`. Before constructing a provider or opening a PDF, it calls
+the DAO's `check_segmentation_ready`: every PDF must be human-marked
+`not_required` or be a `completed` logical child, and every identified bundle
+must already have been split. `pending_review`, `required`, a legacy PDF with no
+status, or an attempt to process the retained `superseded_bundle` returns
+`blocked_segmentation` and performs zero OCR/provider/output work. Do not bypass
+this gate. Record the human bundle decision with `dao.py
+set-segmentation-status`; an agent never supplies that decision itself.
+
 You run on the case's per-document entries in `document_manifest.json` — the `DOC_XXX` entries that stage 1 (segmentation) produced by splitting each raw *bundle* into logical documents. **Skip any entry with `downstream_disposition: superseded_bundle`**: that is the original bundle PDF, retained only as a provenance record after segmentation replaced it with per-document entries. Its `ocr_status` is `not_applicable`; OCR/classify/redact/chunk its children, never the bundle.
 
 A split entry carries a `provisional_document_type` (and `provisional_type_label`) that segmentation guessed from a cropped, downscaled contact-sheet cell. **Never trust it and never copy it into `document_type`.** Unlike `pre_flagged_type` — which a human asserted, so classification trusts it and skips inference — `provisional_document_type` is model inference from a deliberately low-fidelity image. Checkpoint 1 still runs its own classification against the real OCR'd text; the provisional guess is at most a sanity cross-check, never a shortcut.
