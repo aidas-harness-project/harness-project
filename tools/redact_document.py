@@ -5,11 +5,14 @@ the `redaction.Redactor` abstraction (today: `LlmRedactor` over any configured
 provider), so a future dedicated de-identification model can drop in without
 changing this tool. Dev-phase default provider is `codex-cli`.
 
-Every page's redaction is fidelity-checked (redaction.verify_fidelity): if the
-model dropped, reordered, or fabricated any non-PII text -- or its self-reported
-item count doesn't match the placeholders actually present -- the page's warnings
-are recorded and the document's redaction_result is marked review_required. A
-redaction is never trusted silently.
+Redaction is span-substitution, not page rewriting: the model only IDENTIFIES
+PII values and `redaction.py` deterministically replaces them in the source, so
+non-PII content is preserved by construction (omission/fabrication impossible).
+A possible PII leak -- structured PII surviving in the output, or a model-named
+value not found verbatim in the source -- HARD-FAILS the document (RedactionLeakError,
+nothing written), like a P8 disagreement. Over-redaction risk (a span left
+un-redacted to avoid corrupting kept text) is privacy-safe and only sets
+review_required. A redaction is never trusted silently.
 
 Usage:
     python tools/redact_document.py CASE_ID DOC_ID \
@@ -35,7 +38,7 @@ from llm_providers import (
     SUPPORTED_PROVIDERS,
     build_provider,
 )
-from redaction import PROMPT_VERSION, LlmRedactor, RedactionParseError
+from redaction import PROMPT_VERSION, LlmRedactor, RedactionLeakError, RedactionParseError
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -66,28 +69,32 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
     total_items = 0
     categories: set[str] = set()
     provider_metadata = None
-    fidelity_warnings: list[str] = []
+    review_warnings: list[str] = []
     for page in ocr_result.get("pages", []):
         page_number = page["page"]
         text = _dao("read-page-text", case_id, doc_id, str(page_number))
+        # redact_page HARD-FAILS (RedactionLeakError) on any detected possible
+        # PII leak -- that propagates out of this function and nothing is
+        # written, blocking the document exactly like a P8 disagreement. Only a
+        # leak-free page returns an outcome.
         outcome = redactor.redact_page(text)
         redacted_pages.append(f"<<<PAGE page={page_number}>>>\n{outcome.redacted_text}")
         total_items += outcome.items_redacted
         categories.update(outcome.categories)
         provider_metadata = outcome.provider_metadata
-        for warning in outcome.fidelity_warnings:
-            fidelity_warnings.append(f"page {page_number}: {warning}")
+        for warning in outcome.review_warnings:
+            review_warnings.append(f"page {page_number}: {warning}")
 
     if not redacted_pages:
         raise RuntimeError(f"checkpoint 2 blocked: {doc_id} has no validated pages")
 
-    # 4-1/4-2/4-3: any fidelity drift or count mismatch on any page forces human
-    # review. review_required is COMPUTED from the verification result, never a
-    # hardcoded False -- a downstream agent may raise it further but cannot lower
-    # this floor.
-    review_required = bool(fidelity_warnings)
+    # review_required is COMPUTED, never hardcoded. A leak already hard-failed
+    # above (no write), so what remains here is over-redaction risk (a span left
+    # un-redacted because replace-all was unsafe) -- privacy-safe but worth a
+    # human look. A downstream agent may raise this floor, never lower it.
+    review_required = bool(review_warnings)
 
-    warnings: list[str] = list(fidelity_warnings)
+    warnings: list[str] = list(review_warnings)
     if provider_metadata:
         warnings.append(
             "Provider execution metadata is recorded in model_info.provider_metadata; "
@@ -160,6 +167,9 @@ def main() -> None:
         provider = build_provider(ProviderConfig(args.provider, args.model), env=os.environ, root=ROOT)
         redactor = LlmRedactor(provider)
         result = redact_document(args.case_id, args.doc_id, args.held_by, args.run_id, redactor)
+    except RedactionLeakError as exc:
+        # Possible PII leak detected -- nothing was written. Block the document.
+        sys.exit(f"REDACTION BLOCKED ({args.doc_id}): possible PII leak -- {exc}")
     except (ProviderConfigError, ProviderExecutionError, RedactionParseError, RuntimeError) as exc:
         sys.exit(f"error: {exc}")
     print(json.dumps(result, ensure_ascii=False, indent=2))
