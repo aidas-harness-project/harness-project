@@ -1150,7 +1150,7 @@ as one-sided fabricated content per the item-11 fix. With
 residual path is a second line of defense that has not been independently
 hardened and is not urgent to close before it recurs in practice.
 
-## 18. Stage 1 segmentation: repeating-form split/merge granularity is document-type-dependent -- OPEN
+## 18. Stage 1 segmentation: repeating-form split/merge granularity -- RESOLVED 2026-07-21
 
 Two real bundles pulled the segmentation granularity rule in opposite
 directions, and they are both right -- for different document types.
@@ -1163,22 +1163,21 @@ directions, and they are both right -- for different document types.
   claim spanning 14 pages, its title just a repeated page header -- it must
   MERGE, not split.
 
-Same visual pattern (repeated title on consecutive same-form pages), opposite
-correct answer. The settled direction (owner decision, 2026-07-21) is
-**amount-based**: a page that is an independent transaction with its own
-amount (영수증 / 계산서 / 납입확인서) starts a new document; a page that
-continues one claim or record (내역서 / 세부내역 / 차트 / 의무기록, title
-reprinted as a header) is a continuation. This is NOT yet implemented -- the
-current `--refine` splits every titled page in a long run regardless of type,
-so it over-splits record runs like CASE_026's. What's needed: make the split
-decision type-aware (the full-page verdict already surfaces
-`starts_new_document` + a type label + "its own totals/dates" reasoning in
-`FULL_PAGE_PROMPT`, so the signal exists -- it just isn't gated on document
-class yet), and reconcile CASE_025's back-run baseline to the amount-based rule
-(under it, that run's per-page split may itself be wrong for the 내역서 pages).
+The owner rejected the type/amount-based distinction later on 2026-07-21 and
+settled a deliberately split-biased operational rule instead:
 
-NOT the same as the merge fix landed 2026-07-21: that closed a *sheet-edge
+* a page with its own title block starts a new logical document, even when the
+  same title repeats on consecutive pages;
+* a page with no title of its own after full-page inspection continues the
+  preceding document;
+* an unreadable or failed full-page verdict remains flagged for human review.
+
+Implemented in `FULL_PAGE_PROMPT` v0.2. Both crop-nominated
+`needs_full_page` pages and optional long-segment refinement use that prompt and
+share a versioned per-page cache. Tests pin the title/no-title wording and the
+targeted fallback behavior.
+
+This remains distinct from the merge fix landed 2026-07-21: that closed a *sheet-edge
 continuation omission* (a page the model correctly read as a continuation but
 forgot to list, absorbed into its enclosing document -- see plan doc finding
-10). That fix is orthogonal and complete; this item is the remaining
-type-aware granularity question.
+10). That merge fix is orthogonal and complete.

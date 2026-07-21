@@ -127,7 +127,30 @@
               "type": "boolean",
               "description": "True when more pages needed full-page review than the cap allows. The fallback is then SKIPPED entirely rather than run: saturation means the crop ratio or grid is wrong for this bundle, which is a tuning signal for a human, not something to spend a large number of extra vision calls papering over."
             },
-            "cap": { "type": "integer", "minimum": 0 }
+            "cap": { "type": "integer", "minimum": 0 },
+            "prompt_version": {
+              "type": "string",
+              "description": "Full-page verdict prompt version. Separate from method.prompt_version, which records the contact-sheet prompt."
+            },
+            "resolved_pages": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 }
+            },
+            "unresolved_pages": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 }
+            },
+            "new_boundaries": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 }
+            },
+            "calls": { "type": "integer", "minimum": 0 },
+            "refinement_pages": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 },
+              "description": "Interior pages examined because --refine selected a long segment, distinct from crop-ambiguous pages."
+            },
+            "refinement_calls": { "type": "integer", "minimum": 0 }
           },
           "required": ["triggered", "pages", "saturated", "cap"]
         }
