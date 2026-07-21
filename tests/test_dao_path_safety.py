@@ -49,3 +49,31 @@ def test_read_contract_traversal_blocked(monkeypatch, capsys, tmp_path):
     with pytest.raises(SystemExit):
         dao.cmd_read_contract(args)
     assert "TOP SECRET" not in capsys.readouterr().out
+
+
+def test_acquire_lock_is_atomic_under_contention(tmp_path):
+    # TOCTOU regression (fleet): many threads racing a FREE lock -> exactly one
+    # acquires (returns None); the rest see it held.
+    import threading
+    target = tmp_path / "f.json"
+    wins = []
+    guard = threading.Lock()
+
+    def worker(i):
+        if dao.acquire_lock(target, f"p{i}", "RUN_1", "t") is None:
+            with guard:
+                wins.append(i)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(wins) == 1
+
+
+def test_acquire_lock_reports_holder_when_held(tmp_path):
+    target = tmp_path / "f.json"
+    assert dao.acquire_lock(target, "owner", "RUN_1", "first") is None
+    held = dao.acquire_lock(target, "other", "RUN_2", "second")
+    assert held is not None and held["held_by"] == "owner"
