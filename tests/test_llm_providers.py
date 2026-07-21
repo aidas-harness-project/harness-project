@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 from types import SimpleNamespace
 from unittest import mock
 
@@ -541,6 +542,50 @@ def test_claude_cli_child_env_strips_foreign_secrets(monkeypatch, tmp_path):
     # claude's own credential and ordinary vars survive.
     assert child_env["ANTHROPIC_API_KEY"] == "anthropic-secret"
     assert child_env["PATH"] == "/usr/bin"
+
+
+def test_child_safe_env_basic_scrub(monkeypatch):
+    for k in list(os.environ):
+        if k.upper().endswith(providers._SECRET_ENV_SUFFIXES):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "x")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "keep")
+    monkeypatch.setenv("HOME", "/home/u")
+    env = providers._child_safe_env(keep_prefixes=("ANTHROPIC", "CLAUDE"))
+    assert "OPENAI_API_KEY" not in env
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN" not in env  # _TOKEN suffix
+    assert env["ANTHROPIC_API_KEY"] == "keep"
+    assert env["HOME"] == "/home/u"  # non-secret always kept
+
+
+def test_child_safe_env_keep_prefixes_override_bedrock(monkeypatch):
+    # claude-via-Bedrock: AWS_SECRET_ACCESS_KEY (ends _ACCESS_KEY) must survive
+    # when the deployment opts it in.
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "drop")
+    monkeypatch.setenv("HARNESS_CHILD_ENV_KEEP_PREFIXES", "aws,google")  # lowercase on purpose
+    env = providers._child_safe_env(keep_prefixes=("ANTHROPIC", "CLAUDE"))
+    assert env["AWS_SECRET_ACCESS_KEY"] == "aws-secret"  # kept via override (case-insensitive)
+    assert "OPENAI_API_KEY" not in env  # still scrubbed
+
+
+def test_child_safe_env_ignores_blank_override_entries(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "drop")
+    monkeypatch.setenv("HARNESS_CHILD_ENV_KEEP_PREFIXES", " , ,")  # all blank
+    env = providers._child_safe_env(keep_prefixes=("ANTHROPIC",))
+    assert "OPENAI_API_KEY" not in env  # blank entries don't accidentally keep everything
+
+
+def test_child_safe_env_non_secret_credential_paths_kept(monkeypatch):
+    # These are NOT value-secrets (an ID / a file path) and don't match a secret
+    # suffix, so they survive without any override -- Vertex needs the creds path,
+    # Bedrock needs the key ID.
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/etc/gcp.json")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA...")
+    env = providers._child_safe_env(keep_prefixes=("ANTHROPIC",))
+    assert env["GOOGLE_APPLICATION_CREDENTIALS"] == "/etc/gcp.json"
+    assert env["AWS_ACCESS_KEY_ID"] == "AKIA..."
 
 
 def test_openai_scan_intake_attaches_page_images(monkeypatch, tmp_path):

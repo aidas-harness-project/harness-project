@@ -69,11 +69,20 @@ def _child_safe_env(*, keep_prefixes: Sequence[str]) -> dict[str, str]:
     (the CLI's own provider family, which it needs to authenticate); drops every
     other secret-shaped var so a document-reading child can't exfiltrate, e.g.,
     OPENAI_API_KEY through a prompt-injected transcription.
+
+    Deployments that back a CLI with a cloud provider whose credentials are not
+    prefixed by the CLI's family name -- claude-via-Bedrock (AWS_SECRET_ACCESS_KEY)
+    or claude-via-Vertex (GOOGLE_*) -- add those prefixes via the
+    HARNESS_CHILD_ENV_KEEP_PREFIXES env var (comma-separated), so the child keeps
+    the creds it needs without editing code. Matching is case-insensitive.
     """
+    extra = os.environ.get("HARNESS_CHILD_ENV_KEEP_PREFIXES", "")
+    keep = tuple(p.strip().upper() for p in (*keep_prefixes, *extra.split(",")) if p.strip())
     safe = {}
     for key, value in os.environ.items():
-        is_secret = any(key.upper().endswith(suffix) for suffix in _SECRET_ENV_SUFFIXES)
-        if is_secret and not any(key.upper().startswith(prefix) for prefix in keep_prefixes):
+        upper = key.upper()
+        is_secret = any(upper.endswith(suffix) for suffix in _SECRET_ENV_SUFFIXES)
+        if is_secret and not any(upper.startswith(prefix) for prefix in keep):
             continue
         safe[key] = value
     return safe
