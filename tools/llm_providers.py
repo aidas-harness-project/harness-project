@@ -5,6 +5,14 @@ domain-specific parsing, while providers own how a prompt reaches an
 execution backend. That lets OCR, classification, and intake checks share
 one provider-selection path without coupling their safety rules to any one
 CLI or API surface.
+
+Providers here are all LLM-backed (CLI or HTTP API). An earlier revision
+also shipped an offline Tesseract/Ollama trio (``local-ocr``/``local-vlm``/
+``local-llm``); it was removed because the pinned local models never
+transcribed real Korean claim pages and the runtime was single-machine
+(Windows/E:-drive) only -- see the PR #8 review and open-decisions.md #3/#4.
+A genuinely technology-independent P8 reader (a real OCR engine) is deferred,
+not replaced by these.
 """
 from __future__ import annotations
 
@@ -18,17 +26,15 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parent.parent
 
 SUPPORTED_PROVIDERS = (
-    "claude-cli", "codex-cli", "anthropic-api", "openai-api",
-    "local-ocr", "local-vlm", "local-llm", "fixture",
+    "claude-cli", "codex-cli", "anthropic-api", "openai-api", "fixture",
 )
 DEFAULT_PROVIDER = "claude-cli"
 DEFAULT_ENV_PREFIX = "HARNESS_LLM"
@@ -40,6 +46,13 @@ _CLAUDE_CLI_MAX_ATTEMPTS = 3
 _CLAUDE_CLI_RETRY_SLEEP_SECONDS = 2.0
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
+# A child subprocess that reads untrusted claim-document images has no reason
+# to hold other providers' credentials. Any env var whose name ends in one of
+# these suffixes is stripped from a CLI child's environment unless it belongs
+# to that CLI's own provider family (see _child_safe_env). A denylist (not an
+# allowlist) so ordinary vars like PATH/HOME are never accidentally dropped.
+_SECRET_ENV_SUFFIXES = ("_API_KEY", "_SECRET", "_TOKEN", "_ACCESS_KEY")
+
 
 class ProviderConfigError(RuntimeError):
     """Raised when a provider is selected but not usable as configured."""
@@ -47,6 +60,23 @@ class ProviderConfigError(RuntimeError):
 
 class ProviderExecutionError(RuntimeError):
     """Raised when a configured provider fails during execution."""
+
+
+def _child_safe_env(*, keep_prefixes: Sequence[str]) -> dict[str, str]:
+    """A copy of os.environ with foreign provider secrets removed.
+
+    Keeps any secret-shaped var whose name starts with one of ``keep_prefixes``
+    (the CLI's own provider family, which it needs to authenticate); drops every
+    other secret-shaped var so a document-reading child can't exfiltrate, e.g.,
+    OPENAI_API_KEY through a prompt-injected transcription.
+    """
+    safe = {}
+    for key, value in os.environ.items():
+        is_secret = any(key.upper().endswith(suffix) for suffix in _SECRET_ENV_SUFFIXES)
+        if is_secret and not any(key.upper().startswith(prefix) for prefix in keep_prefixes):
+            continue
+        safe[key] = value
+    return safe
 
 
 @dataclass(frozen=True)
@@ -62,6 +92,11 @@ class ProviderResult:
     prompt_version: str
     text: str
     raw_metadata: dict[str, Any] = field(default_factory=dict)
+    # Provider-reported completion signal where one exists (HTTP APIs). None for
+    # CLI providers, which expose no finish reason. A value other than the
+    # provider's normal-completion marker means the text may be truncated -- the
+    # provider raises rather than returning a partial page (see _post_responses).
+    finish_reason: str | None = None
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -69,6 +104,7 @@ class ProviderResult:
             "model_name": self.model_name,
             "prompt_version": self.prompt_version,
             "raw_metadata": self.raw_metadata,
+            "finish_reason": self.finish_reason,
         }
 
 
@@ -76,13 +112,21 @@ class BaseProvider:
     provider_name: str
     model_name: str
 
-    def _result(self, text: str, prompt_version: str, raw_metadata: dict[str, Any] | None = None) -> ProviderResult:
+    def _result(
+        self,
+        text: str,
+        prompt_version: str,
+        raw_metadata: dict[str, Any] | None = None,
+        *,
+        finish_reason: str | None = None,
+    ) -> ProviderResult:
         return ProviderResult(
             provider_name=self.provider_name,
             model_name=self.model_name,
             prompt_version=prompt_version,
             text=text,
             raw_metadata=raw_metadata or {},
+            finish_reason=finish_reason,
         )
 
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
@@ -94,7 +138,9 @@ class BaseProvider:
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         raise NotImplementedError
 
-    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
+    def scan_intake_content(
+        self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
+    ) -> ProviderResult:
         raise NotImplementedError
 
     def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
@@ -121,8 +167,19 @@ class ClaudeCliProvider(BaseProvider):
         # claude-cli call through this provider (transcribe/compare/classify/scan),
         # not just OCR -- the same context-inheritance risk exists for all of them.
         cmd = [self.command, "-p", prompt, "--safe-mode"]
+        # Pass the configured model through. Without this the model recorded in
+        # provenance metadata is a lie (the CLI silently uses its own default),
+        # and two readers configured with different models would be
+        # indistinguishable. "claude-cli" is the no-model-configured sentinel.
+        if self.model_name and self.model_name != "claude-cli":
+            cmd.extend(["--model", self.model_name])
         if allowed_read:
             cmd.extend(["--allowedTools", "Read"])
+
+        # The child reads untrusted claim images; strip every non-Anthropic
+        # secret from its environment so a prompt-injected read can't exfiltrate
+        # another provider's key (see _child_safe_env).
+        run_env = _child_safe_env(keep_prefixes=("ANTHROPIC", "CLAUDE"))
 
         # Bounded retry on transient subprocess-level failures. A single
         # failed claude-cli call otherwise kills an entire multi-page run:
@@ -157,6 +214,7 @@ class ClaudeCliProvider(BaseProvider):
                     timeout=timeout,
                     cwd=str(self.root),
                     stdin=subprocess.DEVNULL,
+                    env=run_env,
                 )
             except FileNotFoundError as exc:
                 raise ProviderExecutionError(f"claude-cli command not found: {self.command}") from exc
@@ -188,29 +246,15 @@ class ClaudeCliProvider(BaseProvider):
     # and emitted meta-commentary instead of the page text. That lesson still
     # holds and is not being reverted here.
     #
-    # What IS changed: the image is now referenced as an explicit imperative
-    # ("Read the image file at {path} and then ...") instead of a trailing
-    # "Image: {path}" label. Investigation (2026-07-16, CASE_024 follow-up)
-    # found the label form is not a rare/non-deterministic refusal at all --
-    # it failed 9/9 in controlled repeats (with and without --safe-mode,
-    # including on pages that had appeared to succeed on the first pass during
-    # real runs), every time with some variant of "no image was attached to
-    # this message." The model reads "Image: {path}" as descriptive metadata
-    # about an attachment that (via a text-only `claude -p` CLI call) never
-    # actually arrives, not as an instruction to invoke the Read tool on that
-    # path -- so it never even attempts the read. Making the read an explicit
-    # instruction resolved this in every repeat (3/3, then 2 more ad hoc
-    # confirmations on previously-refusing pages). This is not the same
-    # class of fix as the reverted role-framing: it carries no self-legitimizing
-    # or anti-refusal language, just a concrete action to take, so it gives the
-    # child nothing to treat as a prompt-injection signal.
-    #
-    # A related risk found during the same investigation, NOT fixed here:
-    # compare_text() is equally text-only and can suffer the identical
-    # "nothing was actually provided" misfire if a caller ever hands it a
-    # placeholder instead of real content -- it was only saved in the observed
-    # case by compare()'s existing fail-safe (unparseable verdict -> treated as
-    # disagreement), not by any structural protection. See known-gaps.md.
+    # The image is referenced as an explicit imperative ("Read the image file at
+    # {path} and then ...") rather than a trailing "Image: {path}" label.
+    # Investigation (2026-07-16) found the label form fails deterministically
+    # (9/9, with and without --safe-mode): the model reads "Image: {path}" as
+    # descriptive metadata about an attachment that -- via a text-only `claude -p`
+    # call -- never actually arrives, so it never invokes the Read tool. Making
+    # the read an explicit instruction resolves it. This carries no
+    # self-legitimizing or anti-refusal language, so it gives the child nothing
+    # to treat as a prompt-injection signal.
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
         framed_prompt = f"Read the image file at {image_path} and then: {prompt}"
         return self._run(framed_prompt, prompt_version=prompt_version, allowed_read=True, timeout=180)
@@ -221,7 +265,17 @@ class ClaudeCliProvider(BaseProvider):
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, allowed_read=False, timeout=120)
 
-    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
+    def scan_intake_content(
+        self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
+    ) -> ProviderResult:
+        # The child opens the pages itself via its Read tool. Use the same
+        # explicit-imperative form transcribe_image uses -- a trailing
+        # "Image: {path}" label is read as metadata about a never-arriving
+        # attachment and the Read tool is never invoked (2026-07-16 finding). An
+        # HTTP provider attaches the images instead (see OpenAIApiProvider).
+        if image_paths:
+            refs = "\n".join(f"Read the image file at {p}." for p in image_paths)
+            prompt = f"{prompt}\n\n{refs}"
         return self._run(prompt, prompt_version=prompt_version, allowed_read=True, timeout=180)
 
     def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
@@ -250,7 +304,7 @@ class CodexCliProvider(BaseProvider):
         *,
         prompt_version: str,
         timeout: int,
-        image_path: Path | None = None,
+        image_paths: Sequence[Path] | None = None,
     ) -> ProviderResult:
         scratch_dir = self.root / "_ocr_scratch"
         scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -267,11 +321,14 @@ class CodexCliProvider(BaseProvider):
             cmd = [self.command, "exec", prompt, "--skip-git-repo-check", "--sandbox", "read-only"]
             if self.model_name != "codex-cli":
                 cmd.extend(["--model", self.model_name])
-            if image_path is not None:
+            for image_path in image_paths or ():
                 cmd.extend(["--image", str(image_path)])
             cmd.extend(["--output-last-message", str(output_path)])
 
-            run_env = os.environ.copy()
+            # Start from a secret-scrubbed environment, then re-add only Codex's
+            # own key -- a document-reading child shouldn't carry other
+            # providers' credentials.
+            run_env = _child_safe_env(keep_prefixes=("CODEX",))
             if self.env.get("CODEX_API_KEY"):
                 run_env["CODEX_API_KEY"] = self.env["CODEX_API_KEY"]
             try:
@@ -306,7 +363,7 @@ class CodexCliProvider(BaseProvider):
             prompt,
             prompt_version=prompt_version,
             timeout=180,
-            image_path=image_path,
+            image_paths=[image_path],
         )
 
     def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
@@ -315,8 +372,12 @@ class CodexCliProvider(BaseProvider):
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, timeout=120)
 
-    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
-        return self._run(prompt, prompt_version=prompt_version, timeout=180)
+    def scan_intake_content(
+        self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
+    ) -> ProviderResult:
+        return self._run(
+            prompt, prompt_version=prompt_version, timeout=180, image_paths=image_paths
+        )
 
     def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, timeout=120)
@@ -337,11 +398,16 @@ class _ApiProviderStub(BaseProvider):
         for env_name in self.model_env_names:
             if env.get(env_name):
                 return env[env_name]
-        return f"{self.provider_name}-model"
+        # No silent fabrication: a made-up "<provider>-model" string only fails
+        # later with an opaque 404 at the first page. Fail at selection instead.
+        env_hint = " or ".join(self.model_env_names) if self.model_env_names else "the provider env"
+        raise ProviderConfigError(
+            f"{self.provider_name} requires a model name via --model or {env_hint}"
+        )
 
     def _not_implemented(self) -> ProviderExecutionError:
         return ProviderExecutionError(
-            f"{self.provider_name} is selectable, but API execution is not implemented in this issue yet"
+            f"{self.provider_name} is selectable, but API execution is not implemented yet"
         )
 
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
@@ -353,7 +419,9 @@ class _ApiProviderStub(BaseProvider):
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         raise self._not_implemented()
 
-    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
+    def scan_intake_content(
+        self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
+    ) -> ProviderResult:
         raise self._not_implemented()
 
     def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
@@ -416,6 +484,19 @@ class OpenAIApiProvider(_ApiProviderStub):
         except json.JSONDecodeError as exc:
             raise ProviderExecutionError(f"openai-api returned non-JSON response: {response_body!r}") from exc
 
+        # Truncation guard: a response cut off at the token cap comes back with
+        # status "incomplete" and PARTIAL output_text. Returning that as "the
+        # transcription"/"the redaction" would silently land a half a page in
+        # the trusted layer. Refuse it -- the caller fails closed rather than
+        # trusting a truncated read.
+        status = parsed.get("status")
+        if status == "incomplete":
+            reason = (parsed.get("incomplete_details") or {}).get("reason", "unknown")
+            raise ProviderExecutionError(
+                f"openai-api response was truncated (status=incomplete, reason={reason}); "
+                "refusing to use a partial result"
+            )
+
         text = _extract_openai_output_text(parsed)
         if text is None:
             raise ProviderExecutionError("openai-api response did not contain output_text")
@@ -424,19 +505,19 @@ class OpenAIApiProvider(_ApiProviderStub):
             prompt_version,
             {
                 "response_id": parsed.get("id"),
-                "status": parsed.get("status"),
+                "status": status,
                 "http_status": status_code,
                 "usage": parsed.get("usage"),
             },
+            finish_reason=status,
         )
 
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
-        image_url = _image_data_url(image_path)
         input_payload = [{
             "role": "user",
             "content": [
                 {"type": "input_text", "text": prompt},
-                {"type": "input_image", "image_url": image_url, "detail": "high"},
+                *_image_content_parts([image_path]),
             ],
         }]
         return self._post_responses(input_payload, prompt_version=prompt_version, timeout=180)
@@ -447,299 +528,23 @@ class OpenAIApiProvider(_ApiProviderStub):
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._post_responses(prompt, prompt_version=prompt_version, timeout=120)
 
-    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
-        return self._post_responses(prompt, prompt_version=prompt_version, timeout=180)
+    def scan_intake_content(
+        self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
+    ) -> ProviderResult:
+        # The whole point of the D2 scan is that the model SEES the page images.
+        # Attach them as image content parts; a bare text prompt naming file
+        # paths reaches the API as dead strings the server cannot open.
+        input_payload = [{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                *_image_content_parts(image_paths or ()),
+            ],
+        }]
+        return self._post_responses(input_payload, prompt_version=prompt_version, timeout=180)
 
     def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._post_responses(prompt, prompt_version=prompt_version, timeout=120)
-
-
-class LocalOcrProvider(BaseProvider):
-    """Offline Tesseract adapter used only for page transcription.
-
-    ``model_name`` is ``LANGUAGES:PSM`` (for example ``kor+eng:6``).
-    The executable and language data must already be installed. This
-    provider never downloads anything and never falls back externally.
-    """
-
-    provider_name = "local-ocr"
-
-    def __init__(
-        self,
-        *,
-        model_name: str | None = None,
-        command: str = "tesseract",
-        env: Mapping[str, str] | None = None,
-    ):
-        self.model_name = model_name or "kor+eng:6"
-        self.command = command
-        self.env = dict(env) if env is not None else dict(os.environ)
-        language, separator, psm = self.model_name.partition(":")
-        if not language or (separator and (not psm.isdigit() or not 0 <= int(psm) <= 13)):
-            raise ProviderConfigError(
-                "local-ocr model must use LANGUAGES[:PSM], e.g. 'kor+eng:6'"
-            )
-        self.language = language
-        self.psm = psm or "6"
-
-    def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
-        cmd = [self.command, str(image_path), "stdout", "-l", self.language, "--psm", self.psm]
-        run_env = os.environ.copy()
-        if self.env.get("TESSDATA_PREFIX"):
-            run_env["TESSDATA_PREFIX"] = self.env["TESSDATA_PREFIX"]
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=180, env=run_env,
-            )
-        except FileNotFoundError as exc:
-            raise ProviderExecutionError(
-                f"local-ocr command not found: {self.command}; install Tesseract with Korean language data"
-            ) from exc
-        if result.returncode != 0:
-            raise ProviderExecutionError(f"local-ocr call failed: {result.stderr.strip()}")
-        return self._result(
-            result.stdout.strip(), prompt_version,
-            {"command": cmd[0], "returncode": result.returncode, "language": self.language, "psm": self.psm},
-        )
-
-    def _unsupported(self, operation: str):
-        raise ProviderExecutionError(
-            f"local-ocr only supports transcribe_image; use local-llm for {operation}"
-        )
-
-    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
-        self._unsupported("compare_text")
-
-    def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
-        self._unsupported("classify_document")
-
-    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
-        self._unsupported("scan_intake_content")
-
-    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
-        self._unsupported("redact_text")
-
-
-class LocalVlmProvider(BaseProvider):
-    """Offline Ollama vision adapter restricted to a loopback daemon.
-
-    This is intended as the technology-independent P8 reader paired with
-    Tesseract. The model must already be present locally; model downloads are
-    deliberately outside the provider and there is no external fallback.
-    """
-
-    provider_name = "local-vlm"
-
-    def __init__(
-        self,
-        *,
-        model_name: str | None,
-        command: str = "ollama",
-        env: Mapping[str, str] | None = None,
-    ):
-        source_env = dict(env) if env is not None else dict(os.environ)
-        self.model_name = model_name or source_env.get("HARNESS_LOCAL_VLM_MODEL") or ""
-        if not self.model_name:
-            raise ProviderConfigError(
-                "local-vlm requires --model or HARNESS_LOCAL_VLM_MODEL; "
-                "the vision model must already be installed"
-            )
-        self.command = command
-        self.env = source_env
-        configured_host = source_env.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
-        self.ollama_host = configured_host if "://" in configured_host else f"http://{configured_host}"
-        parsed = urlparse(self.ollama_host)
-        if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
-            "localhost", "127.0.0.1", "::1",
-        }:
-            raise ProviderConfigError(
-                f"local-vlm requires a loopback OLLAMA_HOST, got {configured_host!r}"
-            )
-        self.ollama_host = self.ollama_host.rstrip("/")
-        self._model_verified = False
-
-    def _run_env(self) -> dict[str, str]:
-        run_env = os.environ.copy()
-        run_env.update({key: value for key, value in self.env.items() if key.startswith("OLLAMA_")})
-        run_env["OLLAMA_HOST"] = self.ollama_host
-        return run_env
-
-    def _verify_local_model(self) -> None:
-        if self._model_verified:
-            return
-        try:
-            result = subprocess.run(
-                [self.command, "show", self.model_name], capture_output=True,
-                text=True, encoding="utf-8", errors="replace", timeout=30,
-                env=self._run_env(),
-            )
-        except FileNotFoundError as exc:
-            raise ProviderExecutionError(
-                f"local-vlm command not found: {self.command}; install Ollama and preload the vision model"
-            ) from exc
-        if result.returncode != 0:
-            raise ProviderExecutionError(
-                f"local-vlm model {self.model_name!r} is not available locally; "
-                "preload it in the approved E: runtime (automatic download is disabled)"
-            )
-        self._model_verified = True
-
-    def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
-        self._verify_local_model()
-        payload = {
-            "model": self.model_name,
-            "prompt": prompt,
-            "images": [base64.b64encode(image_path.read_bytes()).decode("ascii")],
-            "stream": False,
-            "think": False,
-        }
-        request = urllib.request.Request(
-            f"{self.ollama_host}/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=300) as response:
-                parsed = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise ProviderExecutionError(f"local-vlm loopback call failed: {exc}") from exc
-        text = parsed.get("response")
-        if not isinstance(text, str) or not text.strip():
-            raise ProviderExecutionError("local-vlm response omitted non-empty response text")
-        return self._result(
-            text.strip(), prompt_version,
-            {
-                "endpoint": f"{self.ollama_host}/api/generate",
-                "done": parsed.get("done"),
-                "total_duration": parsed.get("total_duration"),
-            },
-        )
-
-    def _unsupported(self, operation: str):
-        raise ProviderExecutionError(
-            f"local-vlm is reserved for image transcription; use local-llm for {operation}"
-        )
-
-    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
-        self._unsupported("compare_text")
-
-    def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
-        self._unsupported("classify_document")
-
-    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
-        self._unsupported("scan_intake_content")
-
-    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
-        self._unsupported("redact_text")
-
-
-class LocalLlmProvider(BaseProvider):
-    """Offline text-only Ollama adapter restricted to a loopback daemon.
-
-    The model must already exist locally (``ollama show`` must succeed),
-    which prevents ``ollama run`` from initiating an automatic download.
-    """
-
-    provider_name = "local-llm"
-
-    def __init__(
-        self,
-        *,
-        model_name: str | None,
-        command: str = "ollama",
-        env: Mapping[str, str] | None = None,
-    ):
-        source_env = dict(env) if env is not None else dict(os.environ)
-        self.model_name = model_name or source_env.get("HARNESS_LOCAL_LLM_MODEL") or ""
-        if not self.model_name:
-            raise ProviderConfigError(
-                "local-llm requires --model or HARNESS_LOCAL_LLM_MODEL; the model must already be installed"
-            )
-        self.command = command
-        self.env = source_env
-        configured_host = source_env.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
-        self.ollama_host = configured_host if "://" in configured_host else f"http://{configured_host}"
-        parsed = urlparse(self.ollama_host)
-        if parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
-            raise ProviderConfigError(
-                f"local-llm requires a loopback OLLAMA_HOST, got {configured_host!r}"
-            )
-        self.ollama_host = self.ollama_host.rstrip("/")
-        self._model_verified = False
-
-    def _run_env(self) -> dict[str, str]:
-        run_env = os.environ.copy()
-        run_env.update({key: value for key, value in self.env.items() if key.startswith("OLLAMA_")})
-        run_env["OLLAMA_HOST"] = self.ollama_host
-        return run_env
-
-    def _verify_local_model(self) -> None:
-        if self._model_verified:
-            return
-        try:
-            result = subprocess.run(
-                [self.command, "show", self.model_name], capture_output=True,
-                text=True, encoding="utf-8", errors="replace", timeout=30,
-                env=self._run_env(),
-            )
-        except FileNotFoundError as exc:
-            raise ProviderExecutionError(
-                f"local-llm command not found: {self.command}; install Ollama and preload the configured model"
-            ) from exc
-        if result.returncode != 0:
-            raise ProviderExecutionError(
-                f"local-llm model {self.model_name!r} is not available locally; "
-                "preload it in an approved environment (automatic download is disabled)"
-            )
-        self._model_verified = True
-
-    def _run(self, prompt: str, prompt_version: str, timeout: int) -> ProviderResult:
-        self._verify_local_model()
-        payload = {
-            "model": self.model_name,
-            "prompt": prompt,
-            "stream": False,
-            "think": False,
-        }
-        request = urllib.request.Request(
-            f"{self.ollama_host}/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                parsed = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise ProviderExecutionError(f"local-llm loopback call failed: {exc}") from exc
-        text = parsed.get("response")
-        if not isinstance(text, str) or not text.strip():
-            raise ProviderExecutionError("local-llm response omitted non-empty response text")
-        return self._result(
-            text.strip(), prompt_version,
-            {
-                "endpoint": f"{self.ollama_host}/api/generate",
-                "done": parsed.get("done"),
-                "total_duration": parsed.get("total_duration"),
-            },
-        )
-
-    def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
-        raise ProviderExecutionError("local-llm is text-only in this harness; use local-ocr for page transcription")
-
-    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
-        return self._run(prompt, prompt_version, 120)
-
-    def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
-        return self._run(prompt, prompt_version, 600)
-
-    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
-        return self._run(prompt, prompt_version, 600)
-
-    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
-        return self._run(prompt, prompt_version, 600)
 
 
 class FixtureProvider(BaseProvider):
@@ -768,7 +573,9 @@ class FixtureProvider(BaseProvider):
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._response("classify_document", prompt_version)
 
-    def scan_intake_content(self, prompt: str, prompt_version: str) -> ProviderResult:
+    def scan_intake_content(
+        self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
+    ) -> ProviderResult:
         return self._response("scan_intake_content", prompt_version)
 
     def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
@@ -826,26 +633,6 @@ def build_provider(
         return AnthropicApiProvider(model_name=selected.model_name, env=source_env)
     if provider_name == "openai-api":
         return OpenAIApiProvider(model_name=selected.model_name, env=source_env)
-    if provider_name == "local-ocr":
-        return LocalOcrProvider(
-            model_name=selected.model_name,
-            command=source_env.get("HARNESS_LOCAL_OCR_COMMAND") or "tesseract",
-            env=source_env,
-        )
-    if provider_name == "local-vlm":
-        return LocalVlmProvider(
-            model_name=selected.model_name,
-            command=source_env.get("HARNESS_LOCAL_VLM_COMMAND")
-            or source_env.get("HARNESS_LOCAL_LLM_COMMAND")
-            or "ollama",
-            env=source_env,
-        )
-    if provider_name == "local-llm":
-        return LocalLlmProvider(
-            model_name=selected.model_name,
-            command=source_env.get("HARNESS_LOCAL_LLM_COMMAND") or "ollama",
-            env=source_env,
-        )
     if provider_name == "fixture":
         return FixtureProvider(model_name=selected.model_name, responses=fixture_responses)
     raise ProviderConfigError(f"unsupported provider {selected.provider_name!r}")
@@ -862,8 +649,15 @@ def _normalize_provider_name(provider_name: str) -> str:
 
 def _image_data_url(image_path: Path) -> str:
     mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
-    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    encoded = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
+
+
+def _image_content_parts(image_paths: Sequence[Path]) -> list[dict[str, Any]]:
+    return [
+        {"type": "input_image", "image_url": _image_data_url(Path(p)), "detail": "high"}
+        for p in image_paths
+    ]
 
 
 def _extract_openai_output_text(response: Mapping[str, Any]) -> str | None:

@@ -109,31 +109,11 @@ and does not require an API key. `CODEX_API_KEY` is only an optional fallback
 for unattended CI. The provider accepts an optional model through the
 existing `--*-model` arguments; set `HARNESS_CODEX_COMMAND` to override the
 `codex` executable. API-backed providers such as `openai-api` remain
-available when their credentials are present.
-
-### Project-local offline runtime
-
-For claim documents that must not leave the machine, prepare the runtime on
-E: and preload separate text and vision models explicitly. `setup_local_runtime.ps1`
-never installs Tesseract on C:; it requires an approved portable Tesseract 5
-copy already present at `.runtime/tesseract/tesseract.exe`, then downloads
-language data, Ollama, and the model into E: only:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/setup_local_runtime.ps1
-. .\.runtime\local-runtime.env.ps1
-& $env:HARNESS_LOCAL_LLM_COMMAND serve
-python tools/local_runtime.py
-```
-
-The recommended P8 pair is Tesseract (`local-ocr`) plus the loopback Ollama
-vision reader (`local-vlm`, `qwen3-vl:4b-instruct-q4_K_M`); comparison, classification, and
-checkpoint-2 redaction use the text-only `local-llm`
-(`qwen3:4b-instruct-2507-q4_K_M`). The setup command is the only step allowed to
-download. Pipeline providers verify that models already exist and never pull
-or fall back to an external service. On Codex Desktop, where `python` may not
-be on PATH, use the bundled Python absolute path reported by the workspace
-dependency runtime.
+available when their credentials are present. All available providers are
+LLM-vision-backed, so any P8 reader pair is a documented weak cross-validation
+(`cross_validation_mode: single_technology_weak_p8_poc`); a genuinely
+technology-independent reader (a real OCR engine) is deferred -- see
+`open-decisions.md` #4.
 
 ## Tools
 
@@ -143,8 +123,7 @@ dependency runtime.
 | `python tools/validate_output.py <file.json>` | Standalone schema validation |
 | `python tools/intake_case.py <source-cases folder> <CASE_ID>` | Case intake with the D2 per-file review ledger |
 | `python tools/document_assembly.py --sections-file <spec.json> --held-by <agent> --run-id <run>` | Renders narrative reports, auto-generates `[E#]` citation tags and sidecar |
-| `powershell -File tools/setup_local_runtime.ps1` | Completes the E:-scoped runtime from a preseeded portable Tesseract and preloads Ollama/model |
-| `python tools/local_runtime.py` | Fail-closed preflight for runtime paths, Korean OCR data, loopback binding, and preloaded models |
+| `python tools/redact_document.py CASE_ID DOC_ID --held-by <agent> --run-id <run>` | Checkpoint-2 PII redaction via the Redactor abstraction, with per-page fidelity verification |
 | `python tools/sync_agents.py` | Regenerates `.codex/agents/*.toml` and `.agents/skills/*/SKILL.md` from canonical `.claude/` definitions |
 | `pytest` | Runs the DAO/tooling test suite |
 

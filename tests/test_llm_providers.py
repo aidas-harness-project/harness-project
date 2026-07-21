@@ -103,7 +103,7 @@ def test_openai_provider_can_read_model_from_provider_specific_environment():
 
 
 def test_anthropic_provider_stub_execution_error_is_clear():
-    config = providers.ProviderConfig(provider_name="anthropic-api")
+    config = providers.ProviderConfig(provider_name="anthropic-api", model_name="claude-x")
     provider = providers.build_provider(config, env={"ANTHROPIC_API_KEY": "secret"})
 
     with pytest.raises(providers.ProviderExecutionError) as excinfo:
@@ -111,6 +111,16 @@ def test_anthropic_provider_stub_execution_error_is_clear():
 
     assert "anthropic-api" in str(excinfo.value)
     assert "not implemented" in str(excinfo.value)
+
+
+def test_api_stub_without_model_fails_at_build_not_call():
+    # 2-5: a stub API provider must not fabricate a "<provider>-model" string
+    # that 404s on the first page. Selecting it with no model resolvable fails
+    # at build (ProviderConfigError), pointing at how to fix it.
+    config = providers.ProviderConfig(provider_name="anthropic-api")
+    with pytest.raises(providers.ProviderConfigError) as excinfo:
+        providers.build_provider(config, env={"ANTHROPIC_API_KEY": "secret"})
+    assert "model" in str(excinfo.value).lower()
 
 
 def test_fixture_provider_returns_common_result_shape():
@@ -131,6 +141,7 @@ def test_fixture_provider_returns_common_result_shape():
         "model_name": "fixture-model",
         "prompt_version": "classification_v0.1",
         "raw_metadata": {"fixture_key": "classify_document"},
+        "finish_reason": None,
     }
 
 
@@ -152,14 +163,12 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
     result = provider.transcribe_image(Path("page.png"), "transcribe prompt", "ocr_extraction_v0.1")
 
     # The transcription prompt must stay NEUTRAL -- no defensive "role framing"
-    # preamble ("this is a SANCTIONED step, do not refuse..."); a prior version
-    # had that and the nested claude read it as a prompt-injection signal and
-    # refused. That regression guard still applies. Separately, the image must
-    # be referenced as an explicit imperative ("Read the image file at ...")
-    # rather than a trailing "Image: {path}" label -- investigation found the
-    # label form fails ~100% of the time (the model reads it as descriptive
-    # metadata about an attachment that never actually arrives over a text-only
-    # CLI call, and never attempts the Read tool at all).
+    # preamble (a prior version prepended "this is a SANCTIONED step, do not
+    # refuse..." which the nested claude read as a prompt-injection signal and
+    # refused). The image is referenced as an explicit Read instruction, not a
+    # trailing "Image: {path}" label (the label form is read as metadata about a
+    # never-arriving attachment and the Read tool is never invoked). This
+    # assertion guards both against framing creeping back in.
     assert captured["cmd"] == [
         "claude",
         "-p",
@@ -476,59 +485,72 @@ def test_unknown_provider_fails_before_any_execution():
     assert "openai-api" in str(excinfo.value)
 
 
-def test_local_ocr_runs_tesseract_without_network(monkeypatch, tmp_path):
-    captured = {}
-
+def _fake_claude_run(captured):
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["kwargs"] = kwargs
-        return SimpleNamespace(returncode=0, stdout="추출된 텍스트", stderr="")
-
-    monkeypatch.setattr(providers.subprocess, "run", fake_run)
-    provider = providers.build_provider(
-        providers.ProviderConfig("local-ocr", "kor+eng:11"),
-        env={"HARNESS_LOCAL_OCR_COMMAND": "tesseract-local"},
-        root=tmp_path,
-    )
-
-    result = provider.transcribe_image(Path("page.png"), "ignored", "ocr_v1")
-
-    assert captured["cmd"] == [
-        "tesseract-local", "page.png", "stdout", "-l", "kor+eng", "--psm", "11"
-    ]
-    assert "input" not in captured["kwargs"]
-    assert result.text == "추출된 텍스트"
-    assert result.provider_name == "local-ocr"
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+    return fake_run
 
 
-def test_local_ocr_never_falls_back_when_command_is_missing(monkeypatch):
-    monkeypatch.setattr(providers.subprocess, "run", mock.Mock(side_effect=FileNotFoundError("missing")))
-    provider = providers.LocalOcrProvider(command="missing-tesseract")
+def test_claude_cli_passes_configured_model(monkeypatch, tmp_path):
+    # 2-1: a configured model must actually reach the CLI, not be silently
+    # dropped (which made provenance metadata lie and two differently-modelled
+    # readers indistinguishable).
+    captured = {}
+    monkeypatch.setattr(providers.subprocess, "run", _fake_claude_run(captured))
+    provider = providers.ClaudeCliProvider(model_name="claude-opus-4-8", root=tmp_path)
 
-    with pytest.raises(providers.ProviderExecutionError) as excinfo:
-        provider.transcribe_image(Path("page.png"), "prompt", "ocr_v1")
+    provider.compare_text("prompt", "ocr_compare_v0.1")
 
-    assert "install Tesseract" in str(excinfo.value)
-
-
-def test_local_vlm_rejects_non_loopback_ollama_host():
-    with pytest.raises(providers.ProviderConfigError) as excinfo:
-        providers.LocalVlmProvider(
-            model_name="qwen3-vl:4b", env={"OLLAMA_HOST": "https://example.com"}
-        )
-
-    assert "loopback" in str(excinfo.value)
+    assert "--model" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--model") + 1] == "claude-opus-4-8"
 
 
-def test_local_vlm_verifies_model_and_posts_base64_image(monkeypatch, tmp_path):
-    calls = []
+def test_claude_cli_omits_model_flag_for_sentinel(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(providers.subprocess, "run", _fake_claude_run(captured))
+    provider = providers.ClaudeCliProvider(root=tmp_path)  # model_name defaults to "claude-cli"
+
+    provider.compare_text("prompt", "ocr_compare_v0.1")
+
+    assert "--model" not in captured["cmd"]
+
+
+def test_claude_cli_child_env_strips_foreign_secrets(monkeypatch, tmp_path):
+    # 2-4: a document-reading child must not carry OTHER providers' credentials.
+    captured = {}
+    monkeypatch.setattr(providers.subprocess, "run", _fake_claude_run(captured))
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("CODEX_API_KEY", "codex-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+    monkeypatch.setenv("HF_TOKEN", "hf-secret")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    provider = providers.ClaudeCliProvider(root=tmp_path)
+
+    provider.transcribe_image(Path("page.png"), "prompt", "ocr_extraction_v0.1")
+
+    child_env = captured["kwargs"]["env"]
+    assert "OPENAI_API_KEY" not in child_env
+    assert "CODEX_API_KEY" not in child_env
+    assert "HF_TOKEN" not in child_env
+    # claude's own credential and ordinary vars survive.
+    assert child_env["ANTHROPIC_API_KEY"] == "anthropic-secret"
+    assert child_env["PATH"] == "/usr/bin"
+
+
+def test_openai_scan_intake_attaches_page_images(monkeypatch, tmp_path):
+    # 2-2: the D2 scan on an HTTP provider must ATTACH images, not name file
+    # paths the server cannot open.
     captured = {}
 
-    def fake_run(cmd, **kwargs):
-        calls.append((cmd, kwargs))
-        return SimpleNamespace(returncode=0, stdout="model exists", stderr="")
-
     class FakeResponse:
+        status = 200
+
         def __enter__(self):
             return self
 
@@ -536,57 +558,35 @@ def test_local_vlm_verifies_model_and_posts_base64_image(monkeypatch, tmp_path):
             return False
 
         def read(self):
-            return b'{"response":"page text","done":true,"total_duration":123}'
+            return b'{"id": "r", "status": "completed", "output_text": "CLEAR"}'
 
     def fake_urlopen(request, timeout):
-        captured["url"] = request.full_url
         captured["payload"] = json.loads(request.data.decode("utf-8"))
-        captured["timeout"] = timeout
         return FakeResponse()
 
-    monkeypatch.setattr(providers.subprocess, "run", fake_run)
     monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
-    image_path = tmp_path / "page.png"
-    image_path.write_bytes(b"fake png")
+    pages = [tmp_path / "p1.png", tmp_path / "p2.png"]
+    for p in pages:
+        p.write_bytes(b"png")
     provider = providers.build_provider(
-        providers.ProviderConfig("local-vlm", "qwen3-vl:4b"),
-        env={
-            "OLLAMA_HOST": "http://127.0.0.1:11434",
-            "OLLAMA_MODELS": "E:/runtime/models",
-            "HARNESS_LOCAL_VLM_COMMAND": "E:/runtime/ollama.exe",
-        },
+        providers.ProviderConfig(provider_name="openai-api", model_name="gpt-test"),
+        env={"OPENAI_API_KEY": "secret"},
     )
 
-    result = provider.transcribe_image(image_path, "transcribe", "ocr_v1")
+    provider.scan_intake_content("scan prompt", "content_scan_v0.1", image_paths=pages)
 
-    assert calls[0][0] == ["E:/runtime/ollama.exe", "show", "qwen3-vl:4b"]
-    assert calls[0][1]["env"]["OLLAMA_MODELS"] == "E:/runtime/models"
-    assert captured["url"] == "http://127.0.0.1:11434/api/generate"
-    assert captured["payload"]["model"] == "qwen3-vl:4b"
-    assert captured["payload"]["images"] == ["ZmFrZSBwbmc="]
-    assert captured["payload"]["stream"] is False
-    assert captured["timeout"] == 300
-    assert result.text == "page text"
+    content = captured["payload"]["input"][0]["content"]
+    image_parts = [c for c in content if c.get("type") == "input_image"]
+    assert len(image_parts) == 2
+    assert all(c["image_url"].startswith("data:image/png;base64,") for c in image_parts)
 
 
-def test_local_llm_rejects_non_loopback_ollama_host():
-    with pytest.raises(providers.ProviderConfigError) as excinfo:
-        providers.LocalLlmProvider(
-            model_name="local-model", env={"OLLAMA_HOST": "https://example.com"}
-        )
-
-    assert "loopback" in str(excinfo.value)
-
-
-def test_local_llm_verifies_preloaded_model_before_loopback_generate(monkeypatch):
-    calls = []
-    captured = {}
-
-    def fake_run(cmd, **kwargs):
-        calls.append((cmd, kwargs))
-        return SimpleNamespace(returncode=0, stdout="model info", stderr="")
-
+def test_openai_truncated_response_raises(monkeypatch):
+    # 2-3: a token-capped, truncated response must not be returned as if it were
+    # the whole page/redaction.
     class FakeResponse:
+        status = 200
+
         def __enter__(self):
             return self
 
@@ -594,41 +594,18 @@ def test_local_llm_verifies_preloaded_model_before_loopback_generate(monkeypatch
             return False
 
         def read(self):
-            return b'{"response":"AGREE: same","done":true,"total_duration":42}'
+            return (
+                b'{"id": "r", "status": "incomplete",'
+                b' "incomplete_details": {"reason": "max_output_tokens"},'
+                b' "output_text": "partial..."}'
+            )
 
-    def fake_urlopen(request, timeout):
-        captured["url"] = request.full_url
-        captured["payload"] = json.loads(request.data.decode("utf-8"))
-        captured["timeout"] = timeout
-        return FakeResponse()
-
-    monkeypatch.setattr(providers.subprocess, "run", fake_run)
-    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
-    provider = providers.LocalLlmProvider(
-        model_name="local-model", env={"OLLAMA_MODELS": "E:/runtime/models"}
+    monkeypatch.setattr(providers.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="openai-api", model_name="gpt-test"),
+        env={"OPENAI_API_KEY": "secret"},
     )
-
-    result = provider.compare_text("compare prompt", "compare_v1")
-
-    assert calls[0][0] == ["ollama", "show", "local-model"]
-    assert calls[0][1]["env"]["OLLAMA_MODELS"] == "E:/runtime/models"
-    assert captured["url"] == "http://127.0.0.1:11434/api/generate"
-    assert captured["payload"] == {
-        "model": "local-model", "prompt": "compare prompt", "stream": False, "think": False,
-    }
-    assert captured["timeout"] == 120
-    assert result.text == "AGREE: same"
-
-
-def test_local_llm_refuses_to_auto_download_missing_model(monkeypatch):
-    monkeypatch.setattr(
-        providers.subprocess,
-        "run",
-        mock.Mock(return_value=SimpleNamespace(returncode=1, stdout="", stderr="missing")),
-    )
-    provider = providers.LocalLlmProvider(model_name="missing-model", env={})
 
     with pytest.raises(providers.ProviderExecutionError) as excinfo:
-        provider.classify_document("prompt", "classification_v1")
-
-    assert "automatic download is disabled" in str(excinfo.value)
+        provider.classify_document("prompt", "classification_v0.1")
+    assert "truncated" in str(excinfo.value).lower()

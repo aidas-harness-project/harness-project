@@ -1,20 +1,26 @@
-"""Document-pipeline checkpoint 2: redact validated page text via a provider.
+"""Document-pipeline checkpoint 2: redact validated page text via a Redactor.
 
-All case data access goes through tools/dao.py. The default provider is the
-offline ``local-llm`` adapter; it requires a preloaded Ollama model on a
-loopback-only daemon and never falls back to an external provider.
+All case data access goes through tools/dao.py. Redaction itself goes through
+the `redaction.Redactor` abstraction (today: `LlmRedactor` over any configured
+provider), so a future dedicated de-identification model can drop in without
+changing this tool. Dev-phase default provider is `codex-cli`.
+
+Every page's redaction is fidelity-checked (redaction.verify_fidelity): if the
+model dropped, reordered, or fabricated any non-PII text -- or its self-reported
+item count doesn't match the placeholders actually present -- the page's warnings
+are recorded and the document's redaction_result is marked review_required. A
+redaction is never trusted silently.
 
 Usage:
     python tools/redact_document.py CASE_ID DOC_ID \
         --held-by document-pipeline --run-id RUN_ID \
-        --provider local-llm --model MODEL
+        --provider codex-cli --model MODEL
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -29,33 +35,12 @@ from llm_providers import (
     SUPPORTED_PROVIDERS,
     build_provider,
 )
+from redaction import PROMPT_VERSION, LlmRedactor, RedactionParseError
 
 
 ROOT = Path(__file__).resolve().parent.parent
 DAO = ROOT / "tools" / "dao.py"
-PROMPT_VERSION = "pii_redaction_v0.1"
-PROMPT_TEMPLATE = """Redact personally identifying information from the validated OCR text below.
-
-Replace each detected value with one of these stable placeholders:
-[PERSON_NAME], [RESIDENT_REGISTRATION_NUMBER], [PHONE_NUMBER], [ADDRESS],
-[EMAIL], [ACCOUNT_NUMBER], [VEHICLE_NUMBER], or [OTHER_PII].
-
-Do not summarize, translate, correct, reorder, or omit non-PII content. Preserve
-all line breaks and all medical, insurance, date, amount, diagnosis, and policy
-content exactly unless the value itself is PII. Do not treat a value as safe
-merely because it looks like a sample, alias, or pseudonym. A value is already
-redacted only when it is one of the bracketed placeholders listed above.
-
-For example, "홍길동 / 010-1234-5678 / 골절" must become
-"[PERSON_NAME] / [PHONE_NUMBER] / 골절" with items_redacted=2.
-
-Reply with ONLY one JSON object in this exact shape:
-{{"redacted_text":"...", "items_redacted":0,
-  "categories":["person_name"]}}
-
---- Validated page text ---
-{text}
-"""
+DEFAULT_REDACTION_PROVIDER = "codex-cli"
 
 
 def _dao(*args: str) -> str:
@@ -69,36 +54,7 @@ def _dao(*args: str) -> str:
     return result.stdout
 
 
-def _parse_redaction(raw: str) -> dict:
-    decoder = json.JSONDecoder()
-    start = 0
-    saw_brace = False
-    while True:
-        brace = raw.find("{", start)
-        if brace == -1:
-            msg = "redaction response was invalid JSON" if saw_brace else "redaction response was not JSON"
-            raise ProviderExecutionError(f"{msg}: {raw!r}")
-        saw_brace = True
-        try:
-            parsed, _ = decoder.raw_decode(raw[brace:])
-            break
-        except json.JSONDecodeError:
-            start = brace + 1
-            continue
-    if not isinstance(parsed, dict):
-        raise ProviderExecutionError(f"redaction response JSON must be an object: {raw!r}")
-    if not isinstance(parsed.get("redacted_text"), str):
-        raise ProviderExecutionError("redaction response omitted string redacted_text")
-    if not isinstance(parsed.get("items_redacted"), int) or parsed["items_redacted"] < 0:
-        raise ProviderExecutionError("redaction response items_redacted must be a non-negative integer")
-    categories = parsed.get("categories", [])
-    if not isinstance(categories, list) or any(not isinstance(item, str) for item in categories):
-        raise ProviderExecutionError("redaction response categories must be an array of strings")
-    parsed["categories"] = categories
-    return parsed
-
-
-def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, provider) -> dict:
+def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redactor) -> dict:
     ocr_result = json.loads(_dao("read-contract", case_id, f"ocr_result_{doc_id}.json"))
     if ocr_result.get("cross_validation_status") not in {"agreed", "disagreed_resolved"}:
         raise RuntimeError(
@@ -110,19 +66,33 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, provid
     total_items = 0
     categories: set[str] = set()
     provider_metadata = None
+    fidelity_warnings: list[str] = []
     for page in ocr_result.get("pages", []):
         page_number = page["page"]
         text = _dao("read-page-text", case_id, doc_id, str(page_number))
-        prompt = PROMPT_TEMPLATE.format(text=text)
-        result = provider.redact_text(prompt, PROMPT_VERSION)
-        parsed = _parse_redaction(result.text)
-        redacted_pages.append(f"<<<PAGE page={page_number}>>>\n{parsed['redacted_text']}")
-        total_items += parsed["items_redacted"]
-        categories.update(parsed["categories"])
-        provider_metadata = result.metadata()
+        outcome = redactor.redact_page(text)
+        redacted_pages.append(f"<<<PAGE page={page_number}>>>\n{outcome.redacted_text}")
+        total_items += outcome.items_redacted
+        categories.update(outcome.categories)
+        provider_metadata = outcome.provider_metadata
+        for warning in outcome.fidelity_warnings:
+            fidelity_warnings.append(f"page {page_number}: {warning}")
 
     if not redacted_pages:
         raise RuntimeError(f"checkpoint 2 blocked: {doc_id} has no validated pages")
+
+    # 4-1/4-2/4-3: any fidelity drift or count mismatch on any page forces human
+    # review. review_required is COMPUTED from the verification result, never a
+    # hardcoded False -- a downstream agent may raise it further but cannot lower
+    # this floor.
+    review_required = bool(fidelity_warnings)
+
+    warnings: list[str] = list(fidelity_warnings)
+    if provider_metadata:
+        warnings.append(
+            "Provider execution metadata is recorded in model_info.provider_metadata; "
+            "source text was accessed only through dao.py."
+        )
 
     redacted_text = "\n".join(redacted_pages) + "\n"
     redacted_path = f"data/processed/{case_id}/{doc_id}/redacted_text.md"
@@ -132,22 +102,18 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, provid
         "component": "document-pipeline",
         "status": "success",
         "model_info": {
-            "model_name": f"{provider.provider_name}:{provider.model_name}",
+            "model_name": redactor.label,
             "prompt_version": PROMPT_VERSION,
             "provider_metadata": provider_metadata or {},
         },
-        "method": "local_llm_offline" if provider.provider_name == "local-llm" else provider.provider_name,
+        "method": redactor.method,
         "document_id": doc_id,
         "redacted_text_path": redacted_path,
         "items_redacted": total_items,
         "categories": sorted(categories),
-        "review_required": False,
-        "warnings": [],
+        "review_required": review_required,
+        "warnings": warnings,
     }
-    if provider_metadata:
-        contract["warnings"] = [
-            "Provider execution metadata is recorded in model_info.provider_metadata; source text was accessed only through dao.py."
-        ]
 
     scratch_root = ROOT / "_redaction_scratch"
     scratch_root.mkdir(parents=True, exist_ok=True)
@@ -174,7 +140,8 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, provid
         "doc_id": doc_id,
         "pages": len(redacted_pages),
         "items_redacted": total_items,
-        "provider": f"{provider.provider_name}:{provider.model_name}",
+        "review_required": review_required,
+        "redactor": redactor.label,
     }
 
 
@@ -185,14 +152,15 @@ def main() -> None:
     parser.add_argument("--held-by", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--provider", choices=SUPPORTED_PROVIDERS,
-                        default=os.environ.get("HARNESS_REDACTION_PROVIDER", "local-llm"))
+                        default=os.environ.get("HARNESS_REDACTION_PROVIDER", DEFAULT_REDACTION_PROVIDER))
     parser.add_argument("--model", default=os.environ.get("HARNESS_REDACTION_MODEL"))
     args = parser.parse_args()
 
     try:
         provider = build_provider(ProviderConfig(args.provider, args.model), env=os.environ, root=ROOT)
-        result = redact_document(args.case_id, args.doc_id, args.held_by, args.run_id, provider)
-    except (ProviderConfigError, ProviderExecutionError, RuntimeError) as exc:
+        redactor = LlmRedactor(provider)
+        result = redact_document(args.case_id, args.doc_id, args.held_by, args.run_id, redactor)
+    except (ProviderConfigError, ProviderExecutionError, RedactionParseError, RuntimeError) as exc:
         sys.exit(f"error: {exc}")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

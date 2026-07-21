@@ -20,9 +20,11 @@ class FakeScanProvider:
     def __init__(self, response):
         self.response = response
         self.prompts = []
+        self.image_paths = None
 
-    def scan_intake_content(self, prompt, prompt_version):
+    def scan_intake_content(self, prompt, prompt_version, image_paths=None):
         self.prompts.append((prompt, prompt_version))
+        self.image_paths = list(image_paths) if image_paths is not None else None
         return ProviderResult(self.provider_name, self.model_name, prompt_version, self.response)
 
 
@@ -108,6 +110,12 @@ def test_scan_for_answer_key_content_uses_capped_page_count(monkeypatch, tmp_pat
     result = intake_case.scan_for_answer_key_content(tmp_path / "doc.pdf", "CASE_009", 1, n_pages=3, provider=provider)
 
     assert captured["max_pages"] == 3
+    # 2-2 regression: the page images must reach the provider's image channel,
+    # not be embedded as file-path strings in the prompt text (dead strings to
+    # an HTTP provider -- the D2 scan would silently see nothing).
+    assert provider.image_paths == fake_pages
+    scan_prompt = provider.prompts[0][0]
+    assert "page_001.png" not in scan_prompt
     assert result["flagged"] is False
     assert result["pages_checked"] == 3
     assert len(provider.prompts) == 1

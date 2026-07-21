@@ -930,7 +930,19 @@ question, sharpened: intake needs either a completeness check against the
 GT's claim scope, or an explicit acceptance that evaluation measures
 "analysis of what was provided," not "prediction of the final report."
 
-## 16. CASE_003 (RUN_20260714_003) checkpoint 1 -- old local model tags failed real pages; explicit Instruct pair has only one-page validation -- OPEN
+## 16. CASE_003 checkpoint 1 -- local model stack attempted then REMOVED; reader self-refusal + non-text documents -- PARTIALLY OPEN
+
+**SUPERSEDED 2026-07-21 (PR #8 review): the local model stack was removed.**
+Everything below about `local-ocr`/`local-vlm`/`local-llm`, `tools/local_runtime.py`,
+and the Instruct-Q4 model tags is retained as the historical record of why. The
+stack never reached real-content validation on a multi-document matrix and was
+single-machine (Windows/E:) only, so it was deleted rather than left as
+misleading scaffolding; a genuinely technology-independent reader (a real OCR
+engine) is deferred to `open-decisions.md` #4. The two findings that OUTLIVE the
+removal -- reader self-refusal (c) and the non-text-image document path (d) --
+are still live and summarized at the end. The "Image: {path}" misread that made
+the refusals look non-deterministic was separately root-caused and fixed; see
+item 17.
 
 Two separate problems surfaced while running CASE_003's document-pipeline
 stage:
@@ -1014,10 +1026,13 @@ Two things surfaced and were addressed:
   path hints alone, not from inherited repo context. Reintroducing defensive
   "this is sanctioned, do not refuse" framing is still forbidden (it made
   this worse before). This is the dev-phase weak-P8's real cost and a
-  stronger argument for validating a genuinely different reader technology
-  (local-ocr/local-vlm, open-decisions #4) so at least one reader can't
-  refuse. Rough rate this run: ~5 of 12 text documents hit at least one
-  refusal-caused disagreement.
+  stronger argument for a genuinely different reader technology (a real OCR
+  engine, open-decisions #4) so at least one reader structurally cannot refuse
+  -- the removed local-vlm was to have been that reader but never worked on real
+  pages. Until a real OCR engine lands, the only remedy is the human-resolution
+  path below; trying a different LLM provider (codex-cli / openai-api) for the
+  offending reader may reduce the rate but cannot guarantee a fix. Rough rate
+  this run: ~5 of 12 text documents hit at least one refusal-caused disagreement.
 
 - **The human-resolution path for these disagreements was un-runnable and is
   now wired.** `resolve_from_raw_ocr()` existed and was unit-tested but had
