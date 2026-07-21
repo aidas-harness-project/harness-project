@@ -184,7 +184,8 @@ class ClaudeCliProvider(BaseProvider):
         self.root = root
         self.command = command
 
-    def _run(self, prompt: str, *, prompt_version: str, allowed_read: bool, timeout: int) -> ProviderResult:
+    def _run(self, prompt: str, *, prompt_version: str, allowed_read: bool, timeout: int,
+             read_cwd: Path | None = None) -> ProviderResult:
         # --safe-mode: the child claude -p session must see NOTHING but the
         # prompt -- no CLAUDE.md, skills, or session hooks. Without it, cwd=ROOT
         # auto-loads this project's context, and a context-aware reader
@@ -204,6 +205,14 @@ class ClaudeCliProvider(BaseProvider):
             cmd.extend(["--model", self.model_name])
         if allowed_read:
             cmd.extend(["--allowedTools", "Read"])
+
+        # D1/PII confinement (fleet review H1): a file-reading child runs with
+        # cwd set to the IMAGE directory, not the repo root -- claude's
+        # --allowedTools Read is scoped to cwd, so an injected "also read
+        # data/ground_truth/...  / another case's PII" cannot reach case data
+        # outside the scratch dir holding the rendered page image(s). Non-reading
+        # calls (compare/classify/redact) keep cwd=root; they invoke no Read.
+        cwd = str(read_cwd) if (allowed_read and read_cwd is not None) else str(self.root)
 
         # The child reads untrusted claim images; strip every non-Anthropic
         # secret from its environment so a prompt-injected read can't exfiltrate
@@ -241,7 +250,7 @@ class ClaudeCliProvider(BaseProvider):
                     encoding="utf-8",
                     errors="replace",
                     timeout=timeout,
-                    cwd=str(self.root),
+                    cwd=cwd,
                     stdin=subprocess.DEVNULL,
                     env=run_env,
                 )
@@ -297,7 +306,9 @@ class ClaudeCliProvider(BaseProvider):
     # to treat as a prompt-injection signal.
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
         framed_prompt = f"Read the image file at {image_path} and then: {prompt}"
-        return self._run(framed_prompt, prompt_version=prompt_version, allowed_read=True, timeout=180)
+        # Confine the child's Read to the image's own directory (H1).
+        return self._run(framed_prompt, prompt_version=prompt_version, allowed_read=True,
+                         timeout=180, read_cwd=Path(image_path).resolve().parent)
 
     def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, allowed_read=False, timeout=60)
@@ -314,10 +325,14 @@ class ClaudeCliProvider(BaseProvider):
         # "Image: {path}" label is read as metadata about a never-arriving
         # attachment and the Read tool is never invoked (2026-07-16 finding). An
         # HTTP provider attaches the images instead (see OpenAIApiProvider).
-        if image_paths:
-            refs = "\n".join(f"Read the image file at {p}." for p in image_paths)
-            prompt = f"{prompt}\n\n{refs}"
-        return self._run(prompt, prompt_version=prompt_version, allowed_read=True, timeout=180)
+        refs = "\n".join(f"Read the image file at {p}." for p in image_paths)
+        prompt = f"{prompt}\n\n{refs}"
+        # Confine Read to the shared image directory when the pages live in one
+        # dir (the intake scratch case), else leave unconfined (H1).
+        parents = {Path(p).resolve().parent for p in image_paths}
+        read_cwd = parents.pop() if len(parents) == 1 else None
+        return self._run(prompt, prompt_version=prompt_version, allowed_read=True,
+                         timeout=180, read_cwd=read_cwd)
 
     def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, allowed_read=False, timeout=120)
