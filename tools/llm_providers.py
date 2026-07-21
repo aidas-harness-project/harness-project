@@ -509,17 +509,26 @@ class OpenAIApiProvider(_ApiProviderStub):
         except json.JSONDecodeError as exc:
             raise ProviderExecutionError(f"openai-api returned non-JSON response: {response_body!r}") from exc
 
-        # Truncation guard: a response cut off at the token cap comes back with
-        # status "incomplete" and PARTIAL output_text. Returning that as "the
-        # transcription"/"the redaction" would silently land a half a page in
-        # the trusted layer. Refuse it -- the caller fails closed rather than
-        # trusting a truncated read.
+        # Truncation guard (verified against the Responses API contract): a
+        # response cut off at the token cap comes back status "incomplete" with
+        # incomplete_details.reason "max_output_tokens" and PARTIAL (or, for a
+        # reasoning model, empty) output_text. Returning that as "the
+        # transcription"/"the redaction" would silently land half a page in the
+        # trusted layer. Refuse it. incomplete_details can be null even when
+        # incomplete -- hence the `or {}`.
         status = parsed.get("status")
         if status == "incomplete":
             reason = (parsed.get("incomplete_details") or {}).get("reason", "unknown")
             raise ProviderExecutionError(
                 f"openai-api response was truncated (status=incomplete, reason={reason}); "
                 "refusing to use a partial result"
+            )
+        # Any non-completed terminal status (e.g. "failed") is a failure too --
+        # only "completed" is trusted. None is left permissive (older responses
+        # may omit status; the output_text check below still fails closed).
+        if status is not None and status != "completed":
+            raise ProviderExecutionError(
+                f"openai-api response was not completed (status={status!r}); refusing to use it"
             )
 
         text = _extract_openai_output_text(parsed)

@@ -656,6 +656,31 @@ def test_openai_truncated_response_raises(monkeypatch):
     assert "truncated" in str(excinfo.value).lower()
 
 
+def test_openai_non_completed_status_raises(monkeypatch):
+    # R4 hardening: any non-"completed" terminal status (e.g. "failed") is a
+    # failure, not just "incomplete".
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"id": "r", "status": "failed", "output_text": "junk"}'
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="openai-api", model_name="gpt-test"),
+        env={"OPENAI_API_KEY": "secret"},
+    )
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.classify_document("prompt", "classification_v0.1")
+    assert "not completed" in str(excinfo.value).lower()
+
+
 def test_claude_cli_fails_closed_on_empty_output(monkeypatch, tmp_path):
     # Failure-safety: exit 0 with empty stdout must NOT be returned as a valid
     # (empty) transcription -- a blank result is never content. It retries, then
