@@ -208,7 +208,7 @@ def test_claude_cli_provider_always_passes_safe_mode(monkeypatch, tmp_path):
     provider.transcribe_image(Path("page.png"), "transcribe prompt", "ocr_extraction_v0.1")
     provider.compare_text("compare prompt", "ocr_compare_v0.1")
     provider.classify_document("classify prompt", "classification_v0.1")
-    provider.scan_intake_content("scan prompt", "intake_scan_v0.1")
+    provider.scan_intake_content("scan prompt", "intake_scan_v0.1", image_paths=[Path("p1.png")])
 
     assert len(calls) == 4
     for cmd in calls:
@@ -737,3 +737,37 @@ def test_codex_cli_fails_closed_on_empty_output(monkeypatch, tmp_path):
     with pytest.raises(providers.ProviderExecutionError) as excinfo:
         provider.compare_text("prompt", "ocr_compare_v0.1")
     assert "empty" in str(excinfo.value).lower()
+
+
+def test_image_data_url_missing_file_raises_clean(tmp_path):
+    # R5-A: a missing/unreadable page image must be a clean ProviderExecutionError,
+    # not a raw FileNotFoundError out of the caller.
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        providers._image_data_url(tmp_path / "does_not_exist.png")
+    assert "could not read image" in str(excinfo.value)
+
+
+def test_openai_scan_missing_image_raises_clean(monkeypatch, tmp_path):
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="openai-api", model_name="gpt-x"),
+        env={"OPENAI_API_KEY": "k"},
+    )
+    with pytest.raises(providers.ProviderExecutionError):
+        provider.scan_intake_content("s", "v", image_paths=[tmp_path / "missing.png"])
+
+
+@pytest.mark.parametrize("empty", [None, []])
+def test_scan_intake_requires_images(monkeypatch, tmp_path, empty):
+    # R5-B: the D2 vision scan must never run blind (no images) -- all real
+    # providers fail closed rather than silently scanning nothing.
+    reals = [
+        providers.ClaudeCliProvider(root=tmp_path),
+        providers.CodexCliProvider(root=tmp_path),
+        providers.build_provider(
+            providers.ProviderConfig(provider_name="openai-api", model_name="gpt-x"),
+            env={"OPENAI_API_KEY": "k"},
+        ),
+    ]
+    for prov in reals:
+        with pytest.raises(providers.ProviderExecutionError):
+            prov.scan_intake_content("s", "v", image_paths=empty)

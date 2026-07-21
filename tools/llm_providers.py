@@ -62,6 +62,16 @@ class ProviderExecutionError(RuntimeError):
     """Raised when a configured provider fails during execution."""
 
 
+def _require_scan_images(image_paths) -> None:
+    """The D2 content check is a VISION scan; running it with no images would
+    silently scan nothing and could falsely report 'clear'. Fail closed."""
+    if not image_paths:
+        raise ProviderExecutionError(
+            "scan_intake_content requires page images -- the D2 content check is a "
+            "vision scan and cannot run blind (got no image_paths)"
+        )
+
+
 def _child_safe_env(*, keep_prefixes: Sequence[str]) -> dict[str, str]:
     """A copy of os.environ with foreign provider secrets removed.
 
@@ -298,6 +308,7 @@ class ClaudeCliProvider(BaseProvider):
     def scan_intake_content(
         self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
     ) -> ProviderResult:
+        _require_scan_images(image_paths)
         # The child opens the pages itself via its Read tool. Use the same
         # explicit-imperative form transcribe_image uses -- a trailing
         # "Image: {path}" label is read as metadata about a never-arriving
@@ -410,6 +421,7 @@ class CodexCliProvider(BaseProvider):
     def scan_intake_content(
         self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
     ) -> ProviderResult:
+        _require_scan_images(image_paths)
         return self._run(
             prompt, prompt_version=prompt_version, timeout=180, image_paths=image_paths
         )
@@ -575,6 +587,7 @@ class OpenAIApiProvider(_ApiProviderStub):
     def scan_intake_content(
         self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
     ) -> ProviderResult:
+        _require_scan_images(image_paths)
         # The whole point of the D2 scan is that the model SEES the page images.
         # Attach them as image content parts; a bare text prompt naming file
         # paths reaches the API as dead strings the server cannot open.
@@ -692,9 +705,15 @@ def _normalize_provider_name(provider_name: str) -> str:
 
 
 def _image_data_url(image_path: Path) -> str:
-    mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
-    encoded = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
-    return f"data:{mime_type};base64,{encoded}"
+    path = Path(image_path)
+    mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        # A missing/unreadable page image must surface as a clean provider error,
+        # not a raw FileNotFoundError traceback out of the caller.
+        raise ProviderExecutionError(f"could not read image {path}: {exc}") from exc
+    return f"data:{mime_type};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 def _image_content_parts(image_paths: Sequence[Path]) -> list[dict[str, Any]]:

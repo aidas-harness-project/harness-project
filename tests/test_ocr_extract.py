@@ -341,3 +341,40 @@ def test_run_ocr_resume_false_ignores_cache(monkeypatch, tmp_path):
 
     assert result["pages"][0]["reading_a"] == "A1"  # freshly read, not "STALE"
     assert len(reader_a.calls) == 2  # both pages read
+
+
+# --- decode_text_file: encoding robustness (R6) ---
+def _write(tmp_path, data: bytes) -> Path:
+    p = tmp_path / "doc.txt"
+    p.write_bytes(data)
+    return p
+
+
+def test_decode_prefers_utf8_and_round_trips(tmp_path):
+    kor = "환자 홍길동 진단서 골절"
+    text, enc = oe.decode_text_file(_write(tmp_path, kor.encode("utf-8")))
+    assert text == kor and enc == "utf-8"
+
+
+def test_decode_strips_utf8_bom(tmp_path):
+    kor = "환자 홍길동"
+    text, enc = oe.decode_text_file(_write(tmp_path, b"\xef\xbb\xbf" + kor.encode("utf-8")))
+    assert text == kor  # no stray ﻿
+    assert enc == "utf-8"
+
+
+def test_decode_reads_cp949(tmp_path):
+    kor = "환자 홍길동 골절"
+    text, enc = oe.decode_text_file(_write(tmp_path, kor.encode("cp949")))
+    assert text == kor and enc == "cp949"
+
+
+def test_decode_empty_file_fails_closed(tmp_path):
+    with pytest.raises(llm_providers.ProviderExecutionError):
+        oe.decode_text_file(_write(tmp_path, b"   \n\t"))
+
+
+def test_decode_undecodable_fails_closed(tmp_path):
+    # bytes invalid in utf-8/cp949/euc-kr
+    with pytest.raises(llm_providers.ProviderExecutionError):
+        oe.decode_text_file(_write(tmp_path, b"\xff\xfe\x00\x81\xff"))
