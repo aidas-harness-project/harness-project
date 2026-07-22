@@ -1190,3 +1190,74 @@ DEFERRED, with why:
   frontend hole (serving ground-truth files) WAS fixed. If the frontend is ever
   exposed, auth + CSRF + upload/spawn caps + scrubbing the `/run` child env
   become required.
+
+## 19. Analysis agents could read pre-redaction page text -- RESOLVED 2026-07-22 (specs + regression), residual risk OPEN
+
+Found live during the CASE_901 test run (`intake -> document-pipeline ->
+denial-response`, RUN_20260722_001).
+
+**What happened.** The `denial-response` subagent followed its spec and called
+`dao.py read-document-text CASE_901 DOC_001`. That command returns the **path**
+to `redacted_text.md`, not its text -- but all three consuming specs described
+it as the way to "read the processed text". Getting back a one-line path where
+text was promised, the agent concluded the command had failed, judged that
+opening the returned path itself would violate P2, and fell back to
+`read-page-text` for all four pages. `page_NNN.md` is checkpoint 1 output --
+**before** redaction.
+
+**Measured exposure** (CASE_901/DOC_001):
+
+| page | `page_NNN.md` (checkpoint 1) | `redacted_text.md` (checkpoint 2) |
+|---|---|---|
+| 2 | `서울시 서초구 서초대로74길 14, 33층` / `(02)758-7755` | `[ADDRESS]` / `[PHONE_NUMBER]` |
+| 4 | `대표이사 나 채 범` | `대표이사 [PERSON_NAME]` |
+
+The agent read a natural person's name, a street address, and phone/fax numbers
+that checkpoint 2 exists to remove. **No PII reached the output** -- all 19
+evidence quotes in `denial_reason_result.json` were checked and are clean -- but
+that was the quotes it happened to pick, not a control.
+
+**Root cause was the specs, not the code.** The two commands are deliberately
+different, because their consumers are:
+
+| command | file | redaction | consumer | returns |
+|---|---|---|---|---|
+| `read-page-text` | `page_NNN.md` | **before** | `redact_document.py:75` (tool) | text (in-process, feeds the Redactor) |
+| `read-document-text` | `redacted_text.md` | **after** | agents | path (agent reads as much as it needs) |
+
+Making `read-page-text` return a path instead would be worse -- it would put a
+pre-redaction path into circulation and make opening it the normal idiom.
+`read-document-text` returning a path is fine: the file is redacted, and a
+136KB document (`CASE_024/DOC_002`) should not be force-fed into an agent's
+context. What was wrong was three specs describing the path-returner as a
+text-returner.
+
+The specs also wrote the command as `read_document_text` -- underscored, which
+matches neither the CLI name (`read-document-text`) nor any in-process function
+(only `cmd_read_document_text`, an argparse entry point, exists). Unlike
+`read_contract_data`/`patch_manifest_document`, which are real callable
+functions, this name existed nowhere. Same files already wrote every other DAO
+call in executable form (`dao.py write-contract`, `dao.py patch-manifest-document`).
+
+**Fixed.**
+- `denial-response.md` / `policy-pipeline.md`: state that `read-document-text`
+  returns the redacted document's path and that the path is what you read; ban
+  `read-page-text` outright as checkpoint 2's pre-redaction input.
+- `document-pipeline.md`: keeps `read-page-text` (it owns checkpoint 2) but now
+  says plainly that it is pre-redaction data, redaction's input and nothing
+  else, never to be quoted into a contract or handed to another stage.
+- All three rewritten to the executable CLI form; `sync_agents.py` re-run.
+- `tests/test_redaction_boundary.py` (6 tests) pins the invariant: PII present
+  in `page_NNN.md` is absent from `redacted_text.md`; `read-page-text` yields
+  pre-redaction text; `read-document-text` yields a path, never content; the
+  path it yields holds redacted content; the two commands are not
+  interchangeable; `expert_review_only` still emits no path at all. Verified by
+  mutation -- reintroducing the "print the text" change fails 2 of the 6.
+
+**Residual risk, OPEN.** A spec is a prompt. Nothing structurally prevents an
+analysis agent from calling `read-page-text`; the DAO does not know who is
+calling. A real gate needs caller identity at the DAO boundary -- e.g. a
+required `--caller-stage` on `read-page-text` accepted only for
+`document_processing`, mirroring how `read-ground-truth` already takes
+`--caller-stage`. Deferred, and worth doing: this is the second finding in this
+file (see item 18) where the sanctioned path was correct but not sealed.
