@@ -14,7 +14,9 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. P
 
 # What you do
 
-1. Read the flagged insurer-response document's processed text (via `read_document_text`).
+1. Read the flagged insurer-response document's processed text. `python tools/dao.py read-document-text CASE_ID DOC_ID` returns the **path** to the redacted document (`redacted_text.md`), not its text — read that path to get the content. The command is also the gate: it refuses a document routed `expert_review_only` and reports `NOT_EXTRACTED` when checkpoint 2 hasn't produced a redacted file yet. Either outcome means you stop and report, never that you go looking for the text elsewhere.
+
+   **Never use `read-page-text`.** It serves checkpoint 2's own input — `page_NNN.md` is checkpoint 1 output, *before* redaction, and still contains claimant-facing PII (names, addresses, phone numbers) that redaction exists to remove. Reading it bypasses the redaction stage entirely. Every quote you cite must come from the redacted text.
 2. Split every materially distinct insurer decision into a separate `reason_id`. `decision_type: denial` means no payment for that claim coverage/item; `decision_type: reduction` means payment liability is recognized but the payable amount is reduced. A case may contain both types in separate findings. Never collapse several coverages, items, or reasons into one finding.
 3. Record `payment_status` independently as `unpaid` / `partially_paid` / `paid` / `unknown`. It is an observed outcome, not another decision type. Do not infer a payment-status rule from the decision type; that relationship remains deliberately unconstrained until enough real data exists.
 4. Classify each reason against R01-R21/R99 using `common_component_output.schema.json`'s `taxonomy_code.x-codebook`, including `candidate_codes` for Top-3 evaluation. Enforce the reviewed decision-type mapping: reduction-only and denial-only codes cannot cross types; R15/R99 may use either; R12/R14 remain unclassified and always set `review_required: true`, routed to `손해사정사`. Use the most specific supported code and use R99 only when no specific code fits.
