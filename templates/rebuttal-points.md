@@ -1,7 +1,7 @@
 ---
 type: Template
 title: 반박 포인트 리포트 형식
-description: 감액사유별 보험사 주장·반박 후보·근거 자료·검수 필요를 정리하는 출력 형식.
+description: 감액·거절사유별 보험사 주장·반박 후보·근거 자료·검수 필요를 정리하는 출력 형식.
 tags: [template, rebuttal]
 timestamp: 2026-07-13T00:00:00+09:00
 adopted_from: wiki/templates/rebuttal-points.md
@@ -19,7 +19,7 @@ adopted_from: wiki/templates/rebuttal-points.md
 ```markdown
 # 반박 포인트
 
-## 감액사유
+## 감액/거절사유
 - 치료 필요성 부족
 
 ## 보험사 주장
@@ -43,7 +43,8 @@ adopted_from: wiki/templates/rebuttal-points.md
 
 - 반박 후보마다 근거 자료(문서·페이지)를 연결한다.
 - 근거를 연결할 수 없는 반박은 반드시 "검수 필요"로 표시한다.
-- 감액사유 코드는 `pipeline.md`의 Denial/reduction reason codes(R코드)를 따른다.
+- 감액·거절사유 코드는 `pipeline.md`의 Denial/reduction reason codes(R코드)를 따른다.
+- 약관 근거는 `denial-validation`에서 `verified`로 확인된 매칭만 사용한다.
 
 # Citations
 

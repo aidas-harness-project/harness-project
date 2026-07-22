@@ -42,6 +42,13 @@ worked through -- see CLAUDE.md's changelog).
 phase-gated. It runs whenever a flagged insurer-response document's
 processed text (from stage 2) exists, whether that's during Phase 1
 (closed cases bundle the insurer notice from the start) or genuinely later.
+Its output keeps `decision_type` (`denial`/`reduction`) separate from the
+observed `payment_status`; `partial_payment` is not a decision type. Each
+materially distinct insurer reason gets its own `reason_id`, three explicit
+ground arrays (contractual, medical/factual, calculation), an explicit amount
+object, and policy matches whose insurer-citation and clause locations remain
+distinguishable. Empty ground/match arrays are valid and preferable to an
+unsupported inference.
 
 # Phase 2 -- insurer denial/reduction response
 
@@ -52,7 +59,7 @@ for rebuttal generation).
 
 | # | Stage | Agent | Notes |
 |---|---|---|---|
-| 1 | Denial Validation | `denial-validation` | 2 internal checkpoints: (a) evidence retrieval + validate each denial reason against it, (b) generate rebuttal points from the validation. Insurer-vs-evidence disagreement is this stage's actual purpose, **not** a P6 conflict -- don't route it through the conflict ledger |
+| 1 | Denial Validation | `denial-validation` | 2 internal checkpoints: (a) verify every policy-match ID/location, retrieve evidence, and validate each denial/reduction reason; (b) generate rebuttal points using only verified policy links. Invalid/unverifiable links are review-routed and never silently replaced. Insurer-vs-evidence disagreement is this stage's actual purpose, **not** a P6 conflict -- don't route it through the conflict ledger |
 | 2 | Draft Report v2 | `draft-report` | Second checkpoint of the Phase 1 agent |
 | — | Critic Pass (v2) | `critic` | Same agent as Phase 1 |
 | — | Evaluation | `evaluation` | Same agent as Phase 1 |
@@ -92,6 +99,14 @@ structure, no registry entry). See open-decisions.md #2.
 `template_id` at claim-analysis's checkpoint 3.
 
 ## Denial/reduction reason codes (R-codes)
+
+`decision_type` has exactly two values: `denial` means no payment for the
+specific claim coverage/item; `reduction` means payment liability is recognized
+but the payable amount is reduced. One case may contain both as separate reason
+entries. `payment_status` (`unpaid`, `partially_paid`, `paid`, `unknown`) records
+the observed outcome independently; no automatic relationship is enforced until
+enough real data exists. R12/R14 remain unclassified pending adjuster review, so
+either decision type is schema-valid only with `review_required: true`.
 
 The frequency tier and applicable decision types are loss-adjuster-reviewed
 taxonomy metadata received on 2026-07-21 and 2026-07-22 respectively. They are
