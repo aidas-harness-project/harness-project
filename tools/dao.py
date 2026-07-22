@@ -2289,6 +2289,40 @@ _PROTECTED_CONTRACT_FILES = frozenset({
     "_run_state.json",
     "_transaction_journal.json",
 })
+def _invalidate_stale_downstream(args, data: dict, target: Path) -> None:
+    """After denial_reason_result.json is rewritten, mark every downstream
+    stage whose output no longer matches it as `pending` again.
+
+    Called with the upstream file's lock still held, so the hash written into
+    run-state is the one that just landed. `_update_run_state` takes a
+    different file's lock (run-state), and never the reverse direction, so
+    the two locks cannot deadlock against each other.
+
+    Deliberately NOT a deletion. A stale validation is still evidence of what
+    a stage concluded and why; discarding it would lose that, and P6's
+    never-delete-conflicting-data discipline applies to superseded outputs as
+    much as to contradictory sources. The file stays, its recorded
+    source_denial_contract_hash marks it superseded, and the DAO refuses to
+    rewrite it against the wrong upstream anyway.
+    """
+    if Path(args.filename).name != _cross_contract.DENIAL_REASONS:
+        return
+    case = case_dir(args.case_id)
+    new_hash = _cross_contract.upstream_hash(data)
+    stale = _cross_contract.stale_downstream(case, new_hash)
+    if not stale:
+        return
+    print(f"NOTE: {_cross_contract.DENIAL_REASONS} changed; {len(stale)} downstream contract(s) "
+          "no longer describe the current reason/match set:")
+    for filename, stage, recorded in stale:
+        shown = (recorded[:12] + "...") if recorded else "none recorded"
+        print(f"  - {filename} (was {shown}) -> run-state stage {stage!r} reset to pending")
+        state = _update_run_state(args.case_id, args.run_id, stage, "pending", args.held_by)
+        if state is None:
+            print(f"    WARNING: could not reset {stage!r} (see LOCKED above) -- that stage still "
+                  "reads as passed while its output is stale; reset it before trusting the run.")
+    print("  The stale files are left on disk on purpose (nothing is deleted). Re-run those "
+          "stages against the current contract.")
 
 
 def cmd_write_contract(args):
@@ -2405,6 +2439,13 @@ def cmd_write_contract(args):
                 and previous_contract is not None
                 and previous_contract != data):
             policy_layer_changed = args.filename
+        # Rewriting an upstream contract can strand downstream ones that were
+        # derived from the previous reason/match set. Nothing is deleted (P6:
+        # data is never silently discarded) -- the affected stages are flipped
+        # back to `pending` in run-state, which is the file that already
+        # answers "where does this run actually stand". The stale contract
+        # stays on disk, and its recorded hash is what marks it superseded.
+        _invalidate_stale_downstream(args, data, target)
         if args.stage:
             # A different target (_run_state.json, not this contract file) --
             # no deadlock risk nesting this inside the contract file's lock.
