@@ -58,3 +58,21 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 **Status: resolved 2026-07-15.** A document consisting entirely of photographs or other visual evidence is represented as `extraction_method: non_text_image`, `ocr_status: not_applicable`, `cross_validation_status: non_text_verified`, and `downstream_disposition: expert_review_only`. A genuine human must make this decision through `run_checkpoint1.py resolve-non-text`; the tool preserves the original P8 disagreement, creates no page text or model-generated image description, skips text classification/redaction, and records an explicit exclusion in `page_chunks.json`.
 
 This does not resolve mixed text/image documents. The whole-document command refuses any document with an already-written text page, so a future per-page mixed-content contract cannot silently reuse this bypass.
+
+## 6. Evaluation measures R-code accuracy only, not decision_type or source-location accuracy
+
+**Where:** the evaluation contract (`schemas/evaluation_result.schema.json`, `.claude/agents/evaluation.md`), against `denial_reason_result.json`.
+
+**Current:** evaluation scores the denial/reduction classification as R-code Top-1/Top-3. Two things the contract now *records* are not *scored*:
+
+- `decision_type` (denial vs reduction). A reason can carry the right R-code and the wrong decision type; today that counts as fully correct.
+- Source-location accuracy. Since the 2026-07-22 audit fix (`known-gaps.md` item 20) every denial-family evidence reference must carry `document_id` + `page` + `quote`, so the data to score this now exists -- but nothing scores whether the cited location is the *right* one, only that one is present and resolvable.
+
+**Problem:** the harness can look accurate on the metric it reports while being wrong in ways the metric cannot see -- the same failure shape as the schema gaps in item 20, one level up. Under-measurement is not neutral: it decides what the PoC's Go/No-Go is actually evidence for.
+
+**Why it is not just "add two more numbers":** each needs a real definition first.
+- Is a correct R-code with an incorrect `decision_type` a miss, or partial credit? They are not independent -- the reviewed codebook already constrains which decision types each code admits (`x-codebook.applicable_decision_types`), so some combinations are contradictions rather than errors of degree.
+- What counts as a correct location? Exact page match, or overlap with the ground-truth adjuster's cited span? Quote-level or page-level? A stricter rule punishes a correct finding cited one page off; a looser one cannot distinguish grounded from approximately-grounded.
+- Ground truth for locations may not exist in comparable form: the real adjuster's report cites its own documents, not the case's `DOC_XXX`/page coordinates.
+
+**To resolve:** a deliberate evaluation design pass, deciding the scoring rules above before implementing them. Explicitly not built at gate-building time -- inventing a metric to fill the gap would produce a number nobody could interpret, which is worse than a documented absence.

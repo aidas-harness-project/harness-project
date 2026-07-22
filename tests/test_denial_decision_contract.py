@@ -27,6 +27,11 @@ def reason(code="R01", decision_type="reduction", *, review_required=False):
         "decision_type": decision_type,
         "payment_status": "unknown",
         "taxonomy_code": code,
+        # Required since the audit fix: candidate_codes is the Top-1/Top-3
+        # evaluation input, and an omitted list silently drops a reason from
+        # that measurement instead of scoring it. The top entry must be the
+        # assigned code (enforced by tools/_cross_contract.py).
+        "candidate_codes": [{"taxonomy_code": code, "confidence": 0.9}],
         "raw_reason_text": "보험사 합성 원문",
         "insurer_claim_summary": "보험사가 해당 사유를 주장함",
         "grounds": {

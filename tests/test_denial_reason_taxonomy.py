@@ -109,6 +109,8 @@ def _denial_result(code):
         "decision_type": decision_type,
         "payment_status": "unknown",
         "taxonomy_code": code,
+        # Required since the audit fix -- see tests/test_cross_contract.py.
+        "candidate_codes": [{"taxonomy_code": code, "confidence": 0.9}],
         "raw_reason_text": "보험사 감액 또는 거절 사유 원문",
         "insurer_claim_summary": "보험사가 감액 또는 거절을 주장함",
         "grounds": {

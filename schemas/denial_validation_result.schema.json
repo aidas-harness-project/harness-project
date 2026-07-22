@@ -46,7 +46,7 @@
         "evidence_references": {
           "type": "array",
           "description": "Final cited evidence backing the verdict. May be empty only when verdict is insufficient_evidence.",
-          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+          "items": { "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference" }
         },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
         "review_required": { "type": "boolean" },
@@ -81,7 +81,7 @@
         "evidence_references": {
           "type": "array",
           "description": "Source locations used to verify or reject the policy match. Verified matches require at least one.",
-          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+          "items": { "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference" }
         },
         "review_required": { "type": "boolean" },
         "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
