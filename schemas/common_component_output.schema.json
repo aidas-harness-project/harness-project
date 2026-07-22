@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "common_component_output.schema.json",
-  "title": "Common component output contract v0.4",
+  "title": "Common component output contract v0.5",
   "description": "Fields every pipeline component's output JSON includes in common. Judgment-type outputs add the safety fields (source_grounded, hallucination_risk_check, prohibited_language_check). See harness-guardrails (P1) for the rules this schema enforces.",
   "type": "object",
   "properties": {
@@ -110,6 +110,14 @@
         "insurer_response",
         "other"
       ]
+    },
+    "decision_type": {
+      "description": "Insurer decision for one claim coverage or claim item. denial means no payment for that item; reduction means payment liability is recognized but the payable amount is reduced. A case may contain separate reasons of both types.",
+      "enum": ["denial", "reduction"]
+    },
+    "payment_status": {
+      "description": "Observed payment outcome, kept separate from decision_type. No automatic decision_type-to-payment_status rule is enforced until enough real data exists.",
+      "enum": ["unpaid", "partially_paid", "paid", "unknown"]
     },
     "taxonomy_code": {
       "description": "Denial/reduction-reason R-code. See pipeline.md's taxonomy section. x-codebook carries the loss-adjuster-reviewed Korean label, observed frequency tier, and applicable decision types. These are taxonomy metadata, not case evidence or model confidence. An empty applicable_decision_types array means the adjuster's source table left the classification blank; it does not mean the code can never apply.",

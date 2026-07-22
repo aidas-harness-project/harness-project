@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "denial_reason_result.schema.json",
-  "title": "denial_reason_result.json -- insurer's stated position, extracted and classified v0.2",
-  "description": "Extracts denial/reduction/non-payment reasons from an insurer-response document and classifies each against the R-code taxonomy. Produced by denial-response, which is dependency-triggered (runs whenever a flagged insurer-response document's processed text exists) rather than phase-gated -- see pipeline.md. The loss-adjuster-reviewed frequency tier is fixed taxonomy metadata in common_component_output.schema.json's taxonomy_code.x-codebook; it is deliberately not copied into each case result or used as confidence. Judgment-type output; include the safety fields (source_grounded etc.) from common_component_output.schema.json.",
+  "title": "denial_reason_result.json -- insurer's stated position, grounds, and policy matches v0.3",
+  "description": "Produced by denial-response. Each materially distinct insurer decision is a separate reason. decision_type records denial versus reduction; payment_status records the observed payment outcome independently. Every stated or inferred ground and every policy match carries source locations. Judgment-type output; include the safety fields from common_component_output.schema.json.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -10,7 +10,7 @@
       "properties": {
         "denial_reasons": {
           "type": "array",
-          "description": "Extracted reasons. Empty array means no denial/reduction found.",
+          "description": "Extracted denial/reduction decisions. Empty means the insurer-response document states neither.",
           "items": { "$ref": "#/$defs/denial_reason" }
         }
       },
@@ -18,26 +18,134 @@
     }
   ],
   "$defs": {
+    "basis_item": {
+      "type": "object",
+      "properties": {
+        "basis_id": { "type": "string", "pattern": "^BASIS_[0-9]+$" },
+        "text": { "type": "string", "minLength": 1 },
+        "basis_source": {
+          "enum": ["insurer_stated", "agent_inferred"],
+          "description": "Never merge an insurer-stated ground with an agent-inferred ground. agent_inferred always requires expert review."
+        },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Exact source location supporting this basis text. A basis without a source location is invalid, not merely low-confidence.",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        },
+        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "review_required": { "type": "boolean" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+      },
+      "required": ["basis_id", "text", "basis_source", "evidence_references", "confidence", "review_required"],
+      "allOf": [
+        {
+          "if": { "properties": { "basis_source": { "const": "agent_inferred" } }, "required": ["basis_source"] },
+          "then": {
+            "properties": { "review_required": { "const": true } },
+            "required": ["reviewer_role"]
+          }
+        },
+        {
+          "if": { "properties": { "review_required": { "const": true } }, "required": ["review_required"] },
+          "then": { "required": ["reviewer_role"] }
+        }
+      ]
+    },
+    "grounds": {
+      "type": "object",
+      "description": "Three non-overlapping ground categories. Empty arrays mean the insurer response did not state that kind of ground; never fill an absent ground by guesswork.",
+      "properties": {
+        "contractual_basis": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/basis_item" }
+        },
+        "medical_or_factual_basis": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/basis_item" }
+        },
+        "calculation_basis": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/basis_item" }
+        }
+      },
+      "required": ["contractual_basis", "medical_or_factual_basis", "calculation_basis"]
+    },
+    "amounts": {
+      "type": "object",
+      "description": "Explicit payment amounts. Use null when the insurer response does not state a value; do not infer one.",
+      "properties": {
+        "claimed_amount": { "type": ["number", "null"], "minimum": 0 },
+        "payable_amount": { "type": ["number", "null"], "minimum": 0 },
+        "denied_amount": { "type": ["number", "null"], "minimum": 0 },
+        "reduction_amount": { "type": ["number", "null"], "minimum": 0 },
+        "reduction_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
+      },
+      "required": ["claimed_amount", "payable_amount", "denied_amount", "reduction_amount", "reduction_rate"]
+    },
+    "policy_match": {
+      "type": "object",
+      "properties": {
+        "policy_match_id": { "type": "string", "pattern": "^PM_[0-9]+$" },
+        "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+        "clause_id": { "type": "string", "pattern": "^C-[0-9]+$" },
+        "match_source": {
+          "enum": ["insurer_cited", "agent_inferred"],
+          "description": "insurer_cited means the insurer response identifies the clause; agent_inferred means the agent found a potentially relevant clause and must route it for review."
+        },
+        "relevance_note": { "type": "string", "minLength": 1 },
+        "insurer_citation_evidence_references": {
+          "type": "array",
+          "description": "Location in the insurer response where the clause was cited. Empty only for agent_inferred matches.",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        },
+        "policy_clause_evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Location of the matched clause in the processed policy document. Required for every match so denial-validation can verify the link before relying on it.",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        },
+        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "review_required": { "type": "boolean" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+      },
+      "required": [
+        "policy_match_id", "document_id", "clause_id", "match_source", "relevance_note",
+        "insurer_citation_evidence_references", "policy_clause_evidence_references",
+        "confidence", "review_required"
+      ],
+      "allOf": [
+        {
+          "if": { "properties": { "match_source": { "const": "insurer_cited" } }, "required": ["match_source"] },
+          "then": { "properties": { "insurer_citation_evidence_references": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "match_source": { "const": "agent_inferred" } }, "required": ["match_source"] },
+          "then": {
+            "properties": {
+              "insurer_citation_evidence_references": { "maxItems": 0 },
+              "review_required": { "const": true }
+            },
+            "required": ["reviewer_role"]
+          }
+        },
+        {
+          "if": { "properties": { "review_required": { "const": true } }, "required": ["review_required"] },
+          "then": { "required": ["reviewer_role"] }
+        }
+      ]
+    },
     "denial_reason": {
       "type": "object",
       "properties": {
-        "reason_id": {
-          "type": "string",
-          "pattern": "^DR_[0-9]+$"
-        },
-        "reason_type": {
-          "enum": ["denial", "reduction", "partial_payment", "document_request", "other"],
-          "description": "denial=non-payment, reduction=reduced payout, partial_payment=partial payout, document_request=additional documents requested"
-        },
+        "reason_id": { "type": "string", "pattern": "^DR_[0-9]+$" },
+        "decision_type": { "$ref": "common_component_output.schema.json#/$defs/decision_type" },
+        "payment_status": { "$ref": "common_component_output.schema.json#/$defs/payment_status" },
         "taxonomy_code": { "$ref": "common_component_output.schema.json#/$defs/taxonomy_code" },
-        "taxonomy_label": {
-          "type": "string",
-          "description": "R-code display label, in Korean. e.g. 기왕증 / 기존 질환 기여도"
-        },
+        "taxonomy_label": { "type": "string" },
         "candidate_codes": {
           "type": "array",
           "maxItems": 3,
-          "description": "Top-3 candidate R-codes (descending confidence, first entry matches taxonomy_code). Used for the denial-reason Top-3 agreement metric.",
           "items": {
             "type": "object",
             "properties": {
@@ -47,44 +155,17 @@
             "required": ["taxonomy_code", "confidence"]
           }
         },
-        "raw_reason_text": {
-          "type": "string",
-          "description": "The insurer's original wording, verbatim."
-        },
-        "insurer_claim_summary": {
-          "type": "string",
-          "description": "Summary of the insurer's position. Use hedged, non-definitive phrasing (see the forbidden-expression guide in pipeline.md)."
-        },
-        "reduction_rate": {
-          "type": ["number", "null"],
-          "minimum": 0,
-          "maximum": 1,
-          "description": "Reduction rate. null if not applicable."
-        },
-        "reduction_amount": {
-          "type": ["number", "null"],
-          "minimum": 0,
-          "description": "Reduction amount (KRW). null if not stated in the source."
-        },
+        "raw_reason_text": { "type": "string", "minLength": 1 },
+        "insurer_claim_summary": { "type": "string", "minLength": 1 },
+        "grounds": { "$ref": "#/$defs/grounds" },
+        "amounts": { "$ref": "#/$defs/amounts" },
         "requested_documents": {
           "type": "array",
           "items": { "$ref": "common_component_output.schema.json#/$defs/document_type" }
         },
         "policy_matches": {
           "type": "array",
-          "description": "Policy clauses this denial reason was matched to (denial-response.md step 5). Empty array if no matching clause could be found -- record why in warnings.",
-          "items": {
-            "type": "object",
-            "properties": {
-              "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
-              "clause_id": { "type": "string" },
-              "relevance_note": {
-                "type": "string",
-                "description": "Why this clause was matched to this reason, if not self-evident."
-              }
-            },
-            "required": ["document_id", "clause_id"]
-          }
+          "items": { "$ref": "#/$defs/policy_match" }
         },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
         "evidence_references": {
@@ -96,14 +177,46 @@
         "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
       },
       "required": [
-        "reason_id",
-        "reason_type",
-        "taxonomy_code",
-        "raw_reason_text",
-        "policy_matches",
-        "confidence",
-        "evidence_references",
-        "review_required"
+        "reason_id", "decision_type", "payment_status", "taxonomy_code", "raw_reason_text",
+        "insurer_claim_summary", "grounds", "amounts", "requested_documents", "policy_matches",
+        "confidence", "evidence_references", "review_required"
+      ],
+      "allOf": [
+        {
+          "description": "Reduction-only codes must not be classified as denial.",
+          "if": {
+            "properties": {
+              "taxonomy_code": {
+                "enum": ["R01", "R02", "R03", "R06", "R07", "R10", "R11", "R13", "R16", "R17", "R18", "R19", "R20", "R21"]
+              }
+            },
+            "required": ["taxonomy_code"]
+          },
+          "then": { "properties": { "decision_type": { "const": "reduction" } } }
+        },
+        {
+          "description": "Denial-only codes must not be classified as reduction.",
+          "if": {
+            "properties": { "taxonomy_code": { "enum": ["R04", "R05", "R08", "R09"] } },
+            "required": ["taxonomy_code"]
+          },
+          "then": { "properties": { "decision_type": { "const": "denial" } } }
+        },
+        {
+          "description": "R12 and R14 remain unclassified pending adjuster confirmation and always require review whichever decision type the source supports.",
+          "if": {
+            "properties": { "taxonomy_code": { "enum": ["R12", "R14"] } },
+            "required": ["taxonomy_code"]
+          },
+          "then": {
+            "properties": { "review_required": { "const": true } },
+            "required": ["reviewer_role"]
+          }
+        },
+        {
+          "if": { "properties": { "review_required": { "const": true } }, "required": ["review_required"] },
+          "then": { "required": ["reviewer_role"] }
+        }
       ]
     }
   }

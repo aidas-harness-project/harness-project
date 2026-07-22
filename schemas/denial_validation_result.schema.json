@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "denial_validation_result.schema.json",
-  "title": "denial_validation_result.json -- denial reasons validated against case evidence v0.1",
-  "description": "Produced by denial-validation's checkpoint 1 (Evidence retrieval + validation). For each denial reason in denial_reason_result.json, whether the case's own evidence actually supports the insurer's stated reason.",
+  "title": "denial_validation_result.json -- denial reasons and policy links validated against case evidence v0.2",
+  "description": "Produced by denial-validation's checkpoint 1. For each denial/reduction reason, validates the insurer's position against case evidence and verifies every policy match before downstream reliance.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -38,6 +38,11 @@
           "description": "PoC dev-phase requirement: every chunk id (from page_chunks.json) retrieval surfaced for this reason, not just what got cited below. Revisit whether this stays required post-PoC.",
           "items": { "type": "string" }
         },
+        "policy_match_validations": {
+          "type": "array",
+          "description": "One verification record per policy match on the referenced denial reason. Empty only when that reason has no policy matches.",
+          "items": { "$ref": "#/$defs/policy_match_validation" }
+        },
         "evidence_references": {
           "type": "array",
           "description": "Final cited evidence backing the verdict. May be empty only when verdict is insufficient_evidence.",
@@ -47,7 +52,7 @@
         "review_required": { "type": "boolean" },
         "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
       },
-      "required": ["reason_id", "verdict", "verdict_explanation", "retrieved_chunk_ids", "evidence_references", "confidence", "review_required"],
+      "required": ["reason_id", "verdict", "verdict_explanation", "retrieved_chunk_ids", "policy_match_validations", "evidence_references", "confidence", "review_required"],
       "allOf": [
         {
           "description": "Rule: any verdict other than insufficient_evidence must cite at least one evidence_reference.",
@@ -57,6 +62,49 @@
           "then": {
             "properties": { "evidence_references": { "minItems": 1 } }
           }
+        },
+        {
+          "if": { "properties": { "review_required": { "const": true } }, "required": ["review_required"] },
+          "then": { "required": ["reviewer_role"] }
+        }
+      ]
+    },
+    "policy_match_validation": {
+      "type": "object",
+      "properties": {
+        "policy_match_id": { "type": "string", "pattern": "^PM_[0-9]+$" },
+        "verification_status": {
+          "enum": ["verified", "invalid", "unverifiable"],
+          "description": "invalid means the referenced document/clause/location is wrong or does not support the match; unverifiable means required source material is unavailable. Neither may be used as a trusted policy basis."
+        },
+        "verification_explanation": { "type": "string", "minLength": 1 },
+        "evidence_references": {
+          "type": "array",
+          "description": "Source locations used to verify or reject the policy match. Verified matches require at least one.",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        },
+        "review_required": { "type": "boolean" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+      },
+      "required": ["policy_match_id", "verification_status", "verification_explanation", "evidence_references", "review_required"],
+      "allOf": [
+        {
+          "if": { "properties": { "verification_status": { "const": "verified" } }, "required": ["verification_status"] },
+          "then": { "properties": { "evidence_references": { "minItems": 1 } } }
+        },
+        {
+          "if": {
+            "properties": { "verification_status": { "enum": ["invalid", "unverifiable"] } },
+            "required": ["verification_status"]
+          },
+          "then": {
+            "properties": { "review_required": { "const": true } },
+            "required": ["reviewer_role"]
+          }
+        },
+        {
+          "if": { "properties": { "review_required": { "const": true } }, "required": ["review_required"] },
+          "then": { "required": ["reviewer_role"] }
         }
       ]
     }
