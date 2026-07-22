@@ -67,9 +67,11 @@ Subcommands:
     check-conflicts-clear CASE_ID
 """
 import argparse
+import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import sys
 import time
@@ -269,6 +271,70 @@ def cmd_read_document_text(args):
 
 PAGE_TEXT_ALLOWED_STAGES = frozenset({"document-pipeline"})
 
+PAGE_TEXT_CAPABILITY_ENV = "HARNESS_CHECKPOINT2_CAPABILITY"
+
+
+def capability_dir() -> Path:
+    return ROOT / "_capabilities"
+
+
+def _issue_page_text_capability(case_id: str, doc_id: str) -> tuple[str, Path]:
+    """Mint the one-shot capability that authorizes pre-redaction reads.
+
+    Returns (token, path). The token goes to the child DAO through its
+    environment; a file named for the token's DIGEST is written to a directory
+    the DAO owns. Verification checks that the digest of the presented token
+    names an existing file, so the secret itself is never stored.
+
+    The asymmetry is the point, and an earlier version of this got it wrong:
+    comparing an env var against a second env var proves nothing, because a
+    caller who sets both to the same value passes. Here the check depends on
+    a file only the issuing process created, which a caller cannot fabricate
+    without already being able to write into the repo's capability directory.
+
+    Scoped to one case/document and deleted after the run
+    (release_page_text_capability), so a leaked token is not reusable later or
+    against other documents.
+    """
+    token = secrets.token_hex(32)
+    directory = capability_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / _capability_filename(token, case_id, doc_id)
+    # 0o600 and O_EXCL: readable only by this user, and never silently
+    # reusing a path that already exists.
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"case_id": case_id, "doc_id": doc_id, "issued_at": now_iso()}, handle)
+    return token, path
+
+
+def _capability_filename(token: str, case_id: str, doc_id: str) -> str:
+    """Name a capability file by the digest of (token, case, document).
+
+    Binding the scope into the digest means a token minted for one document
+    does not verify for another, and storing only the digest means reading
+    the directory does not hand anyone a usable token.
+    """
+    digest = hashlib.sha256(f"{token}:{case_id}:{doc_id}".encode("utf-8")).hexdigest()
+    return f"{digest}.json"
+
+
+def release_page_text_capability(path: Path) -> None:
+    """Revoke the capability. Called in a finally, so an exception mid-run
+    still ends with the token unusable."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _page_text_capability_ok(case_id: str, doc_id: str) -> bool:
+    """Whether this process presented a live capability for THIS document."""
+    presented = os.environ.get(PAGE_TEXT_CAPABILITY_ENV)
+    if not presented:
+        return False
+    return (capability_dir() / _capability_filename(presented, case_id, doc_id)).exists()
+
 
 def cmd_read_page_text(args):
     """Read one validated checkpoint-1 page from the processed layer.
@@ -289,6 +355,18 @@ def cmd_read_page_text(args):
     corrected (commit df7b123) and tests/test_redaction_boundary.py pins that
     wording, but a spec is guidance -- this is the structural half, mirroring
     the caller check read-ground-truth has always had for D1.
+
+    --caller-stage alone is SELF-ASSERTED: any caller can type
+    `--caller-stage document-pipeline`. So the flag is necessary but not
+    sufficient -- the call must also present the capability
+    redact_document.py mints per run and passes through the child
+    environment. An agent shelling out to the DAO does not have it, so
+    claiming the stage name no longer gets page text.
+
+    What this does NOT do: stop an agent from opening
+    data/processed/.../page_NNN.md with Read or `cat`. That is a filesystem
+    permission question, not something the DAO can answer, and it is recorded
+    honestly in known-gaps.md rather than described as sealed.
     """
     if args.caller_stage not in PAGE_TEXT_ALLOWED_STAGES:
         print(f"DENIED: page text is pre-redaction and may only be read by "
@@ -296,6 +374,14 @@ def cmd_read_page_text(args):
               f"caller_stage={args.caller_stage!r} is not permitted. Analysis stages must use "
               f"read-document-text, which returns the path to the REDACTED text. "
               f"This is logged as a potential redaction-boundary violation.")
+        return 1
+    if not _page_text_capability_ok(args.case_id, args.doc_id):
+        print("DENIED: --caller-stage is self-asserted and is not sufficient on its own. "
+              "Pre-redaction page text additionally requires checkpoint 2's run capability, "
+              "which tools/redact_document.py mints and passes to this process. A stage that "
+              "merely names itself 'document-pipeline' does not get page text. Use "
+              "read-document-text (returns the path to the REDACTED text) instead. "
+              "This is logged as a potential redaction-boundary violation.")
         return 1
     if args.page < 1:
         print(f"ERROR: page must be >= 1 (got {args.page})")

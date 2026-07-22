@@ -15,6 +15,10 @@ and what separates them is exactly the redaction pass.
 The PII strings below are the real ones from CASE_901/DOC_001, kept verbatim
 so a regression reproduces the original finding rather than a paraphrase of it.
 """
+import os
+import subprocess
+import sys
+
 import pytest
 
 import dao
@@ -56,6 +60,17 @@ def processed_document(isolated_dao):
     return processed
 
 
+@pytest.fixture
+def checkpoint2_capability(monkeypatch):
+    """Grant checkpoint 2's capability for tests that assert what the
+    AUTHORIZED caller sees. Tests about refusing unauthorized callers
+    deliberately do not use it."""
+    token, path = dao._issue_page_text_capability("CASE_009", "DOC_001")
+    monkeypatch.setenv(dao.PAGE_TEXT_CAPABILITY_ENV, token)
+    yield token
+    dao.release_page_text_capability(path)
+
+
 def test_page_text_is_pre_redaction_and_redacted_text_is_not(processed_document):
     """The invariant the whole boundary rests on.
 
@@ -72,7 +87,7 @@ def test_page_text_is_pre_redaction_and_redacted_text_is_not(processed_document)
 
 
 def test_read_page_text_returns_pre_redaction_content(
-    processed_document, make_args, capsys
+    processed_document, checkpoint2_capability, make_args, capsys
 ):
     """read-page-text hands back raw text -- correct for its one caller
     (redact_document.py, which feeds it straight to the Redactor) and exactly
@@ -118,7 +133,7 @@ def test_the_path_read_document_text_returns_holds_redacted_content(
 
 
 def test_the_two_commands_are_not_interchangeable(
-    processed_document, make_args, capsys
+    processed_document, checkpoint2_capability, make_args, capsys
 ):
     """One returns a path, the other returns text, and only one of the two is
     redacted. Any change collapsing that difference re-opens the bypass."""
@@ -176,7 +191,7 @@ def test_dao_denial_does_not_depend_on_the_page_existing(isolated_dao, make_args
     assert "NOT_EXTRACTED" not in out
 
 
-def test_checkpoint2_owner_still_reads_page_text(processed_document, make_args, capsys):
+def test_checkpoint2_owner_still_reads_page_text(processed_document, checkpoint2_capability, make_args, capsys):
     """The gate must not break the one stage that legitimately needs this --
     redaction cannot run without its own input."""
     rc = dao.cmd_read_page_text(make_args(page=1, caller_stage="document-pipeline"))
@@ -184,6 +199,104 @@ def test_checkpoint2_owner_still_reads_page_text(processed_document, make_args, 
 
     assert rc == 0
     assert any(pii in out for pii in PII_VALUES), "checkpoint 2 reads pre-redaction text by design"
+
+
+DAO_PATH = dao.ROOT / "tools" / "dao.py"
+
+
+def _run_dao_cli(args, env_extra=None, cwd=None):
+    """Run the DAO as a real subprocess -- the way an agent would.
+
+    In-process tests cannot show what an agent can actually do: the gate here
+    reads os.environ, so exercising it honestly means a separate process with
+    a chosen environment.
+    """
+    env = dict(os.environ)
+    env.update(env_extra or {})
+    return subprocess.run([sys.executable, str(DAO_PATH), *args],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", cwd=str(cwd or dao.ROOT), env=env)
+
+
+@pytest.fixture
+def real_page(tmp_path, monkeypatch):
+    """A processed page in an isolated tree, addressed through the DAO."""
+    monkeypatch.setattr(dao, "OUTPUTS", tmp_path / "outputs")
+    monkeypatch.setattr(dao, "DATA", tmp_path / "data")
+    processed = tmp_path / "data" / "processed" / "CASE_009" / "DOC_001"
+    processed.mkdir(parents=True)
+    (processed / "page_001.md").write_text(PRE_REDACTION_PAGE, encoding="utf-8")
+    return tmp_path
+
+
+def test_caller_stage_alone_does_not_unlock_page_text(real_page, make_args, capsys):
+    """--caller-stage is SELF-ASSERTED: any caller can type the authorized
+    stage name. Naming it must not be enough on its own."""
+    rc = dao.cmd_read_page_text(make_args(page=1, caller_stage="document-pipeline"))
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "self-asserted" in out
+    for pii in PII_VALUES:
+        assert pii not in out
+
+
+def test_capability_unlocks_page_text_for_its_own_document(real_page, make_args, monkeypatch,
+                                                           capsys):
+    token, path = dao._issue_page_text_capability("CASE_009", "DOC_001")
+    try:
+        monkeypatch.setenv(dao.PAGE_TEXT_CAPABILITY_ENV, token)
+        rc = dao.cmd_read_page_text(make_args(page=1, caller_stage="document-pipeline"))
+        out = capsys.readouterr().out
+    finally:
+        dao.release_page_text_capability(path)
+
+    assert rc == 0
+    assert any(pii in out for pii in PII_VALUES), "checkpoint 2 reads pre-redaction text by design"
+
+
+def test_capability_does_not_transfer_to_another_document(real_page, make_args, monkeypatch,
+                                                          capsys):
+    """Scope is bound into the token's digest, so a capability minted for one
+    document cannot be replayed against another."""
+    token, path = dao._issue_page_text_capability("CASE_009", "DOC_999")
+    try:
+        monkeypatch.setenv(dao.PAGE_TEXT_CAPABILITY_ENV, token)
+        rc = dao.cmd_read_page_text(make_args(page=1, caller_stage="document-pipeline"))
+    finally:
+        dao.release_page_text_capability(path)
+
+    assert rc == 1
+
+
+def test_capability_is_revoked_after_release(real_page, make_args, monkeypatch):
+    """A token that leaked out of a finished run must not still work."""
+    token, path = dao._issue_page_text_capability("CASE_009", "DOC_001")
+    dao.release_page_text_capability(path)
+    monkeypatch.setenv(dao.PAGE_TEXT_CAPABILITY_ENV, token)
+
+    assert dao.cmd_read_page_text(make_args(page=1, caller_stage="document-pipeline")) == 1
+
+
+@pytest.mark.parametrize("env_extra", [
+    {},
+    {"HARNESS_CHECKPOINT2_CAPABILITY": "guessed-value"},
+    # The attack that defeated a first version of this gate: it compared one
+    # environment variable against another, so a caller setting both to the
+    # same value passed. Verification now depends on a file only the issuing
+    # process could have created.
+    {"HARNESS_CHECKPOINT2_CAPABILITY": "x", "HARNESS_CHECKPOINT2_CAPABILITY_EXPECTED": "x"},
+], ids=["no-capability", "guessed-token", "self-consistent-env-pair"])
+def test_spoofed_capability_is_refused_end_to_end(env_extra):
+    """Run as a real subprocess against the real repo, the way an agent
+    would -- claiming the stage name and forging the environment."""
+    result = _run_dao_cli(
+        ["read-page-text", "CASE_903", "DOC_001", "4", "--caller-stage", "document-pipeline"],
+        env_extra=env_extra)
+
+    assert result.returncode == 1, f"spoof succeeded with {env_extra}"
+    assert "DENIED" in result.stdout
+    assert "나 채 범" not in result.stdout
 
 
 def test_expert_review_only_document_is_refused_before_any_path_is_emitted(

@@ -1344,3 +1344,54 @@ source-location accuracy. Those need a real evaluation design (what counts as
 a correct location? is a right code with a wrong decision_type a partial
 credit?), not a metric invented at gate-building time. Tracked in
 `open-decisions.md`.
+
+## 21. Pre-redaction page text: capability gate added, filesystem still open -- PARTIAL 2026-07-22
+
+Item 19 closed the redaction bypass with a `--caller-stage` check on
+`read-page-text`. An audit then pointed out the obvious: `--caller-stage` is
+**self-asserted**. Any caller can type `--caller-stage document-pipeline`, so
+the gate stopped an agent that followed instructions and stopped nothing else.
+
+**What was added.** `read-page-text` now additionally requires a capability
+that `redact_document.py` mints per document (`_issue_page_text_capability`),
+passes to the child DAO through the environment, and revokes in a `finally`.
+Verification is deliberately asymmetric: the token's SHA-256, salted with the
+case and document id, names a file in `_capabilities/` that only the issuing
+process created. Presenting the stage name is no longer enough; an agent
+shelling out to `dao.py` cannot produce a live token.
+
+**A first version of this was broken and is worth recording.** It compared
+one environment variable against another (`..._CAPABILITY` vs
+`..._CAPABILITY_EXPECTED`), which is not a check at all -- a caller who sets
+both to the same value passes. It was caught by actually running the spoof
+rather than by reading the code, and that exact attack is now a named
+regression test (`self-consistent-env-pair`). Two attacker-controlled values
+compared against each other prove nothing; verification has to depend on
+something the attacker cannot write.
+
+**Scope, stated plainly, because overstating this would be worse than the
+gap.** This closes the DAO path only. It does NOT stop an agent from opening
+`data/processed/CASE_XXX/DOC_XXX/page_NNN.md` directly with Read, `cat`, or
+Python. That directory has no OS-level restriction, and `.claude/settings.json`
+does not deny-list it (the existing deny rules cover `data/ground_truth`,
+`source-cases`, `data/raw`, `archive/sources` -- not `data/processed`). The
+honest description is: **the sanctioned path is now gated; the data is not
+sealed.** It raises the bar from "any stage that types a flag" to "a stage
+that deliberately bypasses the DAO", which is the same class of residual risk
+already recorded for D1's Bash-read hole in item 18.
+
+**What a real seal would need**, none of which is PoC-appropriate to do
+half-way:
+- OS-level permissions on `data/processed/*/page_*.md`, readable only by the
+  account that runs checkpoint 2 -- the same fix D1's Bash-read gap needs.
+- Or: never persist pre-redaction page text at all. Checkpoint 1 would hand
+  its output to checkpoint 2 in-process and only redacted text would ever
+  reach disk. This is the structurally correct answer and the larger change:
+  it removes the asset instead of guarding it, but P8 resolution currently
+  depends on those page files existing for human review.
+- A `Read(./data/processed/**/page_*.md)` deny rule would cover the Read tool
+  specifically, but not Bash, so it narrows the hole rather than closing it.
+  Not added here: a partial control that reads as a seal is the thing this
+  entry is trying to avoid.
+
+Tracked as PARTIAL, not RESOLVED, deliberately.

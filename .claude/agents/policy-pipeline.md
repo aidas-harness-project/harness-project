@@ -28,7 +28,7 @@ The intermediate artifacts from sub-phases 1-2 are working state for this one ag
 
 Read policy document text via `python tools/dao.py read-document-text CASE_ID DOC_ID` (the DAO) — never a raw file directly. It returns the **path** to the redacted document (`redacted_text.md`), not its text; read that path to get the content. It also gates access: a document routed `expert_review_only` is refused, and `NOT_EXTRACTED` means checkpoint 2 hasn't run yet. Either way you stop and report rather than sourcing the text another way.
 
-**Never use `read-page-text`.** It serves checkpoint 2's own input — `page_NNN.md` is checkpoint 1 output, *before* redaction, and still contains claimant-facing PII (names, addresses, phone numbers). Reading it bypasses the redaction stage. The DAO enforces this: `read-page-text` requires `--caller-stage` and accepts only `document-pipeline`, so a call from this stage returns `DENIED` and no text. Never open `source-cases/` or `data/ground_truth/`.
+**Never use `read-page-text`.** It serves checkpoint 2's own input — `page_NNN.md` is checkpoint 1 output, *before* redaction, and still contains claimant-facing PII (names, addresses, phone numbers). Reading it bypasses the redaction stage. The DAO enforces this: `read-page-text` requires `--caller-stage` **and** a per-document capability only `tools/redact_document.py` mints, so a call from this stage returns `DENIED` and no text even if it names `document-pipeline`. Never open `source-cases/` or `data/ground_truth/`.
 
 # Error handling
 

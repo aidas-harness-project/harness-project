@@ -15,13 +15,18 @@ def _fixture_redactor(pii_items_json: str) -> LlmRedactor:
 def _dao_factory(page_text, captured=None, calls=None):
     ocr_result = {"cross_validation_status": "agreed", "pages": [{"page": 1}, {"page": 2}]}
 
-    def fake_dao(*args):
+    def fake_dao(*args, capability=None):
         if calls is not None:
             calls.append(args)
         if args[0] == "read-contract":
             return json.dumps(ocr_result)
         if args[0] == "read-page-text":
+            # Pre-redaction reads must carry checkpoint 2's capability -- the
+            # real DAO refuses without it, so a stub that accepted the call
+            # bare would let a regression through here.
+            assert capability, "read-page-text must be called with the checkpoint 2 capability"
             return page_text  # page-invariant so one canned fixture fits both pages
+        assert capability is None, f"{args[0]} must not be handed the page-text capability"
         if captured is not None and args[0] == "write-redacted-text":
             captured["redacted"] = rd.Path(args[args.index("--text-file") + 1]).read_text(encoding="utf-8")
         if captured is not None and args[0] == "write-contract":

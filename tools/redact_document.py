@@ -31,6 +31,7 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+import dao
 from llm_providers import (
     ProviderConfig,
     ProviderConfigError,
@@ -46,10 +47,22 @@ DAO = ROOT / "tools" / "dao.py"
 DEFAULT_REDACTION_PROVIDER = "codex-cli"
 
 
-def _dao(*args: str) -> str:
+def _dao(*args: str, capability: str | None = None) -> str:
+    """Run a DAO subcommand.
+
+    `capability` is checkpoint 2's per-run secret, passed only on the one call
+    that needs pre-redaction page text. It goes through the environment rather
+    than argv so it does not land in process listings, and it is minted fresh
+    per run so it cannot be replayed from a log. Every other DAO call runs
+    without it -- the capability is scoped to the reads that actually require
+    it, not granted for the whole process.
+    """
+    env = dict(os.environ)
+    if capability is not None:
+        env[dao.PAGE_TEXT_CAPABILITY_ENV] = capability
     result = subprocess.run(
         [sys.executable, str(DAO), *args], capture_output=True, text=True,
-        encoding="utf-8", errors="replace", cwd=str(ROOT),
+        encoding="utf-8", errors="replace", cwd=str(ROOT), env=env,
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
@@ -70,23 +83,33 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
     categories: set[str] = set()
     provider_metadata = None
     review_warnings: list[str] = []
-    for page in ocr_result.get("pages", []):
-        page_number = page["page"]
-        # --caller-stage is a hard DAO gate, not a label: pre-redaction page
-        # text is restricted to the stage that owns checkpoint 2 (this tool).
-        text = _dao("read-page-text", case_id, doc_id, str(page_number),
-                    "--caller-stage", "document-pipeline")
-        # redact_page HARD-FAILS (RedactionLeakError) on any detected possible
-        # PII leak -- that propagates out of this function and nothing is
-        # written, blocking the document exactly like a P8 disagreement. Only a
-        # leak-free page returns an outcome.
-        outcome = redactor.redact_page(text)
-        redacted_pages.append(f"<<<PAGE page={page_number}>>>\n{outcome.redacted_text}")
-        total_items += outcome.items_redacted
-        categories.update(outcome.categories)
-        provider_metadata = outcome.provider_metadata
-        for warning in outcome.review_warnings:
-            review_warnings.append(f"page {page_number}: {warning}")
+
+    # Scoped to this one document and revoked in the finally, so the window in
+    # which pre-redaction text is obtainable at all is the page loop and
+    # nothing more. An analysis agent shelling out to dao.py cannot produce
+    # this, so --caller-stage alone stops being enough.
+    capability, capability_path = dao._issue_page_text_capability(case_id, doc_id)
+    try:
+        for page in ocr_result.get("pages", []):
+            page_number = page["page"]
+            # --caller-stage is a hard DAO gate, not a label, and the
+            # capability is what makes the claim verifiable rather than
+            # self-asserted.
+            text = _dao("read-page-text", case_id, doc_id, str(page_number),
+                        "--caller-stage", "document-pipeline", capability=capability)
+            # redact_page HARD-FAILS (RedactionLeakError) on any detected
+            # possible PII leak -- that propagates out of this function and
+            # nothing is written, blocking the document exactly like a P8
+            # disagreement. Only a leak-free page returns an outcome.
+            outcome = redactor.redact_page(text)
+            redacted_pages.append(f"<<<PAGE page={page_number}>>>\n{outcome.redacted_text}")
+            total_items += outcome.items_redacted
+            categories.update(outcome.categories)
+            provider_metadata = outcome.provider_metadata
+            for warning in outcome.review_warnings:
+                review_warnings.append(f"page {page_number}: {warning}")
+    finally:
+        dao.release_page_text_capability(capability_path)
 
     if not redacted_pages:
         raise RuntimeError(f"checkpoint 2 blocked: {doc_id} has no validated pages")
