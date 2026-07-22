@@ -101,24 +101,45 @@ def test_pipeline_table_matches_schema_codebook_metadata():
 
 
 def _denial_result(code):
+    applicable_types = EXPECTED_DECISION_TYPES.get(code, ["reduction"])
+    decision_type = applicable_types[0] if applicable_types else "reduction"
+    review_required = code in {"R12", "R14"}
+    reason = {
+        "reason_id": "DR_1",
+        "decision_type": decision_type,
+        "payment_status": "unknown",
+        "taxonomy_code": code,
+        "raw_reason_text": "보험사 감액 또는 거절 사유 원문",
+        "insurer_claim_summary": "보험사가 감액 또는 거절을 주장함",
+        "grounds": {
+            "contractual_basis": [],
+            "medical_or_factual_basis": [],
+            "calculation_basis": [],
+        },
+        "amounts": {
+            "claimed_amount": None,
+            "payable_amount": None,
+            "denied_amount": None,
+            "reduction_amount": None,
+            "reduction_rate": None,
+        },
+        "requested_documents": [],
+        "policy_matches": [],
+        "confidence": 0.9,
+        "evidence_references": [{
+            "document_id": "DOC_001",
+            "page": 1,
+            "quote": "보험사 감액 또는 거절 사유 원문",
+        }],
+        "review_required": review_required,
+    }
+    if review_required:
+        reason["reviewer_role"] = "손해사정사"
     return {
         "case_id": "CASE_001",
         "component": "denial-response",
         "status": "success",
-        "denial_reasons": [{
-            "reason_id": "DR_1",
-            "reason_type": "reduction",
-            "taxonomy_code": code,
-            "raw_reason_text": "보험사 감액 사유 원문",
-            "policy_matches": [],
-            "confidence": 0.9,
-            "evidence_references": [{
-                "document_id": "DOC_001",
-                "page": 1,
-                "quote": "보험사 감액 사유 원문",
-            }],
-            "review_required": False,
-        }],
+        "denial_reasons": [reason],
     }
 
 
