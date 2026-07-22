@@ -38,6 +38,10 @@ schemas.zip
 
 # ocr_extract.py's project-local scratch (page images) -- transient, cleaned up on exit
 _ocr_scratch/
+
+# Checkpoint 2's short-lived page-text capabilities. Minted per document and
+# revoked when the run ends; never source, never worth committing.
+_capabilities/
 _redaction_scratch/
 
 # graphify knowledge-graph build output -- regenerable from the corpus, not source

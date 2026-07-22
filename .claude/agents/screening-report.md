@@ -20,9 +20,19 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. G
 
 `screening_report.json` + `screening_report.md`. Content structure and required sections: template TBD, see `pipeline.md`'s note on pending template rules — do not invent a template structure now.
 
+In `insurer_position`, preserve denial and reduction separately:
+
+- `has_denial` and `denial.reason_ids`/`total_amount`
+- `has_reduction` and `reduction.reason_ids`/`total_amount`
+- `has_denial_or_reduction` remains for one schema version only as a deprecated compatibility field and must equal the logical OR of the two explicit booleans.
+
+A case may populate both sections. Never collapse two reason lists into one main classification. Each section may only list reasons whose `decision_type` matches it — a `reduction` under `denial.reason_ids` (or the reverse) is rejected by the DAO, as is the same `reason_id` appearing in both. This is not bookkeeping: the screening report is the triage document a human reads first, so a reason filed under the wrong heading misstates what the insurer actually decided.
+
+Record `source_denial_contract_hash` from the `denial_reason_result.json` you summarized (see `denial-validation.md` for how it is computed). The DAO recomputes it at write time and refuses a mismatch, so a report describing a superseded reason set cannot be persisted; a refusal means the denial contract was rewritten while you worked — re-read it and redo the summary. Set a total amount only when every amount needed for that total is explicitly stated; otherwise use `null`. The deprecated `main_reason_*` and flat `reduction_amount` fields are not authoritative for new consumers.
+
 For the narrative `.md`: you provide per-field/per-section content + `evidence_references` to `python tools/document_assembly.py --sections-file <spec.json> --held-by screening-report --run-id RUN_ID --template screening_report`, which assembles the file and auto-generates `[E#]` tags and the `.evidence.json` sidecar in one pass — locked and atomic like any other DAO write. The `--template screening_report` flag structurally enforces `templates/screening-report.md`'s 7 sections (exact headings and order, per `templates/registry.json`) — a refusal means fix your section list to match, not drop the flag. You never hand-write a tag number or hand-maintain the sidecar.
 
-Every judgment beyond direct restatement (case difficulty, priority review points, etc.) follows P3 — hedge, flag, don't assert.
+In the narrative section `보험사 판단`, render separate `거절` and `감액` subsections, including their reason IDs, stated grounds, and explicit amounts. Every judgment beyond direct restatement (case difficulty, priority review points, etc.) follows P3 — hedge, flag, don't assert.
 
 # Access rules
 

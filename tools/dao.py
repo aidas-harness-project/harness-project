@@ -35,7 +35,7 @@ cannot do; the orchestrator/agent owns that loop.
 
 Subcommands:
     read-document-text CASE_ID DOC_ID
-    read-page-text CASE_ID DOC_ID PAGE
+    read-page-text CASE_ID DOC_ID PAGE --caller-stage STAGE
     read-ground-truth CASE_ID --caller-stage STAGE --version {v1|v2}
     read-contract CASE_ID FILENAME
     write-contract CASE_ID FILENAME --data-file PATH --schema-name NAME
@@ -67,9 +67,11 @@ Subcommands:
     check-conflicts-clear CASE_ID
 """
 import argparse
+import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import sys
 import time
@@ -79,6 +81,8 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
 from _validation import load_registry, validate_instance
+import _cross_contract as cross_contract
+from _cross_contract import check as cross_contract_check
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
@@ -265,12 +269,120 @@ def cmd_read_document_text(args):
     return 1
 
 
+PAGE_TEXT_ALLOWED_STAGES = frozenset({"document-pipeline"})
+
+PAGE_TEXT_CAPABILITY_ENV = "HARNESS_CHECKPOINT2_CAPABILITY"
+
+
+def capability_dir() -> Path:
+    return ROOT / "_capabilities"
+
+
+def _issue_page_text_capability(case_id: str, doc_id: str) -> tuple[str, Path]:
+    """Mint the one-shot capability that authorizes pre-redaction reads.
+
+    Returns (token, path). The token goes to the child DAO through its
+    environment; a file named for the token's DIGEST is written to a directory
+    the DAO owns. Verification checks that the digest of the presented token
+    names an existing file, so the secret itself is never stored.
+
+    The asymmetry is the point, and an earlier version of this got it wrong:
+    comparing an env var against a second env var proves nothing, because a
+    caller who sets both to the same value passes. Here the check depends on
+    a file only the issuing process created, which a caller cannot fabricate
+    without already being able to write into the repo's capability directory.
+
+    Scoped to one case/document and deleted after the run
+    (release_page_text_capability), so a leaked token is not reusable later or
+    against other documents.
+    """
+    token = secrets.token_hex(32)
+    directory = capability_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / _capability_filename(token, case_id, doc_id)
+    # 0o600 and O_EXCL: readable only by this user, and never silently
+    # reusing a path that already exists.
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"case_id": case_id, "doc_id": doc_id, "issued_at": now_iso()}, handle)
+    return token, path
+
+
+def _capability_filename(token: str, case_id: str, doc_id: str) -> str:
+    """Name a capability file by the digest of (token, case, document).
+
+    Binding the scope into the digest means a token minted for one document
+    does not verify for another, and storing only the digest means reading
+    the directory does not hand anyone a usable token.
+    """
+    digest = hashlib.sha256(f"{token}:{case_id}:{doc_id}".encode("utf-8")).hexdigest()
+    return f"{digest}.json"
+
+
+def release_page_text_capability(path: Path) -> None:
+    """Revoke the capability. Called in a finally, so an exception mid-run
+    still ends with the token unusable."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _page_text_capability_ok(case_id: str, doc_id: str) -> bool:
+    """Whether this process presented a live capability for THIS document."""
+    presented = os.environ.get(PAGE_TEXT_CAPABILITY_ENV)
+    if not presented:
+        return False
+    return (capability_dir() / _capability_filename(presented, case_id, doc_id)).exists()
+
+
 def cmd_read_page_text(args):
     """Read one validated checkpoint-1 page from the processed layer.
 
     This command exists for checkpoint 2 so redaction never opens a raw
     source or reaches into data/processed outside the DAO boundary.
+
+    page_NNN.md is checkpoint 1 output -- BEFORE redaction -- so it still
+    carries claimant-facing PII (names, addresses, phone numbers). Only the
+    stage that owns checkpoint 2 has any business reading it; every analysis
+    stage reads the redacted text via read-document-text instead.
+
+    The caller gate is enforced here rather than left to agent prompts
+    because a prompt cannot actually stop a call. CASE_901 is the proof: the
+    denial-response agent misread read-document-text's path return as a
+    failure, fell back to read-page-text, and read real names/addresses/phone
+    numbers straight out of the pre-redaction layer. The agent specs were
+    corrected (commit df7b123) and tests/test_redaction_boundary.py pins that
+    wording, but a spec is guidance -- this is the structural half, mirroring
+    the caller check read-ground-truth has always had for D1.
+
+    --caller-stage alone is SELF-ASSERTED: any caller can type
+    `--caller-stage document-pipeline`. So the flag is necessary but not
+    sufficient -- the call must also present the capability
+    redact_document.py mints per run and passes through the child
+    environment. An agent shelling out to the DAO does not have it, so
+    claiming the stage name no longer gets page text.
+
+    What this does NOT do: stop an agent from opening
+    data/processed/.../page_NNN.md with Read or `cat`. That is a filesystem
+    permission question, not something the DAO can answer, and it is recorded
+    honestly in known-gaps.md rather than described as sealed.
     """
+    if args.caller_stage not in PAGE_TEXT_ALLOWED_STAGES:
+        print(f"DENIED: page text is pre-redaction and may only be read by "
+              f"{sorted(PAGE_TEXT_ALLOWED_STAGES)} (checkpoint 2's own input; harness-guardrails P2). "
+              f"caller_stage={args.caller_stage!r} is not permitted. Analysis stages must use "
+              f"read-document-text, which returns the path to the REDACTED text. "
+              f"This is logged as a potential redaction-boundary violation.")
+        return 1
+    if not _page_text_capability_ok(args.case_id, args.doc_id):
+        print("DENIED: --caller-stage is self-asserted and is not sufficient on its own. "
+              "Pre-redaction page text additionally requires checkpoint 2's run capability, "
+              "which tools/redact_document.py mints and passes to this process. A stage that "
+              "merely names itself 'document-pipeline' does not get page text. Use "
+              "read-document-text (returns the path to the REDACTED text) instead. "
+              "This is logged as a potential redaction-boundary violation.")
+        return 1
     if args.page < 1:
         print(f"ERROR: page must be >= 1 (got {args.page})")
         return 1
@@ -318,6 +430,42 @@ def read_contract_data(case_id: str, filename: str):
     return load_json(p)
 
 
+def _invalidate_stale_downstream(args, data: dict, target: Path) -> None:
+    """After denial_reason_result.json is rewritten, mark every downstream
+    stage whose output no longer matches it as `pending` again.
+
+    Called with the upstream file's lock still held, so the hash written into
+    run-state is the one that just landed. `_update_run_state` takes a
+    different file's lock (run-state), and never the reverse direction, so
+    the two locks cannot deadlock against each other.
+
+    Deliberately NOT a deletion. A stale validation is still evidence of what
+    a stage concluded and why; discarding it would lose that, and P6's
+    never-delete-conflicting-data discipline applies to superseded outputs as
+    much as to contradictory sources. The file stays, its recorded
+    source_denial_contract_hash marks it superseded, and the DAO refuses to
+    rewrite it against the wrong upstream anyway.
+    """
+    if Path(args.filename).name != cross_contract.DENIAL_REASONS:
+        return
+    case = case_dir(args.case_id)
+    new_hash = cross_contract.upstream_hash(data)
+    stale = cross_contract.stale_downstream(case, new_hash)
+    if not stale:
+        return
+    print(f"NOTE: {cross_contract.DENIAL_REASONS} changed; {len(stale)} downstream contract(s) "
+          "no longer describe the current reason/match set:")
+    for filename, stage, recorded in stale:
+        shown = (recorded[:12] + "...") if recorded else "none recorded"
+        print(f"  - {filename} (was {shown}) -> run-state stage {stage!r} reset to pending")
+        state = _update_run_state(args.case_id, args.run_id, stage, "pending", args.held_by)
+        if state is None:
+            print(f"    WARNING: could not reset {stage!r} (see LOCKED above) -- that stage still "
+                  "reads as passed while its output is stale; reset it before trusting the run.")
+    print("  The stale files are left on disk on purpose (nothing is deleted). Re-run those "
+          "stages against the current contract.")
+
+
 def cmd_write_contract(args):
     target = _require_within(case_dir(args.case_id), args.filename)
     existing_lock = acquire_lock_blocking(target, args.held_by, args.run_id, args.purpose or f"write {args.filename}")
@@ -338,8 +486,25 @@ def cmd_write_contract(args):
             for e in errors:
                 print(f"  - {e}")
             return 1
+        # Cross-contract invariants a single-document schema cannot see:
+        # ids resolving against a sibling contract, id uniqueness, and
+        # sibling-comparing field rules. Same fail/don't-persist contract as
+        # schema validation above -- see tools/_cross_contract.py.
+        cross_errors = cross_contract_check(args.filename, data, case_dir(args.case_id))
+        if cross_errors:
+            print(f"FAIL: cross-contract validation errors for {target}:")
+            for e in cross_errors:
+                print(f"  - {e}")
+            return 1
         atomic_write_json(target, data)
         print(f"PASS: wrote {target}")
+        # Rewriting an upstream contract can strand downstream ones that were
+        # derived from the previous reason/match set. Nothing is deleted (P6:
+        # data is never silently discarded) -- the affected stages are flipped
+        # back to `pending` in run-state, which is the file that already
+        # answers "where does this run actually stand". The stale contract
+        # stays on disk, and its recorded hash is what marks it superseded.
+        _invalidate_stale_downstream(args, data, target)
         if args.stage:
             # A different target (_run_state.json, not this contract file) --
             # no deadlock risk nesting this inside the contract file's lock.
@@ -979,6 +1144,9 @@ def main():
 
     p = sub.add_parser("read-page-text"); p.add_argument("case_id"); p.add_argument("doc_id")
     p.add_argument("page", type=int)
+    p.add_argument("--caller-stage", required=True,
+                   help="Stage making the call. Pre-redaction text is restricted to "
+                        f"{sorted(PAGE_TEXT_ALLOWED_STAGES)}; anything else is DENIED.")
     p.set_defaults(fn=cmd_read_page_text)
 
     p = sub.add_parser("read-ground-truth"); p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)

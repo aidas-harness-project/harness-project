@@ -1190,3 +1190,208 @@ DEFERRED, with why:
   frontend hole (serving ground-truth files) WAS fixed. If the frontend is ever
   exposed, auth + CSRF + upload/spawn caps + scrubbing the `/run` child env
   become required.
+
+## 19. Analysis agents could read pre-redaction page text -- RESOLVED 2026-07-22 (specs + regression), residual risk OPEN
+
+Found live during the CASE_901 test run (`intake -> document-pipeline ->
+denial-response`, RUN_20260722_001).
+
+**What happened.** The `denial-response` subagent followed its spec and called
+`dao.py read-document-text CASE_901 DOC_001`. That command returns the **path**
+to `redacted_text.md`, not its text -- but all three consuming specs described
+it as the way to "read the processed text". Getting back a one-line path where
+text was promised, the agent concluded the command had failed, judged that
+opening the returned path itself would violate P2, and fell back to
+`read-page-text` for all four pages. `page_NNN.md` is checkpoint 1 output --
+**before** redaction.
+
+**Measured exposure** (CASE_901/DOC_001):
+
+| page | `page_NNN.md` (checkpoint 1) | `redacted_text.md` (checkpoint 2) |
+|---|---|---|
+| 2 | `서울시 서초구 서초대로74길 14, 33층` / `(02)758-7755` | `[ADDRESS]` / `[PHONE_NUMBER]` |
+| 4 | `대표이사 나 채 범` | `대표이사 [PERSON_NAME]` |
+
+The agent read a natural person's name, a street address, and phone/fax numbers
+that checkpoint 2 exists to remove. **No PII reached the output** -- all 19
+evidence quotes in `denial_reason_result.json` were checked and are clean -- but
+that was the quotes it happened to pick, not a control.
+
+**Root cause was the specs, not the code.** The two commands are deliberately
+different, because their consumers are:
+
+| command | file | redaction | consumer | returns |
+|---|---|---|---|---|
+| `read-page-text` | `page_NNN.md` | **before** | `redact_document.py:75` (tool) | text (in-process, feeds the Redactor) |
+| `read-document-text` | `redacted_text.md` | **after** | agents | path (agent reads as much as it needs) |
+
+Making `read-page-text` return a path instead would be worse -- it would put a
+pre-redaction path into circulation and make opening it the normal idiom.
+`read-document-text` returning a path is fine: the file is redacted, and a
+136KB document (`CASE_024/DOC_002`) should not be force-fed into an agent's
+context. What was wrong was three specs describing the path-returner as a
+text-returner.
+
+The specs also wrote the command as `read_document_text` -- underscored, which
+matches neither the CLI name (`read-document-text`) nor any in-process function
+(only `cmd_read_document_text`, an argparse entry point, exists). Unlike
+`read_contract_data`/`patch_manifest_document`, which are real callable
+functions, this name existed nowhere. Same files already wrote every other DAO
+call in executable form (`dao.py write-contract`, `dao.py patch-manifest-document`).
+
+**Fixed.**
+- `denial-response.md` / `policy-pipeline.md`: state that `read-document-text`
+  returns the redacted document's path and that the path is what you read; ban
+  `read-page-text` outright as checkpoint 2's pre-redaction input.
+- `document-pipeline.md`: keeps `read-page-text` (it owns checkpoint 2) but now
+  says plainly that it is pre-redaction data, redaction's input and nothing
+  else, never to be quoted into a contract or handed to another stage.
+- All three rewritten to the executable CLI form; `sync_agents.py` re-run.
+- `tests/test_redaction_boundary.py` (6 tests) pins the invariant: PII present
+  in `page_NNN.md` is absent from `redacted_text.md`; `read-page-text` yields
+  pre-redaction text; `read-document-text` yields a path, never content; the
+  path it yields holds redacted content; the two commands are not
+  interchangeable; `expert_review_only` still emits no path at all. Verified by
+  mutation -- reintroducing the "print the text" change fails 2 of the 6.
+
+**Residual risk -- CLOSED 2026-07-22 (see item 20).** The gate described here
+was built as specified: `read-page-text` now takes a required `--caller-stage`
+and `dao.PAGE_TEXT_ALLOWED_STAGES` accepts only `document-pipeline`, mirroring
+`read-ground-truth`'s D1 check. The caller check runs before any filesystem
+lookup, so an unauthorized stage cannot distinguish "denied" from "no such
+page" and use the difference to probe. `redact_document.py` -- the one
+legitimate caller -- passes the flag. 10 tests in
+`tests/test_redaction_boundary.py` cover it, including a parametrized denial
+for all 7 analysis stages and a check that the denial message does not itself
+leak the PII it withholds.
+
+## 20. Denial-family contracts validated field-by-field but not as a whole -- RESOLVED 2026-07-22
+
+An external audit of the denial/reduction contracts found five weaknesses.
+All five were reproduced against the real committed outputs (CASE_903,
+CASE_901, CASE_021) before anything was changed -- none was hypothetical, and
+none was caught by the 480-test suite, because every one of them lives in a
+place a JSON Schema structurally cannot look.
+
+**The shared root cause.** A JSON Schema validates one document against one
+shape. It cannot read a sibling file, and it cannot compare two members of the
+same array. Everything below sat in that blind spot, so each individual field
+was legal while the document as a whole asserted something false -- the same
+shape of gap as item 14's run-state drift and the ocr_result rollup fixed
+earlier the same day: the tool happened to write consistent data, so the
+corpus looked fine, and only the tool's good behaviour was holding the
+invariant.
+
+**F1 -- `read-page-text` had no caller gate (HIGH).** Closed; folded into item
+19, which had already specified this exact fix as its residual risk.
+
+**F2 -- source locations were optional (HIGH).** `evidence_reference` requires
+only `quote`. Stripping `document_id` and `page` from all 19 references in
+CASE_903's `denial_reason_result.json` validated cleanly, so a reason nobody
+could trace to a page counted as grounded -- precisely what P1 exists to
+prevent. Fixed with a new `strict_evidence_reference` in
+`common_component_output.schema.json` requiring `document_id` + `page` +
+`quote`, applied to the denial family only (`denial_reason_result`,
+`denial_validation_result`). Deliberately NOT global: other contracts use the
+looser form where surrounding structure already fixes the document context.
+Same attack now yields 36 errors; both real files still pass unchanged.
+
+**F3 -- cross-references were unchecked (HIGH).** `denial_validation_result`
+naming `DR_999` validated. So did omitting validations for real reasons, and
+duplicating one, and verifying a `policy_match_id` that existed nowhere. A
+Phase 2 output could therefore validate nothing at all, or claim to have
+validated something imaginary, and still report success.
+
+**F4 -- duplicate ids and legacy fields (MED).** Two reasons both called
+`DR_1` validated; so did a stale `reason_type: partial_payment` sitting beside
+the current `decision_type`. Ids are how every downstream stage and the
+evaluation contract address a reason.
+
+**F5 -- `candidate_codes` was optional (MED).** The Top-1/Top-3 evaluation
+input could be omitted entirely (silently dropping a reason from measurement
+rather than scoring it), or list a top candidate that disagreed with the
+assigned `taxonomy_code`, or run in increasing confidence order.
+
+**The fix for F3/F4/F5's comparison half: `tools/_cross_contract.py`**, hooked
+into `dao.cmd_write_contract` immediately after schema validation, with the
+same fail/don't-persist contract. It resolves ids across sibling contracts
+(one validation per reason, one verification per policy match, no orphans, no
+omissions, no duplicates), enforces id uniqueness, and checks the
+sibling-comparing rules schema cannot (top candidate == assigned code,
+distinct codes, non-increasing confidence, `taxonomy_label` matching the
+codebook's `label_ko`). Schema-side additions cover the shape half:
+`candidate_codes` required + `minItems: 1`, and `additionalProperties: false`
+on `denial_reason` and `policy_match`.
+
+**Deliberate non-failures.** CASE_021's `policy_matches` predate
+`policy_match_id`; matches carrying no id are skipped rather than reported as
+unverified, since retro-failing a legacy shape is noise, not a finding -- the
+schema governs new writes. A missing sibling contract is likewise not an
+error (stages run in order); only a present one that disagrees fails.
+
+**Verification.** 20 new tests in `tests/test_cross_contract.py`, each a
+reproduction of an audit finding rather than a hypothetical, plus 4 added to
+`tests/test_redaction_boundary.py` for F1. The 21 pre-existing denial tests
+that broke were all one cause -- fixtures written before `candidate_codes` was
+required -- fixed at the two shared builders, not by relaxing the rule. 502
+tests pass; the sole remaining failure is the pre-existing
+`test_forbidden_table_not_restated_outside_authoritative_source`
+self-reference bug, unrelated and confirmed failing without these changes.
+
+**OPEN, deliberately not built.** The evaluation contract still measures
+R-code Top-1/Top-3 only -- it does not score `decision_type` accuracy or
+source-location accuracy. Those need a real evaluation design (what counts as
+a correct location? is a right code with a wrong decision_type a partial
+credit?), not a metric invented at gate-building time. Tracked in
+`open-decisions.md`.
+
+## 21. Pre-redaction page text: capability gate added, filesystem still open -- PARTIAL 2026-07-22
+
+Item 19 closed the redaction bypass with a `--caller-stage` check on
+`read-page-text`. An audit then pointed out the obvious: `--caller-stage` is
+**self-asserted**. Any caller can type `--caller-stage document-pipeline`, so
+the gate stopped an agent that followed instructions and stopped nothing else.
+
+**What was added.** `read-page-text` now additionally requires a capability
+that `redact_document.py` mints per document (`_issue_page_text_capability`),
+passes to the child DAO through the environment, and revokes in a `finally`.
+Verification is deliberately asymmetric: the token's SHA-256, salted with the
+case and document id, names a file in `_capabilities/` that only the issuing
+process created. Presenting the stage name is no longer enough; an agent
+shelling out to `dao.py` cannot produce a live token.
+
+**A first version of this was broken and is worth recording.** It compared
+one environment variable against another (`..._CAPABILITY` vs
+`..._CAPABILITY_EXPECTED`), which is not a check at all -- a caller who sets
+both to the same value passes. It was caught by actually running the spoof
+rather than by reading the code, and that exact attack is now a named
+regression test (`self-consistent-env-pair`). Two attacker-controlled values
+compared against each other prove nothing; verification has to depend on
+something the attacker cannot write.
+
+**Scope, stated plainly, because overstating this would be worse than the
+gap.** This closes the DAO path only. It does NOT stop an agent from opening
+`data/processed/CASE_XXX/DOC_XXX/page_NNN.md` directly with Read, `cat`, or
+Python. That directory has no OS-level restriction, and `.claude/settings.json`
+does not deny-list it (the existing deny rules cover `data/ground_truth`,
+`source-cases`, `data/raw`, `archive/sources` -- not `data/processed`). The
+honest description is: **the sanctioned path is now gated; the data is not
+sealed.** It raises the bar from "any stage that types a flag" to "a stage
+that deliberately bypasses the DAO", which is the same class of residual risk
+already recorded for D1's Bash-read hole in item 18.
+
+**What a real seal would need**, none of which is PoC-appropriate to do
+half-way:
+- OS-level permissions on `data/processed/*/page_*.md`, readable only by the
+  account that runs checkpoint 2 -- the same fix D1's Bash-read gap needs.
+- Or: never persist pre-redaction page text at all. Checkpoint 1 would hand
+  its output to checkpoint 2 in-process and only redacted text would ever
+  reach disk. This is the structurally correct answer and the larger change:
+  it removes the asset instead of guarding it, but P8 resolution currently
+  depends on those page files existing for human review.
+- A `Read(./data/processed/**/page_*.md)` deny rule would cover the Read tool
+  specifically, but not Bash, so it narrows the hole rather than closing it.
+  Not added here: a partial control that reads as a seal is the thing this
+  entry is trying to avoid.
+
+Tracked as PARTIAL, not RESOLVED, deliberately.

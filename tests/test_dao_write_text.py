@@ -81,19 +81,30 @@ def test_write_reviewed_draft_rejects_invalid_version(isolated_dao, make_args, t
         dao.cmd_write_reviewed_draft(args)
 
 
-def test_read_page_text_returns_only_validated_processed_page(isolated_dao, make_args, capsys):
+@pytest.fixture
+def checkpoint2_capability(monkeypatch):
+    """These tests exercise the AUTHORIZED caller's path (checkpoint 2), so
+    they hold its capability. --caller-stage alone no longer suffices --
+    see tests/test_redaction_boundary.py for the refusal cases."""
+    token, path = dao._issue_page_text_capability("CASE_009", "DOC_001")
+    monkeypatch.setenv(dao.PAGE_TEXT_CAPABILITY_ENV, token)
+    yield token
+    dao.release_page_text_capability(path)
+
+
+def test_read_page_text_returns_only_validated_processed_page(isolated_dao, checkpoint2_capability, make_args, capsys):
     page_path = isolated_dao / "data" / "processed" / "CASE_009" / "DOC_001" / "page_001.md"
     page_path.parent.mkdir(parents=True)
     page_path.write_text("검증된 페이지 텍스트", encoding="utf-8")
 
-    rc = dao.cmd_read_page_text(make_args(page=1))
+    rc = dao.cmd_read_page_text(make_args(page=1, caller_stage="document-pipeline"))
 
     assert rc == 0
     assert capsys.readouterr().out == "검증된 페이지 텍스트"
 
 
-def test_read_page_text_fails_when_checkpoint1_page_is_missing(isolated_dao, make_args, capsys):
-    rc = dao.cmd_read_page_text(make_args(page=3))
+def test_read_page_text_fails_when_checkpoint1_page_is_missing(isolated_dao, checkpoint2_capability, make_args, capsys):
+    rc = dao.cmd_read_page_text(make_args(page=3, caller_stage="document-pipeline"))
 
     assert rc == 1
     assert "NOT_EXTRACTED" in capsys.readouterr().out
@@ -124,12 +135,12 @@ def test_read_document_text_reports_non_text_instead_of_requesting_reextraction(
 
 
 @pytest.mark.parametrize("page", [0, -1])
-def test_read_page_text_rejects_non_positive_page_numbers(isolated_dao, make_args, capsys, page):
+def test_read_page_text_rejects_non_positive_page_numbers(isolated_dao, checkpoint2_capability, make_args, capsys, page):
     unexpected_path = isolated_dao / "data" / "processed" / "CASE_009" / "DOC_001" / f"page_{page:03d}.md"
     unexpected_path.parent.mkdir(parents=True)
     unexpected_path.write_text("must not be read", encoding="utf-8")
 
-    rc = dao.cmd_read_page_text(make_args(page=page))
+    rc = dao.cmd_read_page_text(make_args(page=page, caller_stage="document-pipeline"))
 
     assert rc == 1
     assert capsys.readouterr().out == f"ERROR: page must be >= 1 (got {page})\n"
