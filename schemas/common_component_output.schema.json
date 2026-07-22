@@ -175,6 +175,17 @@
         "quote": { "type": "string", "minLength": 1 }
       },
       "required": ["quote"]
+    },
+    "strict_evidence_reference": {
+      "type": "object",
+      "description": "An evidence reference whose SOURCE LOCATION is mandatory rather than optional. Same shape as evidence_reference, but document_id and page are required too, so the reference always resolves back to a specific page of a specific document. Used by the denial/reduction family (denial_reason_result grounds and policy matches, denial_validation_result), where a reason nobody can trace to a page is the exact failure P1 exists to prevent -- an adjuster rebutting an insurer has to be able to point at where it says that. evidence_reference remains the looser default for contracts whose surrounding structure already fixes the document context; do not globally swap one for the other.",
+      "properties": {
+        "document_id": { "$ref": "#/$defs/document_id" },
+        "document_type": { "$ref": "#/$defs/document_type" },
+        "page": { "type": "integer", "minimum": 1 },
+        "quote": { "type": "string", "minLength": 1 }
+      },
+      "required": ["document_id", "page", "quote"]
     }
   }
 }

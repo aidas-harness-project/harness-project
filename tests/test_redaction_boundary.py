@@ -77,7 +77,7 @@ def test_read_page_text_returns_pre_redaction_content(
     """read-page-text hands back raw text -- correct for its one caller
     (redact_document.py, which feeds it straight to the Redactor) and exactly
     why no analysis stage may use it."""
-    rc = dao.cmd_read_page_text(make_args(page=1))
+    rc = dao.cmd_read_page_text(make_args(page=1, caller_stage="document-pipeline"))
 
     out = capsys.readouterr().out
     assert rc == 0
@@ -124,12 +124,66 @@ def test_the_two_commands_are_not_interchangeable(
     redacted. Any change collapsing that difference re-opens the bypass."""
     dao.cmd_read_document_text(make_args())
     document_out = capsys.readouterr().out
-    dao.cmd_read_page_text(make_args(page=1))
+    dao.cmd_read_page_text(make_args(page=1, caller_stage="document-pipeline"))
     page_out = capsys.readouterr().out
 
     assert document_out != page_out
     assert not any(pii in document_out for pii in PII_VALUES)
     assert any(pii in page_out for pii in PII_VALUES)
+
+
+ANALYSIS_STAGES = [
+    "denial-response",      # the stage that actually did this in CASE_901
+    "policy-pipeline",
+    "claim-analysis",
+    "denial-validation",
+    "draft-report",
+    "critic",
+    "evaluation",
+]
+
+
+@pytest.mark.parametrize("stage", ANALYSIS_STAGES)
+def test_dao_denies_pre_redaction_page_text_to_analysis_stages(
+    stage, processed_document, make_args, capsys
+):
+    """The structural half of the fix, and the one the specs cannot provide.
+
+    Previously read-page-text had no caller check at all: any stage that
+    called it got pre-redaction text back. The agent specs were corrected to
+    forbid it, but a spec is a prompt -- it cannot stop the call, and in
+    CASE_901 it did not. This asserts the DAO itself refuses, which is what
+    read-ground-truth has always done for the D1 boundary.
+    """
+    rc = dao.cmd_read_page_text(make_args(page=1, caller_stage=stage))
+    out = capsys.readouterr().out
+
+    assert rc == 1, f"{stage} must be refused pre-redaction page text"
+    assert "DENIED" in out
+    for pii in PII_VALUES:
+        assert pii not in out, f"a denial must not leak the very PII it withholds ({pii})"
+
+
+def test_dao_denial_does_not_depend_on_the_page_existing(isolated_dao, make_args, capsys):
+    """The caller check must run BEFORE any filesystem lookup, so an
+    unauthorized stage cannot use the difference between 'denied' and
+    'not extracted' to probe which pages exist."""
+    rc = dao.cmd_read_page_text(make_args(page=999, caller_stage="denial-response"))
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "DENIED" in out
+    assert "NOT_EXTRACTED" not in out
+
+
+def test_checkpoint2_owner_still_reads_page_text(processed_document, make_args, capsys):
+    """The gate must not break the one stage that legitimately needs this --
+    redaction cannot run without its own input."""
+    rc = dao.cmd_read_page_text(make_args(page=1, caller_stage="document-pipeline"))
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert any(pii in out for pii in PII_VALUES), "checkpoint 2 reads pre-redaction text by design"
 
 
 def test_expert_review_only_document_is_refused_before_any_path_is_emitted(

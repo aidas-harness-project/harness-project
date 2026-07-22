@@ -31,7 +31,7 @@
           "type": "array",
           "minItems": 1,
           "description": "Exact source location supporting this basis text. A basis without a source location is invalid, not merely low-confidence.",
-          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+          "items": { "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference" }
         },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
         "review_required": { "type": "boolean" },
@@ -97,13 +97,13 @@
         "insurer_citation_evidence_references": {
           "type": "array",
           "description": "Location in the insurer response where the clause was cited. Empty only for agent_inferred matches.",
-          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+          "items": { "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference" }
         },
         "policy_clause_evidence_references": {
           "type": "array",
           "minItems": 1,
           "description": "Location of the matched clause in the processed policy document. Required for every match so denial-validation can verify the link before relying on it.",
-          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+          "items": { "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference" }
         },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
         "review_required": { "type": "boolean" },
@@ -114,6 +114,7 @@
         "insurer_citation_evidence_references", "policy_clause_evidence_references",
         "confidence", "review_required"
       ],
+      "additionalProperties": false,
       "allOf": [
         {
           "if": { "properties": { "match_source": { "const": "insurer_cited" } }, "required": ["match_source"] },
@@ -145,6 +146,8 @@
         "taxonomy_label": { "type": "string" },
         "candidate_codes": {
           "type": "array",
+          "description": "Ranked classification candidates, best first. Required and non-empty: this is the Top-1/Top-3 evaluation input, and an omitted list silently removes a reason from that measurement rather than scoring it. The first entry must equal taxonomy_code (the headline code IS the top candidate -- a list whose winner disagrees with the assigned code describes a classification nobody made), codes must be distinct, and confidence must be non-increasing. Descending order and the top-1 match are checked by the DAO's cross-contract validator, which can compare siblings; JSON Schema can only pin shape.",
+          "minItems": 1,
           "maxItems": 3,
           "items": {
             "type": "object",
@@ -152,7 +155,8 @@
               "taxonomy_code": { "$ref": "common_component_output.schema.json#/$defs/taxonomy_code" },
               "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" }
             },
-            "required": ["taxonomy_code", "confidence"]
+            "required": ["taxonomy_code", "confidence"],
+            "additionalProperties": false
           }
         },
         "raw_reason_text": { "type": "string", "minLength": 1 },
@@ -171,16 +175,17 @@
         "evidence_references": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+          "items": { "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference" }
         },
         "review_required": { "type": "boolean" },
         "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
       },
       "required": [
-        "reason_id", "decision_type", "payment_status", "taxonomy_code", "raw_reason_text",
-        "insurer_claim_summary", "grounds", "amounts", "requested_documents", "policy_matches",
-        "confidence", "evidence_references", "review_required"
+        "reason_id", "decision_type", "payment_status", "taxonomy_code", "candidate_codes",
+        "raw_reason_text", "insurer_claim_summary", "grounds", "amounts", "requested_documents",
+        "policy_matches", "confidence", "evidence_references", "review_required"
       ],
+      "additionalProperties": false,
       "allOf": [
         {
           "description": "Reduction-only codes must not be classified as denial.",

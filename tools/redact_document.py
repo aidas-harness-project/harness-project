@@ -72,7 +72,10 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
     review_warnings: list[str] = []
     for page in ocr_result.get("pages", []):
         page_number = page["page"]
-        text = _dao("read-page-text", case_id, doc_id, str(page_number))
+        # --caller-stage is a hard DAO gate, not a label: pre-redaction page
+        # text is restricted to the stage that owns checkpoint 2 (this tool).
+        text = _dao("read-page-text", case_id, doc_id, str(page_number),
+                    "--caller-stage", "document-pipeline")
         # redact_page HARD-FAILS (RedactionLeakError) on any detected possible
         # PII leak -- that propagates out of this function and nothing is
         # written, blocking the document exactly like a P8 disagreement. Only a

@@ -86,14 +86,14 @@ def test_read_page_text_returns_only_validated_processed_page(isolated_dao, make
     page_path.parent.mkdir(parents=True)
     page_path.write_text("검증된 페이지 텍스트", encoding="utf-8")
 
-    rc = dao.cmd_read_page_text(make_args(page=1))
+    rc = dao.cmd_read_page_text(make_args(page=1, caller_stage="document-pipeline"))
 
     assert rc == 0
     assert capsys.readouterr().out == "검증된 페이지 텍스트"
 
 
 def test_read_page_text_fails_when_checkpoint1_page_is_missing(isolated_dao, make_args, capsys):
-    rc = dao.cmd_read_page_text(make_args(page=3))
+    rc = dao.cmd_read_page_text(make_args(page=3, caller_stage="document-pipeline"))
 
     assert rc == 1
     assert "NOT_EXTRACTED" in capsys.readouterr().out
@@ -129,7 +129,7 @@ def test_read_page_text_rejects_non_positive_page_numbers(isolated_dao, make_arg
     unexpected_path.parent.mkdir(parents=True)
     unexpected_path.write_text("must not be read", encoding="utf-8")
 
-    rc = dao.cmd_read_page_text(make_args(page=page))
+    rc = dao.cmd_read_page_text(make_args(page=page, caller_stage="document-pipeline"))
 
     assert rc == 1
     assert capsys.readouterr().out == f"ERROR: page must be >= 1 (got {page})\n"

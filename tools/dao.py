@@ -35,7 +35,7 @@ cannot do; the orchestrator/agent owns that loop.
 
 Subcommands:
     read-document-text CASE_ID DOC_ID
-    read-page-text CASE_ID DOC_ID PAGE
+    read-page-text CASE_ID DOC_ID PAGE --caller-stage STAGE
     read-ground-truth CASE_ID --caller-stage STAGE --version {v1|v2}
     read-contract CASE_ID FILENAME
     write-contract CASE_ID FILENAME --data-file PATH --schema-name NAME
@@ -79,6 +79,7 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
 from _validation import load_registry, validate_instance
+from _cross_contract import check as cross_contract_check
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
@@ -265,12 +266,36 @@ def cmd_read_document_text(args):
     return 1
 
 
+PAGE_TEXT_ALLOWED_STAGES = frozenset({"document-pipeline"})
+
+
 def cmd_read_page_text(args):
     """Read one validated checkpoint-1 page from the processed layer.
 
     This command exists for checkpoint 2 so redaction never opens a raw
     source or reaches into data/processed outside the DAO boundary.
+
+    page_NNN.md is checkpoint 1 output -- BEFORE redaction -- so it still
+    carries claimant-facing PII (names, addresses, phone numbers). Only the
+    stage that owns checkpoint 2 has any business reading it; every analysis
+    stage reads the redacted text via read-document-text instead.
+
+    The caller gate is enforced here rather than left to agent prompts
+    because a prompt cannot actually stop a call. CASE_901 is the proof: the
+    denial-response agent misread read-document-text's path return as a
+    failure, fell back to read-page-text, and read real names/addresses/phone
+    numbers straight out of the pre-redaction layer. The agent specs were
+    corrected (commit df7b123) and tests/test_redaction_boundary.py pins that
+    wording, but a spec is guidance -- this is the structural half, mirroring
+    the caller check read-ground-truth has always had for D1.
     """
+    if args.caller_stage not in PAGE_TEXT_ALLOWED_STAGES:
+        print(f"DENIED: page text is pre-redaction and may only be read by "
+              f"{sorted(PAGE_TEXT_ALLOWED_STAGES)} (checkpoint 2's own input; harness-guardrails P2). "
+              f"caller_stage={args.caller_stage!r} is not permitted. Analysis stages must use "
+              f"read-document-text, which returns the path to the REDACTED text. "
+              f"This is logged as a potential redaction-boundary violation.")
+        return 1
     if args.page < 1:
         print(f"ERROR: page must be >= 1 (got {args.page})")
         return 1
@@ -336,6 +361,16 @@ def cmd_write_contract(args):
         if errors:
             print(f"FAIL: schema validation errors for {target}:")
             for e in errors:
+                print(f"  - {e}")
+            return 1
+        # Cross-contract invariants a single-document schema cannot see:
+        # ids resolving against a sibling contract, id uniqueness, and
+        # sibling-comparing field rules. Same fail/don't-persist contract as
+        # schema validation above -- see tools/_cross_contract.py.
+        cross_errors = cross_contract_check(args.filename, data, case_dir(args.case_id))
+        if cross_errors:
+            print(f"FAIL: cross-contract validation errors for {target}:")
+            for e in cross_errors:
                 print(f"  - {e}")
             return 1
         atomic_write_json(target, data)
@@ -979,6 +1014,9 @@ def main():
 
     p = sub.add_parser("read-page-text"); p.add_argument("case_id"); p.add_argument("doc_id")
     p.add_argument("page", type=int)
+    p.add_argument("--caller-stage", required=True,
+                   help="Stage making the call. Pre-redaction text is restricted to "
+                        f"{sorted(PAGE_TEXT_ALLOWED_STAGES)}; anything else is DENIED.")
     p.set_defaults(fn=cmd_read_page_text)
 
     p = sub.add_parser("read-ground-truth"); p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)

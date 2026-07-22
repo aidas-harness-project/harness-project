@@ -1254,10 +1254,93 @@ call in executable form (`dao.py write-contract`, `dao.py patch-manifest-documen
   interchangeable; `expert_review_only` still emits no path at all. Verified by
   mutation -- reintroducing the "print the text" change fails 2 of the 6.
 
-**Residual risk, OPEN.** A spec is a prompt. Nothing structurally prevents an
-analysis agent from calling `read-page-text`; the DAO does not know who is
-calling. A real gate needs caller identity at the DAO boundary -- e.g. a
-required `--caller-stage` on `read-page-text` accepted only for
-`document_processing`, mirroring how `read-ground-truth` already takes
-`--caller-stage`. Deferred, and worth doing: this is the second finding in this
-file (see item 18) where the sanctioned path was correct but not sealed.
+**Residual risk -- CLOSED 2026-07-22 (see item 20).** The gate described here
+was built as specified: `read-page-text` now takes a required `--caller-stage`
+and `dao.PAGE_TEXT_ALLOWED_STAGES` accepts only `document-pipeline`, mirroring
+`read-ground-truth`'s D1 check. The caller check runs before any filesystem
+lookup, so an unauthorized stage cannot distinguish "denied" from "no such
+page" and use the difference to probe. `redact_document.py` -- the one
+legitimate caller -- passes the flag. 10 tests in
+`tests/test_redaction_boundary.py` cover it, including a parametrized denial
+for all 7 analysis stages and a check that the denial message does not itself
+leak the PII it withholds.
+
+## 20. Denial-family contracts validated field-by-field but not as a whole -- RESOLVED 2026-07-22
+
+An external audit of the denial/reduction contracts found five weaknesses.
+All five were reproduced against the real committed outputs (CASE_903,
+CASE_901, CASE_021) before anything was changed -- none was hypothetical, and
+none was caught by the 480-test suite, because every one of them lives in a
+place a JSON Schema structurally cannot look.
+
+**The shared root cause.** A JSON Schema validates one document against one
+shape. It cannot read a sibling file, and it cannot compare two members of the
+same array. Everything below sat in that blind spot, so each individual field
+was legal while the document as a whole asserted something false -- the same
+shape of gap as item 14's run-state drift and the ocr_result rollup fixed
+earlier the same day: the tool happened to write consistent data, so the
+corpus looked fine, and only the tool's good behaviour was holding the
+invariant.
+
+**F1 -- `read-page-text` had no caller gate (HIGH).** Closed; folded into item
+19, which had already specified this exact fix as its residual risk.
+
+**F2 -- source locations were optional (HIGH).** `evidence_reference` requires
+only `quote`. Stripping `document_id` and `page` from all 19 references in
+CASE_903's `denial_reason_result.json` validated cleanly, so a reason nobody
+could trace to a page counted as grounded -- precisely what P1 exists to
+prevent. Fixed with a new `strict_evidence_reference` in
+`common_component_output.schema.json` requiring `document_id` + `page` +
+`quote`, applied to the denial family only (`denial_reason_result`,
+`denial_validation_result`). Deliberately NOT global: other contracts use the
+looser form where surrounding structure already fixes the document context.
+Same attack now yields 36 errors; both real files still pass unchanged.
+
+**F3 -- cross-references were unchecked (HIGH).** `denial_validation_result`
+naming `DR_999` validated. So did omitting validations for real reasons, and
+duplicating one, and verifying a `policy_match_id` that existed nowhere. A
+Phase 2 output could therefore validate nothing at all, or claim to have
+validated something imaginary, and still report success.
+
+**F4 -- duplicate ids and legacy fields (MED).** Two reasons both called
+`DR_1` validated; so did a stale `reason_type: partial_payment` sitting beside
+the current `decision_type`. Ids are how every downstream stage and the
+evaluation contract address a reason.
+
+**F5 -- `candidate_codes` was optional (MED).** The Top-1/Top-3 evaluation
+input could be omitted entirely (silently dropping a reason from measurement
+rather than scoring it), or list a top candidate that disagreed with the
+assigned `taxonomy_code`, or run in increasing confidence order.
+
+**The fix for F3/F4/F5's comparison half: `tools/_cross_contract.py`**, hooked
+into `dao.cmd_write_contract` immediately after schema validation, with the
+same fail/don't-persist contract. It resolves ids across sibling contracts
+(one validation per reason, one verification per policy match, no orphans, no
+omissions, no duplicates), enforces id uniqueness, and checks the
+sibling-comparing rules schema cannot (top candidate == assigned code,
+distinct codes, non-increasing confidence, `taxonomy_label` matching the
+codebook's `label_ko`). Schema-side additions cover the shape half:
+`candidate_codes` required + `minItems: 1`, and `additionalProperties: false`
+on `denial_reason` and `policy_match`.
+
+**Deliberate non-failures.** CASE_021's `policy_matches` predate
+`policy_match_id`; matches carrying no id are skipped rather than reported as
+unverified, since retro-failing a legacy shape is noise, not a finding -- the
+schema governs new writes. A missing sibling contract is likewise not an
+error (stages run in order); only a present one that disagrees fails.
+
+**Verification.** 20 new tests in `tests/test_cross_contract.py`, each a
+reproduction of an audit finding rather than a hypothetical, plus 4 added to
+`tests/test_redaction_boundary.py` for F1. The 21 pre-existing denial tests
+that broke were all one cause -- fixtures written before `candidate_codes` was
+required -- fixed at the two shared builders, not by relaxing the rule. 502
+tests pass; the sole remaining failure is the pre-existing
+`test_forbidden_table_not_restated_outside_authoritative_source`
+self-reference bug, unrelated and confirmed failing without these changes.
+
+**OPEN, deliberately not built.** The evaluation contract still measures
+R-code Top-1/Top-3 only -- it does not score `decision_type` accuracy or
+source-location accuracy. Those need a real evaluation design (what counts as
+a correct location? is a right code with a wrong decision_type a partial
+credit?), not a metric invented at gate-building time. Tracked in
+`open-decisions.md`.
