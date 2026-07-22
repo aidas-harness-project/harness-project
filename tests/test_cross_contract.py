@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 import dao
+import _cross_contract as cc
 from _cross_contract import check
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -62,6 +63,16 @@ def _validation(reason_id, match_ids=()):
         "verdict": "partially_supported",
         "policy_match_validations": [{"policy_match_id": m} for m in match_ids],
     }
+
+
+def _derived(case_dir, payload):
+    """Stamp the payload with the hash of the denial_reason_result.json in
+    this case dir. Downstream contracts must declare what they were built
+    from (see tests/test_upstream_staleness.py); these tests are about ids and
+    decision types, so the provenance field is filled in correctly rather than
+    re-asserted here."""
+    upstream = json.loads((case_dir / "denial_reason_result.json").read_text(encoding="utf-8"))
+    return dict(payload, source_denial_contract_hash=cc.upstream_hash(upstream))
 
 
 # ---- denial_reason_result: ids and ranked lists ----
@@ -146,7 +157,7 @@ def test_omitted_taxonomy_label_is_not_invented(reasons_doc, case_dir):
 def test_validation_of_a_nonexistent_reason_is_rejected(case_dir):
     """The headline finding: DR_999 resolves to nothing and used to pass."""
     doc = {"validations": [_validation("DR_1"), _validation("DR_999")]}
-    errors = check("denial_validation_result.json", doc, case_dir)
+    errors = check("denial_validation_result.json", _derived(case_dir, doc), case_dir)
     assert any("DR_999" in e and "does not exist" in e for e in errors)
 
 
@@ -154,19 +165,19 @@ def test_every_denial_reason_must_be_validated(case_dir):
     """Skipping one silently leaves an insurer's denial unrebutted while the
     contract still reports success."""
     doc = {"validations": [_validation("DR_1")]}
-    errors = check("denial_validation_result.json", doc, case_dir)
+    errors = check("denial_validation_result.json", _derived(case_dir, doc), case_dir)
     assert any("DR_2" in e and "no validation" in e for e in errors)
 
 
 def test_a_reason_must_not_be_validated_twice(case_dir):
     doc = {"validations": [_validation("DR_1"), _validation("DR_1"), _validation("DR_2")]}
-    errors = check("denial_validation_result.json", doc, case_dir)
+    errors = check("denial_validation_result.json", _derived(case_dir, doc), case_dir)
     assert any("appears more than once" in e for e in errors)
 
 
 def test_exact_one_to_one_validation_passes(case_dir):
     doc = {"validations": [_validation("DR_1"), _validation("DR_2")]}
-    assert check("denial_validation_result.json", doc, case_dir) == []
+    assert check("denial_validation_result.json", _derived(case_dir, doc), case_dir) == []
 
 
 def test_policy_match_verification_must_resolve(tmp_path):
@@ -176,7 +187,7 @@ def test_policy_match_verification_must_resolve(tmp_path):
     (d / "denial_reason_result.json").write_text(json.dumps(reasons, ensure_ascii=False),
                                                  encoding="utf-8")
     doc = {"validations": [_validation("DR_1", match_ids=["PM_999"])]}
-    errors = check("denial_validation_result.json", doc, d)
+    errors = check("denial_validation_result.json", _derived(d, doc), d)
     assert any("PM_999" in e and "does not exist" in e for e in errors)
     assert any("PM_1" in e and "no verification" in e for e in errors)
 
@@ -191,7 +202,8 @@ def test_legacy_policy_matches_without_ids_are_not_retro_failed(tmp_path):
     d.mkdir()
     (d / "denial_reason_result.json").write_text(json.dumps(reasons, ensure_ascii=False),
                                                  encoding="utf-8")
-    assert check("denial_validation_result.json", {"validations": [_validation("DR_1")]}, d) == []
+    assert check("denial_validation_result.json",
+                 _derived(d, {"validations": [_validation("DR_1")]}), d) == []
 
 
 def test_validation_before_its_source_contract_exists_is_rejected(tmp_path):
@@ -228,7 +240,7 @@ def test_match_verified_under_the_wrong_reason_is_rejected(owned_matches_case):
         _validation("DR_1"),
         _validation("DR_2", match_ids=["PM_1"]),
     ]}
-    errors = check("denial_validation_result.json", doc, owned_matches_case)
+    errors = check("denial_validation_result.json", _derived(owned_matches_case, doc), owned_matches_case)
     assert any("PM_1" in e and "belongs to 'DR_1', not 'DR_2'" in e for e in errors)
 
 
@@ -237,12 +249,12 @@ def test_correct_ownership_passes(owned_matches_case):
         _validation("DR_1", match_ids=["PM_1"]),
         _validation("DR_2", match_ids=["PM_2"]),
     ]}
-    assert check("denial_validation_result.json", doc, owned_matches_case) == []
+    assert check("denial_validation_result.json", _derived(owned_matches_case, doc), owned_matches_case) == []
 
 
 def test_owned_match_left_unverified_is_reported_against_its_reason(owned_matches_case):
     doc = {"validations": [_validation("DR_1"), _validation("DR_2", match_ids=["PM_2"])]}
-    errors = check("denial_validation_result.json", doc, owned_matches_case)
+    errors = check("denial_validation_result.json", _derived(owned_matches_case, doc), owned_matches_case)
     assert any("DR_1" in e and "PM_1" in e and "no verification" in e for e in errors)
 
 
@@ -252,7 +264,7 @@ def test_same_match_verified_under_two_reasons_is_rejected(owned_matches_case):
         _validation("DR_1", match_ids=["PM_1"]),
         _validation("DR_2", match_ids=["PM_1", "PM_2"]),
     ]}
-    errors = check("denial_validation_result.json", doc, owned_matches_case)
+    errors = check("denial_validation_result.json", _derived(owned_matches_case, doc), owned_matches_case)
     assert any("belongs to 'DR_1', not 'DR_2'" in e for e in errors)
     assert any("verified more than once" in e for e in errors)
 
@@ -262,7 +274,7 @@ def test_match_repeated_within_one_validation_is_rejected(owned_matches_case):
         _validation("DR_1", match_ids=["PM_1", "PM_1"]),
         _validation("DR_2", match_ids=["PM_2"]),
     ]}
-    errors = check("denial_validation_result.json", doc, owned_matches_case)
+    errors = check("denial_validation_result.json", _derived(owned_matches_case, doc), owned_matches_case)
     assert any("verified more than once" in e for e in errors)
 
 
@@ -378,13 +390,13 @@ def test_legacy_matches_without_ids_are_still_skipped(policy_case):
 
 def test_screening_report_reason_ids_must_resolve(case_dir):
     doc = {"denial_summary": {"reason_ids": ["DR_1", "DR_7"]}}
-    errors = check("screening_report.json", doc, case_dir)
+    errors = check("screening_report.json", _derived(case_dir, doc), case_dir)
     assert any("DR_7" in e for e in errors)
 
 
 def test_screening_report_with_valid_ids_passes(case_dir):
     doc = {"denial_summary": {"reason_ids": ["DR_1", "DR_2"]}}
-    assert check("screening_report.json", doc, case_dir) == []
+    assert check("screening_report.json", _derived(case_dir, doc), case_dir) == []
 
 
 @pytest.fixture
@@ -410,7 +422,8 @@ def _position(denial_ids, reduction_ids):
 
 
 def test_correctly_split_screening_sections_pass(mixed_decision_case):
-    assert check("screening_report.json", _position(["DR_1"], ["DR_2"]),
+    assert check("screening_report.json",
+                 _derived(mixed_decision_case, _position(["DR_1"], ["DR_2"])),
                  mixed_decision_case) == []
 
 
@@ -418,13 +431,13 @@ def test_swapped_denial_and_reduction_sections_are_rejected(mixed_decision_case)
     """The regression the audit asked for: both ids resolve, so an
     existence-only check passes while the report inverts what the insurer
     actually decided."""
-    errors = check("screening_report.json", _position(["DR_2"], ["DR_1"]), mixed_decision_case)
+    errors = check("screening_report.json", _derived(mixed_decision_case, _position(["DR_2"], ["DR_1"])), mixed_decision_case)
     assert any("DR_2" in e and "'reduction'" in e and "denial" in e for e in errors)
     assert any("DR_1" in e and "'denial'" in e and "reduction" in e for e in errors)
 
 
 def test_a_reduction_listed_under_denial_is_rejected(mixed_decision_case):
-    errors = check("screening_report.json", _position(["DR_1", "DR_2"], []), mixed_decision_case)
+    errors = check("screening_report.json", _derived(mixed_decision_case, _position(["DR_1", "DR_2"], [])), mixed_decision_case)
     assert any("DR_2" in e and "must not be summarized as a denial" in e for e in errors)
 
 

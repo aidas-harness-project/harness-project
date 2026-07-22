@@ -33,12 +33,72 @@ Failures are returned as strings, same contract as validate_instance(), and
 dao.write-contract refuses the write on any -- the fail/don't-persist rule
 already used for schema errors.
 """
+import hashlib
 import json
 from pathlib import Path
 
 # Files that carry ids other contracts point at, and the checks each gets.
 DENIAL_REASONS = "denial_reason_result.json"
 DENIAL_VALIDATION = "denial_validation_result.json"
+
+# Stages whose output is derived from denial_reason_result.json. If that
+# contract is rewritten, whatever these produced describes a reason/match set
+# that no longer exists -- see upstream_hash() and stale_downstream().
+DERIVED_FROM_DENIAL_REASONS = {
+    DENIAL_VALIDATION: "denial_validation",
+    "screening_report.json": "screening_report",
+}
+
+UPSTREAM_HASH_FIELD = "source_denial_contract_hash"
+
+
+def upstream_hash(data: dict) -> str:
+    """A content hash of denial_reason_result.json's MEANING, not its bytes.
+
+    Only the parts downstream contracts actually resolve against are hashed:
+    each reason's id, decision_type, taxonomy_code, and its owned
+    policy_match_ids. Hashing the whole file would invalidate every downstream
+    contract when an unrelated field changed -- a reworded
+    insurer_claim_summary, a confidence nudge, a new warning -- and an
+    invalidation that fires on noise gets ignored, which is worse than none.
+
+    Sorted and separator-pinned so the digest depends on content rather than
+    key order or whitespace.
+    """
+    material = [
+        {
+            "reason_id": r.get("reason_id"),
+            "decision_type": r.get("decision_type"),
+            "taxonomy_code": r.get("taxonomy_code"),
+            "policy_match_ids": sorted(
+                m.get("policy_match_id") for m in (r.get("policy_matches") or [])
+                if m.get("policy_match_id") is not None),
+        }
+        for r in (data.get("denial_reasons") or [])
+    ]
+    material.sort(key=lambda item: item["reason_id"] or "")
+    canonical = json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def stale_downstream(case_dir: Path, new_hash: str) -> list[tuple[str, str, str | None]]:
+    """Downstream contracts on disk whose recorded upstream hash no longer
+    matches. Returns (filename, stage_name, recorded_hash) per stale file.
+
+    A contract with no recorded hash is treated as stale rather than fine: it
+    was written before this check existed, so nothing establishes which
+    reason set it was derived from -- assuming it is current is exactly the
+    assumption that goes wrong.
+    """
+    stale = []
+    for filename, stage in DERIVED_FROM_DENIAL_REASONS.items():
+        existing = _load(case_dir, filename)
+        if existing is None:
+            continue
+        recorded = existing.get(UPSTREAM_HASH_FIELD)
+        if recorded != new_hash:
+            stale.append((filename, stage, recorded))
+    return stale
 
 
 def _load(case_dir: Path, filename: str):
@@ -122,6 +182,31 @@ def check_denial_reason_result(data: dict) -> list[str]:
                               "detail but must not restate the code's meaning differently")
 
     return errors
+
+
+def _check_upstream_hash(data: dict, reasons_doc: dict, filename: str) -> list[str]:
+    """A downstream contract must declare which denial_reason_result it was
+    built from, and that must be the one on disk right now.
+
+    This runs inside the DOWNSTREAM file's lock (see dao.cmd_write_contract),
+    and reads upstream at that moment -- so the hash compared is the same one
+    in effect when the write lands. There is no window between checking and
+    writing for upstream to change underneath. Lock order is single-file:
+    downstream is locked, upstream is only read, so no two callers can hold
+    locks in opposing order.
+    """
+    current = upstream_hash(reasons_doc)
+    recorded = data.get(UPSTREAM_HASH_FIELD)
+    if recorded is None:
+        return [f"{filename}: {UPSTREAM_HASH_FIELD} is missing -- a derived contract must record "
+                f"which {DENIAL_REASONS} it was built from (expected {current!r}), otherwise "
+                "nothing can tell later whether it went stale"]
+    if recorded != current:
+        return [f"{filename}: {UPSTREAM_HASH_FIELD} is {recorded!r} but {DENIAL_REASONS} now "
+                f"hashes to {current!r} -- this was derived from a reason/match set that has "
+                "since changed. Re-run the stage against the current contract; do not write "
+                "a validation of reasons that no longer exist."]
+    return []
 
 
 def _normalized_policy_filename(document_id: str) -> str:
@@ -259,6 +344,8 @@ def check_denial_validation_result(data: dict, case_dir: Path) -> list[str]:
         return [f"{DENIAL_VALIDATION} cannot be written before {DENIAL_REASONS} exists -- "
                 "it validates that contract's reasons and has nothing to resolve ids against"]
 
+    errors.extend(_check_upstream_hash(data, reasons_doc, DENIAL_VALIDATION))
+
     reasons = reasons_doc.get("denial_reasons") or []
     known_reason_ids = [r.get("reason_id") for r in reasons]
 
@@ -353,7 +440,7 @@ def check_screening_report(data: dict, case_dir: Path) -> list[str]:
     known = [r.get("reason_id") for r in reasons]
     decision_of = {r.get("reason_id"): r.get("decision_type") for r in reasons}
 
-    errors = []
+    errors = _check_upstream_hash(data, reasons_doc, "screening_report.json")
     for ref in _collect_reason_ids(data):
         if ref not in known:
             errors.append(f"screening_report references reason_id {ref!r}, which does not exist "

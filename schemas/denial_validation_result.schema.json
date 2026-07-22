@@ -11,6 +11,11 @@
         "validations": {
           "type": "array",
           "items": { "$ref": "#/$defs/validation" }
+        },
+        "source_denial_contract_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the denial_reason_result.json this validation was built from -- specifically of the reason ids, decision types, taxonomy codes, and owned policy_match_ids it resolves against, not the whole file (an unrelated reworded summary must not invalidate a still-correct validation). The DAO recomputes this from the contract on disk at write time and refuses the write on a mismatch, so a validation of reasons that have since changed cannot be persisted. Rewriting denial_reason_result.json flips this stage back to pending in run-state rather than deleting anything."
         }
       },
       "required": ["validations"]

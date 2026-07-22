@@ -14,6 +14,11 @@
         },
         "case_summary": { "$ref": "#/$defs/case_summary" },
         "insurer_position": { "$ref": "#/$defs/insurer_position" },
+        "source_denial_contract_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the denial_reason_result.json this report summarizes -- of the reason ids, decision types, taxonomy codes, and owned policy_match_ids, not the whole file. The DAO recomputes it from the contract on disk at write time and refuses a mismatch, so a screening report describing a superseded reason set cannot be persisted. Rewriting denial_reason_result.json flips this stage back to pending in run-state; no file is deleted."
+        },
         "key_issues": {
           "type": "array",
           "items": { "$ref": "#/$defs/key_issue" }
