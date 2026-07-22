@@ -203,6 +203,177 @@ def test_validation_before_its_source_contract_exists_is_rejected(tmp_path):
     assert any("cannot be written before" in e for e in errors)
 
 
+# ---- policy match ownership: a match belongs to ONE reason ----
+
+@pytest.fixture
+def owned_matches_case(tmp_path):
+    """DR_1 owns PM_1, DR_2 owns PM_2 -- the setup a flat existence check
+    cannot tell apart from 'both ids exist somewhere'."""
+    reasons = {"denial_reasons": [
+        _reason("DR_1", matches=[{"policy_match_id": "PM_1"}]),
+        _reason("DR_2", matches=[{"policy_match_id": "PM_2"}]),
+    ]}
+    d = tmp_path / "CASE_OWN"
+    d.mkdir()
+    (d / "denial_reason_result.json").write_text(json.dumps(reasons, ensure_ascii=False),
+                                                 encoding="utf-8")
+    return d
+
+
+def test_match_verified_under_the_wrong_reason_is_rejected(owned_matches_case):
+    """The finding: PM_1 belongs to DR_1, but was verified under DR_2. Every
+    id exists, so a global-set check passes -- while PM_1 was never actually
+    checked under the reason that owns it, and PM_2 never checked at all."""
+    doc = {"validations": [
+        _validation("DR_1"),
+        _validation("DR_2", match_ids=["PM_1"]),
+    ]}
+    errors = check("denial_validation_result.json", doc, owned_matches_case)
+    assert any("PM_1" in e and "belongs to 'DR_1', not 'DR_2'" in e for e in errors)
+
+
+def test_correct_ownership_passes(owned_matches_case):
+    doc = {"validations": [
+        _validation("DR_1", match_ids=["PM_1"]),
+        _validation("DR_2", match_ids=["PM_2"]),
+    ]}
+    assert check("denial_validation_result.json", doc, owned_matches_case) == []
+
+
+def test_owned_match_left_unverified_is_reported_against_its_reason(owned_matches_case):
+    doc = {"validations": [_validation("DR_1"), _validation("DR_2", match_ids=["PM_2"])]}
+    errors = check("denial_validation_result.json", doc, owned_matches_case)
+    assert any("DR_1" in e and "PM_1" in e and "no verification" in e for e in errors)
+
+
+def test_same_match_verified_under_two_reasons_is_rejected(owned_matches_case):
+    """Wrong-parent and duplicate at once -- both must surface."""
+    doc = {"validations": [
+        _validation("DR_1", match_ids=["PM_1"]),
+        _validation("DR_2", match_ids=["PM_1", "PM_2"]),
+    ]}
+    errors = check("denial_validation_result.json", doc, owned_matches_case)
+    assert any("belongs to 'DR_1', not 'DR_2'" in e for e in errors)
+    assert any("verified more than once" in e for e in errors)
+
+
+def test_match_repeated_within_one_validation_is_rejected(owned_matches_case):
+    doc = {"validations": [
+        _validation("DR_1", match_ids=["PM_1", "PM_1"]),
+        _validation("DR_2", match_ids=["PM_2"]),
+    ]}
+    errors = check("denial_validation_result.json", doc, owned_matches_case)
+    assert any("verified more than once" in e for e in errors)
+
+
+# ---- policy documents, clauses, and cited locations must be real ----
+
+CLAUSE_QUOTE = "「뇌혈관질환」의 진단확정은 의료법 제3조에서 규정한 의료기관의 의사에 의하여"
+
+
+def _policy_doc(document_id="DOC_002", clause_id="제3조", page=2, quote=CLAUSE_QUOTE):
+    return {
+        "document_id": document_id,
+        "clauses": [{
+            "clause_id": clause_id,
+            "evidence_references": [
+                {"document_id": document_id, "page": page, "quote": quote}],
+        }],
+    }
+
+
+def _match(policy_match_id="PM_1", document_id="DOC_002", clause_id="제3조",
+           ref_document_id=None, page=2, quote=CLAUSE_QUOTE, match_source="insurer_cited"):
+    return {
+        "policy_match_id": policy_match_id,
+        "document_id": document_id,
+        "clause_id": clause_id,
+        "match_source": match_source,
+        "policy_clause_evidence_references": [
+            {"document_id": ref_document_id or document_id, "page": page, "quote": quote}],
+    }
+
+
+@pytest.fixture
+def policy_case(tmp_path):
+    d = tmp_path / "CASE_POLICY"
+    d.mkdir()
+    (d / "normalized_policy_clause_DOC_002.json").write_text(
+        json.dumps(_policy_doc(), ensure_ascii=False), encoding="utf-8")
+    return d
+
+
+def _reasons_with(match):
+    return {"denial_reasons": [_reason("DR_1", matches=[match])]}
+
+
+def test_resolvable_policy_match_passes(policy_case):
+    assert check("denial_reason_result.json", _reasons_with(_match()), policy_case) == []
+
+
+def test_match_citing_a_different_document_is_rejected(policy_case):
+    """A DOC_002 match whose clause evidence points at DOC_999: the citation
+    does not come from the document the match claims."""
+    doc = _reasons_with(_match(ref_document_id="DOC_999"))
+    errors = check("denial_reason_result.json", doc, policy_case)
+    assert any("DOC_999" in e and "DOC_002" in e for e in errors)
+
+
+def test_match_on_a_nonexistent_clause_is_rejected(policy_case):
+    doc = _reasons_with(_match(clause_id="제99조"))
+    errors = check("denial_reason_result.json", doc, policy_case)
+    assert any("제99조" in e and "does not exist" in e for e in errors)
+
+
+def test_match_on_an_unnormalized_policy_document_is_rejected(policy_case):
+    """Fail-safe: a link that cannot be checked is not allowed to stand as
+    though it had been."""
+    doc = _reasons_with(_match(document_id="DOC_777"))
+    errors = check("denial_reason_result.json", doc, policy_case)
+    assert any("normalized_policy_clause_DOC_777.json" in e for e in errors)
+
+
+def test_clause_evidence_on_the_wrong_page_is_rejected(policy_case):
+    doc = _reasons_with(_match(page=9))
+    errors = check("denial_reason_result.json", doc, policy_case)
+    assert any("does not match any evidence reference" in e for e in errors)
+
+
+def test_clause_evidence_with_an_unrecorded_quote_is_rejected(policy_case):
+    doc = _reasons_with(_match(quote="약관에 그렇게 적혀 있다고 함"))
+    errors = check("denial_reason_result.json", doc, policy_case)
+    assert any("does not match any evidence reference" in e for e in errors)
+
+
+def test_agent_inferred_matches_are_verified_identically(policy_case):
+    """An inferred link is the one most in need of checking, not least."""
+    doc = _reasons_with(_match(clause_id="제99조", match_source="agent_inferred"))
+    errors = check("denial_reason_result.json", doc, policy_case)
+    assert any("제99조" in e and "does not exist" in e for e in errors)
+
+
+def test_match_may_cite_a_condition_level_evidence_reference(tmp_path):
+    """A match may turn on a specific payout condition rather than the clause
+    header, so condition-level references count as recorded locations."""
+    policy = _policy_doc()
+    policy["clauses"][0]["payout_conditions"] = [
+        {"text": "진단확정 요건", "evidence_references": [
+            {"document_id": "DOC_002", "page": 3, "quote": "조건 본문"}]}]
+    d = tmp_path / "CASE_COND"
+    d.mkdir()
+    (d / "normalized_policy_clause_DOC_002.json").write_text(
+        json.dumps(policy, ensure_ascii=False), encoding="utf-8")
+    doc = _reasons_with(_match(page=3, quote="조건 본문"))
+    assert check("denial_reason_result.json", doc, d) == []
+
+
+def test_legacy_matches_without_ids_are_still_skipped(policy_case):
+    """CASE_021's shape must not be retro-failed by the new clause checks."""
+    doc = {"denial_reasons": [_reason("DR_1", matches=[
+        {"document_id": "DOC_999", "clause_id": "제3조", "relevance_note": "legacy"}])]}
+    assert check("denial_reason_result.json", doc, policy_case) == []
+
+
 # ---- screening_report ----
 
 def test_screening_report_reason_ids_must_resolve(case_dir):
@@ -214,6 +385,59 @@ def test_screening_report_reason_ids_must_resolve(case_dir):
 def test_screening_report_with_valid_ids_passes(case_dir):
     doc = {"denial_summary": {"reason_ids": ["DR_1", "DR_2"]}}
     assert check("screening_report.json", doc, case_dir) == []
+
+
+@pytest.fixture
+def mixed_decision_case(tmp_path):
+    """DR_1 is a denial, DR_2 a reduction -- the distinction the screening
+    report's two sections exist to preserve."""
+    reasons = {"denial_reasons": [
+        dict(_reason("DR_1", code="R04"), decision_type="denial"),
+        dict(_reason("DR_2", code="R01"), decision_type="reduction"),
+    ]}
+    d = tmp_path / "CASE_MIXED"
+    d.mkdir()
+    (d / "denial_reason_result.json").write_text(json.dumps(reasons, ensure_ascii=False),
+                                                 encoding="utf-8")
+    return d
+
+
+def _position(denial_ids, reduction_ids):
+    return {"insurer_position": {
+        "denial": {"reason_ids": list(denial_ids)},
+        "reduction": {"reason_ids": list(reduction_ids)},
+    }}
+
+
+def test_correctly_split_screening_sections_pass(mixed_decision_case):
+    assert check("screening_report.json", _position(["DR_1"], ["DR_2"]),
+                 mixed_decision_case) == []
+
+
+def test_swapped_denial_and_reduction_sections_are_rejected(mixed_decision_case):
+    """The regression the audit asked for: both ids resolve, so an
+    existence-only check passes while the report inverts what the insurer
+    actually decided."""
+    errors = check("screening_report.json", _position(["DR_2"], ["DR_1"]), mixed_decision_case)
+    assert any("DR_2" in e and "'reduction'" in e and "denial" in e for e in errors)
+    assert any("DR_1" in e and "'denial'" in e and "reduction" in e for e in errors)
+
+
+def test_a_reduction_listed_under_denial_is_rejected(mixed_decision_case):
+    errors = check("screening_report.json", _position(["DR_1", "DR_2"], []), mixed_decision_case)
+    assert any("DR_2" in e and "must not be summarized as a denial" in e for e in errors)
+
+
+def test_same_reason_in_both_sections_is_rejected(mixed_decision_case):
+    errors = check("screening_report.json", _position(["DR_1"], ["DR_1", "DR_2"]),
+                   mixed_decision_case)
+    assert any("BOTH denial and reduction" in e for e in errors)
+
+
+def test_reason_repeated_within_one_section_is_rejected(mixed_decision_case):
+    errors = check("screening_report.json", _position(["DR_1", "DR_1"], ["DR_2"]),
+                   mixed_decision_case)
+    assert any("more than once" in e for e in errors)
 
 
 # ---- dispatch and the DAO gate ----
