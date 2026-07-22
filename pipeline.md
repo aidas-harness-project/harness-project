@@ -93,37 +93,39 @@ structure, no registry entry). See open-decisions.md #2.
 
 ## Denial/reduction reason codes (R-codes)
 
-The frequency tier is loss-adjuster-reviewed taxonomy metadata received on
-2026-07-21. It describes observed operational frequency only. It is not source
-evidence, classification confidence, or permission to prefer a frequent code
-over the insurer's actual wording. The machine-readable copy lives beside the
+The frequency tier and applicable decision types are loss-adjuster-reviewed
+taxonomy metadata received on 2026-07-21 and 2026-07-22 respectively. They are
+not source evidence, classification confidence, or permission to override the
+insurer's actual wording. `감액` maps to `reduction`; `거절` maps to `denial`.
+A `미분류` cell means the adjuster's source table left the classification blank,
+not that the code is inapplicable. The machine-readable copy lives beside the
 enum in `common_component_output.schema.json`'s `taxonomy_code.x-codebook` and
 is kept synchronized with this table by tests.
 
-| Code | Reason | Frequency |
-|---|---|---|
-| R01 | 기왕증 / 기존 질환 기여도 (pre-existing condition contribution) | 상 |
-| R02 | 장해율 과다 (disability rate overstated) | 상 |
-| R03 | 손해액 과다 (damages overstated) | 상 |
-| R04 | 약관상 지급요건 미충족 (policy conditions not met) | 상 |
-| R05 | 면책사항 (exclusion clause) | 상 |
-| R06 | 치료 필요성 부족 (treatment necessity insufficient) | 상 |
-| R07 | 과잉진료 / 비급여 적정성 (overtreatment / non-covered-item appropriateness) | 중 |
-| R08 | 서류 부족 (missing documents) | 하 |
-| R09 | 동일 사유 재청구 (repeat claim, same reason) | 하 |
-| R10 | 기존장해·동일 부위 장해 공제 (existing disability / same-body-part disability deduction) | 상 |
-| R11 | 피해자 과실상계 (claimant contributory negligence) | 상 |
-| R12 | 자기부담금·약정 공제금액 적용 (deductible / contracted deduction) | 하 |
-| R13 | 중복보상·실손 비례보상 (duplicate coverage / indemnity proportional payment) | 중 |
-| R14 | 가입금액·보상한도·일수한도 적용 (insured amount / coverage / day limit) | 하 |
-| R15 | 면책기간·감액기간 적용 (exclusion / reduction period) | 중 |
-| R16 | 치료기간·입원일수 일부 불인정 (partial disallowance of treatment / hospitalization duration) | 중 |
-| R17 | 치료항목·비급여 비용 일부 불인정 (partial disallowance of treatment items / non-covered costs) | 중 |
-| R18 | 소득·휴업기간·가동기간 일부 불인정 (partial disallowance of income / work-loss / working period) | 상 |
-| R19 | 의료자문 결과에 따른 감액 (reduction based on medical advisory) | 상 |
-| R20 | 계약 전 알릴의무 위반에 따른 비례감액 (proportional reduction for pre-contract disclosure violation) | 상 |
-| R21 | 산재·타보험·제3자 기지급액 공제 (deduction of amounts paid by workers' compensation / other insurance / third parties) | 중 |
-| R99 | 기타 / 분류 불가 (other / unclassifiable) | 중 |
+| Code | Reason | Frequency | Classification |
+|---|---|---|---|
+| R01 | 기왕증 / 기존 질환 기여도 (pre-existing condition contribution) | 상 | 감액 |
+| R02 | 장해율 과다 (disability rate overstated) | 상 | 감액 |
+| R03 | 손해액 과다 (damages overstated) | 상 | 감액 |
+| R04 | 약관상 지급요건 미충족 (policy conditions not met) | 상 | 거절 |
+| R05 | 면책사항 (exclusion clause) | 상 | 거절 |
+| R06 | 치료 필요성 부족 (treatment necessity insufficient) | 상 | 감액 |
+| R07 | 과잉진료 / 비급여 적정성 (overtreatment / non-covered-item appropriateness) | 중 | 감액 |
+| R08 | 서류 부족 (missing documents) | 하 | 거절 |
+| R09 | 동일 사유 재청구 (repeat claim, same reason) | 하 | 거절 |
+| R10 | 기존장해·동일 부위 장해 공제 (existing disability / same-body-part disability deduction) | 상 | 감액 |
+| R11 | 피해자 과실상계 (claimant contributory negligence) | 상 | 감액 |
+| R12 | 자기부담금·약정 공제금액 적용 (deductible / contracted deduction) | 하 | 미분류 |
+| R13 | 중복보상·실손 비례보상 (duplicate coverage / indemnity proportional payment) | 중 | 감액 |
+| R14 | 가입금액·보상한도·일수한도 적용 (insured amount / coverage / day limit) | 하 | 미분류 |
+| R15 | 면책기간·감액기간 적용 (exclusion / reduction period) | 중 | 감액 및 거절 |
+| R16 | 치료기간·입원일수 일부 불인정 (partial disallowance of treatment / hospitalization duration) | 중 | 감액 |
+| R17 | 치료항목·비급여 비용 일부 불인정 (partial disallowance of treatment items / non-covered costs) | 중 | 감액 |
+| R18 | 소득·휴업기간·가동기간 일부 불인정 (partial disallowance of income / work-loss / working period) | 상 | 감액 |
+| R19 | 의료자문 결과에 따른 감액 (reduction based on medical advisory) | 상 | 감액 |
+| R20 | 계약 전 알릴의무 위반에 따른 비례감액 (proportional reduction for pre-contract disclosure violation) | 상 | 감액 |
+| R21 | 산재·타보험·제3자 기지급액 공제 (deduction of amounts paid by workers' compensation / other insurance / third parties) | 중 | 감액 |
+| R99 | 기타 / 분류 불가 (other / unclassifiable) | 중 | 감액 및 거절 |
 
 ## Forbidden-expression substitutions
 
