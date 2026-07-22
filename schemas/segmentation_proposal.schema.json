@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "segmentation_proposal.schema.json",
+  "title": "segmentation_proposal_{source_document_id}.json -- bundle document segmentation proposal v0.1",
+  "description": "A proposal for how one raw bundle PDF should be split into logical documents, produced by tools/segment_case.py BEFORE any OCR runs. Stage 1's output is document structure, not text. One file per bundle document (segmentation_proposal_DOC_XXX.json), never a shared flat filename -- the same silent-overwrite bug that hit ocr_result/classification_result/redaction_result would hit a case with two bundles. This is shared review state, not a component output, so it does not use the common output envelope. Written/read only through the DAO. A proposal starts review_status: pending and only a human moves it to approved; tools/segment_case.py split refuses to run until then, and refuses again if any individual segment is still pending.",
+  "type": "object",
+  "properties": {
+    "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
+    "source_document_id": {
+      "$ref": "common_component_output.schema.json#/$defs/document_id",
+      "description": "owner: segmentation. The bundle being segmented -- its existing document_manifest.json entry."
+    },
+    "source_file_name": { "type": "string" },
+    "source_file_path": {
+      "type": "string",
+      "pattern": "^data/raw/",
+      "description": "The bundle under data/raw/. Never a source-cases/ path: source-cases/ is immutable and is not read by this stage."
+    },
+    "source_page_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "review_status": {
+      "enum": ["pending", "approved", "rejected"],
+      "description": "Case-level gate. Starts pending. Only a human sets approved/rejected. Approving this is NOT enough to split -- every segment must also be approved or edited."
+    },
+    "reviewed_by": { "type": ["string", "null"] },
+    "reviewed_at": { "type": ["string", "null"], "format": "date-time" },
+    "rejection_reason": {
+      "type": ["string", "null"],
+      "description": "Required when review_status is rejected."
+    },
+    "method": { "$ref": "#/$defs/method" },
+    "segments": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/segment" },
+      "description": "May be empty: a manual-mode skeleton has no segments until a human fills them, and a failed parse deliberately produces zero segments rather than inventing boundaries."
+    },
+    "unassigned_pages": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 1 },
+      "description": "Pages covered by no segment, recorded explicitly rather than left for a reviewer to compute. Non-empty is a normal intermediate state (manual mode starts with every page here); it is only an error at split time, which refuses to run while any page is unassigned."
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Non-fatal problems a human should see before approving: parse failures, fallback saturation, blank or sideways pages."
+    }
+  },
+  "required": ["case_id", "source_document_id", "source_file_name", "source_page_count", "review_status", "method", "segments"],
+  "$defs": {
+    "method": {
+      "type": "object",
+      "description": "How this proposal was produced. Recorded in enough detail that a token-cost or quality regression is diagnosable from the artifact alone, without re-running anything.",
+      "properties": {
+        "ocr_performed": {
+          "const": false,
+          "description": "Structurally const, not merely false. Stage 1 does not transcribe text, and a proposal claiming otherwise is rejected by schema validation rather than by convention -- the cheapest available enforcement of the stage boundary."
+        },
+        "method_version": {
+          "type": "string",
+          "description": "e.g. segment_contact_sheet_v0.1"
+        },
+        "mode": {
+          "enum": ["manual", "vision_proposal"],
+          "description": "manual = a human read the contact sheets and entered ranges; no model was called. vision_proposal = a model proposed boundaries. Deliberately NOT one value per backend: claude-cli and local-vlm are both vision_proposal, distinguished by provider_name/model_name, so a provider swap does not change the mode's meaning."
+        },
+        "provider_name": { "type": ["string", "null"] },
+        "model_name": { "type": ["string", "null"] },
+        "prompt_version": { "type": ["string", "null"] },
+        "provider_metadata": {
+          "type": ["object", "null"],
+          "description": "ProviderResult.metadata() from the proposal call(s)."
+        },
+        "render_dpi": {
+          "type": "integer",
+          "minimum": 36,
+          "description": "Used for the full-page fallback path. Contact-sheet cells are rendered directly at cell size via a zoom matrix, not at a DPI, because the vision long-edge cap makes any higher render resolution pure waste."
+        },
+        "crop_ratio": {
+          "type": "number",
+          "minimum": 0.2,
+          "maximum": 0.6,
+          "description": "Fraction of each page's height kept, measured from the top. Document titles and form headers sit in the top fifth on this corpus; the default 0.33 keeps that with margin."
+        },
+        "grid_cols": { "type": "integer", "minimum": 1 },
+        "grid_rows": { "type": "integer", "minimum": 1 },
+        "sheet_pixel_budget": {
+          "type": "object",
+          "properties": {
+            "long_edge": { "type": "integer", "minimum": 1 },
+            "total_pixels": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["long_edge", "total_pixels"],
+          "description": "The achieved sheet geometry, not the cap. Recorded because grid/crop choices interact with the vision API's downscaling in a way that is invisible after the fact otherwise."
+        },
+        "contact_sheets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sheet_index": { "type": "integer", "minimum": 0 },
+              "path": { "type": "string" },
+              "page_start": { "type": "integer", "minimum": 1 },
+              "page_end": { "type": "integer", "minimum": 1 },
+              "page_numbers": {
+                "type": "array",
+                "items": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "required": ["sheet_index", "path", "page_start", "page_end"]
+          },
+          "description": "Paths point into gitignored scratch and will not survive a clean checkout -- recorded anyway because during review a human needs the exact sheet the model saw."
+        },
+        "full_page_fallback": {
+          "type": "object",
+          "properties": {
+            "triggered": { "type": "boolean" },
+            "pages": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 },
+              "description": "Pages the model could not judge from the cropped cell."
+            },
+            "saturated": {
+              "type": "boolean",
+              "description": "True when more pages needed full-page review than the cap allows. The fallback is then SKIPPED entirely rather than run: saturation means the crop ratio or grid is wrong for this bundle, which is a tuning signal for a human, not something to spend a large number of extra vision calls papering over."
+            },
+            "cap": { "type": "integer", "minimum": 0 },
+            "prompt_version": {
+              "type": "string",
+              "description": "Full-page verdict prompt version. Separate from method.prompt_version, which records the contact-sheet prompt."
+            },
+            "resolved_pages": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 }
+            },
+            "unresolved_pages": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 }
+            },
+            "new_boundaries": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 }
+            },
+            "calls": { "type": "integer", "minimum": 0 },
+            "refinement_pages": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 },
+              "description": "Interior pages examined because --refine selected a long segment, distinct from crop-ambiguous pages."
+            },
+            "refinement_calls": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["triggered", "pages", "saturated", "cap"]
+        }
+      },
+      "required": ["ocr_performed", "method_version", "mode", "crop_ratio", "grid_cols", "grid_rows"]
+    },
+    "segment": {
+      "type": "object",
+      "description": "One proposed logical document: a contiguous page range within the bundle.",
+      "properties": {
+        "segment_index": { "type": "integer", "minimum": 0 },
+        "page_start": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based, inclusive -- matching intake_case's --split spec and run_checkpoint1's --page-start."
+        },
+        "page_end": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based, inclusive. page_end >= page_start is enforced by segment_case.validate_segments(), not here: JSON Schema cannot compare sibling values, and faking it with allOf would be worse than an honest tool-side check."
+        },
+        "provisional_document_type": {
+          "anyOf": [
+            { "$ref": "common_component_output.schema.json#/$defs/document_type" },
+            { "type": "null" }
+          ],
+          "description": "owner: segmentation. A PRE-OCR VISUAL GUESS from a cropped, downscaled contact-sheet cell. Not authoritative and must not be copied into document_manifest.json's document_type. Unlike pre_flagged_type -- which a human asserted and classification therefore trusts -- this is model inference from a deliberately low-fidelity image, so document-pipeline's checkpoint 1 still runs its own classification against the real OCR'd text."
+        },
+        "provisional_type_label": {
+          "type": ["string", "null"],
+          "description": "The model's own words for the document type (e.g. 후유장해진단서), unconstrained by the closed document_type enum. Kept because that enum has 8 buckets for a corpus with far more real form types: forcing 후유장해진단서 and a routine outpatient 진단서 both into diagnosis_certificate discards exactly the distinction a human reviewer needs to check the boundary."
+        },
+        "confidence": {
+          "anyOf": [
+            { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+            { "type": "null" }
+          ],
+          "description": "null in manual mode -- a human entering a boundary they read directly is not expressing model confidence."
+        },
+        "boundary_evidence": {
+          "type": ["string", "null"],
+          "description": "What was visible at page_start that marks a new document (title block, letterhead, page-1-of-N reset). This is what makes human review possible in bounded time: without it a reviewer must re-derive every boundary from the sheets themselves."
+        },
+        "review_status": {
+          "enum": ["pending", "approved", "edited", "rejected"],
+          "description": "edited = a human changed the proposed range and approves the changed one. Distinct from approved so the evaluation record shows where the model was corrected."
+        },
+        "needs_full_page": {
+          "type": "boolean",
+          "description": "The cropped cell was insufficient and this segment's boundary came from (or still needs) a full-page look."
+        },
+        "orientation_suspect": {
+          "type": "boolean",
+          "description": "The page's content bounding box is wider than tall, suggesting a sideways scan. page.rotation is 0 on these -- it is content orientation, not a PDF flag -- so a top crop captures a table's left edge rather than a title, and the cell cannot be judged."
+        },
+        "assigned_document_id": {
+          "anyOf": [
+            { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+            { "type": "null" }
+          ],
+          "description": "null until split runs. Set to the newly created DOC_XXX so the proposal remains a usable audit record afterward."
+        }
+      },
+      "required": ["segment_index", "page_start", "page_end", "review_status"]
+    }
+  }
+}

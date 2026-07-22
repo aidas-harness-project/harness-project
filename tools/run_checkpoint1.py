@@ -390,6 +390,23 @@ def run_checkpoint1(
     page_start: int | None = None,
     page_end: int | None = None,
 ) -> dict:
+    segmentation = _dao.check_segmentation_ready(case_id, doc_id)
+    if not segmentation["clear"]:
+        # Structural Stage-1 gate: do this before provider construction, PDF
+        # rendering, or any output write. A blocked call therefore cannot spend
+        # tokens or contaminate Stage 2 with an unsplit bundle.
+        return {
+            "status": "blocked_segmentation",
+            "case_id": case_id,
+            "doc_id": doc_id,
+            "blockers": segmentation["blockers"],
+            "error": segmentation.get("error"),
+            "next_action": (
+                "Review each pending PDF with dao.py set-segmentation-status; "
+                "split every document marked required before retrying Stage 2."
+            ),
+        }
+
     pdf_path = Path(pdf_path)
     if reader_a is None or reader_b is None or comparator is None:
         providers = build_ocr_providers(
@@ -703,7 +720,7 @@ def _run_from_args(args):
     except ProviderExecutionError as exc:
         sys.exit(f"error: {exc}")
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    if result["status"] == "blocked_disagreement":
+    if result["status"] in {"blocked_disagreement", "blocked_segmentation"}:
         sys.exit(1)
 
 

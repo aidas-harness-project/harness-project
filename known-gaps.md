@@ -1150,7 +1150,38 @@ as one-sided fabricated content per the item-11 fix. With
 residual path is a second line of defense that has not been independently
 hardened and is not urgent to close before it recurs in practice.
 
-## 18. Full review-fleet findings -- fixed set + deferred set (2026-07-22)
+## 18. Stage 1 segmentation: repeating-form split/merge granularity -- RESOLVED 2026-07-21
+
+Two real bundles pulled the segmentation granularity rule in opposite
+directions, and they are both right -- for different document types.
+
+* **CASE_025 (110p, 후유장해):** the 진료비 세부내역서 / 영수증 back run reprints
+  its title on every page, and the owner's ground-truth rule was "every titled
+  page is its own document." `--refine` was built and tuned to SPLIT these runs
+  (recall 0.81 -> 0.96).
+* **CASE_026 (59p, 기왕증):** the 진료비 내역서(입원) 한방 run (p28-41) is one
+  claim spanning 14 pages, its title just a repeated page header -- it must
+  MERGE, not split.
+
+The owner rejected the type/amount-based distinction later on 2026-07-21 and
+settled a deliberately split-biased operational rule instead:
+
+* a page with its own title block starts a new logical document, even when the
+  same title repeats on consecutive pages;
+* a page with no title of its own after full-page inspection continues the
+  preceding document;
+* an unreadable or failed full-page verdict remains flagged for human review.
+
+Implemented in `FULL_PAGE_PROMPT` v0.2. Both crop-nominated
+`needs_full_page` pages and optional long-segment refinement use that prompt and
+share a versioned per-page cache. Tests pin the title/no-title wording and the
+targeted fallback behavior.
+
+This remains distinct from the merge fix landed 2026-07-21: that closed a *sheet-edge
+continuation omission* (a page the model correctly read as a continuation but
+forgot to list, absorbed into its enclosing document -- see plan doc finding
+10). That merge fix is orthogonal and complete.
+## 19. Full review-fleet findings -- fixed set + deferred set (2026-07-22)
 
 An 8-reviewer adversarial fleet went over `main`. The clear, verified fixes
 landed (see the CLAUDE.md 2026-07-22 row). These are the findings deliberately

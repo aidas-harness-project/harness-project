@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "document_manifest.schema.json",
-  "title": "document_manifest.json -- case document roster v0.4",
+  "title": "document_manifest.json -- case document roster v0.6",
   "description": "The list of every document in a case and its processing status. This is a shared state file updated by multiple stages in sequence, not a single component's output -- it does not use the common output envelope. Update discipline: each stage adds only its own owner fields and never modifies fields it doesn't own (owner is documented per field below). This discipline is enforced structurally by the DAO's write_contract lock (see harness-guardrails P5), not just by convention.",
   "type": "object",
   "properties": {
@@ -54,6 +54,49 @@
             { "type": "null" }
           ],
           "description": "owner: Case Intake. Set when a document's type is already known at intake (e.g. an insurer-response document flagged during the source-ledger review) -- classification trusts this instead of running inference. null if not pre-flagged."
+        },
+        "provisional_document_type": {
+          "anyOf": [
+            { "$ref": "common_component_output.schema.json#/$defs/document_type" },
+            { "type": "null" }
+          ],
+          "description": "owner: Case Intake (segmentation). A PRE-OCR VISUAL GUESS carried over from segmentation_proposal_{source_document_id}.json, inferred from a cropped, downscaled contact-sheet cell. NOT authoritative and NOT a substitute for classification: document-pipeline's checkpoint 1 still owns document_type and must run its own inference against the real OCR'd text. Contrast pre_flagged_type directly above -- that one a human asserted, so classification trusts it and skips inference; this one a model guessed from a deliberately low-fidelity image, so it must not be wired into the same short-circuit. null for documents that did not come from a segmented bundle."
+        },
+        "source_file_name": {
+          "type": ["string", "null"],
+          "description": "owner: Case Intake (segmentation). The bundle this logical document was split out of. null for a document intaken whole."
+        },
+        "source_page_start": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "owner: Case Intake (segmentation). 1-based inclusive page in the source bundle. null for a document intaken whole. Provenance back to the immutable original is why the superseded bundle entry is retained rather than deleted."
+        },
+        "source_page_end": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "owner: Case Intake (segmentation). 1-based inclusive. source_page_end >= source_page_start is enforced by the tool, not here -- JSON Schema cannot compare sibling values."
+        },
+        "segmentation_proposal_path": {
+          "type": ["string", "null"],
+          "description": "owner: Case Intake (segmentation). Backpointer to the proposal that produced this entry, so an auditor can see which boundaries a human approved and what evidence the model gave."
+        },
+        "segmentation_status": {
+          "enum": ["pending_review", "required", "not_required", "completed", "not_applicable"],
+          "description": "owner: Case Intake (segmentation). Stage-2 preflight gate. Every newly intaken PDF starts pending_review until a human marks it required (bundle; blocks until split) or not_required (already one logical document). Split marks the superseded bundle and every child completed. Non-PDF inputs are not_applicable. Legacy PDF entries missing this field are treated as pending_review by the DAO preflight, so absence never bypasses the gate."
+        },
+        "segmentation_reviewed_by": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "owner: human intake reviewer. Required when segmentation_status is required or not_required."
+        },
+        "segmentation_reviewed_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "owner: human intake reviewer. Required when segmentation_status is required or not_required."
+        },
+        "segmentation_review_note": {
+          "type": ["string", "null"],
+          "description": "owner: human intake reviewer. Optional reason for the bundle/non-bundle decision."
         },
         "pages": {
           "type": ["integer", "null"],
@@ -114,10 +157,10 @@
         },
         "downstream_disposition": {
           "anyOf": [
-            { "enum": ["automated_text_pipeline", "expert_review_only"] },
+            { "enum": ["automated_text_pipeline", "expert_review_only", "superseded_bundle"] },
             { "type": "null" }
           ],
-          "description": "owner: document-pipeline. expert_review_only excludes the document from text redaction, chunking, and automated downstream evidence use."
+          "description": "owner: document-pipeline, except superseded_bundle which is owned by Case Intake (segmentation). expert_review_only excludes the document from text redaction, chunking, and automated downstream evidence use. superseded_bundle marks a raw bundle that segmentation has replaced with per-document entries: it is excluded from every downstream stage but retained so provenance back to the immutable source survives. It is deliberately a separate value from expert_review_only, whose conditional below asserts a human verified photographic evidence -- a claim that is simply untrue of a superseded bundle, and encoding it that way would put a false human verification into the record."
         },
         "non_text_verification": {
           "type": ["object", "null"],
@@ -147,6 +190,60 @@
               "classification_confidence": { "type": "null" }
             },
             "required": ["extraction_method", "cross_validation_status", "non_text_verification"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "downstream_disposition": { "const": "superseded_bundle" } },
+            "required": ["downstream_disposition"]
+          },
+          "then": {
+            "properties": {
+              "ocr_status": { "const": "not_applicable" },
+              "redacted_text_path": { "type": "null" }
+            },
+            "required": ["segmentation_proposal_path"],
+            "description": "A superseded bundle is never OCR'd or redacted as a whole -- its pages are processed through the DOC_XXX entries segmentation created. Requiring segmentation_proposal_path means an entry can only claim to be superseded if it points at the proposal that superseded it."
+          }
+        },
+        {
+          "if": {
+            "properties": { "source_page_start": { "type": "integer" } },
+            "required": ["source_page_start"]
+          },
+          "then": {
+            "required": ["source_file_name", "source_page_end"],
+            "description": "A page range never exists half-specified: a start without an end or a source file is unusable provenance."
+          }
+        },
+        {
+          "if": {
+            "properties": { "segmentation_status": { "enum": ["required", "not_required"] } },
+            "required": ["segmentation_status"]
+          },
+          "then": {
+            "required": ["segmentation_reviewed_by", "segmentation_reviewed_at"],
+            "properties": {
+              "segmentation_reviewed_by": { "type": "string", "minLength": 1 },
+              "segmentation_reviewed_at": { "type": "string", "format": "date-time" }
+            },
+            "description": "A bundle/non-bundle decision is a genuine human intake decision and must be attributable."
+          }
+        },
+        {
+          "if": {
+            "properties": { "segmentation_status": { "const": "completed" } },
+            "required": ["segmentation_status"]
+          },
+          "then": {
+            "anyOf": [
+              { "required": ["source_page_start", "source_page_end", "segmentation_proposal_path"] },
+              {
+                "properties": { "downstream_disposition": { "const": "superseded_bundle" } },
+                "required": ["downstream_disposition", "segmentation_proposal_path"]
+              }
+            ],
+            "description": "Completed means either a logical child with source-page provenance or the retained superseded bundle; an unsplit intake document cannot self-assert completion."
           }
         }
       ]

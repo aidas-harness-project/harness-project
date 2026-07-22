@@ -9,12 +9,18 @@ Coordinates 10 agents across two phases to turn case intake into a screening rep
 
 **Execution mode: sub-agent pipeline.** Every stage below is dispatched as a subagent call naming that agent's definition file (`.claude/agents/{name}.md`), with `model: opus`. All inter-agent data passes through the DAO as files — agent return values carry only a summary and warnings, never the actual contract data.
 
-**Canonical stage names** (enforced by `run_state.schema.json` v0.2 — any other spelling is rejected at write time; conflict-ledger `raised_by_stage` uses the same enum): `intake`, `document_processing`, `indexing`, `policy_clause_processing`, `claim_analysis`, `denial_response`, `consistency_check`, `screening_report`, `draft_report_v1`, `draft_report_v2`, `critic_v1`, `critic_v2`, `denial_validation`, `evaluation`. Pass exactly these to every `--stage`/`update-run-state` call and require the same of every dispatched agent (each agent spec now pins its own). Adding a pipeline stage means adding it to the schema enum in the same change (D4).
+There is no standalone `run_pipeline.py` process. This skill is the executable
+orchestration contract: a case-processing request must follow every gate below
+in order. Calling a later tool directly bypasses orchestration and is not a
+pipeline run.
+
+**Canonical stage names** (enforced by `run_state.schema.json` v0.2 — any other spelling is rejected at write time; conflict-ledger `raised_by_stage` uses the same enum): `intake`, `document_segmentation`, `document_processing`, `indexing`, `policy_clause_processing`, `claim_analysis`, `denial_response`, `consistency_check`, `screening_report`, `draft_report_v1`, `draft_report_v2`, `critic_v1`, `critic_v2`, `denial_validation`, `evaluation`. Pass exactly these to every `--stage`/`update-run-state` call and require the same of every dispatched agent (each agent spec now pins its own). Adding a pipeline stage means adding it to the schema enum in the same change (D4).
 
 ## Phase 0 — context and gating (every run)
 
 1. **Resolve `run_id`**: new run → issue `RUN_{YYYYMMDD}_{NNN}`. Resuming → read `_run_state.json` via the DAO's `get_last_passed_stage(case_id)` query; resume from the next stage after the last one that passed. Do not restart from scratch just because a run was interrupted — that's what P10's per-step backups exist for.
 2. **Intake check**: if `data/raw/CASE_XXX/` doesn't exist yet, run intake first (D2 — `_source_ledger.json` gate, every file `pending`→human sets `approved`/`rejected`, whole case blocks on any rejection). Never skip the human confirmation step.
+   - **Segmentation check**: a raw source may be a *bundle* concatenating several logical documents. Every newly intaken PDF starts `segmentation_status: pending_review`; a genuine human records `required` or `not_required` with `python tools/dao.py set-segmentation-status CASE_ID DOC_ID STATUS --reviewer NAME --held-by NAME --run-id RUN_ID`. Automatic bundle-candidate classification is not implemented and an agent never supplies this human decision. Split every `required` bundle into per-document `DOC_XXX.pdf` via `tools/segment_case.py` (`sheets`/`propose [--refine]`/`approve`/`split`). `propose` automatically rechecks crop-ambiguous `needs_full_page` pages full-page when the 25% spend cap is not saturated; `--refine` is a separate, opt-in pass over long segments that may have been confidently over-merged. Both use the owner-set title rule: own title → new document, no title after full-page inspection → continuation, unreadable → human review. This has its **own human-review gate**: `split` refuses until a human approves the `segmentation_proposal_{DOC}.json` (case-level `approved` AND every segment `approved`/`edited` AND no unassigned page). Stage 2 also enforces a case-wide structural preflight in `run_checkpoint1.py`: any `pending_review`/`required` PDF, legacy PDF missing the status, or direct attempt to process a `superseded_bundle` returns `blocked_segmentation` before provider construction or OCR. Do not dispatch Stage 2 until `dao.py check-segmentation-ready CASE_ID` passes. Records under the `document_segmentation` stage. No OCR happens here — segmentation output is document structure, not text; `document-pipeline` still owns real classification.
 3. **Conflict-ledger check**: before dispatching *any* stage, call `check_conflicts_clear(case_id)`. If not clear, halt and report every pending entry (old and new) — do not proceed past an unresolved conflict, no matter which stage raised it.
 4. **Lock check**: if a stage's target file already has a `.lock` present at run start/resume, do not poll and do not assume it's stale — halt, report the lock's full contents, wait for human confirmation (P5).
 
@@ -22,7 +28,7 @@ Coordinates 10 agents across two phases to turn case intake into a screening rep
 
 | # | Stage | Agent | Internal checkpoints |
 |---|---|---|---|
-| 1 | Case Intake | (orchestrator + intake tool) | D2-gated `_source_ledger.json` |
+| 1 | Case Intake & Document Segmentation | (orchestrator + `intake_case.py` + `segment_case.py`) | D2-gated `_source_ledger.json`; then bundle→per-document split with its own human-approval gate on `segmentation_proposal_{DOC}.json` (blocks stage 2). No OCR — structure only |
 | 2 | Document Processing | `document-pipeline` | (a) provider-backed OCR/P8 cross-validation+classification, (b) redaction, (c) chunking — each a real DAO checkpoint |
 | 3 | Indexing (adapter, optional) | (tool, no agent) | pass-through by default; no-op unless enabled |
 | 4 | Policy Clause Processing | `policy-pipeline` | (a) clause boundary ID, (b) extraction, (c) normalization |

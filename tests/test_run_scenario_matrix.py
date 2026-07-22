@@ -34,7 +34,10 @@ def _seed_manifest(tmp_path, case_id, doc_id):
     dao.atomic_write_json(out_dir / "document_manifest.json", {
         "case_id": case_id, "created_at": dao.now_iso(),
         "documents": [{"document_id": doc_id, "file_name": f"{doc_id}.pdf", "file_path": f"data/raw/{case_id}/{doc_id}.pdf",
-                       "file_format": "pdf", "file_size_bytes": 1000, "ocr_status": "pending"}],
+                       "file_format": "pdf", "file_size_bytes": 1000, "ocr_status": "pending",
+                       "segmentation_status": "not_required",
+                       "segmentation_reviewed_by": "fixture reviewer",
+                       "segmentation_reviewed_at": dao.now_iso()}],
     })
 
 
