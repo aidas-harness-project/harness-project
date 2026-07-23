@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "policy_boundary_inventory.schema.json",
+  "title": "policy_boundary_inventory_DOC_XXX.json -- complete source-boundary accounting v0.1",
+  "description": "Produced by policy-pipeline before the stage can finalize. Every non-whitespace character of every processed policy page must belong to an exact-offset page span. Each span is either assigned to a policy boundary or explicitly excluded with a reason. Every boundary then resolves to normalized, excluded_with_reason, review_required, or extraction_failed. The DAO cross-contract verifies exact offsets, full page coverage, and normalized mappings.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "source_document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id"
+        },
+        "boundaries": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/boundary" }
+        },
+        "page_spans": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/page_span" }
+        }
+      },
+      "required": ["source_document_id", "boundaries", "page_spans"]
+    }
+  ],
+  "$defs": {
+    "normalized_mapping": {
+      "type": "object",
+      "properties": {
+        "clause_id": {
+          "type": "string",
+          "pattern": "^C-[0-9]+$",
+          "description": "Provisional display address in normalized_policy_clause_DOC_XXX.json. Part 4 migrates this to immutable clause_uid."
+        },
+        "bucket": {
+          "enum": [
+            "clause",
+            "payout_conditions",
+            "exclusions",
+            "reduction_conditions"
+          ]
+        },
+        "condition_index": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Zero-based item index for a condition bucket; null when bucket=clause."
+        }
+      },
+      "required": ["clause_id", "bucket", "condition_index"],
+      "additionalProperties": false
+    },
+    "boundary": {
+      "type": "object",
+      "properties": {
+        "boundary_uid": {
+          "type": "string",
+          "pattern": "^PB-[a-f0-9]{16,64}$",
+          "description": "Stable deterministic identifier for this source boundary, preferably derived from document id + exact source span."
+        },
+        "boundary_level": {
+          "enum": ["article", "paragraph", "item", "definition", "table", "heading", "other"]
+        },
+        "label": { "type": "string", "minLength": 1 },
+        "disposition": {
+          "enum": [
+            "normalized",
+            "excluded_with_reason",
+            "review_required",
+            "extraction_failed"
+          ]
+        },
+        "normalized_mappings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/normalized_mapping" }
+        },
+        "reason": { "type": ["string", "null"], "minLength": 1 },
+        "review_required": { "type": "boolean" }
+      },
+      "required": [
+        "boundary_uid",
+        "boundary_level",
+        "label",
+        "disposition",
+        "normalized_mappings",
+        "reason",
+        "review_required"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "disposition": { "const": "normalized" } },
+            "required": ["disposition"]
+          },
+          "then": {
+            "properties": {
+              "normalized_mappings": { "type": "array", "minItems": 1 },
+              "reason": { "type": "null" },
+              "review_required": { "const": false }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "enum": ["excluded_with_reason", "review_required", "extraction_failed"]
+              }
+            },
+            "required": ["disposition"]
+          },
+          "then": {
+            "properties": {
+              "normalized_mappings": { "type": "array", "maxItems": 0 },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "disposition": { "const": "review_required" } },
+            "required": ["disposition"]
+          },
+          "then": {
+            "properties": { "review_required": { "const": true } }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "page_span": {
+      "type": "object",
+      "properties": {
+        "span_uid": {
+          "type": "string",
+          "pattern": "^PS-[a-f0-9]{16,64}$"
+        },
+        "page": { "type": "integer", "minimum": 1 },
+        "start_char": { "type": "integer", "minimum": 0 },
+        "end_char": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Exclusive end offset in the exact processed page body after the <<<PAGE>>> marker."
+        },
+        "quote": { "type": "string", "minLength": 1 },
+        "disposition": { "enum": ["boundary", "excluded"] },
+        "boundary_uid": { "type": ["string", "null"] },
+        "exclusion_reason": { "type": ["string", "null"], "minLength": 1 }
+      },
+      "required": [
+        "span_uid",
+        "page",
+        "start_char",
+        "end_char",
+        "quote",
+        "disposition",
+        "boundary_uid",
+        "exclusion_reason"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "disposition": { "const": "boundary" } },
+            "required": ["disposition"]
+          },
+          "then": {
+            "properties": {
+              "boundary_uid": {
+                "type": "string",
+                "pattern": "^PB-[a-f0-9]{16,64}$"
+              },
+              "exclusion_reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "disposition": { "const": "excluded" } },
+            "required": ["disposition"]
+          },
+          "then": {
+            "properties": {
+              "boundary_uid": { "type": "null" },
+              "exclusion_reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

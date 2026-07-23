@@ -92,6 +92,7 @@ from _validation import load_registry, validate_instance
 import _cross_contract
 import stage_dependencies
 import segment_lineage
+import policy_completeness
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
@@ -366,6 +367,71 @@ def _validate_manifest_lineage(case_id, manifest) -> list:
     return segment_lineage.validate_segment_lineage(manifest, _segment_text_reader(case_id))
 
 
+def _policy_completion_blockers(case_id: str) -> list[str]:
+    """Return every condition that prevents policy_clause_processing finalize.
+
+    Persistence-time checks protect each inventory write. This final gate
+    additionally requires one normalized contract and one fully-accounted
+    inventory for every automated policy source, and rejects unresolved
+    review/extraction boundaries.
+    """
+    blockers = []
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        return ["document_manifest.json is missing"]
+    policy_docs = [
+        d for d in manifest.get("documents", [])
+        if (
+            d.get("document_type") == "insurance_policy"
+            and d.get("downstream_disposition") == "automated_text_pipeline"
+        )
+    ]
+    if not policy_docs:
+        return ["no automated insurance_policy document is registered"]
+
+    schemas, registry = load_registry()
+    for doc in policy_docs:
+        doc_id = doc.get("document_id")
+        normalized_name = f"normalized_policy_clause_{doc_id}.json"
+        inventory_name = f"policy_boundary_inventory_{doc_id}.json"
+        normalized = read_contract_data(case_id, normalized_name)
+        inventory = read_contract_data(case_id, inventory_name)
+        if normalized is None:
+            blockers.append(f"{doc_id}: missing {normalized_name}")
+            continue
+        if not normalized.get("clauses"):
+            blockers.append(f"{doc_id}: normalized clauses is empty")
+        normalized_errors = validate_instance(
+            normalized, "normalized_policy_clause.schema.json",
+            schemas, registry)
+        blockers.extend(
+            f"{doc_id}: normalized schema: {error}"
+            for error in normalized_errors)
+        if inventory is None:
+            blockers.append(f"{doc_id}: missing {inventory_name}")
+            continue
+        inventory_errors = validate_instance(
+            inventory, policy_completeness.INVENTORY_SCHEMA,
+            schemas, registry)
+        blockers.extend(
+            f"{doc_id}: inventory schema: {error}"
+            for error in inventory_errors)
+        blockers.extend(
+            f"{doc_id}: {error}"
+            for error in policy_completeness.check_policy_boundary_inventory(
+                inventory,
+                inventory_name,
+                _redacted_text_for_doc(case_id, doc_id),
+                normalized,
+            )
+        )
+        blockers.extend(
+            f"{doc_id}: unresolved boundary: {error}"
+            for error in policy_completeness.unresolved_boundaries(inventory)
+        )
+    return blockers
+
+
 def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
     """Run the registered cross-contract checks for schema_name (schema-shape
     validation already passed by the time this is called). Returns 0 to allow
@@ -425,6 +491,35 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
             for e in errors:
                 print(f"  - {e}")
             return 1
+    elif schema_name == policy_completeness.INVENTORY_SCHEMA:
+        target_doc = policy_completeness.doc_id_from_inventory_filename(filename)
+        manifest = read_contract_data(case_id, "document_manifest.json")
+        if manifest is None:
+            print(f"FAIL: no document_manifest.json -- cannot verify {target}")
+            return 1
+        entry = next(
+            (d for d in manifest.get("documents", [])
+             if d.get("document_id") == target_doc), None)
+        if (
+            entry is None
+            or entry.get("document_type") != "insurance_policy"
+            or entry.get("downstream_disposition") != "automated_text_pipeline"
+        ):
+            print(f"FAIL: {target_doc} is not a registered automated insurance_policy source")
+            return 1
+        normalized = read_contract_data(
+            case_id, f"normalized_policy_clause_{target_doc}.json")
+        errors = policy_completeness.check_policy_boundary_inventory(
+            data,
+            filename,
+            _redacted_text_for_doc(case_id, target_doc),
+            normalized,
+        )
+        if errors:
+            print(f"FAIL: policy completeness errors for {target}:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
     return 0
 
 
@@ -448,7 +543,10 @@ def cmd_write_contract(args):
             for e in errors:
                 print(f"  - {e}")
             return 1
-        if _cross_contract.has_cross_contract_check(schema_name):
+        if (
+            _cross_contract.has_cross_contract_check(schema_name)
+            or schema_name == policy_completeness.INVENTORY_SCHEMA
+        ):
             rc = _run_cross_contract(args.case_id, args.filename, schema_name, data, target)
             if rc != 0:
                 return rc
@@ -1190,6 +1288,15 @@ def _finalize_stage(case_id, run_id, stage, held_by):
                     for e in lineage_errors:
                         print(f"  - {e}")
                     return None
+
+        if stage == "policy_clause_processing":
+            completion_blockers = _policy_completion_blockers(case_id)
+            if completion_blockers:
+                print("REFUSED: cannot finalize 'policy_clause_processing' -- "
+                      "policy completeness gate is not clear:")
+                for blocker in completion_blockers:
+                    print(f"  - {blocker}")
+                return None
 
         state["run_id"] = run_id or state.get("run_id")
         entry = next(

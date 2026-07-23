@@ -136,3 +136,20 @@ fastapi 미설치로 collection error(문서화된 기존 gap) — 실행 시 �
   `460 passed, 1 skipped`.
 - CASE_030 실제 data/run-state migration은 아직 수행 전이다. 코드 커밋 후 DAO
   migration과 manifest segment 등록을 별도 데이터 작업으로 수행해야 한다.
+
+## Part 3 — policy boundary inventory + completeness gate (완료)
+
+- 신규 `policy_boundary_inventory_DOC_XXX.json` 계약은 processed policy page의 모든
+  비공백 문자를 exact-offset span으로 분할한다. 각 span은 boundary에 속하거나
+  `excluded`와 사유를 가져야 한다.
+- `tools/policy_completeness.py`가 page/quote offset, overlap, 전체 문자 coverage,
+  boundary source 연결, normalized clause/condition mapping을 cross-contract로 검증한다.
+- 하나의 boundary span이 여러 제N조/①~⑳/번호 item anchor를 삼키지 못하게 하여
+  같은 조항 안의 두 번째 항·호 누락이 별도 미처리 영역으로 드러나게 했다.
+- 모든 automated insurance-policy document는 non-empty normalized contract와
+  complete inventory를 모두 가져야 한다. `review_required` 또는
+  `extraction_failed` boundary가 하나라도 있으면 `policy_clause_processing`
+  finalize가 거부된다.
+- `.claude/agents/policy-pipeline.md`와 pipeline.md를 새 계약에 맞게 갱신하고
+  `tools/sync_agents.py`를 실행했다.
+- 전체 회귀: frontend 의존성 테스트 2개 제외 `467 passed, 1 skipped`.
