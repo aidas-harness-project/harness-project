@@ -32,11 +32,13 @@ def _normalized():
             "coverage_type": "진단비",
             "payout_conditions": [{"condition_uid": "CI-1111111111111111", "text": "진단 시 지급", "evidence_references": [{
                 "document_id": "DOC_001", "page": 1, "quote": "① 진단 시 지급",
-            }]}],
+            }], "support_level": "direct", "support_rationale": "원문 직접 진술",
+                "review_required": False}],
             "exclusions": [],
             "reduction_conditions": [{"condition_uid": "CI-2222222222222222", "text": "동일 사고 1회", "evidence_references": [{
                 "document_id": "DOC_001", "page": 1, "quote": "② 동일 사고는 1회 한도",
-            }]}],
+            }], "support_level": "direct", "support_rationale": "원문 직접 진술",
+                "review_required": False}],
             "definitions": [],
             "obligations": [],
             "claim_requirements": [],
@@ -173,6 +175,25 @@ def test_inventory_schema_accepts_complete_contract():
     errors = dao._schema_check(
         _inventory(), "policy_boundary_inventory.schema.json")
     assert errors == []
+
+
+def test_normalized_schema_requires_condition_support_metadata():
+    normalized = _normalized()
+    item = normalized["clauses"][0]["payout_conditions"][0]
+    del item["support_level"]
+    errors = dao._schema_check(
+        normalized, "normalized_policy_clause.schema.json")
+    assert any("support_level" in error for error in errors)
+
+
+def test_normalized_schema_composite_support_requires_two_refs_and_review():
+    normalized = _normalized()
+    item = normalized["clauses"][0]["payout_conditions"][0]
+    item["support_level"] = "composite"
+    errors = dao._schema_check(
+        normalized, "normalized_policy_clause.schema.json")
+    assert any("evidence_references" in error or "review_required" in error
+               for error in errors)
 
 
 def test_completion_gate_requires_inventory_for_each_policy_doc(

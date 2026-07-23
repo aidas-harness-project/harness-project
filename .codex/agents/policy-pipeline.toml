@@ -37,6 +37,15 @@ Every clause has an immutable `clause_uid` derived from document identity and ex
 
 Set `clause_kind` and use only its dedicated semantic bucket: `coverage` → `payout_conditions`/`exclusions`/`reduction_conditions`; `definition` → `definitions`; `obligation` → `obligations`; `procedure` → `claim_requirements`; `termination` → `termination_conditions`; `dispute_resolution` → `dispute_resolution_conditions`; `coverage_start` → `coverage_start_conditions`. Split a source clause into multiple normalized clauses when it contains materially different kinds. Never put disclosure duties, definitions, claim-submission procedures, cancellation rules, dispute procedures, or coverage-start rules in `payout_conditions`. Use `other` only with `review_required: true`. Every bucket is required; an empty list means none found, not an omission. Each item carries its own `evidence_references` (P1) at the granularity downstream matching needs. Any judgment beyond direct restatement gets hedged and flagged per P3.
 
+For every condition item, set `support_level`, `support_rationale`, and
+`review_required`. Use `direct` only when at least one cited passage itself
+substantially states the condition. Use `composite` when the normalized
+condition combines two or more passages; cite every passage and set
+`review_required: true`. Never emit `insufficient` in a successful normalized
+contract. A clause title is valid clause-level provenance but is not condition
+support. The DAO applies a conservative lexical-support floor in addition to
+verbatim page matching; passing that floor does not replace semantic review.
+
 `policy_boundary_inventory_{document_id}.json` — one file per policy document,
 covering the same processed source. Page-span offsets are relative to the exact page
 body after its `<<<PAGE page=N>>>` marker. Generate stable `boundary_uid`/`span_uid`

@@ -58,6 +58,9 @@ def _valid_clause():
                         "quote": "피보험자가 보험기간 중 상해로 사망한 경우 사망보험금을 지급합니다",
                     }
                 ],
+                "support_level": "direct",
+                "support_rationale": "The cited sentence states the insured event and payment.",
+                "review_required": False,
             }
         ],
         "exclusions": [
@@ -71,6 +74,9 @@ def _valid_clause():
                         "quote": "피보험자가 고의로 자신을 해친 경우에는 보험금을 지급하지 아니합니다",
                     }
                 ],
+                "support_level": "direct",
+                "support_rationale": "The cited sentence states the exclusion.",
+                "review_required": False,
             }
         ],
         "reduction_conditions": [
@@ -84,6 +90,9 @@ def _valid_clause():
                         "quote": "계약일부터 2년 이내에 보험금 지급사유가 발생한 경우 보험금의 50%를 감액하여 지급합니다",
                     }
                 ],
+                "support_level": "direct",
+                "support_rationale": "The cited sentence states the reduction period and rate.",
+                "review_required": False,
             }
         ],
         "definitions": [],
@@ -299,7 +308,7 @@ def test_correct_quote_but_wrong_page_rejected():
     assert any("not found on page 2" in e for e in errors)
 
 
-def test_clause_title_quote_reused_for_condition_is_not_real_support():
+def test_clause_title_quote_reused_for_condition_is_rejected():
     # A condition whose only "quote" is the clause heading -- which does exist
     # on the page, but does not support the condition. The clause heading quote
     # ("제3조(보험금의 지급사유)") appears on the page, so a naive check passes;
@@ -315,9 +324,44 @@ def test_clause_title_quote_reused_for_condition_is_not_real_support():
     errors = check_normalized_policy_clause(
         _contract([clause]), "normalized_policy_clause_DOC_001.json", REDACTED_TEXT
     )
-    # Structural check passes (quote is on-page); semantic adequacy is a human
-    # review item, not something the verbatim floor can decide. Documented.
-    assert errors == []
+    assert any("only clause heading" in error for error in errors)
+
+
+def test_unrelated_on_page_quote_is_rejected_as_semantically_weak():
+    clause = _valid_clause()
+    clause["payout_conditions"][0]["evidence_references"][0]["quote"] = \
+        "제5조(보험금의 감액)"
+    clause["payout_conditions"][0]["evidence_references"][0]["page"] = 2
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        REDACTED_TEXT)
+    assert any(
+        "only clause heading" in error or "insufficient lexical support" in error
+        for error in errors)
+
+
+def test_insufficient_support_level_is_rejected():
+    clause = _valid_clause()
+    clause["payout_conditions"][0]["support_level"] = "insufficient"
+    clause["payout_conditions"][0]["review_required"] = True
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        REDACTED_TEXT)
+    assert any("cannot be emitted" in error for error in errors)
+
+
+def test_composite_support_requires_review_flag():
+    clause = _valid_clause()
+    item = clause["payout_conditions"][0]
+    item["support_level"] = "composite"
+    item["evidence_references"].append({
+        "document_id": "DOC_001", "page": 1,
+        "quote": "사망보험금을 지급합니다",
+    })
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        REDACTED_TEXT)
+    assert any("requires review_required=true" in error for error in errors)
 
 
 def test_duplicate_clause_id_rejected():

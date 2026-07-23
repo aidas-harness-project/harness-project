@@ -57,6 +57,10 @@ NORMALIZED_POLICY_CLAUSE_SCHEMA = "normalized_policy_clause.schema.json"
 _DOC_ID_IN_FILENAME_RE = re.compile(r"_(DOC_\d+)\.json$")
 _CLAUSE_ID_RE = re.compile(r"^C-(\d+)$")
 _PAGE_MARKER_RE = re.compile(r"(?m)^<<<PAGE page=(\d+)>>>\n?")
+_HEADING_ONLY_RE = re.compile(
+    r"^\s*제\s*\d+\s*조(?:의\s*\d+)?\s*(?:\([^)]{1,80}\))?\s*$"
+)
+_WORD_RE = re.compile(r"[가-힣A-Za-z0-9]{2,}")
 CONDITION_BUCKETS = (
     "payout_conditions",
     "exclusions",
@@ -232,6 +236,71 @@ def check_stable_ids_and_semantics(clauses: list[dict]) -> list[str]:
     return errors
 
 
+def _meaningful_tokens(text: str) -> set[str]:
+    """Return a conservative lexical floor for semantic-support checks.
+
+    This is deliberately not a semantic classifier. It only catches the
+    high-confidence failure where a normalized condition and its cited source
+    share almost no content (especially a clause heading cited as if it were a
+    condition). Human/agent semantic review remains necessary above this floor.
+    """
+    return set(_WORD_RE.findall(_normalize_ws(text)))
+
+
+def _looks_like_heading_only(quote: str) -> bool:
+    normalized = _normalize_ws(quote)
+    return bool(_HEADING_ONLY_RE.match(normalized))
+
+
+def check_condition_support(clauses: list[dict]) -> list[str]:
+    """Enforce a deterministic evidence-quality floor for each condition."""
+    errors: list[str] = []
+    for clause_index, clause in enumerate(clauses):
+        for bucket in CONDITION_BUCKETS:
+            for item_index, item in enumerate(clause.get(bucket) or []):
+                loc = f"clauses[{clause_index}].{bucket}[{item_index}]"
+                refs = item.get("evidence_references") or []
+                quotes = [
+                    ref.get("quote", "") for ref in refs
+                    if isinstance(ref, dict) and ref.get("quote", "").strip()
+                ]
+                level = item.get("support_level")
+                if level == "insufficient":
+                    errors.append(
+                        f"{loc}: support_level 'insufficient' cannot be emitted "
+                        "in a successful normalized policy contract")
+                    continue
+                if level == "composite":
+                    if len(quotes) < 2:
+                        errors.append(
+                            f"{loc}: composite support requires at least two "
+                            "source passages")
+                    if item.get("review_required") is not True:
+                        errors.append(
+                            f"{loc}: composite support requires review_required=true")
+
+                if quotes and all(_looks_like_heading_only(q) for q in quotes):
+                    errors.append(
+                        f"{loc}: condition evidence contains only clause heading(s), "
+                        "which do not substantiate the normalized condition")
+                    continue
+
+                condition_tokens = _meaningful_tokens(item.get("text", ""))
+                quote_text = " ".join(quotes)
+                if condition_tokens:
+                    supported = {
+                        token for token in condition_tokens if token in quote_text
+                    }
+                    coverage = len(supported) / len(condition_tokens)
+                    if coverage < 0.5:
+                        errors.append(
+                            f"{loc}: cited source has insufficient lexical support "
+                            f"for the normalized condition ({len(supported)}/"
+                            f"{len(condition_tokens)} meaningful tokens); revise "
+                            "the condition or cite the supporting passage")
+    return errors
+
+
 def check_normalized_policy_clause(data: dict, filename: str, redacted_text: str | None) -> list[str]:
     """Full cross-contract check for one normalized_policy_clause file.
 
@@ -256,6 +325,7 @@ def check_normalized_policy_clause(data: dict, filename: str, redacted_text: str
 
     errors.extend(check_clause_ids(clauses))
     errors.extend(check_stable_ids_and_semantics(clauses))
+    errors.extend(check_condition_support(clauses))
 
     if redacted_text is None:
         raise SourceUnavailable(
