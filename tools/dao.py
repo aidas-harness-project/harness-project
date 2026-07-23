@@ -54,6 +54,11 @@ Subcommands:
     read-evidence-tags DOC_PATH
     check-forbidden-expressions DOC_PATH
     update-run-state CASE_ID RUN_ID STAGE STATUS --held-by NAME
+        (STATUS in pending|in_progress|failed|skipped; 'passed' is refused here --
+         a stage passes only via finalize-stage, atomically with its snapshot)
+    finalize-stage CASE_ID RUN_ID STAGE --held-by NAME
+        (dependency-checked; builds+validates the P10 snapshot, then records
+         status=passed + backup_path + completed_at in one run-state lock)
     set-human-input-status CASE_ID STAGE {waiting|received} --held-by NAME --run-id RUN_ID
         [--description TEXT]  (required when status is waiting)
     request-expert-review CASE_ID {v1|v2} --held-by NAME --run-id RUN_ID
@@ -79,6 +84,8 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
 from _validation import load_registry, validate_instance
+import _cross_contract
+import stage_dependencies
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
@@ -318,6 +325,41 @@ def read_contract_data(case_id: str, filename: str):
     return load_json(p)
 
 
+def _redacted_text_for_doc(case_id, doc_id):
+    """The processed/redacted policy text a normalized_policy_clause file claims
+    to quote. None when the document was never processed -- the cross-contract
+    check turns that into SourceUnavailable, never a clean pass."""
+    if not doc_id:
+        return None
+    redacted = processed_dir(case_id, doc_id) / "redacted_text.md"
+    if not redacted.exists():
+        return None
+    return redacted.read_text(encoding="utf-8")
+
+
+def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
+    """Run the registered cross-contract checks for schema_name (schema-shape
+    validation already passed by the time this is called). Returns 0 to allow
+    the write, 1 to refuse it -- same fail-before-persist contract the schema
+    errors use. SourceUnavailable is a refusal, not a pass: a contract whose
+    source cannot be verified must never be written."""
+    if schema_name == _cross_contract.NORMALIZED_POLICY_CLAUSE_SCHEMA:
+        target_doc = _cross_contract.doc_id_from_filename(filename)
+        redacted_text = _redacted_text_for_doc(case_id, target_doc)
+        try:
+            errors = _cross_contract.check_normalized_policy_clause(data, filename, redacted_text)
+        except _cross_contract.SourceUnavailable as exc:
+            print(f"FAIL: cross-contract source could not be verified for {target}:")
+            print(f"  - SOURCE_UNAVAILABLE: {exc}")
+            return 1
+        if errors:
+            print(f"FAIL: cross-contract validation errors for {target}:")
+            for e in errors:
+                print(f"  - {e}")
+            return 1
+    return 0
+
+
 def cmd_write_contract(args):
     target = _require_within(case_dir(args.case_id), args.filename)
     existing_lock = acquire_lock_blocking(target, args.held_by, args.run_id, args.purpose or f"write {args.filename}")
@@ -338,12 +380,22 @@ def cmd_write_contract(args):
             for e in errors:
                 print(f"  - {e}")
             return 1
+        if _cross_contract.has_cross_contract_check(schema_name):
+            rc = _run_cross_contract(args.case_id, args.filename, schema_name, data, target)
+            if rc != 0:
+                return rc
         atomic_write_json(target, data)
         print(f"PASS: wrote {target}")
         if args.stage:
             # A different target (_run_state.json, not this contract file) --
             # no deadlock risk nesting this inside the contract file's lock.
-            state = _update_run_state(args.case_id, args.run_id, args.stage, "passed", args.held_by)
+            # A single contract write marks the stage in_progress, never passed:
+            # passing a stage is a deliberate finalize-stage call (snapshot +
+            # passed, atomic), not a side effect of one write. dep_check='soft'
+            # so an unmet upstream dependency doesn't fail an otherwise-valid
+            # contract write -- it just declines to advance the stage.
+            state = _update_run_state(args.case_id, args.run_id, args.stage, "in_progress",
+                                      args.held_by, dep_check="soft")
             if state is None:
                 print("WARNING: contract write succeeded, but run-state could not be updated (see LOCKED above) -- "
                       "run-state may now lag behind actual progress; retry the run-state update.")
@@ -385,7 +437,11 @@ def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_b
                 "\n".join(f"  - {e}" for e in errors)
         atomic_write_json(target, manifest)
         if stage:
-            state = _update_run_state(case_id, run_id, stage, "passed", held_by)
+            # in_progress, not passed -- see cmd_write_contract: patching one
+            # document's manifest fields is progress within document_processing,
+            # never the whole stage finalizing. dep_check='soft' so a manifest
+            # patch never fails on run-state dependencies.
+            state = _update_run_state(case_id, run_id, stage, "in_progress", held_by, dep_check="soft")
             if state is None:
                 return True, f"PASS: patched {document_id} in {target}\n" \
                     "WARNING: patch succeeded, but run-state could not be updated (lock contention) -- " \
@@ -681,10 +737,34 @@ def _schema_check(data: dict, schema_name: str) -> list:
 
 # ---------------------------------------------------------------- run state ops --
 
-def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None):
+def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
+                       finalize=False, dep_check="hard"):
     """Holds the run-state lock across the whole read+modify+write, not just
     the write -- see acquire_lock_blocking. Returns the updated state on
-    success, or None if the lock never cleared (caller reports and halts)."""
+    success, or None if the lock never cleared, a dependency is unmet, or the
+    resulting state fails schema validation (caller reports and halts).
+
+    Two guards were added for CASE_030 (see stage_dependencies.py and the v0.3
+    run_state schema):
+
+    - status='passed' is ONLY reachable with finalize=True. A stage passes
+      exactly once, atomically with its snapshot, through finalize-stage; a
+      bare update-run-state can never mint a passed stage (and the schema
+      additionally requires a non-null backup_path on any passed stage, so an
+      attempt to do it by hand would fail validation regardless).
+    - dependency graph: advancing a stage to in_progress/passed is refused if
+      its upstream prerequisites are not passed (or dependency-accepted
+      skipped). dep_check='hard' refuses and returns None; dep_check='soft'
+      (used by write-contract/patch-manifest's incidental --stage progress
+      marker) skips the advance with a warning but still writes the contract,
+      since the *contract* is valid even when the stage cannot yet advance.
+    """
+    if status == "passed" and not finalize:
+        print("REFUSED: a stage may not be set 'passed' directly via update-run-state -- "
+              "passing a stage is atomic with its P10 snapshot; use finalize-stage. "
+              "(harness-guardrails P10)")
+        return None
+
     target = run_state_path(case_id)
     existing_lock = acquire_lock_blocking(target, held_by, run_id or "unknown", f"update run-state: {stage} -> {status}")
     if existing_lock is not None:
@@ -694,6 +774,21 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None)
     try:
         state = load_run_state(case_id)
         state["run_id"] = run_id or state.get("run_id")
+
+        blockers = stage_dependencies.check_dependencies(stage, status, state)
+        if blockers:
+            if dep_check == "soft":
+                print(f"NOTE: stage {stage!r} not advanced to {status!r} -- unmet dependencies:")
+                for b in blockers:
+                    print(f"  - {b}")
+                # Return the unchanged state so callers treat this as non-fatal
+                # (the contract write itself already succeeded).
+                return state
+            print(f"REFUSED: cannot advance run-state for {target}:")
+            for b in blockers:
+                print(f"  - {b}")
+            return None
+
         stages = state["stages"]
         entry = next((s for s in stages if s["stage_name"] == stage), None)
         if entry is None:
@@ -703,7 +798,7 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None)
         if status == "in_progress":
             entry["started_at"] = entry["started_at"] or now_iso()
             entry["attempt_count"] += 1
-        if status in ("passed", "failed"):
+        if status in ("passed", "failed", "skipped"):
             entry["completed_at"] = now_iso()
         entry["status"] = status
         if backup_path:
@@ -853,24 +948,111 @@ def cmd_get_last_passed_stage(args):
     return 0
 
 
-def cmd_snapshot_backup(args):
-    src = case_dir(args.case_id)
-    n = len([s for s in load_run_state(args.case_id)["stages"] if s.get("backup_path")]) + 1
-    dest = src / "_backups" / f"step_{n:02d}_{args.stage}"
-    dest.mkdir(parents=True, exist_ok=True)
-    for item in src.iterdir():
-        if item.name in ("_backups",) or item.name.endswith(".lock"):
-            continue
-        if item.is_file():
-            shutil.copy2(item, dest / item.name)
-        elif item.is_dir():
-            shutil.copytree(item, dest / item.name, dirs_exist_ok=True)
-    state = _update_run_state(args.case_id, args.run_id, args.stage, "passed", args.held_by, backup_path=str(dest))
+def _build_snapshot_atomic(case_id: str, stage: str) -> Path:
+    """Build a full cumulative snapshot of a case's outputs (P10) and place it
+    at its final _backups/step_<N>_<stage>/ path atomically.
+
+    The copy is assembled into a sibling temp directory first; only once every
+    file/dir has copied successfully is it moved into place with a single
+    os.replace (atomic on the same filesystem). A crash mid-copy therefore
+    leaves an orphan .tmp_snapshot_* dir -- never a half-populated real
+    backup a restore could mistake for complete. Any pre-existing orphan for
+    this exact destination is cleared first so a retry after a prior failure
+    starts clean. Returns the final destination path.
+    """
+    src = case_dir(case_id)
+    n = len([s for s in load_run_state(case_id)["stages"] if s.get("backup_path")]) + 1
+    backups = src / "_backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    dest = backups / f"step_{n:02d}_{stage}"
+    tmp = backups / f".tmp_snapshot_{stage}_{os.getpid()}"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    try:
+        for item in src.iterdir():
+            if item.name in ("_backups",) or item.name.endswith(".lock"):
+                continue
+            if item.is_file():
+                shutil.copy2(item, tmp / item.name)
+            elif item.is_dir():
+                shutil.copytree(item, tmp / item.name, dirs_exist_ok=True)
+        # Atomic publish. If a same-named dest somehow exists (retry), replace it.
+        if dest.exists():
+            shutil.rmtree(dest)
+        os.replace(tmp, dest)
+    except Exception:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return dest
+
+
+def _finalize_stage(case_id, run_id, stage, held_by):
+    """Atomically pass a stage: dependency-check -> build+validate snapshot ->
+    record status=passed + backup_path + completed_at under one run-state lock.
+
+    Order matters. Dependencies are checked FIRST (against current state,
+    outside the eventual finalize lock -- a dependency can't un-pass between
+    the check and the write, since nothing else passes stages concurrently in
+    this single-writer-per-run model). The snapshot is built and confirmed on
+    disk BEFORE any run-state field flips to passed, so a snapshot failure
+    leaves the stage un-passed (P10: 'if a later stage crashes ... revert to
+    the most recent intact step'). Returns the updated state, or None on any
+    failure (dependency unmet, snapshot failure, lock contention, schema
+    failure) -- in every None case the stage is NOT passed.
+    """
+    # Pre-check dependencies against current state so we don't build an
+    # expensive snapshot for a stage that can't legally pass anyway.
+    pre_state = load_run_state(case_id)
+    blockers = stage_dependencies.check_dependencies(stage, "passed", pre_state)
+    if blockers:
+        print(f"REFUSED: cannot finalize {stage!r} -- unmet dependencies:")
+        for b in blockers:
+            print(f"  - {b}")
+        return None
+
+    try:
+        dest = _build_snapshot_atomic(case_id, stage)
+    except Exception as exc:  # noqa: BLE001 -- report and refuse, never half-pass
+        print(f"FAIL: snapshot for stage {stage!r} could not be built -- stage NOT passed: {exc}")
+        return None
+    # The snapshot must have been published (the atomic rename succeeded and a
+    # real directory now stands at dest). Emptiness is NOT a failure: an early
+    # stage (intake) legitimately has no outputs to snapshot yet -- the point
+    # is that the backup exists as an intact, fully-copied directory, not that
+    # it is non-empty.
+    if not dest.exists() or not dest.is_dir():
+        print(f"FAIL: snapshot at {dest} was not published -- stage {stage!r} NOT passed")
+        return None
+
+    state = _update_run_state(case_id, run_id, stage, "passed", held_by,
+                              backup_path=str(dest), finalize=True)
     if state is None:
-        print(f"PARTIAL: snapshot written at {dest}, but run-state could not be updated (see LOCKED above) -- retry the run-state update.")
+        # The snapshot exists but the pass couldn't be recorded (lock/schema).
+        # The stage is NOT passed -- the snapshot is a harmless orphan that a
+        # retry will supersede (step_N numbering counts recorded backups, so a
+        # re-run mints a fresh number rather than trusting this one).
+        print(f"PARTIAL: snapshot written at {dest}, but run-state could not record 'passed' -- "
+              f"stage {stage!r} is NOT passed; retry finalize-stage.")
+        return None
+    return state
+
+
+def cmd_snapshot_backup(args):
+    """Backward-compatible alias for finalize-stage: snapshot + passed, atomic.
+    Kept so existing callers/tests using 'snapshot-backup' keep working; new
+    code should read this as 'finalize this stage'."""
+    state = _finalize_stage(args.case_id, args.run_id, args.stage, args.held_by)
+    if state is None:
         return 1
-    print(f"OK: snapshot at {dest}")
+    entry = next(s for s in state["stages"] if s["stage_name"] == args.stage)
+    print(f"OK: finalized {args.stage} -> passed, snapshot at {entry['backup_path']}")
     return 0
+
+
+def cmd_finalize_stage(args):
+    return cmd_snapshot_backup(args)
 
 
 # ------------------------------------------------------------ conflict ledger --
@@ -1049,7 +1231,11 @@ def main():
 
     p = sub.add_parser("update-run-state")
     p.add_argument("case_id"); p.add_argument("run_id"); p.add_argument("stage")
-    p.add_argument("status", choices=["pending", "in_progress", "passed", "failed"])
+    # 'passed' is intentionally NOT a choice here: passing a stage is done by
+    # finalize-stage (snapshot + passed, atomic). 'skipped' is for optional
+    # stages only (stage_dependencies.SKIPPABLE_STAGES); the dependency
+    # validator rejects it for any non-skippable stage.
+    p.add_argument("status", choices=["pending", "in_progress", "failed", "skipped"])
     p.add_argument("--held-by", required=True)
     p.set_defaults(fn=cmd_update_run_state)
 
@@ -1078,6 +1264,11 @@ def main():
     p.add_argument("case_id"); p.add_argument("run_id"); p.add_argument("stage")
     p.add_argument("--held-by", required=True)
     p.set_defaults(fn=cmd_snapshot_backup)
+
+    p = sub.add_parser("finalize-stage")
+    p.add_argument("case_id"); p.add_argument("run_id"); p.add_argument("stage")
+    p.add_argument("--held-by", required=True)
+    p.set_defaults(fn=cmd_finalize_stage)
 
     p = sub.add_parser("read-conflict-ledger"); p.add_argument("case_id")
     p.set_defaults(fn=cmd_read_conflict_ledger)

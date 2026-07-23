@@ -248,7 +248,8 @@ def test_blocked_run_resets_manifest_instead_of_leaving_it_stale(tmp_path, monke
         "document_type": "insurer_response", "classification_confidence": 0.9,
     })
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    dao._update_run_state("CASE_009", "RUN_OLD", "document_processing", "passed", "tester")
+    # Simulate the fork source's prior legitimate finalize (snapshot + passed).
+    dao._finalize_stage("CASE_009", "RUN_OLD", "document_processing", "tester")
 
     _mock_ocr(monkeypatch, [("A", "B", "disagreed")])
     monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
