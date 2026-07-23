@@ -66,6 +66,15 @@ table before a normalized clause links to it, then use
 `reference_table_refs[{document_id, table_uid, row_uids?}]`. Emit an empty
 `reference_table_refs` array when a clause needs no table.
 
+`policy_audit_result_{document_id}.json` — write this last for every policy
+document. It binds the audit to the exact SHA-256 bytes of the normalized
+clause, boundary inventory, and optional reference-table contracts, records
+the mandatory audit scope, and keeps every defect as a stable finding. Any
+later rewrite makes the audit stale automatically. Never finalize while a
+finding is `open`; fix it, mark a supported false positive/resolution, or
+obtain a human `accepted_risk` decision. An automated actor may not accept
+risk on a human's behalf.
+
 # Access rules
 
 Read policy document text via `read_document_text(case_id, doc_id)` (the DAO) — never a raw file directly. Never open `source-cases/` or `data/ground_truth/`.
@@ -76,8 +85,9 @@ Schema validation failure: one self-correction attempt, then halt per P4. If the
 
 Finalize only with `python tools/dao.py finalize-stage ... policy_clause_processing`.
 The DAO verifies every registered automated policy document has a non-empty
-normalized contract plus a complete, resolved boundary inventory before it creates
-the P10 snapshot and records `passed`.
+normalized contract, a complete resolved boundary inventory, and a current
+version-bound audit with no open findings before it creates the P10 snapshot
+and records `passed`.
 
 # Collaboration
 

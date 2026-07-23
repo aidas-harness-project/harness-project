@@ -78,6 +78,7 @@ Subcommands:
 import argparse
 import json
 import os
+import hashlib
 import re
 import shutil
 import sys
@@ -93,6 +94,7 @@ import _cross_contract
 import stage_dependencies
 import segment_lineage
 import policy_completeness
+import policy_audit
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
@@ -175,6 +177,10 @@ def read_lock(target: Path):
         return None
     try:
         return load_json(lp)
+    except FileNotFoundError:
+        # The holder released between exists() and read_text(). The blocking
+        # acquire loop will immediately retry the atomic O_EXCL create.
+        return None
     except (json.JSONDecodeError, ValueError):
         # A lock created by O_EXCL but not yet content-filled (tiny race window):
         # it IS held, we just can't read who by yet. Report a placeholder rather
@@ -344,6 +350,28 @@ def _redacted_text_for_doc(case_id, doc_id):
     return redacted.read_text(encoding="utf-8")
 
 
+def _contract_sha256(case_id: str, filename: str) -> str | None:
+    path = _require_within(case_dir(case_id), filename)
+    if not path.exists():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _policy_audit_context(case_id: str, doc_id: str):
+    normalized_name = f"normalized_policy_clause_{doc_id}.json"
+    inventory_name = f"policy_boundary_inventory_{doc_id}.json"
+    reference_name = f"reference_table_{doc_id}.json"
+    normalized = read_contract_data(case_id, normalized_name)
+    inventory = read_contract_data(case_id, inventory_name)
+    reference = read_contract_data(case_id, reference_name)
+    hashes = {
+        "normalized_sha256": _contract_sha256(case_id, normalized_name),
+        "inventory_sha256": _contract_sha256(case_id, inventory_name),
+        "reference_table_sha256": _contract_sha256(case_id, reference_name),
+    }
+    return hashes, normalized, inventory, reference
+
+
 def _segment_text_reader(case_id):
     """Reader closure segment_lineage.validate_segment_lineage needs: given a
     document_id, return that document's derived/redacted processed text, or
@@ -394,6 +422,7 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
         doc_id = doc.get("document_id")
         normalized_name = f"normalized_policy_clause_{doc_id}.json"
         inventory_name = f"policy_boundary_inventory_{doc_id}.json"
+        audit_name = f"policy_audit_result_{doc_id}.json"
         normalized = read_contract_data(case_id, normalized_name)
         inventory = read_contract_data(case_id, inventory_name)
         if normalized is None:
@@ -432,6 +461,31 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
         blockers.extend(
             f"{doc_id}: reference table link: {error}"
             for error in _reference_table_link_errors(case_id, normalized)
+        )
+        audit = read_contract_data(case_id, audit_name)
+        if audit is None:
+            blockers.append(f"{doc_id}: missing {audit_name}")
+            continue
+        audit_errors = validate_instance(
+            audit, policy_audit.AUDIT_SCHEMA, schemas, registry)
+        blockers.extend(
+            f"{doc_id}: audit schema: {error}" for error in audit_errors)
+        hashes, current_normalized, current_inventory, current_reference = \
+            _policy_audit_context(case_id, doc_id)
+        blockers.extend(
+            f"{doc_id}: audit: {error}"
+            for error in policy_audit.check_policy_audit(
+                audit,
+                audit_name,
+                hashes,
+                current_normalized,
+                current_inventory,
+                current_reference,
+            )
+        )
+        blockers.extend(
+            f"{doc_id}: unresolved audit: {error}"
+            for error in policy_audit.unresolved_findings(audit)
         )
     return blockers
 
@@ -489,6 +543,89 @@ def _reference_table_link_errors(case_id: str, normalized: dict) -> list[str]:
             if missing_rows:
                 errors.append(
                     f"{loc}: row_uids do not resolve: {sorted(missing_rows)}")
+    return errors
+
+
+def _downstream_policy_ref_errors(
+        case_id: str, schema_name: str, data: dict) -> list[str]:
+    """Resolve downstream policy UIDs only against current, clear audits."""
+    refs = []
+    if schema_name == "coverage_result.schema.json":
+        refs = [
+            (f"coverages[{index}].matched_clause_ref",
+             coverage.get("matched_clause_ref"))
+            for index, coverage in enumerate(data.get("coverages") or [])
+            if coverage.get("matched_clause_ref") is not None
+        ]
+    elif schema_name == "requirement_matching_result.schema.json":
+        refs = [
+            (f"coverage_requirements[{coverage_index}].requirements"
+             f"[{requirement_index}].clause_ref",
+             requirement.get("clause_ref"))
+            for coverage_index, coverage in enumerate(
+                data.get("coverage_requirements") or [])
+            for requirement_index, requirement in enumerate(
+                coverage.get("requirements") or [])
+            if requirement.get("clause_ref") is not None
+        ]
+    elif schema_name == "denial_reason_result.schema.json":
+        refs = [
+            (f"denial_reasons[{reason_index}].policy_matches[{match_index}]",
+             match)
+            for reason_index, reason in enumerate(data.get("denial_reasons") or [])
+            for match_index, match in enumerate(reason.get("policy_matches") or [])
+        ]
+
+    errors = []
+    checked_docs = {}
+    for loc, ref in refs:
+        doc_id = ref.get("document_id")
+        if doc_id not in checked_docs:
+            normalized = read_contract_data(
+                case_id, f"normalized_policy_clause_{doc_id}.json")
+            audit = read_contract_data(
+                case_id, f"policy_audit_result_{doc_id}.json")
+            doc_errors = []
+            if normalized is None:
+                doc_errors.append("normalized policy contract is missing")
+            if audit is None:
+                doc_errors.append("policy audit is missing")
+            if normalized is not None and audit is not None:
+                hashes, current_normalized, inventory, reference = \
+                    _policy_audit_context(case_id, doc_id)
+                doc_errors.extend(policy_audit.check_policy_audit(
+                    audit,
+                    f"policy_audit_result_{doc_id}.json",
+                    hashes,
+                    current_normalized,
+                    inventory,
+                    reference,
+                ))
+                doc_errors.extend(policy_audit.unresolved_findings(audit))
+            checked_docs[doc_id] = (normalized, doc_errors)
+        normalized, doc_errors = checked_docs[doc_id]
+        errors.extend(f"{loc}: {error}" for error in doc_errors)
+        if normalized is None:
+            continue
+        clause = next(
+            (item for item in normalized.get("clauses") or []
+             if item.get("clause_uid") == ref.get("clause_uid")),
+            None,
+        )
+        if clause is None:
+            errors.append(
+                f"{loc}: clause_uid {ref.get('clause_uid')!r} does not resolve")
+            continue
+        condition_uid = ref.get("condition_uid")
+        if condition_uid is not None:
+            available = {
+                item.get("condition_uid")
+                for bucket in _cross_contract.CONDITION_BUCKETS
+                for item in clause.get(bucket) or []}
+            if condition_uid not in available:
+                errors.append(
+                    f"{loc}: condition_uid {condition_uid!r} does not resolve "
+                    "within the referenced clause")
     return errors
 
 
@@ -633,6 +770,43 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
             for error in errors:
                 print(f"  - {error}")
             return 1
+    elif schema_name == policy_audit.AUDIT_SCHEMA:
+        target_doc = policy_audit.doc_id_from_filename(filename)
+        manifest = read_contract_data(case_id, "document_manifest.json")
+        entry = next(
+            (item for item in (manifest or {}).get("documents", [])
+             if item.get("document_id") == target_doc),
+            None,
+        )
+        if (
+            entry is None
+            or entry.get("document_type") != "insurance_policy"
+            or entry.get("downstream_disposition") != "automated_text_pipeline"
+        ):
+            print(
+                f"FAIL: {target_doc} is not a registered automated "
+                "insurance_policy source")
+            return 1
+        lineage_errors = _validate_manifest_lineage(case_id, manifest)
+        if lineage_errors:
+            print(f"FAIL: segment-lineage validation errors for {target}:")
+            for error in lineage_errors:
+                print(f"  - {error}")
+            return 1
+        hashes, normalized, inventory, reference = _policy_audit_context(
+            case_id, target_doc)
+        if normalized is None or inventory is None:
+            print(
+                f"FAIL: audit requires current normalized clause and boundary "
+                f"inventory contracts for {target_doc}")
+            return 1
+        errors = policy_audit.check_policy_audit(
+            data, filename, hashes, normalized, inventory, reference)
+        if errors:
+            print(f"FAIL: policy audit validation errors for {target}:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
     return 0
 
 
@@ -659,10 +833,25 @@ def cmd_write_contract(args):
         if (
             _cross_contract.has_cross_contract_check(schema_name)
             or schema_name == policy_completeness.INVENTORY_SCHEMA
+            or schema_name == policy_audit.AUDIT_SCHEMA
         ):
             rc = _run_cross_contract(args.case_id, args.filename, schema_name, data, target)
             if rc != 0:
                 return rc
+        if schema_name in {
+            "coverage_result.schema.json",
+            "requirement_matching_result.schema.json",
+            "denial_reason_result.schema.json",
+        }:
+            ref_errors = _downstream_policy_ref_errors(
+                args.case_id, schema_name, data)
+            if ref_errors:
+                print(
+                    f"FAIL: {schema_name} has stale, unresolved, or invalid "
+                    "policy references:")
+                for error in ref_errors:
+                    print(f"  - {error}")
+                return 1
         if schema_name == "document_manifest.schema.json":
             lineage_errors = _validate_manifest_lineage(args.case_id, data)
             if lineage_errors:

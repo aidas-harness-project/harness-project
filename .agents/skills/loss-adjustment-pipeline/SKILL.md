@@ -25,7 +25,7 @@ Coordinates 10 agents across two phases to turn case intake into a screening rep
 | 1 | Case Intake | (orchestrator + intake tool) | D2-gated `_source_ledger.json` |
 | 2 | Document Processing | `document-pipeline` | (a) provider-backed OCR/P8 cross-validation+classification, (b) redaction, (c) chunking — each a real DAO checkpoint |
 | 3 | Indexing (adapter, optional) | (tool, no agent) | pass-through by default; no-op unless enabled |
-| 4 | Policy Clause Processing | `policy-pipeline` | (a) clause boundary ID, (b) extraction, (c) normalization |
+| 4 | Policy Clause Processing | `policy-pipeline` | (a) exact boundary inventory, (b) semantic extraction, (c) reference tables, (d) version-bound audit; finalize only when every audit is current and has no open finding |
 | 5 | Claim Analysis | `claim-analysis` | (a) field extraction, (b) coverage ID, (c) case-type classification, (d) requirement matching |
 | 6 | Consistency Check | `consistency-check` | conflict-ledger-gated — any disagreement halts via `_conflict_ledger.json`, not an inline ad-hoc halt |
 | 7 | Screening Report | `screening-report` | consumes `denial-response`'s output as a dependency if an insurer-response document exists — not phase-gated |

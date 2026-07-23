@@ -153,3 +153,19 @@ fastapi 미설치로 collection error(문서화된 기존 gap) — 실행 시 �
 - `.claude/agents/policy-pipeline.md`와 pipeline.md를 새 계약에 맞게 갱신하고
   `tools/sync_agents.py`를 실행했다.
 - 전체 회귀: frontend 의존성 테스트 2개 제외 `467 passed, 1 skipped`.
+
+## Part 4~7 — stable policy addresses, evidence quality, tables, audit (완료)
+
+- Part 4 (`6a48b66`): `clause_uid`/`condition_uid`를 불변 downstream
+  주소로 도입하고, `clause_id`는 표시 전용으로 강등했다. 조항 종류별 전용
+  semantic bucket과 cross-contract 의미 검사를 추가했다.
+- Part 5 (`5be7b38`): 조건 근거를 direct/composite/insufficient로 명시하고
+  제목만 인용하거나 내용 토큰이 거의 무관한 인용이 성공 계약으로 저장되는
+  것을 차단했다.
+- Part 6 (`7f28dc7`): 별표/분류표를 table/row/cell stable UID와 셀별 원문
+  근거로 표현하는 `reference_table_DOC_XXX.json` 계약 및 조항 링크를 추가했다.
+  복잡한 병합 셀의 완전한 2차원 순서는 known gap으로 남겼다.
+- Part 7: `policy_audit_result_DOC_XXX.json`이 normalized/inventory/reference
+  계약의 exact SHA-256에 묶인다. 누락·stale·open finding은 policy finalize를
+  막고, downstream clause/condition UID도 current clear audit에 대해서만
+  resolve된다.

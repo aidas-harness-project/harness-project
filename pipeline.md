@@ -37,6 +37,14 @@ Decision-bearing policy appendices are stored in
 source-derived UIDs, and every cell is independently checked against its page
 and quote. Normalized clauses link to tables/rows by UID, never by array
 position or display label.
+
+Every policy document also has a
+`policy_audit_result_{document_id}.json` bound to the exact SHA-256 bytes of
+its normalized clause, boundary inventory, and optional reference table.
+Rewriting any audited contract makes the audit stale. The policy stage cannot
+finalize with a missing/stale audit or an open finding, and downstream
+coverage, requirement, and denial policy references are resolved only against
+the current clear audit.
 | 5 | Claim Analysis | `claim-analysis` | One stage, 4 internal checkpoints: field extraction → coverage ID → case-type classification → requirement matching. Case-type classification is a hard, independently-validated gate -- see claim-analysis.md's note on why |
 | 6 | Consistency Check | `consistency-check` | Any cross-document disagreement goes to `_conflict_ledger.json`, not an inline halt -- see harness-guardrails P6 |
 | 7 | Screening Report | `screening-report` | Gated on `check-conflicts-clear`; consumes `denial-response`'s output whenever an insurer-response document exists (a dependency, not a phase gate) |

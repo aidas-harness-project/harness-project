@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "policy_audit_result.schema.json",
+  "title": "policy_audit_result_DOC_XXX.json -- version-bound policy extraction audit v0.1",
+  "description": "Binds an audit to exact normalized/inventory/reference-table bytes and records every defect until resolved, false-positive, or explicitly accepted by a human.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "source_document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id"
+        },
+        "normalized_sha256": { "$ref": "#/$defs/sha256" },
+        "inventory_sha256": { "$ref": "#/$defs/sha256" },
+        "reference_table_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "audit_scope": {
+          "type": "object",
+          "properties": {
+            "source_completeness": { "const": true },
+            "semantic_buckets": { "const": true },
+            "evidence_support": { "const": true },
+            "reference_tables": { "const": true },
+            "downstream_addresses": { "const": true }
+          },
+          "required": [
+            "source_completeness",
+            "semantic_buckets",
+            "evidence_support",
+            "reference_tables",
+            "downstream_addresses"
+          ],
+          "additionalProperties": false
+        },
+        "auditor_id": { "type": "string", "minLength": 1 },
+        "audited_at": { "type": "string", "format": "date-time" },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" }
+        }
+      },
+      "required": [
+        "source_document_id",
+        "normalized_sha256",
+        "inventory_sha256",
+        "reference_table_sha256",
+        "audit_scope",
+        "auditor_id",
+        "audited_at",
+        "findings"
+      ]
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "finding": {
+      "type": "object",
+      "properties": {
+        "finding_uid": {
+          "type": "string",
+          "pattern": "^PA-[a-f0-9]{16,64}$"
+        },
+        "category": {
+          "enum": [
+            "missing_boundary",
+            "semantic_mismatch",
+            "misbucketed_clause",
+            "evidence_insufficient",
+            "reference_table_ambiguity",
+            "lineage_issue",
+            "downstream_address_issue",
+            "other"
+          ]
+        },
+        "severity": {
+          "enum": ["critical", "high", "medium", "low"]
+        },
+        "status": {
+          "enum": ["open", "resolved", "false_positive", "accepted_risk"]
+        },
+        "description": { "type": "string", "minLength": 1 },
+        "remediation": { "type": "string", "minLength": 1 },
+        "clause_uid": {
+          "type": ["string", "null"],
+          "pattern": "^PC-[a-f0-9]{16,64}$"
+        },
+        "condition_uid": {
+          "type": ["string", "null"],
+          "pattern": "^CI-[a-f0-9]{16,64}$"
+        },
+        "boundary_uid": {
+          "type": ["string", "null"],
+          "pattern": "^PB-[a-f0-9]{16,64}$"
+        },
+        "table_uid": {
+          "type": ["string", "null"],
+          "pattern": "^RT-[a-f0-9]{16,64}$"
+        },
+        "evidence_references": {
+          "type": "array",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
+          }
+        },
+        "artifact_refs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "resolution_note": { "type": ["string", "null"] },
+        "resolved_by": { "type": ["string", "null"] },
+        "resolution_actor_type": {
+          "type": ["string", "null"],
+          "enum": ["human", "automated", null]
+        }
+      },
+      "required": [
+        "finding_uid",
+        "category",
+        "severity",
+        "status",
+        "description",
+        "remediation",
+        "clause_uid",
+        "condition_uid",
+        "boundary_uid",
+        "table_uid",
+        "evidence_references",
+        "artifact_refs",
+        "resolution_note",
+        "resolved_by",
+        "resolution_actor_type"
+      ],
+      "anyOf": [
+        { "properties": { "evidence_references": { "minItems": 1 } } },
+        { "properties": { "artifact_refs": { "minItems": 1 } } }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "open" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "resolution_note": { "type": "null" },
+              "resolved_by": { "type": "null" },
+              "resolution_actor_type": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": ["resolved", "false_positive", "accepted_risk"]
+              }
+            },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "resolution_note": { "type": "string", "minLength": 1 },
+              "resolved_by": { "type": "string", "minLength": 1 },
+              "resolution_actor_type": {
+                "enum": ["human", "automated"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "accepted_risk" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "resolution_actor_type": { "const": "human" }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}
