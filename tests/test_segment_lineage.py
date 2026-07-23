@@ -249,9 +249,16 @@ def test_normalized_output_for_unregistered_doc_refused(isolated_dao, make_args)
         "case_id": "CASE_030", "run_id": "RUN_20260723_001",
         "component": "policy-pipeline", "status": "success",
         "clauses": [{
-            "clause_id": "C-1", "coverage_type": "x",
+            "clause_uid": "PC-1111111111111111",
+            "clause_id": "C-1",
+            "source_boundary_uids": ["PB-1111111111111111"],
+            "clause_kind": "other", "coverage_type": "x",
             "payout_conditions": [], "exclusions": [], "reduction_conditions": [],
-            "confidence": 0.9, "review_required": False,
+            "definitions": [], "obligations": [], "claim_requirements": [],
+            "termination_conditions": [],
+            "dispute_resolution_conditions": [],
+            "coverage_start_conditions": [],
+            "confidence": 0.9, "review_required": True,
             "evidence_references": [{"document_id": "DOC_004", "page": 57, "quote": "회사는 보험금을 지급합니다"}],
         }],
     }

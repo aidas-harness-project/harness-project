@@ -29,26 +29,37 @@
     "normalized_mapping": {
       "type": "object",
       "properties": {
-        "clause_id": {
+        "clause_uid": {
+          "type": "string",
+          "pattern": "^PC-[a-f0-9]{16,64}$",
+          "description": "Immutable machine address in normalized_policy_clause_DOC_XXX.json."
+        },
+        "display_clause_id": {
           "type": "string",
           "pattern": "^C-[0-9]+$",
-          "description": "Provisional display address in normalized_policy_clause_DOC_XXX.json. Part 4 migrates this to immutable clause_uid."
+          "description": "Optional human-readable label; never used to resolve the mapping."
         },
         "bucket": {
           "enum": [
             "clause",
             "payout_conditions",
             "exclusions",
-            "reduction_conditions"
+            "reduction_conditions",
+            "definitions",
+            "obligations",
+            "claim_requirements",
+            "termination_conditions",
+            "dispute_resolution_conditions",
+            "coverage_start_conditions"
           ]
         },
-        "condition_index": {
-          "type": ["integer", "null"],
-          "minimum": 0,
-          "description": "Zero-based item index for a condition bucket; null when bucket=clause."
+        "condition_uid": {
+          "type": ["string", "null"],
+          "pattern": "^CI-[a-f0-9]{16,64}$",
+          "description": "Stable condition address; null when bucket=clause."
         }
       },
-      "required": ["clause_id", "bucket", "condition_index"],
+      "required": ["clause_uid", "bucket", "condition_uid"],
       "additionalProperties": false
     },
     "boundary": {

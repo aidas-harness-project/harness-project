@@ -37,9 +37,11 @@
           "description": "Pointer into policy-pipeline's normalized_policy_clause.json. null if no clause could be matched (record why in warnings).",
           "properties": {
             "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
-            "clause_id": { "type": "string" }
+            "clause_uid": { "type": "string", "pattern": "^PC-[a-f0-9]{16,64}$" },
+            "display_clause_id": { "type": "string", "pattern": "^C-[0-9]+$" }
           },
-          "required": ["document_id", "clause_id"]
+          "required": ["document_id", "clause_uid"],
+          "additionalProperties": false
         },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
         "evidence_references": {

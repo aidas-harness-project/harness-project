@@ -15,20 +15,34 @@ def _uid(prefix, text):
 
 
 def _normalized():
+    clause_uid = "PC-1111111111111111"
     return {
         "case_id": "CASE_030",
         "component": "policy-pipeline",
         "status": "success",
         "clauses": [{
+            "clause_uid": clause_uid,
             "clause_id": "C-1",
+            "source_boundary_uids": [
+                _uid("PB", "제1조(지급)\n"),
+                _uid("PB", "① 진단 시 지급\n"),
+                _uid("PB", "② 동일 사고는 1회 한도\n"),
+            ],
+            "clause_kind": "coverage",
             "coverage_type": "진단비",
-            "payout_conditions": [{"text": "진단 시 지급", "evidence_references": [{
+            "payout_conditions": [{"condition_uid": "CI-1111111111111111", "text": "진단 시 지급", "evidence_references": [{
                 "document_id": "DOC_001", "page": 1, "quote": "① 진단 시 지급",
             }]}],
             "exclusions": [],
-            "reduction_conditions": [{"text": "동일 사고 1회", "evidence_references": [{
+            "reduction_conditions": [{"condition_uid": "CI-2222222222222222", "text": "동일 사고 1회", "evidence_references": [{
                 "document_id": "DOC_001", "page": 1, "quote": "② 동일 사고는 1회 한도",
             }]}],
+            "definitions": [],
+            "obligations": [],
+            "claim_requirements": [],
+            "termination_conditions": [],
+            "dispute_resolution_conditions": [],
+            "coverage_start_conditions": [],
             "confidence": 0.9,
             "review_required": False,
             "evidence_references": [{
@@ -41,13 +55,13 @@ def _normalized():
 def _inventory():
     chunks = [
         ("제1조(지급)\n", "heading", "clause", None),
-        ("① 진단 시 지급\n", "paragraph", "payout_conditions", 0),
-        ("② 동일 사고는 1회 한도\n", "paragraph", "reduction_conditions", 0),
+        ("① 진단 시 지급\n", "paragraph", "payout_conditions", "CI-1111111111111111"),
+        ("② 동일 사고는 1회 한도\n", "paragraph", "reduction_conditions", "CI-2222222222222222"),
     ]
     boundaries = []
     spans = []
     offset = 0
-    for quote, level, bucket, index in chunks:
+    for quote, level, bucket, condition_uid in chunks:
         boundary_uid = _uid("PB", quote)
         boundaries.append({
             "boundary_uid": boundary_uid,
@@ -55,9 +69,10 @@ def _inventory():
             "label": quote.strip(),
             "disposition": "normalized",
             "normalized_mappings": [{
-                "clause_id": "C-1",
+                "clause_uid": "PC-1111111111111111",
+                "display_clause_id": "C-1",
                 "bucket": bucket,
-                "condition_index": index,
+                "condition_uid": condition_uid,
             }],
             "reason": None,
             "review_required": False,
@@ -132,7 +147,8 @@ def test_two_numbered_paragraphs_in_one_boundary_are_rejected():
 
 def test_mapping_to_missing_condition_is_rejected():
     inventory = _inventory()
-    inventory["boundaries"][1]["normalized_mappings"][0]["condition_index"] = 9
+    inventory["boundaries"][1]["normalized_mappings"][0]["condition_uid"] = \
+        "CI-9999999999999999"
     errors = pc.check_policy_boundary_inventory(
         inventory,
         "policy_boundary_inventory_DOC_001.json",
@@ -190,4 +206,3 @@ def test_completion_gate_requires_inventory_for_each_policy_doc(
     blockers = dao._policy_completion_blockers("CASE_030")
 
     assert any("missing policy_boundary_inventory_DOC_001.json" in b for b in blockers)
-

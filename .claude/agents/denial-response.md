@@ -18,7 +18,7 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. P
 2. Extract denial/reduction reason candidates from the text.
 3. Classify each against the reduction-reason taxonomy (R01-R21, R99 — see `pipeline.md` for the current code list and frequency metadata; the machine-readable metadata is `common_component_output.schema.json`'s `taxonomy_code.x-codebook`), including `candidate_codes` for Top-3 evaluation. Split materially distinct insurer reasons into separate findings instead of forcing several reasons into one code. Use the most specific supported code; use R99 only when no specific code fits.
 4. Extract the associated denial/reduction amount if stated.
-5. Match each denial reason to relevant policy clauses (`normalized_policy_clause_{document_id}.json` from `policy-pipeline` — one file per policy document, check every one relevant to the claim's insurer) — recorded in `policy_matches: [{document_id, clause_id, relevance_note}]`; empty array (with a note in `warnings`) if nothing matched, never omitted.
+5. Match each denial reason to relevant policy clauses (`normalized_policy_clause_{document_id}.json` from `policy-pipeline` — one file per policy document, check every one relevant to the claim's insurer) — recorded in `policy_matches: [{document_id, clause_uid, condition_uid?, display_clause_id?, relevance_note}]`. `clause_uid` (and `condition_uid` when condition-specific) is the immutable join key; `display_clause_id` is optional display metadata only. Use an empty array (with a note in `warnings`) if nothing matched, never omit the field.
 
 Every extraction carries `evidence_references` (P1). Classification confidence and `review_required` per finding.
 

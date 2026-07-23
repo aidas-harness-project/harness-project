@@ -21,6 +21,7 @@ from _cross_contract import (
     SourceUnavailable,
     check_normalized_policy_clause,
     check_clause_ids,
+    check_stable_ids_and_semantics,
     doc_id_from_filename,
     split_pages,
 )
@@ -41,10 +42,14 @@ REDACTED_TEXT = (
 
 def _valid_clause():
     return {
+        "clause_uid": "PC-1111111111111111",
         "clause_id": "C-1",
+        "source_boundary_uids": ["PB-1111111111111111"],
+        "clause_kind": "coverage",
         "coverage_type": "상해사망",
         "payout_conditions": [
             {
+                "condition_uid": "CI-1111111111111111",
                 "text": "보험기간 중 상해로 사망",
                 "evidence_references": [
                     {
@@ -57,6 +62,7 @@ def _valid_clause():
         ],
         "exclusions": [
             {
+                "condition_uid": "CI-2222222222222222",
                 "text": "고의로 자신을 해친 경우",
                 "evidence_references": [
                     {
@@ -69,6 +75,7 @@ def _valid_clause():
         ],
         "reduction_conditions": [
             {
+                "condition_uid": "CI-3333333333333333",
                 "text": "계약일부터 2년 이내 지급사유 발생 시 50% 감액",
                 "evidence_references": [
                     {
@@ -79,6 +86,12 @@ def _valid_clause():
                 ],
             }
         ],
+        "definitions": [],
+        "obligations": [],
+        "claim_requirements": [],
+        "termination_conditions": [],
+        "dispute_resolution_conditions": [],
+        "coverage_start_conditions": [],
         "confidence": 0.9,
         "evidence_references": [
             {"document_id": "DOC_001", "page": 1, "quote": "제3조(보험금의 지급사유)"}
@@ -168,10 +181,44 @@ def test_two_clauses_sequential_pass():
     c1 = _valid_clause()
     c2 = _valid_clause()
     c2["clause_id"] = "C-2"
+    c2["clause_uid"] = "PC-2222222222222222"
+    c2["source_boundary_uids"] = ["PB-2222222222222222"]
+    for index, bucket in enumerate(("payout_conditions", "exclusions", "reduction_conditions"), 4):
+        c2[bucket][0]["condition_uid"] = f"CI-{str(index) * 16}"
     errors = check_normalized_policy_clause(
         _contract([c1, c2]), "normalized_policy_clause_DOC_001.json", REDACTED_TEXT
     )
     assert errors == []
+
+
+def test_duplicate_stable_clause_uid_is_rejected():
+    c1 = _valid_clause()
+    c2 = _valid_clause()
+    c2["clause_id"] = "C-2"
+    errors = check_stable_ids_and_semantics([c1, c2])
+    assert any("duplicate clause_uid" in error for error in errors)
+
+
+def test_duplicate_condition_uid_is_rejected():
+    clause = _valid_clause()
+    clause["exclusions"][0]["condition_uid"] = \
+        clause["payout_conditions"][0]["condition_uid"]
+    errors = check_stable_ids_and_semantics([clause])
+    assert any("duplicate condition_uid" in error for error in errors)
+
+
+def test_obligation_cannot_be_stored_as_payout_condition():
+    clause = _valid_clause()
+    clause["clause_kind"] = "obligation"
+    errors = check_stable_ids_and_semantics([clause])
+    assert any("cannot populate" in error for error in errors)
+
+
+def test_display_reordering_does_not_change_stable_uid():
+    original = _valid_clause()
+    stable_uid = original["clause_uid"]
+    original["clause_id"] = "C-2"
+    assert original["clause_uid"] == stable_uid
 
 
 # --------------------------------------------------------------------------

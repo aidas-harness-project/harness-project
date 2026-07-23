@@ -32,20 +32,20 @@ def _mapping_exists(mapping: dict, normalized_contract: dict | None) -> bool:
         return False
     clause = next(
         (c for c in normalized_contract.get("clauses", [])
-         if c.get("clause_id") == mapping.get("clause_id")),
+         if c.get("clause_uid") == mapping.get("clause_uid")),
         None,
     )
     if clause is None:
         return False
     bucket = mapping.get("bucket")
-    index = mapping.get("condition_index")
+    condition_uid = mapping.get("condition_uid")
     if bucket == "clause":
-        return index is None
+        return condition_uid is None
     items = clause.get(bucket)
     return (
         isinstance(items, list)
-        and isinstance(index, int)
-        and 0 <= index < len(items)
+        and isinstance(condition_uid, str)
+        and any(item.get("condition_uid") == condition_uid for item in items)
     )
 
 

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "normalized_policy_clause.schema.json",
-  "title": "normalized_policy_clause.json -- normalized policy clauses for one policy document v0.2",
-  "description": "Produced by policy-pipeline. One file per policy document, array of every clause identified in it, normalized into standard fields (coverage type, payout conditions, exclusions, reduction conditions).",
+  "title": "normalized_policy_clause.json -- normalized policy clauses for one policy document v0.3",
+  "description": "Produced by policy-pipeline. Stable clause/condition UIDs are the machine addresses; sequential clause_id is display-only. Semantic clause kinds are stored in dedicated buckets so obligations, definitions, procedures, termination, disputes, and coverage-start rules cannot be mistaken for payout conditions.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -20,6 +20,11 @@
     "condition_item": {
       "type": "object",
       "properties": {
+        "condition_uid": {
+          "type": "string",
+          "pattern": "^CI-[a-f0-9]{16,64}$",
+          "description": "Stable deterministic identifier derived from immutable source identity (document + source boundary/span), never from array position."
+        },
         "text": { "type": "string", "minLength": 1 },
         "evidence_references": {
           "type": "array",
@@ -28,15 +33,39 @@
           "items": { "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference" }
         }
       },
-      "required": ["text", "evidence_references"]
+      "required": ["condition_uid", "text", "evidence_references"],
+      "additionalProperties": false
     },
     "clause": {
       "type": "object",
       "properties": {
+        "clause_uid": {
+          "type": "string",
+          "pattern": "^PC-[a-f0-9]{16,64}$",
+          "description": "Stable deterministic identifier derived from immutable source boundary identity; downstream stages must reference this value."
+        },
         "clause_id": {
           "type": "string",
           "pattern": "^C-[0-9]+$",
-          "description": "Assigned by policy-pipeline in extraction order -- stable regardless of the source policy's own article/paragraph numbering."
+          "description": "Sequential display label assigned in extraction order. It may change when an earlier clause is inserted and MUST NOT be used as a machine join key."
+        },
+        "source_boundary_uids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^PB-[a-f0-9]{16,64}$" }
+        },
+        "clause_kind": {
+          "enum": [
+            "coverage",
+            "definition",
+            "obligation",
+            "procedure",
+            "termination",
+            "dispute_resolution",
+            "coverage_start",
+            "other"
+          ]
         },
         "coverage_type": {
           "type": "string",
@@ -57,6 +86,30 @@
           "description": "Itemized. Empty array if none.",
           "items": { "$ref": "#/$defs/condition_item" }
         },
+        "definitions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/condition_item" }
+        },
+        "obligations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/condition_item" }
+        },
+        "claim_requirements": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/condition_item" }
+        },
+        "termination_conditions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/condition_item" }
+        },
+        "dispute_resolution_conditions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/condition_item" }
+        },
+        "coverage_start_conditions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/condition_item" }
+        },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
         "evidence_references": {
           "type": "array",
@@ -67,7 +120,66 @@
         "review_required": { "type": "boolean" },
         "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
       },
-      "required": ["clause_id", "coverage_type", "payout_conditions", "exclusions", "reduction_conditions", "confidence", "evidence_references", "review_required"]
+      "required": [
+        "clause_uid",
+        "clause_id",
+        "source_boundary_uids",
+        "clause_kind",
+        "coverage_type",
+        "payout_conditions",
+        "exclusions",
+        "reduction_conditions",
+        "definitions",
+        "obligations",
+        "claim_requirements",
+        "termination_conditions",
+        "dispute_resolution_conditions",
+        "coverage_start_conditions",
+        "confidence",
+        "evidence_references",
+        "review_required"
+      ],
+      "allOf": [
+        {
+          "if": { "properties": { "clause_kind": { "const": "coverage" } }, "required": ["clause_kind"] },
+          "then": {
+            "anyOf": [
+              { "properties": { "payout_conditions": { "minItems": 1 } } },
+              { "properties": { "exclusions": { "minItems": 1 } } },
+              { "properties": { "reduction_conditions": { "minItems": 1 } } }
+            ]
+          }
+        },
+        {
+          "if": { "properties": { "clause_kind": { "const": "definition" } }, "required": ["clause_kind"] },
+          "then": { "properties": { "definitions": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "clause_kind": { "const": "obligation" } }, "required": ["clause_kind"] },
+          "then": { "properties": { "obligations": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "clause_kind": { "const": "procedure" } }, "required": ["clause_kind"] },
+          "then": { "properties": { "claim_requirements": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "clause_kind": { "const": "termination" } }, "required": ["clause_kind"] },
+          "then": { "properties": { "termination_conditions": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "clause_kind": { "const": "dispute_resolution" } }, "required": ["clause_kind"] },
+          "then": { "properties": { "dispute_resolution_conditions": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "clause_kind": { "const": "coverage_start" } }, "required": ["clause_kind"] },
+          "then": { "properties": { "coverage_start_conditions": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "clause_kind": { "const": "other" } }, "required": ["clause_kind"] },
+          "then": { "properties": { "review_required": { "const": true } } }
+        }
+      ],
+      "additionalProperties": false
     }
   }
 }

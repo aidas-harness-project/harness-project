@@ -25,9 +25,11 @@ against the *actually processed* redacted policy text:
   4. page is a real 1-based page that exists in the processed text.
   5. page+quote actually appear together in that page's processed text -- the
      quote is found on the page it claims, verbatim (whitespace-normalized).
-  6. clause_ids are unique and sequential from C-1 (C-1, C-2, ... with no
-     gap, no duplicate, no reordering) -- the stable address every downstream
-     stage resolves a clause by.
+  6. clause_ids are unique and sequential from C-1 (display order only).
+  7. clause_uid and condition_uid values are globally unique within the
+     document and are the stable downstream join keys.
+  8. clause_kind agrees with its dedicated semantic bucket, preventing e.g.
+     a disclosure obligation from being represented as a payout condition.
 
 Page boundaries come from the `<<<PAGE page=N>>>` markers that checkpoint 2
 embeds when it assembles redacted_text.md (same markers chunk_text.py slices
@@ -55,6 +57,26 @@ NORMALIZED_POLICY_CLAUSE_SCHEMA = "normalized_policy_clause.schema.json"
 _DOC_ID_IN_FILENAME_RE = re.compile(r"_(DOC_\d+)\.json$")
 _CLAUSE_ID_RE = re.compile(r"^C-(\d+)$")
 _PAGE_MARKER_RE = re.compile(r"(?m)^<<<PAGE page=(\d+)>>>\n?")
+CONDITION_BUCKETS = (
+    "payout_conditions",
+    "exclusions",
+    "reduction_conditions",
+    "definitions",
+    "obligations",
+    "claim_requirements",
+    "termination_conditions",
+    "dispute_resolution_conditions",
+    "coverage_start_conditions",
+)
+KIND_BUCKETS = {
+    "coverage": {"payout_conditions", "exclusions", "reduction_conditions"},
+    "definition": {"definitions"},
+    "obligation": {"obligations"},
+    "procedure": {"claim_requirements"},
+    "termination": {"termination_conditions"},
+    "dispute_resolution": {"dispute_resolution_conditions"},
+    "coverage_start": {"coverage_start_conditions"},
+}
 
 
 class SourceUnavailable(Exception):
@@ -133,11 +155,11 @@ def split_pages(redacted_text: str) -> dict[int, str]:
 def _iter_all_references(clause: dict):
     """Yield (location_label, reference_dict) for every evidence reference in a
     clause -- the clause's own references and each condition's references,
-    across all three condition lists. The label is used only for error text.
+    across all semantic condition lists. The label is used only for error text.
     """
     for ref in clause.get("evidence_references") or []:
         yield "clause", ref
-    for list_name in ("payout_conditions", "exclusions", "reduction_conditions"):
+    for list_name in CONDITION_BUCKETS:
         for idx, item in enumerate(clause.get(list_name) or []):
             for ref in item.get("evidence_references") or []:
                 yield f"{list_name}[{idx}]", ref
@@ -165,6 +187,51 @@ def check_clause_ids(clauses: list[dict]) -> list[str]:
     return errors
 
 
+def check_stable_ids_and_semantics(clauses: list[dict]) -> list[str]:
+    """Validate stable-UID uniqueness and clause-kind/bucket separation."""
+    errors: list[str] = []
+    seen_clause_uids: set[str] = set()
+    seen_condition_uids: set[str] = set()
+    for index, clause in enumerate(clauses):
+        clause_uid = clause.get("clause_uid")
+        if clause_uid in seen_clause_uids:
+            errors.append(
+                f"clauses[{index}]: duplicate clause_uid {clause_uid!r}")
+        if clause_uid:
+            seen_clause_uids.add(clause_uid)
+
+        kind = clause.get("clause_kind")
+        populated = {
+            bucket for bucket in CONDITION_BUCKETS
+            if clause.get(bucket)
+        }
+        if kind in KIND_BUCKETS:
+            allowed = KIND_BUCKETS[kind]
+            wrong = populated - allowed
+            if not populated.intersection(allowed):
+                errors.append(
+                    f"clauses[{index}]: clause_kind {kind!r} requires a "
+                    f"non-empty bucket in {sorted(allowed)}")
+            if wrong:
+                errors.append(
+                    f"clauses[{index}]: clause_kind {kind!r} cannot populate "
+                    f"semantic bucket(s) {sorted(wrong)}; allowed={sorted(allowed)}")
+        elif kind == "other" and clause.get("review_required") is not True:
+            errors.append(
+                f"clauses[{index}]: clause_kind 'other' requires review_required=true")
+
+        for bucket in CONDITION_BUCKETS:
+            for item_index, item in enumerate(clause.get(bucket) or []):
+                condition_uid = item.get("condition_uid")
+                if condition_uid in seen_condition_uids:
+                    errors.append(
+                        f"clauses[{index}].{bucket}[{item_index}]: duplicate "
+                        f"condition_uid {condition_uid!r}")
+                if condition_uid:
+                    seen_condition_uids.add(condition_uid)
+    return errors
+
+
 def check_normalized_policy_clause(data: dict, filename: str, redacted_text: str | None) -> list[str]:
     """Full cross-contract check for one normalized_policy_clause file.
 
@@ -188,6 +255,7 @@ def check_normalized_policy_clause(data: dict, filename: str, redacted_text: str
         return errors + ["clauses: missing or not an array"]
 
     errors.extend(check_clause_ids(clauses))
+    errors.extend(check_stable_ids_and_semantics(clauses))
 
     if redacted_text is None:
         raise SourceUnavailable(
