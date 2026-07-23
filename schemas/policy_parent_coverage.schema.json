@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "policy_parent_coverage.schema.json",
+  "title": "policy_parent_coverage_DOC_XXX.json -- whole-parent logical-page coverage v0.1",
+  "description": "Produced by policy-pipeline for a physical policy parent document (e.g. CASE_030's 240-page 보험약관 PDF, DOC_001). The per-document boundary inventory only accounts for the pages a segment already owns; it structurally cannot see a page of the parent that was never carved into any segment at all -- exactly CASE_030's hole, where 133 of 240 logical pages (front matter 1-11, gap page 56, and the entire appendix/별표 region 120-240) belonged to no document and were invisible to the completeness gate. This contract closes that: every logical page of the parent PDF, 1..total_logical_pages, must appear exactly once with an explicit disposition. owned_by_segment/reference_table are the productive dispositions; administrative_excluded requires a concrete per-page reason (not a blanket 'appendix'); review_required/extraction_failed are unresolved and block policy_clause_processing finalize. The DAO cross-contract verifies the 1..N coverage is exact (no gap/dup/out-of-range) and that each owned_by_segment/reference_table disposition resolves to a really-registered segment or a really-present reference table.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "parent_document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id",
+          "description": "The physical policy parent whose full page range this contract accounts for. Must be a physical (non-segment) insurance_policy document in the manifest."
+        },
+        "total_logical_pages": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The parent PDF's total printed logical page count (e.g. 240). Every logical page 1..this value must be covered exactly once by a pages[] entry."
+        },
+        "pages": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/page_disposition" }
+        }
+      },
+      "required": ["parent_document_id", "total_logical_pages", "pages"]
+    }
+  ],
+  "$defs": {
+    "page_disposition": {
+      "type": "object",
+      "properties": {
+        "logical_page": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The printed page number ('N / 240')."
+        },
+        "physical_page": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The parent PDF's 1-based physical page index (may differ from logical; CASE_030 offset is +7)."
+        },
+        "disposition": {
+          "enum": [
+            "owned_by_segment",
+            "reference_table",
+            "administrative_excluded",
+            "review_required",
+            "extraction_failed"
+          ]
+        },
+        "owner_document_id": {
+          "anyOf": [
+            { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+            { "type": "null" }
+          ],
+          "description": "For owned_by_segment: the segment/physical document that carries this page's processed text and normalized clauses. null otherwise."
+        },
+        "table_uid": {
+          "type": ["string", "null"],
+          "pattern": "^RT-[a-f0-9]{16,64}$",
+          "description": "For reference_table: the table in reference_table_{owner}.json this page's appendix content was extracted into. null otherwise."
+        },
+        "reference_table_document_id": {
+          "anyOf": [
+            { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+            { "type": "null" }
+          ],
+          "description": "For reference_table: the document_id whose reference_table_{id}.json holds table_uid. null otherwise."
+        },
+        "reason": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "For administrative_excluded/review_required/extraction_failed: the concrete, page-specific reason. null for owned_by_segment/reference_table."
+        }
+      },
+      "required": ["logical_page", "physical_page", "disposition", "owner_document_id", "table_uid", "reference_table_document_id", "reason"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "disposition": { "const": "owned_by_segment" } },
+            "required": ["disposition"]
+          },
+          "then": {
+            "properties": {
+              "owner_document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+              "table_uid": { "type": "null" },
+              "reference_table_document_id": { "type": "null" },
+              "reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "disposition": { "const": "reference_table" } },
+            "required": ["disposition"]
+          },
+          "then": {
+            "properties": {
+              "owner_document_id": { "type": "null" },
+              "table_uid": { "type": "string", "pattern": "^RT-[a-f0-9]{16,64}$" },
+              "reference_table_document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+              "reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "enum": ["administrative_excluded", "review_required", "extraction_failed"]
+              }
+            },
+            "required": ["disposition"]
+          },
+          "then": {
+            "properties": {
+              "owner_document_id": { "type": "null" },
+              "table_uid": { "type": "null" },
+              "reference_table_document_id": { "type": "null" },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -189,3 +189,136 @@ def unresolved_boundaries(data: dict) -> list[str]:
                 f"{boundary.get('boundary_uid')} ({boundary.get('label')}): "
                 f"{disposition} -- {boundary.get('reason')}")
     return blockers
+
+
+# --- Parent-level whole-page coverage (policy_parent_coverage_DOC_XXX.json) ---
+#
+# The per-document boundary inventory above accounts only for the processed
+# pages a segment already owns. It structurally cannot detect a page of the
+# physical PARENT PDF that was never carved into any segment -- CASE_030's real
+# hole, where 133 of 240 logical pages (front matter 1-11, gap page 56, and the
+# whole appendix/별표 region 120-240) belonged to no document and slipped past
+# the completeness gate entirely. This checks the parent's full 1..N logical
+# page range.
+
+PARENT_COVERAGE_SCHEMA = "policy_parent_coverage.schema.json"
+_PARENT_COVERAGE_DOC_RE = re.compile(r"_(DOC_\d+)\.json$")
+
+
+def doc_id_from_parent_coverage_filename(filename: str) -> str | None:
+    match = _PARENT_COVERAGE_DOC_RE.search(filename)
+    return match.group(1) if match else None
+
+
+def check_policy_parent_coverage(
+        data: dict,
+        filename: str,
+        manifest: dict | None,
+        reference_table_for) -> list[str]:
+    """Validate that a parent-coverage contract accounts for every logical page
+    of the parent PDF exactly once, and that each productive disposition
+    resolves to something that really exists.
+
+    reference_table_for(document_id) -> the reference_table_{document_id}.json
+    dict (or None). Used to confirm a reference_table disposition's table_uid is
+    actually present in that document's reference-table contract.
+
+    Returns all errors (empty = clean); callers refuse persistence/finalize on
+    any non-empty list. Does NOT itself treat review_required/extraction_failed
+    as errors -- unresolved_parent_pages() reports those at finalize time, the
+    same split boundary inventory uses (persist a work-in-progress inventory,
+    block only finalize).
+    """
+    errors: list[str] = []
+    target_doc = doc_id_from_parent_coverage_filename(filename)
+    if target_doc is None:
+        errors.append(
+            "parent-coverage filename must be "
+            "policy_parent_coverage_<DOC_ID>.json")
+    if data.get("parent_document_id") != target_doc:
+        errors.append(
+            f"parent_document_id {data.get('parent_document_id')!r} does not "
+            f"match filename document {target_doc!r}")
+
+    by_id = {d.get("document_id"): d for d in (manifest or {}).get("documents", [])}
+    # The parent must be a physical (non-segment) insurance_policy document.
+    parent_entry = by_id.get(target_doc)
+    if parent_entry is None:
+        errors.append(f"parent {target_doc!r} is not in the manifest")
+    else:
+        if parent_entry.get("document_role") == "segment":
+            errors.append(
+                f"parent {target_doc!r} is a segment -- parent coverage must be "
+                "declared on the physical parent document, not a segment")
+        if parent_entry.get("document_type") != "insurance_policy":
+            errors.append(
+                f"parent {target_doc!r} document_type is "
+                f"{parent_entry.get('document_type')!r}, not 'insurance_policy'")
+
+    total = data.get("total_logical_pages")
+    pages = data.get("pages") or []
+    logicals = [p.get("logical_page") for p in pages]
+
+    # Exact 1..total coverage: no dup, no gap, no out-of-range.
+    seen = set()
+    for lp in logicals:
+        if lp in seen:
+            errors.append(f"logical page {lp} appears more than once")
+        seen.add(lp)
+    if isinstance(total, int):
+        for lp in logicals:
+            if isinstance(lp, int) and (lp < 1 or lp > total):
+                errors.append(
+                    f"logical page {lp} is outside 1..{total}")
+        missing = [lp for lp in range(1, total + 1) if lp not in seen]
+        if missing:
+            errors.append(
+                f"logical pages not accounted for at all (coverage gap): "
+                f"{missing[:20]}{'...' if len(missing) > 20 else ''}")
+
+    # Each productive disposition must resolve to something real.
+    for p in pages:
+        lp = p.get("logical_page")
+        disp = p.get("disposition")
+        if disp == "owned_by_segment":
+            owner = p.get("owner_document_id")
+            entry = by_id.get(owner)
+            if entry is None:
+                errors.append(
+                    f"page {lp}: owned_by_segment owner {owner!r} is not a "
+                    "registered manifest document")
+            elif entry.get("downstream_disposition") != "automated_text_pipeline":
+                errors.append(
+                    f"page {lp}: owner {owner!r} is not an automated-text "
+                    "document")
+            elif entry.get("document_type") != "insurance_policy":
+                errors.append(
+                    f"page {lp}: owner {owner!r} is not an insurance_policy "
+                    "document")
+        elif disp == "reference_table":
+            rt_doc = p.get("reference_table_document_id")
+            table_uid = p.get("table_uid")
+            rt = reference_table_for(rt_doc) if rt_doc else None
+            if rt is None:
+                errors.append(
+                    f"page {lp}: reference_table disposition points at "
+                    f"{rt_doc!r} which has no reference_table contract")
+            else:
+                uids = {t.get("table_uid") for t in rt.get("tables", [])}
+                if table_uid not in uids:
+                    errors.append(
+                        f"page {lp}: table_uid {table_uid!r} is not present in "
+                        f"reference_table_{rt_doc}.json")
+
+    return errors
+
+
+def unresolved_parent_pages(data: dict) -> list[str]:
+    """Parent-coverage pages still in a blocking disposition. Empty = clear."""
+    blockers = []
+    for p in data.get("pages", []):
+        disp = p.get("disposition")
+        if disp in ("review_required", "extraction_failed"):
+            blockers.append(
+                f"logical page {p.get('logical_page')}: {disp} -- {p.get('reason')}")
+    return blockers

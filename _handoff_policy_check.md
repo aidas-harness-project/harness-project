@@ -169,3 +169,89 @@ fastapi 미설치로 collection error(문서화된 기존 gap) — 실행 시 �
   계약의 exact SHA-256에 묶인다. 누락·stale·open finding은 policy finalize를
   막고, downstream clause/condition UID도 current clear audit에 대해서만
   resolve된다.
+
+## Part 8 — CASE_030 데이터 마이그레이션/수정 (부분 수행 — segment 등록부터 operator action 필요)
+
+수행 시점: 2026-07-24. outputs/data는 gitignore이므로 아래는 데이터 작업(코드 커밋과 분리).
+모두 DAO 경유, raw/ground-truth 미접근, human review 미날조.
+
+### 완료(DAO만으로 가능한 부분)
+1. **run-state v0.2→v0.3 마이그레이션**: `dao.py migrate-run-state-v03 CASE_030 RUN_20260724_001`.
+   기존의 부정한 `policy_clause_processing: passed`(backup 없음 + document_processing이 여전히
+   in_progress)를 정직하게 `failed`로 강등하고 사유를 `migration_history`에 기록. 백업 날조 없음.
+   결과 run-state는 v0.3 스키마 PASS.
+2. **DOC_002/DOC_003 classification/manifest 정합화**: `patch-manifest-document`로
+   DOC_002 document_type → `insurance_certificate`, DOC_003 → `application_form`(각 classification_result의
+   predicted_document_type와 일치). 이제 classification/manifest 불일치 0건 → document_processing
+   finalize의 정합 게이트를 통과할 수 있는 상태(단, 아래 segment 등록이 선행돼야 finalize 가능).
+
+### operator action 필요(여기서 정지) — segment 등록의 physical page 매핑
+DOC_004/005/006을 manifest segment로 등록하려면 각 page_map 항목에 유효한 `source_physical_page`
+(원본 240p PDF의 물리 페이지 인덱스, 양의 정수·유일·오름차순)가 필요하다. 이는 lineage validator가
+강제한다(logical-only lineage는 검증 불가로 거부). processed/outputs 레이어 어디에도 physical page
+매핑이 없다(logical 인쇄 페이지 "N/240"만 존재; DOC_001조차 array 1~12 = logical 12~23로 offset이
+있어 logical≠physical). 따라서 나는 raw PDF를 읽지 않고는 이 값을 결정할 수 없다.
+
+**요청할 operator action (사용자/운영자만 수행 가능):**
+- 실행 tool: raw 240p 정책 PDF(`data/raw/CASE_030/DOC_001.pdf`)에 대해 logical 인쇄
+  페이지("N / 240") ↔ PDF 물리 페이지(1-based) 매핑을 산출하는 도구(예: document-pipeline의
+  embedded-text 재처리 또는 전용 page-mapping 스크립트). agent는 raw를 직접 읽을 수 없음.
+- 대상 document: physical parent DOC_001(원본 PDF). segment DOC_004(logical 57,58,118,119),
+  DOC_005(59~117), DOC_006(24~55).
+- 필요 산출물: 각 segment의 logical page → source_physical_page 매핑(page_map 완성용).
+- 성공 판정: 산출된 physical page가 양의 정수·유일·오름차순이며, 각 segment redacted_text.md의
+  `<<<PAGE page=N>>>` logical marker 집합과 정확히 대응.
+- agent 불가 사유: raw PDF 직접 접근 금지(P2/D1); processed 레이어에 매핑이 없음.
+
+이 매핑이 확보되면: (a) DOC_004/005/006 segment 등록(document_manifest write, lineage PASS),
+(b) 각 normalized_policy_clause를 v0.3(clause_uid/condition_uid/clause_kind/semantic bucket/
+reference_table_refs/evidence support)로 마이그레이션, (c) 각 DOC의 policy_boundary_inventory 작성,
+(d) claim-relevant reference table(화상분류·골절·창상봉합 A/B 등) 작성, (e) A-1~C-3 실제 오류 수정,
+(f) policy_audit_result 작성 및 finding resolution, (g) policy_clause_processing finalize.
+이들은 processed 레이어 verbatim 대조로 authoring 가능하나, (a)가 선행 조건이라 전부 여기서 대기.
+
+## Part 8 재개 (2026-07-24, 2차 세션) — 물리 매핑 해소 + parent coverage gate
+
+### 물리 페이지 blocker 해소 (사용자 승인)
+사용자가 `E:/SNU/intern/보험약관.pdf` 직접 읽기를 승인(정답지 아님, `data/raw/CASE_030/
+DOC_001.pdf`와 바이트 동일 8187931B). raw PDF embedded text를 읽어 물리↔논리 매핑 산출:
+**물리 페이지 = 논리 페이지 + 7** (240개 인쇄 페이지 전체 단일 상수 offset; 물리 249p 중
+front matter 물리 1~7 + 뒤 248~249는 인쇄번호 없음). 교차검증: DOC_001 array순번1=인쇄"12/240"
+→ 논리12→물리19 ✓. segment page_map 확정:
+- DOC_004 논리{57,58,118,119}→물리{64,65,125,126}
+- DOC_005 논리59~117→물리66~124
+- DOC_006 논리24~55→물리31~62
+각 segment derived_text_sha256 계산 완료, redacted_text.md의 `<<<PAGE>>>` 마커가 선언 페이지와
+정확히 일치 확인. (scratchpad: physical_map.json, page_maps.json, segment_sha.json)
+
+### Part 8 목적 재정의 (사용자 정정)
+Part 8 = 기존 4개 DOC 마이그레이션이 아니라 **보험약관 parent PDF 논리 1~240 전체 coverage 검증**.
+물리 매핑·segment 등록은 선행일 뿐 완료 조건 아님.
+
+### Coverage matrix (지시 1~3, 완성)
+논리 1~240 전체 매핑(중복·공백 0). **소유 107 / 미소유 133**:
+- 논리 1~11 (표지/목차/유의사항/보험용어) — front_matter_REVIEW
+- 논리 56 (인쇄번호만) — near_blank_REVIEW
+- 논리 120~189 (별표1 장해분류표, 별표3 골절, 별표4 화상, 별표6 식중독, 별표8 특정감염병,
+  별표28 응급, 별표31~40 골절/근골격, 별표41-1/2 창상봉합술 수가코드) — reference_table_REQUIRED
+- 논리 190~240 (인용 법규 의료법/민법/상법/개인정보보호법 등 + 특별약관 색인) — referenced_law_or_index_REVIEW
+기존 처리는 240p 중 107p(44%)만. **별표/분류표(120~189)가 전혀 추출 안 됨.**
+
+### parent-level coverage gate 구현 (지시 8, 코드 완료·커밋됨)
+구조적 blocker 확인: `_policy_completion_blockers`가 등록 문서만 순회 → parent 미소유 페이지 누락
+불검출. 추가한 것:
+- `schemas/policy_parent_coverage.schema.json` (v0.1): parent 논리 1..N 전체 페이지 disposition
+  (owned_by_segment/reference_table/administrative_excluded/review_required/extraction_failed)
+- `policy_completeness.check_policy_parent_coverage`(1..N exact coverage + owner/table 실재 확인) +
+  `unresolved_parent_pages`
+- `dao.py`: write-contract cross-contract dispatch + `_policy_completion_blockers`에 physical parent별
+  parent-coverage 필수 gate 연결
+- 테스트: `tests/test_policy_parent_coverage.py`(12) + test_policy_completeness.py 통합 3건. 전체 510 passed.
+- pipeline.md / policy-pipeline.md 갱신 + sync_agents.py 실행.
+
+### 남은 Part 8 데이터 작업 (write 권한 이슈)
+auto-mode 분류기가 dao write-contract 실행을 차단. 사용자 지시: settings.json 미수정, 포괄 allow
+미추가. 각 계약을 scratch에 완성 후 정확한 write-contract 명령을 한 건씩 제시 → 사용자 직접 실행 →
+read-contract 재조회 → 다음. 계약 단위로 묶음(parent coverage 1, reference_table 문서별 1,
+normalized 문서별 1, inventory 문서별 1, audit 문서별 1). 240p 전체가 owned/reference_table/구체적
+excluded 중 하나가 되고 unresolved 0이 될 때까지 Part 8 완료 표시 금지. 마지막에 finalize-stage 검증.

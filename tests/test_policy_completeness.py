@@ -228,3 +228,105 @@ def test_completion_gate_requires_inventory_for_each_policy_doc(
     blockers = dao._policy_completion_blockers("CASE_030")
 
     assert any("missing policy_boundary_inventory_DOC_001.json" in b for b in blockers)
+
+
+def _single_page_manifest_and_norm(out):
+    """A minimal DOC_001 policy set (manifest + normalized + inventory) whose
+    only processed page is REDACTED (one logical page). Used by the parent-
+    coverage finalize-gate tests below."""
+    manifest = {
+        "case_id": "CASE_030",
+        "documents": [{
+            "document_id": "DOC_001",
+            "file_name": "DOC_001.pdf",
+            "file_path": "data/raw/CASE_030/DOC_001.pdf",
+            "file_format": "pdf",
+            "file_size_bytes": 100,
+            "document_role": "physical",
+            "ocr_status": "completed",
+            "cross_validation_status": "agreed",
+            "redacted_text_path":
+                "data/processed/CASE_030/DOC_001/redacted_text.md",
+            "document_type": "insurance_policy",
+            "downstream_disposition": "automated_text_pipeline",
+        }],
+    }
+    (out / "document_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    (out / "normalized_policy_clause_DOC_001.json").write_text(
+        json.dumps(_normalized(), ensure_ascii=False), encoding="utf-8")
+    (out / "policy_boundary_inventory_DOC_001.json").write_text(
+        json.dumps(_inventory(), ensure_ascii=False), encoding="utf-8")
+
+
+def test_completion_gate_requires_parent_coverage_contract(isolated_dao):
+    """The real CASE_030 regression: a physical policy parent with a complete
+    per-document inventory but NO whole-page coverage accounting must not
+    finalize -- the 133 unowned pages were invisible before this gate."""
+    out = isolated_dao / "outputs" / "CASE_030"
+    processed = isolated_dao / "data" / "processed" / "CASE_030" / "DOC_001"
+    out.mkdir(parents=True)
+    processed.mkdir(parents=True)
+    (processed / "redacted_text.md").write_text(REDACTED, encoding="utf-8")
+    _single_page_manifest_and_norm(out)
+
+    blockers = dao._policy_completion_blockers("CASE_030")
+
+    assert any("missing policy_parent_coverage_DOC_001.json" in b
+               for b in blockers), blockers
+
+
+def test_parent_coverage_gap_blocks_finalize(isolated_dao):
+    """A parent-coverage contract that omits some logical pages is itself a
+    blocker -- declaring total=2 but only covering page 1."""
+    out = isolated_dao / "outputs" / "CASE_030"
+    processed = isolated_dao / "data" / "processed" / "CASE_030" / "DOC_001"
+    out.mkdir(parents=True)
+    processed.mkdir(parents=True)
+    (processed / "redacted_text.md").write_text(REDACTED, encoding="utf-8")
+    _single_page_manifest_and_norm(out)
+    coverage = {
+        "case_id": "CASE_030", "component": "policy-pipeline",
+        "status": "success", "parent_document_id": "DOC_001",
+        "total_logical_pages": 2,
+        "pages": [{
+            "logical_page": 1, "physical_page": 8,
+            "disposition": "owned_by_segment", "owner_document_id": "DOC_001",
+            "table_uid": None, "reference_table_document_id": None,
+            "reason": None,
+        }],
+    }
+    (out / "policy_parent_coverage_DOC_001.json").write_text(
+        json.dumps(coverage, ensure_ascii=False), encoding="utf-8")
+
+    blockers = dao._policy_completion_blockers("CASE_030")
+
+    assert any("coverage gap" in b for b in blockers), blockers
+    assert not any("missing policy_parent_coverage" in b for b in blockers)
+
+
+def test_parent_coverage_review_required_page_blocks_finalize(isolated_dao):
+    out = isolated_dao / "outputs" / "CASE_030"
+    processed = isolated_dao / "data" / "processed" / "CASE_030" / "DOC_001"
+    out.mkdir(parents=True)
+    processed.mkdir(parents=True)
+    (processed / "redacted_text.md").write_text(REDACTED, encoding="utf-8")
+    _single_page_manifest_and_norm(out)
+    coverage = {
+        "case_id": "CASE_030", "component": "policy-pipeline",
+        "status": "success", "parent_document_id": "DOC_001",
+        "total_logical_pages": 1,
+        "pages": [{
+            "logical_page": 1, "physical_page": 8,
+            "disposition": "review_required", "owner_document_id": None,
+            "table_uid": None, "reference_table_document_id": None,
+            "reason": "복잡한 병합셀 표 2차원 순서 확인 필요",
+        }],
+    }
+    (out / "policy_parent_coverage_DOC_001.json").write_text(
+        json.dumps(coverage, ensure_ascii=False), encoding="utf-8")
+
+    blockers = dao._policy_completion_blockers("CASE_030")
+
+    assert any("unresolved parent page" in b and "review_required" in b
+               for b in blockers), blockers

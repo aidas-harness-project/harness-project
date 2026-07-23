@@ -65,6 +65,20 @@ table before a normalized clause links to it, then use
 `reference_table_refs[{document_id, table_uid, row_uids?}]`. Emit an empty
 `reference_table_refs` array when a clause needs no table.
 
+`policy_parent_coverage_{parent_id}.json` — one file per PHYSICAL policy parent
+(a real raw PDF, not a segment). The per-document inventory only accounts for
+pages a segment already owns; it cannot see a parent page that was carved into
+no segment at all. This contract accounts for the parent's full logical page
+range, 1..`total_logical_pages`, exactly once. Each page is `owned_by_segment`
+(name the segment/physical document that carries its normalized text),
+`reference_table` (name the `reference_table_document_id` + `table_uid` the
+appendix was extracted into), or `administrative_excluded` with a concrete
+per-page reason — never a blanket "appendix"/"목차" over a whole range, and never
+excluding substantive text just because it is inconvenient. `review_required`/
+`extraction_failed` pages block finalization. The DAO verifies the 1..N coverage
+is exact (no gap/dup) and that every `owned_by_segment`/`reference_table`
+disposition resolves to a really-registered segment or a really-present table.
+
 `policy_audit_result_{document_id}.json` — write this last for every policy
 document. It binds the audit to the exact SHA-256 bytes of the normalized
 clause, boundary inventory, and optional reference-table contracts, records
@@ -85,8 +99,10 @@ Schema validation failure: one self-correction attempt, then halt per P4. If the
 Finalize only with `python tools/dao.py finalize-stage ... policy_clause_processing`.
 The DAO verifies every registered automated policy document has a non-empty
 normalized contract, a complete resolved boundary inventory, and a current
-version-bound audit with no open findings before it creates the P10 snapshot
-and records `passed`.
+version-bound audit with no open findings, AND that every physical policy
+parent has a `policy_parent_coverage` contract covering its full 1..N logical
+page range with no unresolved page, before it creates the P10 snapshot and
+records `passed`.
 
 # Collaboration
 

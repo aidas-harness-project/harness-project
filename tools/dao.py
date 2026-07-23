@@ -487,6 +487,49 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
             f"{doc_id}: unresolved audit: {error}"
             for error in policy_audit.unresolved_findings(audit)
         )
+
+    # Parent-level whole-page coverage. The per-document checks above only see
+    # pages a segment already owns; they cannot detect a parent-PDF page that
+    # was never carved into any segment. Every PHYSICAL (non-segment)
+    # insurance_policy parent must additionally declare a parent-coverage
+    # contract that accounts for its full 1..N logical page range, with no
+    # unresolved (review_required/extraction_failed) page. CASE_030's 133
+    # unowned pages (front matter, 별표 appendix, referenced laws) are exactly
+    # what this catches.
+    physical_parents = [
+        d for d in policy_docs
+        if d.get("document_role") != "segment"
+    ]
+    for parent in physical_parents:
+        pid = parent.get("document_id")
+        coverage_name = f"policy_parent_coverage_{pid}.json"
+        coverage = read_contract_data(case_id, coverage_name)
+        if coverage is None:
+            blockers.append(
+                f"{pid}: missing {coverage_name} -- the physical policy parent "
+                "has no whole-page coverage accounting (every logical page must "
+                "be owned, a reference table, or explicitly excluded with reason)")
+            continue
+        coverage_errors = validate_instance(
+            coverage, policy_completeness.PARENT_COVERAGE_SCHEMA,
+            schemas, registry)
+        blockers.extend(
+            f"{pid}: parent-coverage schema: {error}"
+            for error in coverage_errors)
+        blockers.extend(
+            f"{pid}: parent-coverage: {error}"
+            for error in policy_completeness.check_policy_parent_coverage(
+                coverage,
+                coverage_name,
+                manifest,
+                lambda doc_id: read_contract_data(
+                    case_id, f"reference_table_{doc_id}.json") if doc_id else None,
+            )
+        )
+        blockers.extend(
+            f"{pid}: unresolved parent page: {error}"
+            for error in policy_completeness.unresolved_parent_pages(coverage)
+        )
     return blockers
 
 
@@ -807,6 +850,21 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
             for error in errors:
                 print(f"  - {error}")
             return 1
+    elif schema_name == policy_completeness.PARENT_COVERAGE_SCHEMA:
+        manifest = read_contract_data(case_id, "document_manifest.json")
+        if manifest is None:
+            print(f"FAIL: no document_manifest.json -- cannot verify {target}")
+            return 1
+        errors = policy_completeness.check_policy_parent_coverage(
+            data, filename, manifest,
+            lambda doc_id: read_contract_data(
+                case_id, f"reference_table_{doc_id}.json") if doc_id else None,
+        )
+        if errors:
+            print(f"FAIL: parent-coverage validation errors for {target}:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
     return 0
 
 
@@ -833,6 +891,7 @@ def cmd_write_contract(args):
         if (
             _cross_contract.has_cross_contract_check(schema_name)
             or schema_name == policy_completeness.INVENTORY_SCHEMA
+            or schema_name == policy_completeness.PARENT_COVERAGE_SCHEMA
             or schema_name == policy_audit.AUDIT_SCHEMA
         ):
             rc = _run_cross_contract(args.case_id, args.filename, schema_name, data, target)
