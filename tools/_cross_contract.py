@@ -53,6 +53,7 @@ from pathlib import Path
 # passes to write-contract, so adding a family here is a one-line change plus
 # its check function.
 NORMALIZED_POLICY_CLAUSE_SCHEMA = "normalized_policy_clause.schema.json"
+REFERENCE_TABLE_SCHEMA = "reference_table.schema.json"
 
 _DOC_ID_IN_FILENAME_RE = re.compile(r"_(DOC_\d+)\.json$")
 _CLAUSE_ID_RE = re.compile(r"^C-(\d+)$")
@@ -93,7 +94,10 @@ def has_cross_contract_check(schema_name: str) -> bool:
     """Does this schema have a cross-contract dispatch? dao.write-contract
     calls check_cross_contract only when this is True, so contracts with no
     registered checks are unaffected (schema validation still runs for them)."""
-    return schema_name == NORMALIZED_POLICY_CLAUSE_SCHEMA
+    return schema_name in {
+        NORMALIZED_POLICY_CLAUSE_SCHEMA,
+        REFERENCE_TABLE_SCHEMA,
+    }
 
 
 def doc_id_from_filename(filename: str) -> str | None:
@@ -378,4 +382,105 @@ def check_normalized_policy_clause(data: dict, filename: str, redacted_text: str
                     f"(quote={quote[:60]!r}...)"
                 )
 
+    return errors
+
+
+def check_reference_table(
+        data: dict, filename: str, redacted_text: str | None) -> list[str]:
+    """Validate stable table addresses and cell-level source grounding."""
+    errors: list[str] = []
+    target_doc = doc_id_from_filename(filename)
+    if target_doc is None:
+        errors.append(
+            "reference-table filename must be reference_table_<DOC_ID>.json")
+    if data.get("source_document_id") != target_doc:
+        errors.append(
+            f"source_document_id {data.get('source_document_id')!r} does not "
+            f"match filename document {target_doc!r}")
+    if redacted_text is None:
+        raise SourceUnavailable(
+            f"no processed/redacted text found for {target_doc or filename}")
+    pages = split_pages(redacted_text)
+    normalized_pages = {number: _normalize_ws(text)
+                        for number, text in pages.items()}
+
+    seen_table_uids: set[str] = set()
+    seen_row_uids: set[str] = set()
+    seen_cell_uids: set[str] = set()
+    for table_index, table in enumerate(data.get("tables") or []):
+        expected = f"T-{table_index + 1}"
+        if table.get("table_id") != expected:
+            errors.append(
+                f"tables[{table_index}]: table_id must be sequential display "
+                f"label {expected!r}")
+        table_uid = table.get("table_uid")
+        if table_uid in seen_table_uids:
+            errors.append(
+                f"tables[{table_index}]: duplicate table_uid {table_uid!r}")
+        if table_uid:
+            seen_table_uids.add(table_uid)
+
+        column_keys = [column.get("column_key")
+                       for column in table.get("columns") or []]
+        if len(column_keys) != len(set(column_keys)):
+            errors.append(
+                f"tables[{table_index}]: column_key values must be unique")
+
+        references = [
+            (f"tables[{table_index}].title", table.get("title", ""), ref)
+            for ref in table.get("evidence_references") or []
+        ]
+        for row_index, row in enumerate(table.get("rows") or []):
+            row_uid = row.get("row_uid")
+            if row_uid in seen_row_uids:
+                errors.append(
+                    f"tables[{table_index}].rows[{row_index}]: duplicate "
+                    f"row_uid {row_uid!r}")
+            if row_uid:
+                seen_row_uids.add(row_uid)
+            cells = row.get("cells") or []
+            cell_keys = [cell.get("column_key") for cell in cells]
+            if len(cell_keys) != len(set(cell_keys)):
+                errors.append(
+                    f"tables[{table_index}].rows[{row_index}]: duplicate "
+                    "column_key in row")
+            if set(cell_keys) != set(column_keys):
+                errors.append(
+                    f"tables[{table_index}].rows[{row_index}]: cells must "
+                    "cover every declared column exactly once")
+            for cell_index, cell in enumerate(cells):
+                cell_uid = cell.get("cell_uid")
+                if cell_uid in seen_cell_uids:
+                    errors.append(
+                        f"tables[{table_index}].rows[{row_index}].cells"
+                        f"[{cell_index}]: duplicate cell_uid {cell_uid!r}")
+                if cell_uid:
+                    seen_cell_uids.add(cell_uid)
+                references.extend(
+                    (f"tables[{table_index}].rows[{row_index}].cells"
+                     f"[{cell_index}]", cell.get("value", ""), ref)
+                    for ref in cell.get("evidence_references") or []
+                )
+
+        for loc, value, ref in references:
+            doc_id = ref.get("document_id")
+            page = ref.get("page")
+            quote = ref.get("quote", "")
+            if doc_id != target_doc:
+                errors.append(
+                    f"{loc}: evidence cites {doc_id!r}, expected {target_doc!r}")
+                continue
+            if page not in normalized_pages:
+                errors.append(
+                    f"{loc}: page {page!r} does not exist in processed source")
+                continue
+            normalized_quote = _normalize_ws(quote)
+            if normalized_quote not in normalized_pages[page]:
+                errors.append(
+                    f"{loc}: quote not found on page {page} of processed source")
+                continue
+            if _normalize_ws(value) not in normalized_quote:
+                errors.append(
+                    f"{loc}: cited quote does not contain the table title/cell "
+                    f"value {value!r}")
     return errors

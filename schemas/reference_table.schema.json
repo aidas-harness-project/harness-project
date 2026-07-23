@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "reference_table.schema.json",
+  "title": "reference_table_DOC_XXX.json -- structured policy appendices and decision tables v0.1",
+  "description": "Cell-level representation of policy appendices such as disability-rate, fracture, burn, diagnosis-code, and benefit-grade tables. Every title and cell is independently grounded in the processed source.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "source_document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id"
+        },
+        "tables": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/table" }
+        }
+      },
+      "required": ["source_document_id", "tables"]
+    }
+  ],
+  "$defs": {
+    "cell": {
+      "type": "object",
+      "properties": {
+        "cell_uid": {
+          "type": "string",
+          "pattern": "^RC-[a-f0-9]{16,64}$"
+        },
+        "column_key": { "type": "string", "minLength": 1 },
+        "value": { "type": "string", "minLength": 1 },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
+          }
+        },
+        "review_required": { "type": "boolean" }
+      },
+      "required": [
+        "cell_uid",
+        "column_key",
+        "value",
+        "evidence_references",
+        "review_required"
+      ],
+      "additionalProperties": false
+    },
+    "row": {
+      "type": "object",
+      "properties": {
+        "row_uid": {
+          "type": "string",
+          "pattern": "^RR-[a-f0-9]{16,64}$"
+        },
+        "cells": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/cell" }
+        }
+      },
+      "required": ["row_uid", "cells"],
+      "additionalProperties": false
+    },
+    "column": {
+      "type": "object",
+      "properties": {
+        "column_key": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 }
+      },
+      "required": ["column_key", "label"],
+      "additionalProperties": false
+    },
+    "table": {
+      "type": "object",
+      "properties": {
+        "table_uid": {
+          "type": "string",
+          "pattern": "^RT-[a-f0-9]{16,64}$",
+          "description": "Stable source-derived machine identifier."
+        },
+        "table_id": {
+          "type": "string",
+          "pattern": "^T-[0-9]+$",
+          "description": "Sequential display label only."
+        },
+        "title": { "type": "string", "minLength": 1 },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/column" }
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/row" }
+        },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
+          }
+        },
+        "review_required": { "type": "boolean" }
+      },
+      "required": [
+        "table_uid",
+        "table_id",
+        "title",
+        "columns",
+        "rows",
+        "evidence_references",
+        "review_required"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

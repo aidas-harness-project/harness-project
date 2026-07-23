@@ -29,6 +29,12 @@ def test_doc_suffixed_filename_strips_suffix():
     assert schema_name_for(Path("normalized_policy_clause_DOC_001.json")) == "normalized_policy_clause.schema.json"
 
 
+def test_reference_table_doc_suffixed_filename_resolves():
+    assert schema_name_for(
+        Path("reference_table_DOC_004.json")) == \
+        "reference_table.schema.json"
+
+
 def test_ocr_result_doc_suffixed_filename_resolves():
     """ocr_result.json was found to have the exact same silent-overwrite
     risk as normalized_policy_clause.json -- fixed the same way, one file

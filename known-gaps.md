@@ -5,6 +5,18 @@ they don't get lost. Unlike `open-decisions.md` (deferred, waiting on the
 user), most of these have a clear resolution -- they're TODO, not
 undecided. Each entry: what's missing/broken, why it matters, what closes it.
 
+## Policy reference-table reading order -- OPEN 2026-07-24
+
+`reference_table_DOC_XXX.json` now prevents a whole-table blob from posing as
+cell provenance: every cell must independently resolve to the correct document,
+page, verbatim quote, value, and declared column, and clause links resolve by
+stable table/row UID. It does not yet prove the complete two-dimensional visual
+reading order of a complex merged-cell table. A text layer can still linearize
+merged headers or multi-column blocks ambiguously even when each individual
+cell value exists. Closing this requires layout-aware coordinates/merged-cell
+metadata from the document-processing stage and an order validator; keep such
+tables `review_required` until that representation exists.
+
 ## 1. Missing output schemas -- RESOLVED 2026-07-12
 
 All 12 were written and validated (schema loads, cross-file `$ref`s resolve,

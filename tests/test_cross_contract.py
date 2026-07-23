@@ -101,6 +101,7 @@ def _valid_clause():
         "termination_conditions": [],
         "dispute_resolution_conditions": [],
         "coverage_start_conditions": [],
+        "reference_table_refs": [],
         "confidence": 0.9,
         "evidence_references": [
             {"document_id": "DOC_001", "page": 1, "quote": "제3조(보험금의 지급사유)"}

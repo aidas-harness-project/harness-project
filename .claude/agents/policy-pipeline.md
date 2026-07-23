@@ -55,6 +55,17 @@ source text. A `normalized` boundary has at least one mapping. A boundary that c
 yet be normalized is `review_required` or `extraction_failed`, which deliberately
 blocks stage finalization rather than contaminating downstream analysis.
 
+`reference_table_{document_id}.json` — one file per policy document when its
+appendices contain decision-bearing tables (for example disability rates,
+diagnosis-code mappings, fracture/burn classifications, or benefit grades).
+Give tables, rows, and cells stable source-derived UIDs; `table_id` is display
+only. Declare the columns and emit every row with exactly one cell per column.
+Every title and every cell carries its own strict evidence reference. A single
+blob quote for the whole table is not cell provenance. Write the reference
+table before a normalized clause links to it, then use
+`reference_table_refs[{document_id, table_uid, row_uids?}]`. Emit an empty
+`reference_table_refs` array when a clause needs no table.
+
 # Access rules
 
 Read policy document text via `read_document_text(case_id, doc_id)` (the DAO) — never a raw file directly. Never open `source-cases/` or `data/ground_truth/`.

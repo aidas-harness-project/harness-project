@@ -258,6 +258,7 @@ def test_normalized_output_for_unregistered_doc_refused(isolated_dao, make_args)
             "termination_conditions": [],
             "dispute_resolution_conditions": [],
             "coverage_start_conditions": [],
+            "reference_table_refs": [],
             "confidence": 0.9, "review_required": True,
             "evidence_references": [{"document_id": "DOC_004", "page": 57, "quote": "회사는 보험금을 지급합니다"}],
         }],

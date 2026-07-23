@@ -429,7 +429,67 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
             f"{doc_id}: unresolved boundary: {error}"
             for error in policy_completeness.unresolved_boundaries(inventory)
         )
+        blockers.extend(
+            f"{doc_id}: reference table link: {error}"
+            for error in _reference_table_link_errors(case_id, normalized)
+        )
     return blockers
+
+
+def _reference_table_link_errors(case_id: str, normalized: dict) -> list[str]:
+    """Resolve every clause-to-table link by immutable table/row UID."""
+    errors = []
+    cache = {}
+    for clause_index, clause in enumerate(normalized.get("clauses") or []):
+        for ref_index, ref in enumerate(clause.get("reference_table_refs") or []):
+            loc = f"clauses[{clause_index}].reference_table_refs[{ref_index}]"
+            doc_id = ref.get("document_id")
+            if doc_id not in cache:
+                table_name = f"reference_table_{doc_id}.json"
+                table_contract = read_contract_data(case_id, table_name)
+                cache[doc_id] = table_contract
+                if table_contract is not None:
+                    schemas, registry = load_registry()
+                    schema_errors = validate_instance(
+                        table_contract,
+                        _cross_contract.REFERENCE_TABLE_SCHEMA,
+                        schemas,
+                        registry,
+                    )
+                    errors.extend(
+                        f"{table_name}: schema: {error}"
+                        for error in schema_errors)
+                    try:
+                        source_errors = _cross_contract.check_reference_table(
+                            table_contract,
+                            table_name,
+                            _redacted_text_for_doc(case_id, doc_id),
+                        )
+                    except _cross_contract.SourceUnavailable as exc:
+                        source_errors = [f"source unavailable: {exc}"]
+                    errors.extend(
+                        f"{table_name}: {error}" for error in source_errors)
+            table_contract = cache[doc_id]
+            if table_contract is None:
+                errors.append(
+                    f"{loc}: reference_table_{doc_id}.json does not exist")
+                continue
+            table = next(
+                (item for item in table_contract.get("tables") or []
+                 if item.get("table_uid") == ref.get("table_uid")),
+                None,
+            )
+            if table is None:
+                errors.append(
+                    f"{loc}: table_uid {ref.get('table_uid')!r} does not resolve")
+                continue
+            available_rows = {
+                row.get("row_uid") for row in table.get("rows") or []}
+            missing_rows = set(ref.get("row_uids") or []) - available_rows
+            if missing_rows:
+                errors.append(
+                    f"{loc}: row_uids do not resolve: {sorted(missing_rows)}")
+    return errors
 
 
 def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
@@ -490,6 +550,59 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
             print(f"FAIL: cross-contract validation errors for {target}:")
             for e in errors:
                 print(f"  - {e}")
+            return 1
+        link_errors = _reference_table_link_errors(case_id, data)
+        if link_errors:
+            print(f"FAIL: reference-table link errors for {target}:")
+            for error in link_errors:
+                print(f"  - {error}")
+            return 1
+    elif schema_name == _cross_contract.REFERENCE_TABLE_SCHEMA:
+        target_doc = _cross_contract.doc_id_from_filename(filename)
+        manifest = read_contract_data(case_id, "document_manifest.json")
+        if manifest is None:
+            print(f"FAIL: no document_manifest.json -- cannot verify {target}")
+            return 1
+        lineage_errors = _validate_manifest_lineage(case_id, manifest)
+        if lineage_errors:
+            print(f"FAIL: segment-lineage validation errors for {target}:")
+            for error in lineage_errors:
+                print(f"  - {error}")
+            return 1
+        entry = next(
+            (item for item in manifest.get("documents", [])
+             if item.get("document_id") == target_doc),
+            None,
+        )
+        if (
+            entry is None
+            or entry.get("document_type") != "insurance_policy"
+            or entry.get("downstream_disposition") != "automated_text_pipeline"
+        ):
+            print(
+                f"FAIL: {target_doc} is not a registered automated "
+                "insurance_policy source")
+            return 1
+        if (
+            target_doc is not None
+            and not segment_lineage.parent_processing_complete(
+                manifest, target_doc)
+        ):
+            print(
+                f"FAIL: {target_doc} is a segment whose physical parent's "
+                "processing is incomplete")
+            return 1
+        try:
+            errors = _cross_contract.check_reference_table(
+                data, filename, _redacted_text_for_doc(case_id, target_doc))
+        except _cross_contract.SourceUnavailable as exc:
+            print(f"FAIL: cross-contract source could not be verified for {target}:")
+            print(f"  - SOURCE_UNAVAILABLE: {exc}")
+            return 1
+        if errors:
+            print(f"FAIL: reference-table validation errors for {target}:")
+            for error in errors:
+                print(f"  - {error}")
             return 1
     elif schema_name == policy_completeness.INVENTORY_SCHEMA:
         target_doc = policy_completeness.doc_id_from_inventory_filename(filename)

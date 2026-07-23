@@ -45,6 +45,7 @@ def _normalized():
             "termination_conditions": [],
             "dispute_resolution_conditions": [],
             "coverage_start_conditions": [],
+            "reference_table_refs": [],
             "confidence": 0.9,
             "review_required": False,
             "evidence_references": [{

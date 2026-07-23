@@ -149,6 +149,37 @@
           "type": "array",
           "items": { "$ref": "#/$defs/condition_item" }
         },
+        "reference_table_refs": {
+          "type": "array",
+          "description": "Stable links to structured policy appendices required to interpret this clause.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "document_id": {
+                "$ref": "common_component_output.schema.json#/$defs/document_id"
+              },
+              "table_uid": {
+                "type": "string",
+                "pattern": "^RT-[a-f0-9]{16,64}$"
+              },
+              "display_table_id": {
+                "type": "string",
+                "pattern": "^T-[0-9]+$"
+              },
+              "row_uids": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^RR-[a-f0-9]{16,64}$"
+                }
+              }
+            },
+            "required": ["document_id", "table_uid"],
+            "additionalProperties": false
+          }
+        },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
         "evidence_references": {
           "type": "array",
@@ -174,6 +205,7 @@
         "termination_conditions",
         "dispute_resolution_conditions",
         "coverage_start_conditions",
+        "reference_table_refs",
         "confidence",
         "evidence_references",
         "review_required"
