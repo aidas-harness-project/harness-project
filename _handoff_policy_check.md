@@ -112,3 +112,27 @@ fastapi 미설치로 collection error(문서화된 기존 gap) — 실행 시 �
 - 테스트: 신규 tests/test_stage_dependencies.py(9), tests/test_dao_run_state.py에 Part 1 회귀 11건.
   기존 테스트 마이그레이션: fork/manifest_patch/run_checkpoint1의 passed seed를 finalize/backup_path로.
 - 전체 434 passed(frontend 제외).
+
+## Part 1 보강 + Part 2 — legacy migration, provenance, segment lineage (완료)
+
+- 기존 v0.2 run-state가 `passed + backup_path=null`인 경우 새 v0.3 스키마로는
+  어떤 정상 DAO 갱신도 할 수 없는 migration deadlock을 해소했다.
+  `migrate-run-state-v03`은 유효한 백업을 날조하지 않고 legacy invalid pass를
+  `failed`로 내린 뒤 append-only `migration_history`에 사유를 남긴다.
+- finalize는 run-state lock을 유지한 채 dependency 확인 → prospective finalized
+  state 생성 → snapshot publish → live run-state 기록을 수행한다. snapshot 안에도
+  finalize된 `_run_state.json`이 들어가며, 이미 publish된 backup 경로는 삭제하거나
+  덮어쓰지 않는다.
+- `document_manifest` v0.5에 physical/segment 역할, parent, 비연속 page ranges,
+  logical↔physical page map, derived-text SHA-256을 추가했다.
+- 신규 `tools/segment_lineage.py`가 parent 존재/self-parent/cycle, range/page-map,
+  processed marker, derived-text digest를 검증한다.
+- normalized policy write는 manifest에 등록된 `insurance_policy` automated source만
+  허용하며 write 시점마다 lineage를 다시 검증한다.
+- physical automated document는 classification result가 없거나 manifest type과
+  다르면 document processing을 finalize할 수 없다. Segment는 독립 classifier를
+  가장하지 않고 parent document type을 상속한다.
+- 회귀 결과: Part 1/2 관련 82 passed, frontend 의존성 테스트 2개 제외 전체
+  `460 passed, 1 skipped`.
+- CASE_030 실제 data/run-state migration은 아직 수행 전이다. 코드 커밋 후 DAO
+  migration과 manifest segment 등록을 별도 데이터 작업으로 수행해야 한다.

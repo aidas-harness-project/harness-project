@@ -39,6 +39,8 @@ schemas.zip
 # ocr_extract.py's project-local scratch (page images) -- transient, cleaned up on exit
 _ocr_scratch/
 _redaction_scratch/
+_segmentation_scratch/
+_source-cases/
 
 # graphify knowledge-graph build output -- regenerable from the corpus, not source
 graphify-out/

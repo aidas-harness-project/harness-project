@@ -56,6 +56,10 @@ Subcommands:
     update-run-state CASE_ID RUN_ID STAGE STATUS --held-by NAME
         (STATUS in pending|in_progress|failed|skipped; 'passed' is refused here --
          a stage passes only via finalize-stage, atomically with its snapshot)
+    migrate-run-state-v03 CASE_ID RUN_ID --held-by NAME
+        (audited one-time repair for legacy dependency-invalid or
+         passed-without-backup entries; invalid passes are downgraded, never
+         given fabricated backups)
     finalize-stage CASE_ID RUN_ID STAGE --held-by NAME
         (dependency-checked; builds+validates the P10 snapshot, then records
          status=passed + backup_path + completed_at in one run-state lock)
@@ -78,6 +82,7 @@ import re
 import shutil
 import sys
 import time
+import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -86,6 +91,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 from _validation import load_registry, validate_instance
 import _cross_contract
 import stage_dependencies
+import segment_lineage
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
@@ -337,6 +343,29 @@ def _redacted_text_for_doc(case_id, doc_id):
     return redacted.read_text(encoding="utf-8")
 
 
+def _segment_text_reader(case_id):
+    """Reader closure segment_lineage.validate_segment_lineage needs: given a
+    document_id, return that document's derived/redacted processed text, or
+    None. Uses the standard processed path (data/processed/CASE/DOC/redacted_text.md),
+    which is where a segment's derived_text_path points."""
+    def _read(document_id):
+        return _redacted_text_for_doc(case_id, document_id)
+    return _read
+
+
+def _classification_reader(case_id):
+    """Reader closure for classification/manifest consistency: given a
+    document_id, return its classification_result_{id}.json dict, or None."""
+    def _read(document_id):
+        return read_contract_data(case_id, f"classification_result_{document_id}.json")
+    return _read
+
+
+def _validate_manifest_lineage(case_id, manifest) -> list:
+    """Segment-lineage errors for a manifest about to be written. Empty = clean."""
+    return segment_lineage.validate_segment_lineage(manifest, _segment_text_reader(case_id))
+
+
 def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
     """Run the registered cross-contract checks for schema_name (schema-shape
     validation already passed by the time this is called). Returns 0 to allow
@@ -345,6 +374,45 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
     source cannot be verified must never be written."""
     if schema_name == _cross_contract.NORMALIZED_POLICY_CLAUSE_SCHEMA:
         target_doc = _cross_contract.doc_id_from_filename(filename)
+
+        # The cited document must be a registered automated-text source in the
+        # manifest. CASE_030's DOC_004/005/006 were cited by normalized clause
+        # files while absent from the manifest entirely -- a segment posing as
+        # a first-class document with no verifiable lineage. Refuse that here,
+        # before the (also-required) quote-verification below.
+        manifest = read_contract_data(case_id, "document_manifest.json")
+        if manifest is None:
+            print(f"FAIL: cross-contract source could not be verified for {target}:")
+            print(f"  - NO_MANIFEST: document_manifest.json does not exist -- the cited "
+                  f"document {target_doc} cannot be confirmed as a registered case document")
+            return 1
+        lineage_errors = _validate_manifest_lineage(case_id, manifest)
+        if lineage_errors:
+            print(f"FAIL: segment-lineage validation errors for {target} -- source changed "
+                  "or no longer matches its manifest:")
+            for e in lineage_errors:
+                print(f"  - {e}")
+            return 1
+        if target_doc is not None and not segment_lineage.is_registered_automated_source(manifest, target_doc):
+            print(f"FAIL: cross-contract validation errors for {target}:")
+            print(f"  - UNREGISTERED_SOURCE: {target_doc} is not a manifest document with "
+                  f"downstream_disposition=automated_text_pipeline -- a normalized clause file "
+                  f"may only cite a registered, automated-text document (segment or physical)")
+            return 1
+        target_entry = next(
+            (d for d in manifest.get("documents", [])
+             if d.get("document_id") == target_doc), None)
+        if target_entry is not None and target_entry.get("document_type") != "insurance_policy":
+            print(f"FAIL: cross-contract validation errors for {target}:")
+            print(f"  - WRONG_DOCUMENT_TYPE: {target_doc} is "
+                  f"{target_entry.get('document_type')!r}, not 'insurance_policy'")
+            return 1
+        if target_doc is not None and not segment_lineage.parent_processing_complete(manifest, target_doc):
+            print(f"FAIL: cross-contract validation errors for {target}:")
+            print(f"  - PARENT_INCOMPLETE: {target_doc} is a segment whose physical parent's "
+                  f"processing is not complete -- the segment cannot be used downstream yet")
+            return 1
+
         redacted_text = _redacted_text_for_doc(case_id, target_doc)
         try:
             errors = _cross_contract.check_normalized_policy_clause(data, filename, redacted_text)
@@ -384,6 +452,13 @@ def cmd_write_contract(args):
             rc = _run_cross_contract(args.case_id, args.filename, schema_name, data, target)
             if rc != 0:
                 return rc
+        if schema_name == "document_manifest.schema.json":
+            lineage_errors = _validate_manifest_lineage(args.case_id, data)
+            if lineage_errors:
+                print(f"FAIL: segment-lineage validation errors for {target} -- not written:")
+                for e in lineage_errors:
+                    print(f"  - {e}")
+                return 1
         atomic_write_json(target, data)
         print(f"PASS: wrote {target}")
         if args.stage:
@@ -435,6 +510,10 @@ def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_b
         if errors:
             return False, "FAIL: schema validation errors for " + str(target) + " -- not written:\n" + \
                 "\n".join(f"  - {e}" for e in errors)
+        lineage_errors = _validate_manifest_lineage(case_id, manifest)
+        if lineage_errors:
+            return False, "FAIL: segment-lineage validation errors for " + str(target) + " -- not written:\n" + \
+                "\n".join(f"  - {e}" for e in lineage_errors)
         atomic_write_json(target, manifest)
         if stage:
             # in_progress, not passed -- see cmd_write_contract: patching one
@@ -823,6 +902,72 @@ def cmd_update_run_state(args):
     return 0
 
 
+def cmd_migrate_run_state_v03(args):
+    """Migrate legacy v0.2 state into the v0.3 invariants through the DAO.
+
+    A legacy pass without a P10 backup, or with unmet prerequisites, is not
+    preserved or given a fabricated backup. It is downgraded to failed so the
+    stage must genuinely rerun, and the change remains in migration_history.
+    """
+    target = run_state_path(args.case_id)
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id, "migrate run-state to v0.3")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        state = load_run_state(args.case_id)
+        state["run_id"] = args.run_id or state.get("run_id")
+        changes = []
+        for entry in state.get("stages", []):
+            if entry.get("status") != "passed":
+                continue
+            stage = entry.get("stage_name")
+            reasons = []
+            if not entry.get("backup_path"):
+                reasons.append("missing P10 backup_path")
+            blockers = stage_dependencies.check_dependencies(stage, "passed", state)
+            if blockers:
+                reasons.append("unmet dependencies: " + "; ".join(blockers))
+            if reasons:
+                entry["status"] = "failed"
+                entry["completed_at"] = now_iso()
+                entry["backup_path"] = None
+                changes.append(
+                    f"{stage}: passed->failed ({' | '.join(reasons)})")
+
+        if not changes:
+            errors = _schema_check(state, "run_state.schema.json")
+            if errors:
+                print(f"REFUSED: run-state has non-migratable schema errors in {target}:")
+                for e in errors:
+                    print(f"  - {e}")
+                return 1
+            print("NOOP: run-state already satisfies v0.3 invariants")
+            return 0
+
+        state.setdefault("migration_history", []).append({
+            "migration_id": "run_state_v02_to_v03",
+            "migrated_at": now_iso(),
+            "held_by": args.held_by,
+            "changes": changes,
+        })
+        errors = _schema_check(state, "run_state.schema.json")
+        if errors:
+            print(f"FAIL: migrated run-state is schema-invalid for {target} -- not written:")
+            for e in errors:
+                print(f"  - {e}")
+            return 1
+        save_run_state(args.case_id, state)
+        print("OK: migrated run-state to v0.3:")
+        for change in changes:
+            print(f"  - {change}")
+        return 0
+    finally:
+        release_lock(target)
+
+
 def _set_human_input_status(case_id, stage, status, description, held_by, run_id):
     """P7's human-input wait tracking, in _run_state.json's human_input_status
     array. Holds the run-state lock across the whole read+modify+write, same
@@ -948,7 +1093,7 @@ def cmd_get_last_passed_stage(args):
     return 0
 
 
-def _build_snapshot_atomic(case_id: str, stage: str) -> Path:
+def _build_snapshot_atomic(case_id: str, stage: str, prospective_state: dict) -> Path:
     """Build a full cumulative snapshot of a case's outputs (P10) and place it
     at its final _backups/step_<N>_<stage>/ path atomically.
 
@@ -961,13 +1106,15 @@ def _build_snapshot_atomic(case_id: str, stage: str) -> Path:
     starts clean. Returns the final destination path.
     """
     src = case_dir(case_id)
-    n = len([s for s in load_run_state(case_id)["stages"] if s.get("backup_path")]) + 1
     backups = src / "_backups"
     backups.mkdir(parents=True, exist_ok=True)
+    # Published backups are immutable. Pick the first unused sequence number;
+    # never delete or replace an existing destination.
+    n = 1
+    while (backups / f"step_{n:02d}_{stage}").exists():
+        n += 1
     dest = backups / f"step_{n:02d}_{stage}"
-    tmp = backups / f".tmp_snapshot_{stage}_{os.getpid()}"
-    if tmp.exists():
-        shutil.rmtree(tmp)
+    tmp = backups / f".tmp_snapshot_{stage}_{uuid.uuid4().hex}"
     tmp.mkdir(parents=True)
     try:
         for item in src.iterdir():
@@ -977,9 +1124,11 @@ def _build_snapshot_atomic(case_id: str, stage: str) -> Path:
                 shutil.copy2(item, tmp / item.name)
             elif item.is_dir():
                 shutil.copytree(item, tmp / item.name, dirs_exist_ok=True)
-        # Atomic publish. If a same-named dest somehow exists (retry), replace it.
+        # A restored snapshot must contain the finalized state, not the
+        # pre-finalization state that was live when copying began.
+        atomic_write_json(tmp / "_run_state.json", prospective_state)
         if dest.exists():
-            shutil.rmtree(dest)
+            raise FileExistsError(f"refusing to overwrite immutable backup {dest}")
         os.replace(tmp, dest)
     except Exception:
         if tmp.exists():
@@ -1002,41 +1151,105 @@ def _finalize_stage(case_id, run_id, stage, held_by):
     failure (dependency unmet, snapshot failure, lock contention, schema
     failure) -- in every None case the stage is NOT passed.
     """
-    # Pre-check dependencies against current state so we don't build an
-    # expensive snapshot for a stage that can't legally pass anyway.
-    pre_state = load_run_state(case_id)
-    blockers = stage_dependencies.check_dependencies(stage, "passed", pre_state)
-    if blockers:
-        print(f"REFUSED: cannot finalize {stage!r} -- unmet dependencies:")
-        for b in blockers:
-            print(f"  - {b}")
+    target = run_state_path(case_id)
+    existing_lock = acquire_lock_blocking(
+        target, held_by, run_id or "unknown", f"finalize stage: {stage}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return None
-
+    published = None
     try:
-        dest = _build_snapshot_atomic(case_id, stage)
-    except Exception as exc:  # noqa: BLE001 -- report and refuse, never half-pass
-        print(f"FAIL: snapshot for stage {stage!r} could not be built -- stage NOT passed: {exc}")
-        return None
-    # The snapshot must have been published (the atomic rename succeeded and a
-    # real directory now stands at dest). Emptiness is NOT a failure: an early
-    # stage (intake) legitimately has no outputs to snapshot yet -- the point
-    # is that the backup exists as an intact, fully-copied directory, not that
-    # it is non-empty.
-    if not dest.exists() or not dest.is_dir():
-        print(f"FAIL: snapshot at {dest} was not published -- stage {stage!r} NOT passed")
-        return None
+        # Keep the run-state lock from dependency check through snapshot
+        # publication and the live state write, so no run-state transition can
+        # interleave with finalization.
+        state = load_run_state(case_id)
+        blockers = stage_dependencies.check_dependencies(stage, "passed", state)
+        if blockers:
+            print(f"REFUSED: cannot finalize {stage!r} -- unmet dependencies:")
+            for b in blockers:
+                print(f"  - {b}")
+            return None
 
-    state = _update_run_state(case_id, run_id, stage, "passed", held_by,
-                              backup_path=str(dest), finalize=True)
-    if state is None:
-        # The snapshot exists but the pass couldn't be recorded (lock/schema).
-        # The stage is NOT passed -- the snapshot is a harmless orphan that a
-        # retry will supersede (step_N numbering counts recorded backups, so a
-        # re-run mints a fresh number rather than trusting this one).
-        print(f"PARTIAL: snapshot written at {dest}, but run-state could not record 'passed' -- "
-              f"stage {stage!r} is NOT passed; retry finalize-stage.")
-        return None
-    return state
+        if stage == "document_processing":
+            manifest = read_contract_data(case_id, "document_manifest.json")
+            if manifest is not None:
+                mismatch = segment_lineage.check_classification_manifest_consistency(
+                    manifest, _classification_reader(case_id),
+                    require_complete=True)
+                if mismatch:
+                    print("REFUSED: cannot finalize 'document_processing' -- "
+                          "manifest/classification inconsistency:")
+                    for m in mismatch:
+                        print(f"  - {m}")
+                    return None
+                lineage_errors = _validate_manifest_lineage(case_id, manifest)
+                if lineage_errors:
+                    print("REFUSED: cannot finalize 'document_processing' -- "
+                          "segment-lineage errors:")
+                    for e in lineage_errors:
+                        print(f"  - {e}")
+                    return None
+
+        state["run_id"] = run_id or state.get("run_id")
+        entry = next(
+            (s for s in state["stages"] if s["stage_name"] == stage), None)
+        if entry is None:
+            entry = {
+                "stage_name": stage, "status": "pending",
+                "started_at": None, "completed_at": None,
+                "attempt_count": 0, "backup_path": None,
+            }
+            state["stages"].append(entry)
+
+        # Reserve the path while holding the run-state lock. The builder uses
+        # the same first-unused rule, so the prospective state and snapshot
+        # point at the identical immutable directory.
+        backups = case_dir(case_id) / "_backups"
+        n = 1
+        while (backups / f"step_{n:02d}_{stage}").exists():
+            n += 1
+        reserved_dest = backups / f"step_{n:02d}_{stage}"
+        entry["status"] = "passed"
+        entry["completed_at"] = now_iso()
+        entry["backup_path"] = str(reserved_dest)
+        state["updated_at"] = now_iso()
+        errors = _schema_check(state, "run_state.schema.json")
+        if errors:
+            print(f"FAIL: finalized run-state would be schema-invalid for {target} -- not written:")
+            for e in errors:
+                print(f"  - {e}")
+            return None
+
+        try:
+            published = _build_snapshot_atomic(case_id, stage, state)
+        except Exception as exc:  # noqa: BLE001
+            print(f"FAIL: snapshot for stage {stage!r} could not be built -- "
+                  f"stage NOT passed: {exc}")
+            return None
+        if not published.exists() or not published.is_dir():
+            print(f"FAIL: snapshot at {published} was not published -- "
+                  f"stage {stage!r} NOT passed")
+            return None
+        if published != reserved_dest:
+            shutil.rmtree(published, ignore_errors=True)
+            published = None
+            print("FAIL: reserved snapshot path drifted during finalize -- "
+                  "stage NOT passed")
+            return None
+        try:
+            atomic_write_json(target, state)
+        except Exception as exc:  # noqa: BLE001
+            # This newly published directory was never recorded as a backup;
+            # remove only the orphan. Existing backups are never touched.
+            shutil.rmtree(published, ignore_errors=True)
+            published = None
+            print("FAIL: snapshot published but run-state write failed -- "
+                  f"stage NOT passed: {exc}")
+            return None
+        return state
+    finally:
+        release_lock(target)
 
 
 def cmd_snapshot_backup(args):
@@ -1238,6 +1451,11 @@ def main():
     p.add_argument("status", choices=["pending", "in_progress", "failed", "skipped"])
     p.add_argument("--held-by", required=True)
     p.set_defaults(fn=cmd_update_run_state)
+
+    p = sub.add_parser("migrate-run-state-v03")
+    p.add_argument("case_id"); p.add_argument("run_id")
+    p.add_argument("--held-by", required=True)
+    p.set_defaults(fn=cmd_migrate_run_state_v03)
 
     p = sub.add_parser("set-human-input-status")
     p.add_argument("case_id"); p.add_argument("stage")

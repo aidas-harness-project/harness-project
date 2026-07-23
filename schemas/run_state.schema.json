@@ -17,6 +17,11 @@
       "type": "array",
       "description": "Tracks P7's human-input waits. Entries are never deleted, only updated in place (waiting -> received), so the full history of what was waited on stays visible.",
       "items": { "$ref": "#/$defs/human_input_entry" }
+    },
+    "migration_history": {
+      "type": "array",
+      "description": "Append-only audit history for explicit DAO-owned run-state schema migrations. A migration never fabricates a passed stage or silently deletes legacy state.",
+      "items": { "$ref": "#/$defs/migration_entry" }
     }
   },
   "required": ["case_id", "run_id", "stages"],
@@ -85,6 +90,21 @@
         "received_at": { "type": ["string", "null"], "format": "date-time" }
       },
       "required": ["stage_name", "status", "description", "requested_at"]
+    },
+    "migration_entry": {
+      "type": "object",
+      "properties": {
+        "migration_id": { "type": "string", "minLength": 1 },
+        "migrated_at": { "type": "string", "format": "date-time" },
+        "held_by": { "type": "string", "minLength": 1 },
+        "changes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "required": ["migration_id", "migrated_at", "held_by", "changes"],
+      "additionalProperties": false
     }
   }
 }

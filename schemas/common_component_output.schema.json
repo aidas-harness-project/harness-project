@@ -103,6 +103,7 @@
       "enum": [
         "insurance_certificate",
         "insurance_policy",
+        "application_form",
         "diagnosis_certificate",
         "medical_record",
         "imaging_report",
@@ -167,6 +168,17 @@
         "quote": { "type": "string", "minLength": 1 }
       },
       "required": ["quote"]
+    },
+    "strict_evidence_reference": {
+      "type": "object",
+      "description": "A reference to a source quote where NONE of document_id/page/quote may be omitted -- used where provenance must be independently verifiable and structure must not be relied on to make document/page 'obvious' (see normalized_policy_clause). quote must contain at least one non-whitespace character; cross-contract validation additionally verifies the quote appears verbatim on the cited page of the processed text.",
+      "properties": {
+        "document_id": { "$ref": "#/$defs/document_id" },
+        "document_type": { "$ref": "#/$defs/document_type" },
+        "page": { "type": "integer", "minimum": 1 },
+        "quote": { "type": "string", "pattern": "\\S" }
+      },
+      "required": ["document_id", "page", "quote"]
     }
   }
 }

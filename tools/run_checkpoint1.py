@@ -77,13 +77,23 @@ from ocr_extract import build_ocr_providers, run_ocr
 
 ROOT = Path(__file__).resolve().parent.parent
 
-DOCUMENT_TYPES = ["insurance_certificate", "insurance_policy", "diagnosis_certificate",
-                   "medical_record", "imaging_report", "receipt", "insurer_response", "other"]
-CLASSIFICATION_PROMPT_VERSION = "classification_v0.1"
+DOCUMENT_TYPES = ["insurance_certificate", "insurance_policy", "application_form",
+                   "diagnosis_certificate", "medical_record", "imaging_report",
+                   "receipt", "insurer_response", "other"]
+CLASSIFICATION_PROMPT_VERSION = "classification_v0.2"
 
+# The three easily-confused Korean insurance forms all carry policy-like
+# language, so a bare type list collapses them into insurance_policy (CASE_030:
+# a 증권 and a 청약 both misclassified that way). This guidance names the
+# distinguishing signal for each so the model separates them.
 CLASSIFY_PROMPT_TEMPLATE = """You are classifying an insurance claim document by its type, from its
 already-transcribed text (not the raw image). Choose exactly one of these types:
 {types}
+
+These three Korean forms look similar -- distinguish them by their defining marker:
+- insurance_policy (보험약관): the full contract terms/clauses -- articles like 제N조, 지급사유, 면책, a table of contents of 특별약관. It is the rulebook, not a record of one contract.
+- insurance_certificate (증권서류): a "보험증권" issued as proof of ONE concluded contract -- a 계약번호/증권번호, 보험기간, 보장내용 with 가입금액 per coverage, 총보험료. It references the 약관 but is not the 약관 itself.
+- application_form (청약서류): a "청약서"/가입 신청서 the applicant fills in and signs to APPLY -- 청약일, applicant/피보험자 자필서명, 계약전 알릴의무 질문서, 상품설명서 cover pages. It precedes the contract; it is not the contract terms and not the issued certificate.
 
 Reply with ONLY a JSON object, no other text, in exactly this shape:
 {{"predicted_document_type": "<one of the types above>", "document_type_label": "<Korean display label>",

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "document_manifest.schema.json",
-  "title": "document_manifest.json -- case document roster v0.4",
-  "description": "The list of every document in a case and its processing status. This is a shared state file updated by multiple stages in sequence, not a single component's output -- it does not use the common output envelope. Update discipline: each stage adds only its own owner fields and never modifies fields it doesn't own (owner is documented per field below). This discipline is enforced structurally by the DAO's write_contract lock (see harness-guardrails P5), not just by convention.",
+  "title": "document_manifest.json -- case document roster v0.5",
+  "description": "The list of every document in a case and its processing status. This is a shared state file updated by multiple stages in sequence, not a single component's output -- it does not use the common output envelope. Update discipline: each stage adds only its own owner fields and never modifies fields it doesn't own (owner is documented per field below). This discipline is enforced structurally by the DAO's write_contract lock (see harness-guardrails P5), not just by convention. v0.5: first-class SEGMENT entries -- a document derived from a page-range of a physical parent (CASE_030's 240-page policy PDF was carved into DOC_004/005/006). document_role distinguishes 'physical' (a real raw file) from 'segment' (a derived page-range of a parent); a segment declares source_document_id, its page_map (logical printed page <-> parent PDF physical page), derivation_method, and derived_text_path, and MUST NOT fake independent OCR/classification metadata it never underwent. Lineage (parent exists, no self-parent/cycle, valid ranges, markers-match-declared-pages, parent processed before a segment is usable downstream) is enforced by the DAO's segment-lineage validator, which JSON Schema cannot express (it cannot read the processed text or compare entries to each other).",
   "type": "object",
   "properties": {
     "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
@@ -34,19 +34,63 @@
           "type": "string",
           "description": "owner: Case Intake"
         },
+        "document_role": {
+          "enum": ["physical", "segment"],
+          "description": "owner: Case Intake / document-pipeline. 'physical' = a real raw file (data/raw/...). 'segment' = a derived page-range of a physical parent (source_document_id), e.g. CASE_030's DOC_004/005/006 carved from the 240-page policy. Absent is treated as 'physical' for backward compatibility."
+        },
+        "source_document_id": {
+          "anyOf": [
+            { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+            { "type": "null" }
+          ],
+          "description": "owner: document-pipeline. For a segment: the physical parent document_id this segment was carved from. Must exist in this manifest and must not equal this document's own id (no self-parent); the lineage validator additionally forbids cycles. null/absent for a physical document."
+        },
+        "derivation_method": {
+          "anyOf": [
+            { "enum": ["page_extraction", "embedded_text_segment", "ocr_segment"] },
+            { "type": "null" }
+          ],
+          "description": "owner: document-pipeline. How a segment's text was derived from its parent. Honest label -- a segment carved from a parent's already-extracted text is 'embedded_text_segment'/'page_extraction', NOT presented as if it underwent its own independent OCR."
+        },
+        "derived_text_path": {
+          "type": ["string", "null"],
+          "description": "owner: document-pipeline. For a segment: the processed redacted text path (data/processed/CASE_XXX/DOC_XXX/redacted_text.md) built from the declared page range. null for a physical document (which uses redacted_text_path).",
+          "pattern": "^data/processed/CASE_[0-9]+/DOC_[0-9]+/redacted_text\\.md$"
+        },
+        "derived_text_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "owner: document-pipeline. SHA-256 of the exact derived redacted_text.md bytes for a segment. The DAO recomputes it on manifest writes, document-processing finalize, and normalized-policy writes so a segment cannot change after its lineage was approved."
+        },
+        "page_map": {
+          "type": ["array", "null"],
+          "description": "owner: document-pipeline. For a segment: the explicit mapping from each of the segment's logical printed pages to the parent's PDF physical page. Distinguishes the printed page number that appears in <<<PAGE page=N>>> markers (logical_page) from the parent PDF's physical page index (source_physical_page), which can differ. The lineage validator checks that logical_page values match the segment's own redacted-text markers exactly.",
+          "items": { "$ref": "#/$defs/page_map_entry" }
+        },
+        "segment_page_ranges": {
+          "type": ["array", "null"],
+          "description": "owner: document-pipeline. For a segment: the logical page ranges (possibly NON-contiguous -- DOC_004 is [{57,58},{118,119}]) this segment covers. A single {start,end} spanning a gap (e.g. 57-119) is wrong and is rejected by the lineage validator. Derivable from page_map but stated explicitly for readability and range-validity checks.",
+          "items": { "$ref": "#/$defs/page_range" }
+        },
         "file_path": {
-          "type": "string",
-          "description": "owner: Case Intake. Original path (data/raw/CASE_XXX/...)",
-          "pattern": "^data/raw/"
+          "type": ["string", "null"],
+          "description": "owner: Case Intake. Original raw path (data/raw/CASE_XXX/...) for a physical document; null for a segment (a segment has no raw file of its own).",
+          "anyOf": [
+            { "type": "string", "pattern": "^data/raw/" },
+            { "type": "null" }
+          ]
         },
         "file_format": {
-          "enum": ["pdf", "image", "text", "spreadsheet", "other"],
-          "description": "owner: Case Intake"
+          "anyOf": [
+            { "enum": ["pdf", "image", "text", "spreadsheet", "other"] },
+            { "type": "null" }
+          ],
+          "description": "owner: Case Intake. null for a segment (no file of its own)."
         },
         "file_size_bytes": {
-          "type": "integer",
+          "type": ["integer", "null"],
           "minimum": 0,
-          "description": "owner: Case Intake"
+          "description": "owner: Case Intake. null for a segment (no file of its own)."
         },
         "pre_flagged_type": {
           "anyOf": [
@@ -133,6 +177,39 @@
       "required": ["document_id", "file_name", "file_path", "file_format", "file_size_bytes", "ocr_status"],
       "allOf": [
         {
+          "description": "A segment declares its lineage: parent id, how it was derived, its derived text path, and its page ranges (all non-null). This is the schema half; the DAO's lineage validator checks the parent exists, no self-parent/cycle, ranges are valid, and the declared logical pages match the segment's redacted-text markers.",
+          "if": {
+            "properties": { "document_role": { "const": "segment" } },
+            "required": ["document_role"]
+          },
+          "then": {
+            "properties": {
+              "source_document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+              "derivation_method": { "enum": ["page_extraction", "embedded_text_segment", "ocr_segment"] },
+              "derived_text_path": { "type": "string", "minLength": 1 },
+              "derived_text_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "segment_page_ranges": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/page_range" } },
+              "page_map": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/page_map_entry" } }
+            },
+            "required": ["source_document_id", "derivation_method", "derived_text_path", "derived_text_sha256", "segment_page_ranges", "page_map"]
+          }
+        },
+        {
+          "description": "A physical document (document_role physical or absent) must have a real raw file_path -- it may not be null the way a segment's is.",
+          "if": {
+            "anyOf": [
+              { "properties": { "document_role": { "const": "physical" } }, "required": ["document_role"] },
+              { "not": { "required": ["document_role"] } }
+            ]
+          },
+          "then": {
+            "properties": {
+              "file_path": { "type": "string", "pattern": "^data/raw/" }
+            },
+            "required": ["file_path"]
+          }
+        },
+        {
           "if": {
             "properties": { "downstream_disposition": { "const": "expert_review_only" } },
             "required": ["downstream_disposition"]
@@ -150,6 +227,26 @@
           }
         }
       ]
+    },
+    "page_range": {
+      "type": "object",
+      "description": "An inclusive logical (printed) page range. start <= end enforced by the lineage validator, not the schema (schema can't compare two of its own fields).",
+      "properties": {
+        "start": { "type": "integer", "minimum": 1 },
+        "end": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["start", "end"],
+      "additionalProperties": false
+    },
+    "page_map_entry": {
+      "type": "object",
+      "description": "Maps one of a segment's logical printed pages to the parent PDF's physical page. logical_page is the number that appears in the segment's <<<PAGE page=N>>> markers (and in evidence-reference `page` values); source_physical_page is the parent PDF's 1-based physical page index, which may differ from the printed number. source_physical_page is optional: when the parent's physical indexing is unknown it may be omitted, but logical_page is always required and is what the lineage validator checks against the markers.",
+      "properties": {
+        "logical_page": { "type": "integer", "minimum": 1 },
+        "source_physical_page": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["logical_page", "source_physical_page"],
+      "additionalProperties": false
     }
   }
 }

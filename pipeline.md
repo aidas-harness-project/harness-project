@@ -82,8 +82,19 @@ structure, no registry entry). See open-decisions.md #2.
 
 ## Document types
 
-`insurance_certificate`, `insurance_policy`, `diagnosis_certificate`,
-`medical_record`, `imaging_report`, `receipt`, `insurer_response`, `other`.
+`insurance_certificate`, `insurance_policy`, `application_form`,
+`diagnosis_certificate`, `medical_record`, `imaging_report`, `receipt`,
+`insurer_response`, `other`.
+
+`insurance_certificate` (증권서류) / `insurance_policy` (보험약관) /
+`application_form` (청약서류) are easily confused — all three carry
+policy-like language. Distinguish by defining marker: the 약관 is the full
+contract rulebook (제N조/지급사유/면책/특별약관 목차); the 증권 is proof of one
+concluded contract (계약·증권번호, 보험기간, 보장내용·가입금액, 총보험료); the
+청약서 is the signed application that precedes the contract (청약일, 자필서명,
+계약전 알릴의무 질문서, 상품설명서). `application_form` was added 2026-07-23
+after CASE_030 found a 청약서류 had no type to land in and was absorbed into
+`insurance_policy`.
 
 ## Case types
 

@@ -3,6 +3,9 @@ get-last-passed-stage -- the resume-from-interruption mechanism
 (harness-guardrails P7/P10) reads through get_last_passed_stage, not by
 re-deriving progress from scattered output files.
 """
+import json
+from pathlib import Path
+
 import dao
 
 
@@ -231,7 +234,7 @@ def test_finalize_refused_when_dependency_unmet_leaves_stage_unpassed(isolated_d
 def test_finalize_refused_when_snapshot_fails_does_not_pass_stage(isolated_dao, make_args, run_id, monkeypatch):
     """If snapshot construction raises, the stage must NOT be recorded passed
     (P10: never half-finalize). Simulated by making the snapshot builder throw."""
-    def boom(case_id, stage):
+    def boom(case_id, stage, prospective_state):
         raise OSError("disk full")
     monkeypatch.setattr(dao, "_build_snapshot_atomic", boom)
 
@@ -241,6 +244,76 @@ def test_finalize_refused_when_snapshot_fails_does_not_pass_stage(isolated_dao, 
     state = dao.load_run_state("CASE_009")
     passed = [s for s in state["stages"] if s["status"] == "passed"]
     assert passed == [], "a snapshot failure must leave the stage un-passed"
+
+
+def test_legacy_v02_invalid_pass_is_migrated_with_audit_history(
+        isolated_dao, make_args, run_id):
+    """CASE_030's legacy shape has a DAO-owned repair path. It never invents
+    a backup: the unverified pass is downgraded and an audit entry is kept."""
+    state = dao.load_run_state("CASE_009")
+    state["run_id"] = run_id
+    state["stages"] = [
+        {
+            "stage_name": "document_processing", "status": "in_progress",
+            "started_at": dao.now_iso(), "completed_at": None,
+            "attempt_count": 3, "backup_path": None,
+        },
+        {
+            "stage_name": "policy_clause_processing", "status": "passed",
+            "started_at": None, "completed_at": dao.now_iso(),
+            "attempt_count": 0, "backup_path": None,
+        },
+    ]
+    dao.atomic_write_json(dao.run_state_path("CASE_009"), state)
+
+    rc = dao.cmd_migrate_run_state_v03(
+        make_args(run_id=run_id, held_by="migration-test"))
+
+    assert rc == 0
+    migrated = dao.load_run_state("CASE_009")
+    policy = next(
+        s for s in migrated["stages"]
+        if s["stage_name"] == "policy_clause_processing")
+    assert policy["status"] == "failed"
+    assert policy["backup_path"] is None
+    history = migrated["migration_history"][-1]
+    assert history["migration_id"] == "run_state_v02_to_v03"
+    assert "missing P10 backup_path" in history["changes"][0]
+    assert dao._schema_check(migrated, "run_state.schema.json") == []
+
+
+def test_finalize_snapshot_contains_finalized_run_state(
+        isolated_dao, make_args, run_id):
+    rc = dao.cmd_snapshot_backup(
+        make_args(run_id=run_id, stage="intake"))
+    assert rc == 0
+    live = dao.load_run_state("CASE_009")
+    entry = next(s for s in live["stages"] if s["stage_name"] == "intake")
+    snap_state = json.loads(
+        (Path(entry["backup_path"]) / "_run_state.json").read_text(
+            encoding="utf-8"))
+    snap_entry = next(
+        s for s in snap_state["stages"] if s["stage_name"] == "intake")
+    assert snap_entry["status"] == "passed"
+    assert snap_entry["backup_path"] == entry["backup_path"]
+
+
+def test_finalize_never_overwrites_existing_backup(
+        isolated_dao, make_args, run_id):
+    backups = isolated_dao / "outputs" / "CASE_009" / "_backups"
+    existing = backups / "step_01_intake"
+    existing.mkdir(parents=True)
+    sentinel = existing / "sentinel.txt"
+    sentinel.write_text("immutable", encoding="utf-8")
+
+    rc = dao.cmd_snapshot_backup(
+        make_args(run_id=run_id, stage="intake"))
+
+    assert rc == 0
+    assert sentinel.read_text(encoding="utf-8") == "immutable"
+    live = dao.load_run_state("CASE_009")
+    entry = next(s for s in live["stages"] if s["stage_name"] == "intake")
+    assert Path(entry["backup_path"]).name == "step_02_intake"
 
 
 def test_snapshot_failure_leaves_no_partial_backup(isolated_dao, make_args, run_id, monkeypatch):
