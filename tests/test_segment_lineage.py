@@ -29,6 +29,7 @@ def _physical(did="DOC_001"):
         "document_id": did, "file_name": f"{did}.pdf", "document_role": "physical",
         "file_path": f"data/raw/CASE_030/{did}.pdf", "file_format": "pdf",
         "file_size_bytes": 100, "ocr_status": "completed",
+        "source_total_pages": 249,
         "downstream_disposition": "automated_text_pipeline",
     }
 
@@ -123,6 +124,24 @@ def test_missing_source_physical_page_rejected():
     errors = sl.validate_segment_lineage(
         man, _reader({"DOC_004": DOC004_MARKERS}))
     assert any("source_physical_page" in e for e in errors)
+
+
+def test_parent_requires_verified_source_total_pages():
+    parent = _physical()
+    del parent["source_total_pages"]
+    man = _manifest(parent, _segment())
+    errors = sl.validate_segment_lineage(
+        man, _reader({"DOC_004": DOC004_MARKERS}))
+    assert any("no verified source_total_pages" in e for e in errors), errors
+
+
+def test_segment_physical_page_cannot_exceed_parent_total():
+    parent = _physical()
+    parent["source_total_pages"] = 100
+    man = _manifest(parent, _segment())
+    errors = sl.validate_segment_lineage(
+        man, _reader({"DOC_004": DOC004_MARKERS}))
+    assert any("exceeds parent" in e for e in errors), errors
 
 
 def test_missing_derived_text_rejected():

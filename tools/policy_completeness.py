@@ -313,9 +313,21 @@ def check_policy_parent_coverage(
             errors.append(
                 f"parent {target_doc!r} document_type is "
                 f"{parent_entry.get('document_type')!r}, not 'insurance_policy'")
+        source_total = parent_entry.get("source_total_pages")
+        declared_physical = data.get("total_physical_pages")
+        if not isinstance(source_total, int) or source_total < 1:
+            errors.append(
+                f"parent {target_doc!r} has no verified source_total_pages "
+                "from document processing")
+        elif declared_physical != source_total:
+            errors.append(
+                f"total_physical_pages {declared_physical!r} does not match "
+                f"manifest source_total_pages {source_total}")
 
     total = data.get("total_logical_pages")
+    total_physical = data.get("total_physical_pages")
     pages = data.get("pages") or []
+    unpaged = data.get("unpaged_physical_pages") or []
     logicals = [p.get("logical_page") for p in pages]
 
     # Exact 1..total coverage: no dup, no gap, no out-of-range.
@@ -334,6 +346,32 @@ def check_policy_parent_coverage(
             errors.append(
                 f"logical pages not accounted for at all (coverage gap): "
                 f"{missing[:20]}{'...' if len(missing) > 20 else ''}")
+
+    physicals = [p.get("physical_page") for p in pages]
+    physicals.extend(p.get("physical_page") for p in unpaged)
+    seen_physical = set()
+    for physical in physicals:
+        if physical in seen_physical:
+            errors.append(
+                f"physical page {physical} appears more than once across "
+                "logical and unpaged coverage")
+        seen_physical.add(physical)
+    if isinstance(total_physical, int):
+        for physical in physicals:
+            if isinstance(physical, int) and not (
+                    1 <= physical <= total_physical):
+                errors.append(
+                    f"physical page {physical} is outside "
+                    f"1..{total_physical}")
+        missing_physical = [
+            page for page in range(1, total_physical + 1)
+            if page not in seen_physical
+        ]
+        if missing_physical:
+            errors.append(
+                "physical pages not accounted for at all: "
+                f"{missing_physical[:20]}"
+                f"{'...' if len(missing_physical) > 20 else ''}")
 
     # Each productive disposition must resolve to something real.
     for p in pages:
@@ -354,6 +392,30 @@ def check_policy_parent_coverage(
                 errors.append(
                     f"page {lp}: owner {owner!r} is not an insurance_policy "
                     "document")
+            else:
+                if entry.get("document_role") != "segment":
+                    errors.append(
+                        f"page {lp}: owner {owner!r} is not a segment")
+                if entry.get("source_document_id") != target_doc:
+                    errors.append(
+                        f"page {lp}: owner {owner!r} does not derive from "
+                        f"parent {target_doc!r}")
+                mapping = next(
+                    (item for item in entry.get("page_map") or []
+                     if item.get("logical_page") == lp),
+                    None,
+                )
+                if mapping is None:
+                    errors.append(
+                        f"page {lp}: owner {owner!r} page_map does not contain "
+                        "this logical page")
+                elif mapping.get("source_physical_page") != \
+                        p.get("physical_page"):
+                    errors.append(
+                        f"page {lp}: coverage physical_page "
+                        f"{p.get('physical_page')} disagrees with owner "
+                        f"{owner!r} page_map physical page "
+                        f"{mapping.get('source_physical_page')}")
         elif disp == "reference_table":
             rt_doc = p.get("reference_table_document_id")
             table_uid = p.get("table_uid")
@@ -363,6 +425,36 @@ def check_policy_parent_coverage(
                     f"page {lp}: reference_table disposition points at "
                     f"{rt_doc!r} which has no reference_table contract")
             else:
+                rt_entry = by_id.get(rt_doc)
+                if rt_entry is None:
+                    errors.append(
+                        f"page {lp}: reference-table document {rt_doc!r} is "
+                        "not registered in the manifest")
+                else:
+                    if rt_entry.get("document_role") != "segment":
+                        errors.append(
+                            f"page {lp}: reference-table document {rt_doc!r} "
+                            "is not a segment")
+                    if rt_entry.get("source_document_id") != target_doc:
+                        errors.append(
+                            f"page {lp}: reference-table document {rt_doc!r} "
+                            f"does not derive from parent {target_doc!r}")
+                    mapping = next(
+                        (item for item in rt_entry.get("page_map") or []
+                         if item.get("logical_page") == lp),
+                        None,
+                    )
+                    if mapping is None:
+                        errors.append(
+                            f"page {lp}: reference-table document {rt_doc!r} "
+                            "page_map does not contain this logical page")
+                    elif mapping.get("source_physical_page") != \
+                            p.get("physical_page"):
+                        errors.append(
+                            f"page {lp}: reference-table coverage physical "
+                            f"page {p.get('physical_page')} disagrees with "
+                            f"{rt_doc!r} page_map "
+                            f"{mapping.get('source_physical_page')}")
                 table = next(
                     (t for t in rt.get("tables", [])
                      if t.get("table_uid") == table_uid),
@@ -403,6 +495,21 @@ def check_policy_parent_coverage(
                         f"page {lp}: table_uid {table_uid!r} has no table/cell "
                         "evidence on this logical page; a UID cannot claim "
                         "unevidenced pages")
+        elif disp == "administrative_excluded":
+            refs = p.get("evidence_references") or []
+            if not refs:
+                errors.append(
+                    f"page {lp}: administrative exclusion has no processed "
+                    "page evidence")
+            for ref in refs:
+                if ref.get("document_id") != target_doc:
+                    errors.append(
+                        f"page {lp}: administrative exclusion evidence must "
+                        f"cite parent {target_doc!r}")
+                if ref.get("page") != lp:
+                    errors.append(
+                        f"page {lp}: administrative exclusion evidence cites "
+                        f"logical page {ref.get('page')!r}")
 
     return errors
 
@@ -415,4 +522,10 @@ def unresolved_parent_pages(data: dict) -> list[str]:
         if disp in ("review_required", "extraction_failed"):
             blockers.append(
                 f"logical page {p.get('logical_page')}: {disp} -- {p.get('reason')}")
+    for p in data.get("unpaged_physical_pages", []):
+        disp = p.get("disposition")
+        if disp in ("review_required", "extraction_failed"):
+            blockers.append(
+                f"unpaged physical page {p.get('physical_page')}: "
+                f"{disp} -- {p.get('reason')}")
     return blockers

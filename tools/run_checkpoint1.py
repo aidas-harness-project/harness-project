@@ -221,7 +221,8 @@ def _classification_model_info(provider_metadata: dict) -> dict:
     return info
 
 
-def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
+def _assemble_ocr_result(
+        case_id, doc_id, run_id, ocr_data, source_total_pages=None):
     providers = ocr_data.get("providers", {})
     reader_a_label = _provider_label(providers.get("reader_a"))
     reader_b_label = _provider_label(providers.get("reader_b"))
@@ -259,6 +260,7 @@ def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
         "vision_model_name": f"{reader_b_label}; comparator={comparator_label}",
         "uncertain_confidence_threshold": 1.0,
         "extraction_method": extraction_method, "ocr_status": "completed", "pages": pages_out,
+        "source_total_pages": source_total_pages,
         "encoding_detected": ocr_data.get("encoding_detected"),
         "document_mean_confidence": None,
         # Embedded text is a lossless decode, not a probabilistic read -- its
@@ -285,6 +287,17 @@ def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
     return result
 
 
+def source_pdf_page_count(pdf_path: Path) -> int:
+    """Read immutable physical page count before any page-range extraction."""
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(str(pdf_path)).pages)
+    except Exception as exc:
+        raise RuntimeError(
+            f"cannot determine immutable source PDF page count for "
+            f"{pdf_path}: {exc}") from exc
+
+
 def _reset_manifest_for_blocked_ocr(case_id, doc_id, ocr_result, held_by, run_id):
     """Called only on the blocked_disagreement path -- clears every field
     checkpoint 1 owns back to 'not validly known right now' rather than
@@ -296,6 +309,7 @@ def _reset_manifest_for_blocked_ocr(case_id, doc_id, ocr_result, held_by, run_id
     not a local read-then-_write_contract -- see known-gaps.md item 7."""
     fields = {
         "pages": len(ocr_result["pages"]),
+        "source_total_pages": ocr_result.get("source_total_pages"),
         "ocr_status": "failed",
         "ocr_text_path": None,
         "ocr_quality": None,
@@ -401,6 +415,7 @@ def run_checkpoint1(
     page_end: int | None = None,
 ) -> dict:
     pdf_path = Path(pdf_path)
+    source_total_pages = source_pdf_page_count(pdf_path)
     if reader_a is None or reader_b is None or comparator is None:
         providers = build_ocr_providers(
             reader_a_name=reader_a_name,
@@ -435,7 +450,9 @@ def run_checkpoint1(
         if p["agreement"] == "agreed":
             _write_page_text(case_id, doc_id, p["page"], p["reading_a"], held_by, run_id)
 
-    ocr_result = _assemble_ocr_result(case_id, doc_id, run_id, ocr_data)
+    ocr_result = _assemble_ocr_result(
+        case_id, doc_id, run_id, ocr_data,
+        source_total_pages=source_total_pages)
     _write_contract(case_id, f"ocr_result_{doc_id}.json", ocr_result, "ocr_result.schema.json", held_by, run_id)
 
     any_disagreement = ocr_result["review_required"]
@@ -488,6 +505,7 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
 
     fields = {
         "pages": len(ocr_result["pages"]),
+        "source_total_pages": ocr_result.get("source_total_pages"),
         "ocr_status": "completed",
         "ocr_quality": ocr_result["ocr_quality"],
         "uncertain_region_count": 0,

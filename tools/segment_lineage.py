@@ -162,6 +162,16 @@ def validate_segment_lineage(manifest: dict, redacted_text_for) -> list:
                 f"{loc}: source_physical_page values must be unique and strictly "
                 f"increasing (got {physical_pages})"
             )
+        elif parent in by_id:
+            parent_total = by_id[parent].get("source_total_pages")
+            if not isinstance(parent_total, int) or parent_total < 1:
+                errors.append(
+                    f"{loc}: physical parent {parent!r} has no verified "
+                    "source_total_pages from document processing")
+            elif physical_pages and physical_pages[-1] > parent_total:
+                errors.append(
+                    f"{loc}: source_physical_page {physical_pages[-1]} exceeds "
+                    f"parent {parent!r} source_total_pages={parent_total}")
 
         expected_path = (
             f"data/processed/{manifest.get('case_id')}/{sid}/redacted_text.md")

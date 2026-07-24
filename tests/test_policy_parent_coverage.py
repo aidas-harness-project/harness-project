@@ -5,6 +5,7 @@ owns; it cannot see a parent-PDF page that was never carved into any segment.
 These tests exercise policy_completeness.check_policy_parent_coverage /
 unresolved_parent_pages, which close that gap (CASE_030's 133 unowned pages).
 """
+import dao
 import policy_completeness as pc
 
 
@@ -16,10 +17,21 @@ def _manifest():
         "case_id": "CASE_030",
         "documents": [
             {"document_id": "DOC_001", "document_role": "physical",
+             "source_total_pages": 3,
              "document_type": "insurance_policy",
              "downstream_disposition": "automated_text_pipeline"},
             {"document_id": "DOC_005", "document_role": "segment",
              "source_document_id": "DOC_001",
+             "page_map": [{
+                 "logical_page": 2, "source_physical_page": 2,
+             }],
+             "document_type": "insurance_policy",
+             "downstream_disposition": "automated_text_pipeline"},
+            {"document_id": "DOC_007", "document_role": "segment",
+             "source_document_id": "DOC_001",
+             "page_map": [{
+                 "logical_page": 3, "source_physical_page": 3,
+             }],
              "document_type": "insurance_policy",
              "downstream_disposition": "automated_text_pipeline"},
         ],
@@ -27,13 +39,13 @@ def _manifest():
 
 
 def _reference_table_for(doc_id):
-    # DOC_001 has a reference table RT-aaaa; anything else has none.
-    if doc_id == "DOC_001":
+    # DOC_007 has a reference table RT-aaaa; anything else has none.
+    if doc_id == "DOC_007":
         return {"tables": [{
             "table_uid": "RT-aaaaaaaaaaaaaaaa",
             "review_required": False,
             "evidence_references": [
-                {"document_id": "DOC_001", "page": 3, "quote": "표 제목"},
+                {"document_id": "DOC_007", "page": 3, "quote": "표 제목"},
             ],
             "rows": [{
                 "row_uid": "RR-aaaaaaaaaaaaaaaa",
@@ -41,7 +53,7 @@ def _reference_table_for(doc_id):
                     "cell_uid": "RC-aaaaaaaaaaaaaaaa",
                     "review_required": False,
                     "evidence_references": [
-                        {"document_id": "DOC_001", "page": 3,
+                        {"document_id": "DOC_007", "page": 3,
                          "quote": "표 값"},
                     ],
                 }],
@@ -51,22 +63,32 @@ def _reference_table_for(doc_id):
 
 
 def _page(lp, disp, **kw):
-    base = {"logical_page": lp, "physical_page": lp + 7, "disposition": disp,
+    base = {"logical_page": lp, "physical_page": lp, "disposition": disp,
             "owner_document_id": None, "table_uid": None,
-            "reference_table_document_id": None, "reason": None}
+            "reference_table_document_id": None, "reason": None,
+            "evidence_references": []}
     base.update(kw)
     return base
 
 
 def _clean_data(total=3):
     return {
+        "case_id": "CASE_030",
+        "component": "policy-pipeline",
+        "status": "success",
         "parent_document_id": "DOC_001",
         "total_logical_pages": total,
+        "total_physical_pages": total,
+        "unpaged_physical_pages": [],
         "pages": [
-            _page(1, "administrative_excluded", reason="표지"),
+            _page(
+                1, "administrative_excluded", reason="표지",
+                evidence_references=[{
+                    "document_id": "DOC_001", "page": 1, "quote": "표지",
+                }]),
             _page(2, "owned_by_segment", owner_document_id="DOC_005"),
             _page(3, "reference_table", table_uid="RT-aaaaaaaaaaaaaaaa",
-                  reference_table_document_id="DOC_001"),
+                  reference_table_document_id="DOC_007"),
         ],
     }
 
@@ -75,6 +97,11 @@ def test_clean_coverage_passes():
     errors = pc.check_policy_parent_coverage(
         _clean_data(), FILENAME, _manifest(), _reference_table_for)
     assert errors == [], errors
+
+
+def test_clean_coverage_schema_v02_passes():
+    assert dao._schema_check(
+        _clean_data(), "policy_parent_coverage.schema.json") == []
 
 
 def test_coverage_gap_is_blocker():
@@ -100,6 +127,58 @@ def test_out_of_range_page_is_blocker():
     assert any("outside 1.." in e for e in errors), errors
 
 
+def test_total_physical_pages_must_match_document_processing_metadata():
+    data = _clean_data()
+    data["total_physical_pages"] = 4
+    errors = pc.check_policy_parent_coverage(
+        data, FILENAME, _manifest(), _reference_table_for)
+    assert any("does not match manifest source_total_pages" in e
+               for e in errors), errors
+
+
+def test_every_physical_page_must_be_accounted_for():
+    data = _clean_data()
+    data["total_physical_pages"] = 4
+    manifest = _manifest()
+    manifest["documents"][0]["source_total_pages"] = 4
+    errors = pc.check_policy_parent_coverage(
+        data, FILENAME, manifest, _reference_table_for)
+    assert any("physical pages not accounted" in e for e in errors), errors
+
+
+def test_unpaged_physical_page_requires_human_provenance_when_excluded():
+    data = _clean_data(total=2)
+    data["total_physical_pages"] = 3
+    data["unpaged_physical_pages"] = [{
+        "physical_page": 3,
+        "disposition": "administrative_excluded",
+        "reason": "back cover",
+        "verified_by": None,
+        "verified_at": None,
+    }]
+    errors = dao._schema_check(
+        data, "policy_parent_coverage.schema.json")
+    assert any("verified_by" in error or "verified_at" in error
+               for error in errors), errors
+
+
+def test_owned_page_must_match_segment_page_map():
+    data = _clean_data()
+    data["pages"][1]["physical_page"] = 1
+    errors = pc.check_policy_parent_coverage(
+        data, FILENAME, _manifest(), _reference_table_for)
+    assert any("disagrees with owner" in e for e in errors), errors
+
+
+def test_administrative_exclusion_requires_page_evidence():
+    data = _clean_data()
+    data["pages"][0]["evidence_references"] = []
+    errors = pc.check_policy_parent_coverage(
+        data, FILENAME, _manifest(), _reference_table_for)
+    assert any("administrative exclusion has no processed page evidence" in e
+               for e in errors), errors
+
+
 def test_owned_by_unregistered_segment_is_blocker():
     data = _clean_data()
     data["pages"][1] = _page(2, "owned_by_segment", owner_document_id="DOC_099")
@@ -112,7 +191,7 @@ def test_reference_table_uid_absent_is_blocker():
     data = _clean_data()
     data["pages"][2] = _page(3, "reference_table",
                              table_uid="RT-bbbbbbbbbbbbbbbb",
-                             reference_table_document_id="DOC_001")
+                             reference_table_document_id="DOC_007")
     errors = pc.check_policy_parent_coverage(
         data, FILENAME, _manifest(), _reference_table_for)
     assert any("not present in reference_table" in e for e in errors), errors
@@ -122,7 +201,7 @@ def test_reference_table_document_missing_is_blocker():
     data = _clean_data()
     data["pages"][2] = _page(3, "reference_table",
                              table_uid="RT-aaaaaaaaaaaaaaaa",
-                             reference_table_document_id="DOC_007")
+                             reference_table_document_id="DOC_099")
     errors = pc.check_policy_parent_coverage(
         data, FILENAME, _manifest(), _reference_table_for)
     assert any("no reference_table contract" in e for e in errors), errors
@@ -139,7 +218,7 @@ def test_reference_table_must_have_evidence_on_every_claimed_page():
 
 def test_reference_table_review_flag_is_not_resolved_coverage():
     def review_table(_doc_id):
-        table = _reference_table_for("DOC_001")
+        table = _reference_table_for("DOC_007")
         table["tables"][0]["review_required"] = True
         table["tables"][0]["rows"][0]["cells"][0]["review_required"] = True
         return table

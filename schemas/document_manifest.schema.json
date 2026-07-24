@@ -102,7 +102,12 @@
         "pages": {
           "type": ["integer", "null"],
           "minimum": 1,
-          "description": "owner: document-pipeline (checkpoint 1). null before OCR."
+          "description": "owner: document-pipeline (checkpoint 1). Number of pages actually processed in this document entry. For a page-range run this may be smaller than source_total_pages."
+        },
+        "source_total_pages": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "owner: document-pipeline (checkpoint 1). Immutable physical page count read from the original PDF container before any page-range extraction. Required by policy parent-coverage finalization so total pages cannot be self-declared by the policy agent. null for non-PDF inputs and segments."
         },
         "ocr_status": {
           "enum": ["pending", "completed", "failed", "not_applicable"],

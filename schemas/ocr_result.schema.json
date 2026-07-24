@@ -38,6 +38,11 @@
           "description": "Per-page results. May be empty if ocr_status is failed.",
           "items": { "$ref": "#/$defs/page_result" }
         },
+        "source_total_pages": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Physical page count of the original PDF before any page-range extraction. Copied to document_manifest and used to bind parent coverage to document-processing metadata."
+        },
         "document_mean_confidence": {
           "anyOf": [
             { "$ref": "common_component_output.schema.json#/$defs/confidence" },
