@@ -18,10 +18,16 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. M
 2. Account for the exact processed source with `policy_boundary_inventory_{document_id}.json`.
    Every non-whitespace character on every policy page is covered by an exact-offset
    span assigned to a boundary or explicitly excluded with a reason. A boundary may
-   not swallow multiple article/paragraph/item anchors.
+   not swallow multiple article/paragraph/item anchors. `excluded_with_reason` is
+   only for genuinely non-normative material: if the span contains an article,
+   paragraph, or numbered-item anchor, split and normalize it or route the boundary
+   to `review_required`. A reason such as "covered by the article boundary" is not
+   evidence and cannot exclude the article body.
 3. Extract clause text per boundary.
 4. Normalize into standard fields (coverage type, payout conditions, exclusions,
    reduction conditions) and map every normalized boundary to its clause/condition item.
+   Mapping is bidirectional: every clause-declared boundary must exist and point back
+   to that clause, and every normalized boundary must be declared by its target clause.
 
 The boundary inventory and normalized clause file are both real contract files,
 written through the DAO. `policy_clause_processing` cannot finalize while any
@@ -36,6 +42,11 @@ normalized mapping is unresolved, or any boundary remains `review_required` /
 
 Every clause has an immutable `clause_uid` derived from document identity and exact source-boundary identity, plus `source_boundary_uids`. Every condition item has an immutable `condition_uid` derived from source identity. Never derive either UID from array position, extraction order, normalized wording, or sequential `clause_id`. `clause_id` (`C-1`, `C-2`, ...) is a display label only and may change when an earlier clause is inserted; downstream references use `{document_id, clause_uid}` and, for condition-specific references, `condition_uid`.
 
+UID equality does not mean that similar clauses from different insurers share one
+global code. Identity is source-local and deterministic. Cross-policy similarity or
+future canonical code assignment is a separate, evidence-backed matching layer and
+must never rewrite source UIDs.
+
 Set `clause_kind` and use only its dedicated semantic bucket: `coverage` → `payout_conditions`/`exclusions`/`reduction_conditions`; `definition` → `definitions`; `obligation` → `obligations`; `procedure` → `claim_requirements`; `termination` → `termination_conditions`; `dispute_resolution` → `dispute_resolution_conditions`; `coverage_start` → `coverage_start_conditions`. Split a source clause into multiple normalized clauses when it contains materially different kinds. Never put disclosure duties, definitions, claim-submission procedures, cancellation rules, dispute procedures, or coverage-start rules in `payout_conditions`. Use `other` only with `review_required: true`. Every bucket is required; an empty list means none found, not an omission. Each item carries its own `evidence_references` (P1) at the granularity downstream matching needs. Any judgment beyond direct restatement gets hedged and flagged per P3.
 
 For every condition item, set `support_level`, `support_rationale`, and
@@ -44,8 +55,12 @@ substantially states the condition. Use `composite` when the normalized
 condition combines two or more passages; cite every passage and set
 `review_required: true`. Never emit `insufficient` in a successful normalized
 contract. A clause title is valid clause-level provenance but is not condition
-support. The DAO applies a conservative lexical-support floor in addition to
-verbatim page matching; passing that floor does not replace semantic review.
+support. Preserve the source's complete operative predicate, including negation and
+exclusion language, thresholds, dates, periods, percentages, and other numeric terms.
+Evidence that ends before the operative predicate is incomplete. First verify that
+the normalized meaning is supported; only then apply the DAO's conservative lexical
+support floor. Never rewrite or weaken a condition to raise lexical overlap. Passing
+the floor does not replace semantic review; uncertainty becomes `review_required`.
 
 `policy_boundary_inventory_{document_id}.json` — one file per policy document,
 covering the same processed source. Page-span offsets are relative to the exact page
@@ -64,21 +79,29 @@ Every title and every cell carries its own strict evidence reference. A single
 blob quote for the whole table is not cell provenance. Write the reference
 table before a normalized clause links to it, then use
 `reference_table_refs[{document_id, table_uid, row_uids?}]`. Emit an empty
-`reference_table_refs` array when a clause needs no table.
+`reference_table_refs` array when a clause needs no table. A table may claim only
+pages on which at least one table- or cell-level evidence reference exists.
+`review_required` on a table or any cell keeps the table unresolved and blocks both
+reference-table-only waiver and parent coverage finalization.
 
 `policy_parent_coverage_{parent_id}.json` — one file per PHYSICAL policy parent
 (a real raw PDF, not a segment). The per-document inventory only accounts for
 pages a segment already owns; it cannot see a parent page that was carved into
-no segment at all. This contract accounts for the parent's full logical page
-range, 1..`total_logical_pages`, exactly once. Each page is `owned_by_segment`
+no segment at all. This contract accounts for both the parent's full logical page
+range, 1..`total_logical_pages`, and every immutable-source physical page,
+1..`total_physical_pages`, exactly once. `total_physical_pages` must equal the
+parent manifest's `source_total_pages`; it is not an agent self-declaration. Each
+logical page is `owned_by_segment`
 (name the segment/physical document that carries its normalized text),
 `reference_table` (name the `reference_table_document_id` + `table_uid` the
 appendix was extracted into), or `administrative_excluded` with a concrete
 per-page reason — never a blanket "appendix"/"목차" over a whole range, and never
 excluding substantive text just because it is inconvenient. `review_required`/
 `extraction_failed` pages block finalization. The DAO verifies the 1..N coverage
-is exact (no gap/dup) and that every `owned_by_segment`/`reference_table`
-disposition resolves to a really-registered segment or a really-present table.
+is exact (no gap/dup), verifies every disposition against the registered segment's
+actual logical/physical `page_map`, and requires page-specific processed evidence.
+Physical pages with no logical page require an explicit unpaged disposition;
+administrative exclusion there requires genuine human reviewer identity and time.
 
 `policy_audit_result_{document_id}.json` — write this last for every policy
 document. It binds the audit to the exact SHA-256 bytes of the normalized
@@ -87,7 +110,9 @@ the mandatory audit scope, and keeps every defect as a stable finding. Any
 later rewrite makes the audit stale automatically. Never finalize while a
 finding is `open`; fix it, mark a supported false positive/resolution, or
 obtain a human `accepted_risk` decision. An automated actor may not accept
-risk on a human's behalf.
+risk on a human's behalf. An empty agent-authored finding list is not proof of
+completeness: finalization independently reruns deterministic boundary,
+bidirectional-provenance, and review-state checks.
 
 # Access rules
 
