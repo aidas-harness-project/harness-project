@@ -62,6 +62,25 @@ _HEADING_ONLY_RE = re.compile(
     r"^\s*제\s*\d+\s*조(?:의\s*\d+)?\s*(?:\([^)]{1,80}\))?\s*$"
 )
 _WORD_RE = re.compile(r"[가-힣A-Za-z0-9]{2,}")
+_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])\d+(?:[.,]\d+)?\s*(?:%|년|월|일|회|원|영업일)?")
+_DIRECT_QUOTE_TERMINAL_RE = re.compile(
+    r"(?:다|니다|합니다|됩니다|않습니다|아니합니다|"
+    r"지급|보상|한도|경우|때|사유|상태|금액|기준|"
+    r"해야|하여야|알려야|의무|해지|취소|무효|소멸)"
+    r"(?:[.!?。]|[)”’\"])?$"
+)
+_BUCKET_EVIDENCE_MARKERS = {
+    "payout_conditions": ("지급", "보상", "보험금"),
+    "exclusions": ("않", "아니", "제외", "면책", "부지급"),
+    "reduction_conditions": ("감액", "삭감", "비율", "한도", "차감"),
+    "definitions": ("정의", "말합니다", "뜻합니다", "의미합니다"),
+    "obligations": ("의무", "해야", "하여야", "알려야", "제출하여야"),
+    "claim_requirements": ("청구", "제출", "서류", "증명서"),
+    "termination_conditions": ("해지", "취소", "무효", "소멸"),
+    "dispute_resolution_conditions": (
+        "분쟁", "소송", "관할", "소멸시효", "조정"),
+    "coverage_start_conditions": ("보장", "개시", "효력"),
+}
 CONDITION_BUCKETS = (
     "payout_conditions",
     "exclusions",
@@ -289,8 +308,47 @@ def check_condition_support(clauses: list[dict]) -> list[str]:
                         "which do not substantiate the normalized condition")
                     continue
 
-                condition_tokens = _meaningful_tokens(item.get("text", ""))
-                quote_text = " ".join(quotes)
+                condition_text = _normalize_ws(item.get("text", ""))
+                condition_tokens = _meaningful_tokens(condition_text)
+                quote_text = _normalize_ws(" ".join(quotes))
+                if level == "direct" and quote_text and not \
+                        _DIRECT_QUOTE_TERMINAL_RE.search(quote_text):
+                    errors.append(
+                        f"{loc}: direct evidence ends before a complete policy "
+                        "proposition; cite through the operative predicate or use "
+                        "composite support with review_required=true")
+
+                markers = _BUCKET_EVIDENCE_MARKERS.get(bucket, ())
+                if markers and quote_text and not any(
+                        marker in quote_text for marker in markers):
+                    errors.append(
+                        f"{loc}: cited evidence does not contain an operative "
+                        f"marker for semantic bucket {bucket!r}; the bucket label "
+                        "must not supply meaning that is absent from the quote")
+
+                condition_numbers = set(_NUMBER_RE.findall(condition_text))
+                quote_numbers = set(_NUMBER_RE.findall(quote_text))
+                missing_numbers = condition_numbers - quote_numbers
+                if missing_numbers:
+                    errors.append(
+                        f"{loc}: normalized condition introduces numeric/temporal "
+                        f"terms absent from its evidence: "
+                        f"{sorted(missing_numbers)}")
+
+                # Polarity is outcome-determinative in policy language.  A
+                # normalized negation may never be inferred from a quote that
+                # stops before the negating predicate (CASE_030 DOC_004).
+                condition_has_negation = any(
+                    marker in condition_text
+                    for marker in ("않", "아니", "제외", "면책", "부지급"))
+                quote_has_negation = any(
+                    marker in quote_text
+                    for marker in ("않", "아니", "제외", "면책", "부지급"))
+                if condition_has_negation and not quote_has_negation:
+                    errors.append(
+                        f"{loc}: normalized condition contains negation/exclusion "
+                        "meaning absent from the cited evidence")
+
                 if condition_tokens:
                     supported = {
                         token for token in condition_tokens if token in quote_text
@@ -300,8 +358,10 @@ def check_condition_support(clauses: list[dict]) -> list[str]:
                         errors.append(
                             f"{loc}: cited source has insufficient lexical support "
                             f"for the normalized condition ({len(supported)}/"
-                            f"{len(condition_tokens)} meaningful tokens); revise "
-                            "the condition or cite the supporting passage")
+                            f"{len(condition_tokens)} meaningful tokens); preserve "
+                            "the source meaning, cite the complete supporting "
+                            "passage, or route the item to review_required -- do "
+                            "not rewrite the condition to raise this score")
     return errors
 
 

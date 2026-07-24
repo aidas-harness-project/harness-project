@@ -365,6 +365,54 @@ def test_composite_support_requires_review_flag():
     assert any("requires review_required=true" in error for error in errors)
 
 
+def test_direct_evidence_must_include_complete_operative_predicate():
+    clause = _valid_clause()
+    item = clause["exclusions"][0]
+    item["text"] = "사망보험금을 지급하지 않는다"
+    item["evidence_references"][0]["quote"] = \
+        "피보험자가 고의로 자신을 해친 경우에는 사망보험금을"
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        REDACTED_TEXT)
+    assert any("complete policy proposition" in error for error in errors)
+    assert any("negation/exclusion meaning absent" in error for error in errors)
+
+
+def test_exclusion_bucket_requires_exclusion_marker_in_evidence():
+    clause = _valid_clause()
+    item = clause["exclusions"][0]
+    item["evidence_references"][0]["quote"] = \
+        "피보험자가 고의로 자신을 해친 경우"
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        REDACTED_TEXT)
+    assert any("operative marker" in error and "exclusions" in error
+               for error in errors), errors
+
+
+def test_numeric_and_temporal_terms_must_be_present_in_evidence():
+    clause = _valid_clause()
+    item = clause["reduction_conditions"][0]
+    item["text"] = "계약일부터 2년 이내 지급사유 발생 시 50% 감액, 3회 한도"
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        REDACTED_TEXT)
+    assert any("3회" in error and "absent from its evidence" in error
+               for error in errors), errors
+
+
+def test_truncated_payment_sentence_is_rejected():
+    clause = _valid_clause()
+    item = clause["payout_conditions"][0]
+    item["text"] = "보험수익자에게 사망보험금을 지급하여"
+    item["evidence_references"][0]["quote"] = \
+        "사망보험금을 지급하여"
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        REDACTED_TEXT)
+    assert any("complete policy proposition" in error for error in errors), errors
+
+
 def test_duplicate_clause_id_rejected():
     c1 = _valid_clause()
     c2 = _valid_clause()  # also C-1
