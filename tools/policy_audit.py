@@ -49,6 +49,64 @@ def check_policy_audit(
     table_uids = {
         table.get("table_uid")
         for table in (reference_table or {}).get("tables", [])}
+
+    # Deterministic defects are discovered from the bound artifacts themselves;
+    # the audit author cannot make them disappear by submitting findings=[].
+    boundary_to_clauses = {}
+    for boundary in (inventory or {}).get("boundaries", []):
+        boundary_uid = boundary.get("boundary_uid")
+        for mapping in boundary.get("normalized_mappings") or []:
+            clause_uid = mapping.get("clause_uid")
+            if boundary_uid and clause_uid:
+                boundary_to_clauses.setdefault(
+                    boundary_uid, set()).add(clause_uid)
+        if boundary.get("disposition") in (
+                "review_required", "extraction_failed"):
+            errors.append(
+                f"deterministic audit: boundary {boundary_uid!r} remains "
+                f"{boundary.get('disposition')}")
+
+    for clause_index, clause in enumerate(
+            (normalized or {}).get("clauses", [])):
+        clause_uid = clause.get("clause_uid")
+        if clause.get("review_required") is True:
+            errors.append(
+                f"deterministic audit: clause {clause_uid!r} remains "
+                "review_required")
+        for boundary_uid in clause.get("source_boundary_uids") or []:
+            if boundary_uid not in boundary_uids:
+                errors.append(
+                    f"deterministic audit: clauses[{clause_index}] source "
+                    f"boundary {boundary_uid!r} does not exist")
+            elif clause_uid not in boundary_to_clauses.get(
+                    boundary_uid, set()):
+                errors.append(
+                    f"deterministic audit: boundary {boundary_uid!r} does not "
+                    f"map back to clause {clause_uid!r}")
+        for bucket, items in clause.items():
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if isinstance(item, dict) and \
+                        item.get("condition_uid") and \
+                        item.get("review_required") is True:
+                    errors.append(
+                        "deterministic audit: condition "
+                        f"{item.get('condition_uid')!r} in {bucket} remains "
+                        "review_required")
+
+    for table in (reference_table or {}).get("tables", []):
+        if table.get("review_required") is True:
+            errors.append(
+                f"deterministic audit: table {table.get('table_uid')!r} "
+                "remains review_required")
+        for row in table.get("rows") or []:
+            for cell in row.get("cells") or []:
+                if cell.get("review_required") is True:
+                    errors.append(
+                        f"deterministic audit: cell "
+                        f"{cell.get('cell_uid')!r} remains review_required")
+
     seen = set()
     for index, finding in enumerate(data.get("findings") or []):
         uid = finding.get("finding_uid")

@@ -38,13 +38,22 @@ def _seed_contracts(isolated_dao):
     normalized = {
         "clauses": [{
             "clause_uid": "PC-1111111111111111",
+            "source_boundary_uids": ["PB-1111111111111111"],
+            "review_required": False,
             "payout_conditions": [{
-                "condition_uid": "CI-1111111111111111"}],
+                "condition_uid": "CI-1111111111111111",
+                "review_required": False,
+            }],
         }],
     }
     inventory = {
         "boundaries": [{
-            "boundary_uid": "PB-1111111111111111"}],
+            "boundary_uid": "PB-1111111111111111",
+            "disposition": "normalized",
+            "normalized_mappings": [{
+                "clause_uid": "PC-1111111111111111",
+            }],
+        }],
     }
     normalized_path = out / "normalized_policy_clause_DOC_001.json"
     inventory_path = out / "policy_boundary_inventory_DOC_001.json"
@@ -119,6 +128,51 @@ def test_stale_normalized_hash_is_rejected(isolated_dao):
         None,
     )
     assert any("normalized_sha256 is stale" in error for error in errors)
+
+
+def test_empty_findings_cannot_hide_dangling_source_boundary(isolated_dao):
+    _, normalized, inventory, hashes = _seed_contracts(isolated_dao)
+    normalized["clauses"][0]["source_boundary_uids"] = [
+        "PB-9999999999999999"]
+    errors = policy_audit.check_policy_audit(
+        _audit(hashes),
+        "policy_audit_result_DOC_001.json",
+        hashes,
+        normalized,
+        inventory,
+        None,
+    )
+    assert any("deterministic audit" in error and "does not exist" in error
+               for error in errors), errors
+
+
+def test_empty_findings_cannot_hide_review_required_table(isolated_dao):
+    _, normalized, inventory, hashes = _seed_contracts(isolated_dao)
+    reference_table = {
+        "tables": [{
+            "table_uid": "RT-1111111111111111",
+            "review_required": True,
+            "rows": [{
+                "row_uid": "RR-1111111111111111",
+                "cells": [{
+                    "cell_uid": "RC-1111111111111111",
+                    "review_required": True,
+                }],
+            }],
+        }],
+    }
+    errors = policy_audit.check_policy_audit(
+        _audit(hashes),
+        "policy_audit_result_DOC_001.json",
+        hashes,
+        normalized,
+        inventory,
+        reference_table,
+    )
+    assert any("table" in error and "review_required" in error
+               for error in errors), errors
+    assert any("cell" in error and "review_required" in error
+               for error in errors), errors
 
 
 def test_open_finding_blocks_clear_audit(isolated_dao):
