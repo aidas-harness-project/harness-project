@@ -1202,3 +1202,43 @@ DEFERRED, with why:
   frontend hole (serving ground-truth files) WAS fixed. If the frontend is ever
   exposed, auth + CSRF + upload/spawn caps + scrubbing the `/run` child env
   become required.
+
+## 19. Policy finalize gate had no concept of a segmented parent or a reference-table-only segment -- RESOLVED 2026-07-24 (CASE_030)
+
+CASE_030 (삼성화재 240p 약관, one physical parent DOC_001 carved into 5 segments)
+was the first case to exercise the policy pipeline with a fully-segmented parent
+plus a table-only appendix segment. Finalizing `policy_clause_processing` surfaced
+a real structural gap in `dao._policy_completion_blockers`: it iterated EVERY
+automated `insurance_policy` document and unconditionally demanded a non-empty
+`normalized_policy_clause`, a `policy_boundary_inventory`, AND a
+`policy_audit_result` from each. Two document shapes cannot satisfy that:
+
+- **DOC_001, a segmented physical parent.** Its clauses all live in its segments
+  (DOC_004/005/006/008); duplicating them on the parent would double-cover the
+  same source pages. Modeled honestly it carries an EMPTY clause list -- which the
+  gate rejected as "normalized clauses is empty", and it also had no inventory of
+  its own. Its real completeness is the `policy_parent_coverage_DOC_001` contract
+  (all 240 logical pages accounted for), which the gate already checks separately.
+- **DOC_007, a reference-table-only segment (별표 appendix).** Its content is the
+  17 장해/골절/화상/… 분류표 tables, extracted to `reference_table_DOC_007.json`,
+  not policy clauses. The gate demanded a `normalized_policy_clause_DOC_007.json`
+  that should not exist.
+
+Fix (user-approved carve-out, `tools/dao.py`): the per-document loop now (a) skips
+any doc that is another doc's `source_document_id` (a segmented parent -- its
+completeness is governed by parent-coverage below), and (b) treats a doc that has
+a `reference_table_{id}.json` but no `normalized_policy_clause_{id}.json` as a
+reference-table-only segment -- waiving the clause/audit requirement but STILL
+enforcing its boundary inventory (every page accounted for, boundaries
+`excluded_with_reason` -> reference table). Everything else (DOC_004/005/006/008)
+is unchanged: normalized + inventory + audit all still required and verified.
+2 regression tests added in `tests/test_policy_completeness.py`
+(`test_segmented_parent_is_exempt_from_per_doc_normalization`,
+`test_reference_table_only_segment_is_exempt_from_clauses_but_needs_inventory`);
+518 tests pass. Both CASE_030 stages (`document_processing`,
+`policy_clause_processing`) finalized -> passed with P10 backups, 0 blockers.
+
+Note surfaced while building parent-coverage: DOC_001's processed layer only
+covers logical pages 1-12 (partial OCR), but `check_policy_parent_coverage` reads
+the manifest + reference tables, never DOC_001's processed text, so this does not
+affect the coverage accounting.

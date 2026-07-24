@@ -418,13 +418,59 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
         return ["no automated insurance_policy document is registered"]
 
     schemas, registry = load_registry()
+    # A physical parent that has already been carved into segments is normalized
+    # THROUGH those segments, not on its own body: every clause it would contain
+    # lives in a segment, and its whole-page completeness is enforced by the
+    # parent-coverage contract below -- so the per-document normalization
+    # requirement does not apply to it. Detect a segmented parent as any doc that
+    # is some other doc's source_document_id.
+    segmented_parent_ids = {
+        d.get("source_document_id")
+        for d in manifest.get("documents", [])
+        if d.get("document_role") == "segment" and d.get("source_document_id")
+    }
     for doc in policy_docs:
         doc_id = doc.get("document_id")
         normalized_name = f"normalized_policy_clause_{doc_id}.json"
         inventory_name = f"policy_boundary_inventory_{doc_id}.json"
         audit_name = f"policy_audit_result_{doc_id}.json"
+
+        if doc_id in segmented_parent_ids:
+            # Segmented physical parent -- normalization is delegated to its
+            # segments; parent-coverage (below) governs its completeness.
+            continue
+
+        # A reference-table-only segment (e.g. an appendix/별표 segment) carries
+        # structured tables in reference_table_{id}.json, not policy clauses. It
+        # still owes a complete boundary inventory (every page accounted for,
+        # boundaries dispositioned excluded_with_reason -> reference table), but
+        # a normalized_policy_clause contract and its clause-audit do not apply.
+        reference_table = read_contract_data(
+            case_id, f"reference_table_{doc_id}.json")
         normalized = read_contract_data(case_id, normalized_name)
         inventory = read_contract_data(case_id, inventory_name)
+        reference_table_only = (
+            reference_table is not None and normalized is None)
+        if reference_table_only:
+            if inventory is None:
+                blockers.append(f"{doc_id}: missing {inventory_name}")
+                continue
+            inventory_errors = validate_instance(
+                inventory, policy_completeness.INVENTORY_SCHEMA,
+                schemas, registry)
+            blockers.extend(
+                f"{doc_id}: inventory schema: {error}"
+                for error in inventory_errors)
+            blockers.extend(
+                f"{doc_id}: {error}"
+                for error in policy_completeness.check_policy_boundary_inventory(
+                    inventory, inventory_name,
+                    _redacted_text_for_doc(case_id, doc_id), None))
+            blockers.extend(
+                f"{doc_id}: unresolved boundary: {error}"
+                for error in policy_completeness.unresolved_boundaries(inventory))
+            continue
+
         if normalized is None:
             blockers.append(f"{doc_id}: missing {normalized_name}")
             continue

@@ -330,3 +330,109 @@ def test_parent_coverage_review_required_page_blocks_finalize(isolated_dao):
 
     assert any("unresolved parent page" in b and "review_required" in b
                for b in blockers), blockers
+
+
+# --- Segmented-parent / reference-table-only carve-outs (CASE_030 2026-07-24) ---
+#
+# When a physical parent is fully carved into segments, it is normalized THROUGH
+# those segments, not on its own body -- its per-document normalization/inventory/
+# audit requirement is waived and its completeness is governed by parent-coverage.
+# A reference-table-only segment (별표 appendix) carries structured tables, not
+# clauses, so its normalized-clause requirement is waived but its boundary
+# inventory is still enforced.
+
+
+def _segment_doc(document_id, source_document_id="DOC_001"):
+    return {
+        "document_id": document_id,
+        "file_name": f"{document_id}.pdf",
+        "file_path": f"data/raw/CASE_030/{document_id}.pdf",
+        "file_format": "pdf",
+        "file_size_bytes": 100,
+        "document_role": "segment",
+        "source_document_id": source_document_id,
+        "ocr_status": "completed",
+        "cross_validation_status": "agreed",
+        "redacted_text_path":
+            f"data/processed/CASE_030/{document_id}/redacted_text.md",
+        "document_type": "insurance_policy",
+        "downstream_disposition": "automated_text_pipeline",
+    }
+
+
+def test_segmented_parent_is_exempt_from_per_doc_normalization(isolated_dao):
+    """A physical parent that owns a segment must NOT be asked for its own
+    normalized clauses / inventory / audit -- only its parent-coverage matters.
+    Before the carve-out this raised 'normalized clauses is empty' + 'missing
+    policy_boundary_inventory_DOC_001.json' for the empty parent."""
+    out = isolated_dao / "outputs" / "CASE_030"
+    out.mkdir(parents=True)
+    parent = {
+        "document_id": "DOC_001", "file_name": "DOC_001.pdf",
+        "file_path": "data/raw/CASE_030/DOC_001.pdf", "file_format": "pdf",
+        "file_size_bytes": 100, "document_role": "physical",
+        "ocr_status": "completed", "cross_validation_status": "agreed",
+        "redacted_text_path": "data/processed/CASE_030/DOC_001/redacted_text.md",
+        "document_type": "insurance_policy",
+        "downstream_disposition": "automated_text_pipeline",
+    }
+    manifest = {"case_id": "CASE_030", "documents": [parent, _segment_doc("DOC_009")]}
+    (out / "document_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    # DOC_001 has an EMPTY normalized file and no inventory/audit at all.
+    empty_parent = _normalized()
+    empty_parent["clauses"] = []
+    (out / "normalized_policy_clause_DOC_001.json").write_text(
+        json.dumps(empty_parent, ensure_ascii=False), encoding="utf-8")
+
+    blockers = dao._policy_completion_blockers("CASE_030")
+
+    # The parent itself raises nothing (it's exempt). Any remaining blockers must
+    # be about the SEGMENT (DOC_009) or the missing parent-coverage, never the
+    # empty parent's own normalization/inventory/audit.
+    assert not any("DOC_001: normalized clauses is empty" in b for b in blockers), blockers
+    assert not any("DOC_001: missing policy_boundary_inventory" in b for b in blockers), blockers
+    assert not any("DOC_001: missing policy_audit_result" in b for b in blockers), blockers
+
+
+def test_reference_table_only_segment_is_exempt_from_clauses_but_needs_inventory(
+        isolated_dao):
+    """A segment whose content is a reference_table (no normalized clauses) is
+    waived the normalized-clause requirement, but its boundary inventory is
+    still enforced -- so a MISSING inventory is still a blocker, while a missing
+    normalized_policy_clause contract is not."""
+    out = isolated_dao / "outputs" / "CASE_030"
+    processed = isolated_dao / "data" / "processed" / "CASE_030" / "DOC_007"
+    out.mkdir(parents=True)
+    processed.mkdir(parents=True)
+    (processed / "redacted_text.md").write_text(REDACTED, encoding="utf-8")
+    manifest = {"case_id": "CASE_030", "documents": [_segment_doc("DOC_007")]}
+    (out / "document_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    # A reference_table contract exists; NO normalized_policy_clause_DOC_007.json.
+    reference_table = {
+        "case_id": "CASE_030", "component": "policy-pipeline", "status": "success",
+        "source_document_id": "DOC_007",
+        "tables": [{
+            "table_uid": "RT-1111111111111111", "table_id": "T-1",
+            "title": "장해분류표", "columns": [{"column_key": "c", "label": "분류"}],
+            "rows": [{"row_uid": "RR-1111111111111111", "cells": [{
+                "cell_uid": "RC-1111111111111111", "column_key": "c",
+                "value": "제1조(지급)",
+                "evidence_references": [{"document_id": "DOC_007", "page": 1, "quote": "제1조(지급)"}],
+                "review_required": True,
+            }]}],
+            "evidence_references": [{"document_id": "DOC_007", "page": 1, "quote": "제1조(지급)"}],
+            "review_required": True,
+        }],
+    }
+    (out / "reference_table_DOC_007.json").write_text(
+        json.dumps(reference_table, ensure_ascii=False), encoding="utf-8")
+
+    blockers = dao._policy_completion_blockers("CASE_030")
+
+    # No complaint about a missing normalized clause contract...
+    assert not any("missing normalized_policy_clause_DOC_007" in b for b in blockers), blockers
+    # ...but the missing boundary inventory is still enforced for the segment.
+    assert any("DOC_007: missing policy_boundary_inventory_DOC_007.json" in b
+               for b in blockers), blockers
