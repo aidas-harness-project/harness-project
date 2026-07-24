@@ -20,6 +20,12 @@ _STRUCTURAL_ANCHOR_RE = re.compile(
     r"(?:제\s*\d+\s*조(?:의\s*\d+)?(?:\s*\([^)]*\))?|[①-⑳]|^\s*\d+\.\s+)",
     re.MULTILINE,
 )
+_BLANKET_BODY_EXCLUSION_RE = re.compile(
+    r"(?:covered\s+under|not\s+separately\s+normalized|"
+    r"본문\s*(?:전체|내용)?.*(?:포함|반영|covered)|"
+    r"조문.*(?:포함|반영).*(?:제외|생략))",
+    re.IGNORECASE,
+)
 
 
 def doc_id_from_inventory_filename(filename: str) -> str | None:
@@ -149,6 +155,20 @@ def check_policy_boundary_inventory(
                         f"{boundary.get('boundary_uid')!r} spans {len(anchors)} "
                         "article/paragraph/item anchors -- split material "
                         "subparagraphs so each can map independently")
+            elif span.get("disposition") == "excluded":
+                anchors = list(_STRUCTURAL_ANCHOR_RE.finditer(actual))
+                if anchors:
+                    errors.append(
+                        f"{span.get('span_uid')}: excluded source span on page "
+                        f"{page_num} contains {len(anchors)} article/paragraph/item "
+                        "anchor(s) -- normative policy text must be represented as "
+                        "boundaries and mapped, or routed to review_required")
+                reason = span.get("exclusion_reason") or ""
+                if _BLANKET_BODY_EXCLUSION_RE.search(reason):
+                    errors.append(
+                        f"{span.get('span_uid')}: blanket body exclusion reason is "
+                        "not evidence of semantic normalization; split the source "
+                        "into independently mapped boundaries")
             for pos in range(start, end):
                 if occupied[pos]:
                     # One overlap error is enough for this span; the ordered
@@ -175,6 +195,45 @@ def check_policy_boundary_inventory(
                 errors.append(
                     f"boundary {boundary.get('boundary_uid')}: normalized mapping "
                     f"{mapping!r} does not resolve to a real clause/condition")
+
+    # Mapping resolution must be bidirectional.  The original gate only proved
+    # that inventory -> normalized mappings resolved.  A normalized clause could
+    # still self-declare unrelated source_boundary_uids and pass, leaving its
+    # provenance address dangling (CASE_030 DOC_004/006/008).
+    if normalized_contract is not None:
+        clauses = normalized_contract.get("clauses") or []
+        mapped_boundary_uids_by_clause: dict[str, set[str]] = {}
+        for boundary in boundaries:
+            if boundary.get("disposition") != "normalized":
+                continue
+            boundary_uid = boundary.get("boundary_uid")
+            for mapping in boundary.get("normalized_mappings") or []:
+                clause_uid = mapping.get("clause_uid")
+                if clause_uid and boundary_uid:
+                    mapped_boundary_uids_by_clause.setdefault(
+                        clause_uid, set()).add(boundary_uid)
+
+        for clause_index, clause in enumerate(clauses):
+            clause_uid = clause.get("clause_uid")
+            declared = set(clause.get("source_boundary_uids") or [])
+            unknown = declared - boundary_set
+            if unknown:
+                errors.append(
+                    f"clauses[{clause_index}].source_boundary_uids do not resolve "
+                    f"in this inventory: {sorted(unknown)}")
+            mapped = mapped_boundary_uids_by_clause.get(clause_uid, set())
+            missing_from_clause = mapped - declared
+            if missing_from_clause:
+                errors.append(
+                    f"clauses[{clause_index}] omits inventory boundaries that map "
+                    f"to clause_uid {clause_uid!r}: "
+                    f"{sorted(missing_from_clause)}")
+            unbacked = declared - mapped
+            if unbacked:
+                errors.append(
+                    f"clauses[{clause_index}] declares source boundaries that do "
+                    f"not map back to clause_uid {clause_uid!r}: "
+                    f"{sorted(unbacked)}")
 
     return errors
 

@@ -161,6 +161,58 @@ def test_mapping_to_missing_condition_is_rejected():
     assert any("does not resolve" in error for error in errors)
 
 
+def test_normalized_source_boundary_uid_must_resolve_bidirectionally():
+    normalized = _normalized()
+    normalized["clauses"][0]["source_boundary_uids"][0] = \
+        "PB-9999999999999999"
+    errors = pc.check_policy_boundary_inventory(
+        _inventory(),
+        "policy_boundary_inventory_DOC_001.json",
+        REDACTED,
+        normalized,
+    )
+    assert any("source_boundary_uids do not resolve" in error
+               for error in errors), errors
+    assert any("omits inventory boundaries" in error for error in errors), errors
+
+
+def test_inventory_mapping_must_be_declared_by_clause():
+    normalized = _normalized()
+    normalized["clauses"][0]["source_boundary_uids"].pop()
+    errors = pc.check_policy_boundary_inventory(
+        _inventory(),
+        "policy_boundary_inventory_DOC_001.json",
+        REDACTED,
+        normalized,
+    )
+    assert any("omits inventory boundaries" in error for error in errors), errors
+
+
+def test_normative_paragraph_cannot_be_hidden_in_excluded_span():
+    inventory = _inventory()
+    paragraph_span = inventory["page_spans"][1]
+    boundary_uid = paragraph_span["boundary_uid"]
+    inventory["boundaries"] = [
+        boundary for boundary in inventory["boundaries"]
+        if boundary["boundary_uid"] != boundary_uid
+    ]
+    paragraph_span.update({
+        "disposition": "excluded",
+        "boundary_uid": None,
+        "exclusion_reason":
+            "segment body text covered under its article boundary; "
+            "not separately normalized",
+    })
+    errors = pc.check_policy_boundary_inventory(
+        inventory,
+        "policy_boundary_inventory_DOC_001.json",
+        REDACTED,
+        _normalized(),
+    )
+    assert any("normative policy text" in error for error in errors), errors
+    assert any("blanket body exclusion" in error for error in errors), errors
+
+
 def test_review_and_extraction_boundaries_block_finalize():
     inventory = _inventory()
     inventory["boundaries"][1].update({
