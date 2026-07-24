@@ -488,3 +488,57 @@ def test_reference_table_only_segment_is_exempt_from_clauses_but_needs_inventory
     # ...but the missing boundary inventory is still enforced for the segment.
     assert any("DOC_007: missing policy_boundary_inventory_DOC_007.json" in b
                for b in blockers), blockers
+
+
+def test_reference_table_only_segment_cannot_finalize_with_review_flags(
+        isolated_dao):
+    out = isolated_dao / "outputs" / "CASE_030"
+    processed = isolated_dao / "data" / "processed" / "CASE_030" / "DOC_007"
+    out.mkdir(parents=True)
+    processed.mkdir(parents=True)
+    (processed / "redacted_text.md").write_text(REDACTED, encoding="utf-8")
+    manifest = {"case_id": "CASE_030", "documents": [_segment_doc("DOC_007")]}
+    (out / "document_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    reference_table = {
+        "case_id": "CASE_030", "component": "policy-pipeline",
+        "status": "success", "source_document_id": "DOC_007",
+        "tables": [{
+            "table_uid": "RT-1111111111111111", "table_id": "T-1",
+            "title": "제1조(지급)",
+            "columns": [{"column_key": "c", "label": "분류"}],
+            "rows": [{"row_uid": "RR-1111111111111111", "cells": [{
+                "cell_uid": "RC-1111111111111111", "column_key": "c",
+                "value": "제1조(지급)",
+                "evidence_references": [{
+                    "document_id": "DOC_007", "page": 1,
+                    "quote": "제1조(지급)",
+                }],
+                "review_required": True,
+            }]}],
+            "evidence_references": [{
+                "document_id": "DOC_007", "page": 1,
+                "quote": "제1조(지급)",
+            }],
+            "review_required": True,
+        }],
+    }
+    (out / "reference_table_DOC_007.json").write_text(
+        json.dumps(reference_table, ensure_ascii=False), encoding="utf-8")
+    inventory = _inventory()
+    inventory["source_document_id"] = "DOC_007"
+    for boundary in inventory["boundaries"]:
+        boundary.update({
+            "disposition": "excluded_with_reason",
+            "normalized_mappings": [],
+            "reason": "structured table represented in reference table",
+            "review_required": False,
+        })
+    (out / "policy_boundary_inventory_DOC_007.json").write_text(
+        json.dumps(inventory, ensure_ascii=False), encoding="utf-8")
+
+    blockers = dao._policy_completion_blockers("CASE_030")
+
+    assert any("unresolved reference table" in blocker
+               and "review_required=true" in blocker
+               for blocker in blockers), blockers

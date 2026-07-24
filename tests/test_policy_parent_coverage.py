@@ -29,7 +29,24 @@ def _manifest():
 def _reference_table_for(doc_id):
     # DOC_001 has a reference table RT-aaaa; anything else has none.
     if doc_id == "DOC_001":
-        return {"tables": [{"table_uid": "RT-aaaaaaaaaaaaaaaa"}]}
+        return {"tables": [{
+            "table_uid": "RT-aaaaaaaaaaaaaaaa",
+            "review_required": False,
+            "evidence_references": [
+                {"document_id": "DOC_001", "page": 3, "quote": "표 제목"},
+            ],
+            "rows": [{
+                "row_uid": "RR-aaaaaaaaaaaaaaaa",
+                "cells": [{
+                    "cell_uid": "RC-aaaaaaaaaaaaaaaa",
+                    "review_required": False,
+                    "evidence_references": [
+                        {"document_id": "DOC_001", "page": 3,
+                         "quote": "표 값"},
+                    ],
+                }],
+            }],
+        }]}
     return None
 
 
@@ -109,6 +126,27 @@ def test_reference_table_document_missing_is_blocker():
     errors = pc.check_policy_parent_coverage(
         data, FILENAME, _manifest(), _reference_table_for)
     assert any("no reference_table contract" in e for e in errors), errors
+
+
+def test_reference_table_must_have_evidence_on_every_claimed_page():
+    data = _clean_data()
+    data["pages"][2]["logical_page"] = 2
+    data["pages"][1]["logical_page"] = 3
+    errors = pc.check_policy_parent_coverage(
+        data, FILENAME, _manifest(), _reference_table_for)
+    assert any("no table/cell evidence" in e for e in errors), errors
+
+
+def test_reference_table_review_flag_is_not_resolved_coverage():
+    def review_table(_doc_id):
+        table = _reference_table_for("DOC_001")
+        table["tables"][0]["review_required"] = True
+        table["tables"][0]["rows"][0]["cells"][0]["review_required"] = True
+        return table
+
+    errors = pc.check_policy_parent_coverage(
+        _clean_data(), FILENAME, _manifest(), review_table)
+    assert any("review_required=true" in e for e in errors), errors
 
 
 def test_parent_being_a_segment_is_blocker():

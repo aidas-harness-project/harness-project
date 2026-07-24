@@ -363,11 +363,46 @@ def check_policy_parent_coverage(
                     f"page {lp}: reference_table disposition points at "
                     f"{rt_doc!r} which has no reference_table contract")
             else:
-                uids = {t.get("table_uid") for t in rt.get("tables", [])}
-                if table_uid not in uids:
+                table = next(
+                    (t for t in rt.get("tables", [])
+                     if t.get("table_uid") == table_uid),
+                    None,
+                )
+                if table is None:
                     errors.append(
                         f"page {lp}: table_uid {table_uid!r} is not present in "
                         f"reference_table_{rt_doc}.json")
+                    continue
+                if table.get("review_required") is True:
+                    errors.append(
+                        f"page {lp}: table_uid {table_uid!r} still has "
+                        "review_required=true and cannot be a resolved "
+                        "reference_table disposition")
+                cells = [
+                    cell
+                    for row in table.get("rows") or []
+                    for cell in row.get("cells") or []
+                ]
+                if any(cell.get("review_required") is True for cell in cells):
+                    errors.append(
+                        f"page {lp}: table_uid {table_uid!r} contains cells with "
+                        "review_required=true")
+                evidence_pages = {
+                    ref.get("page")
+                    for ref in table.get("evidence_references") or []
+                    if isinstance(ref, dict)
+                }
+                evidence_pages.update(
+                    ref.get("page")
+                    for cell in cells
+                    for ref in cell.get("evidence_references") or []
+                    if isinstance(ref, dict)
+                )
+                if lp not in evidence_pages:
+                    errors.append(
+                        f"page {lp}: table_uid {table_uid!r} has no table/cell "
+                        "evidence on this logical page; a UID cannot claim "
+                        "unevidenced pages")
 
     return errors
 

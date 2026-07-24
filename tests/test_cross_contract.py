@@ -24,6 +24,7 @@ from _cross_contract import (
     check_stable_ids_and_semantics,
     doc_id_from_filename,
     split_pages,
+    unresolved_reference_table_reviews,
 )
 
 
@@ -411,6 +412,25 @@ def test_truncated_payment_sentence_is_rejected():
         _contract([clause]), "normalized_policy_clause_DOC_001.json",
         REDACTED_TEXT)
     assert any("complete policy proposition" in error for error in errors), errors
+
+
+def test_reference_table_review_flags_are_finalize_blockers():
+    table = {
+        "tables": [{
+            "table_uid": "RT-1111111111111111",
+            "review_required": True,
+            "rows": [{
+                "row_uid": "RR-1111111111111111",
+                "cells": [{
+                    "cell_uid": "RC-1111111111111111",
+                    "review_required": True,
+                }],
+            }],
+        }],
+    }
+    blockers = unresolved_reference_table_reviews(table)
+    assert any("tables[0]" in blocker for blocker in blockers)
+    assert any("cells[0]" in blocker for blocker in blockers)
 
 
 def test_duplicate_clause_id_rejected():

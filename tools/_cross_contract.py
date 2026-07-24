@@ -544,3 +544,26 @@ def check_reference_table(
                     f"{loc}: cited quote does not contain the table title/cell "
                     f"value {value!r}")
     return errors
+
+
+def unresolved_reference_table_reviews(data: dict) -> list[str]:
+    """Return every table/cell that still requires human or layout review.
+
+    Reference-table contracts may be persisted while work is in progress, but
+    policy finalization must not treat a table UID's mere existence as proof
+    that the table was completely reconstructed.
+    """
+    blockers: list[str] = []
+    for table_index, table in enumerate(data.get("tables") or []):
+        if table.get("review_required") is True:
+            blockers.append(
+                f"tables[{table_index}] {table.get('table_uid')}: "
+                "review_required=true")
+        for row_index, row in enumerate(table.get("rows") or []):
+            for cell_index, cell in enumerate(row.get("cells") or []):
+                if cell.get("review_required") is True:
+                    blockers.append(
+                        f"tables[{table_index}].rows[{row_index}].cells"
+                        f"[{cell_index}] {cell.get('cell_uid')}: "
+                        "review_required=true")
+    return blockers

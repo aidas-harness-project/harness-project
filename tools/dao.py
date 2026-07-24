@@ -455,6 +455,29 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
             if inventory is None:
                 blockers.append(f"{doc_id}: missing {inventory_name}")
                 continue
+            schemas, registry = load_registry()
+            reference_errors = validate_instance(
+                reference_table, _cross_contract.REFERENCE_TABLE_SCHEMA,
+                schemas, registry)
+            blockers.extend(
+                f"{doc_id}: reference table schema: {error}"
+                for error in reference_errors)
+            try:
+                reference_source_errors = _cross_contract.check_reference_table(
+                    reference_table,
+                    f"reference_table_{doc_id}.json",
+                    _redacted_text_for_doc(case_id, doc_id),
+                )
+            except _cross_contract.SourceUnavailable as exc:
+                reference_source_errors = [f"source unavailable: {exc}"]
+            blockers.extend(
+                f"{doc_id}: reference table: {error}"
+                for error in reference_source_errors)
+            blockers.extend(
+                f"{doc_id}: unresolved reference table: {error}"
+                for error in
+                _cross_contract.unresolved_reference_table_reviews(
+                    reference_table))
             inventory_errors = validate_instance(
                 inventory, policy_completeness.INVENTORY_SCHEMA,
                 schemas, registry)
