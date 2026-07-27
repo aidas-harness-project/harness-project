@@ -19,6 +19,27 @@
             { "type": "null" }
           ]
         },
+        "source_text_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ],
+          "description": "Digest of the PROCESSED source text (redacted_text.md) the audited contracts quote. Every boundary offset and evidence quote is expressed against these exact bytes, so a re-extraction that changes them invalidates the audit even when the contracts themselves are untouched. null only when the document has no processed text at all (which is itself a completion blocker)."
+        },
+        "manifest_entry_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ],
+          "description": "Digest of this document's document_manifest.json entry, including its page_map. A segment's logical->physical page mapping is what parent coverage and physical-page provenance are checked against; changing it must make the audit stale."
+        },
+        "parent_coverage_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ],
+          "description": "Digest of the parent's policy_parent_coverage contract, for a document whose parent declares one. null when the document has no segmented parent with coverage."
+        },
         "audit_scope": {
           "type": "object",
           "properties": {
@@ -49,6 +70,9 @@
         "normalized_sha256",
         "inventory_sha256",
         "reference_table_sha256",
+        "source_text_sha256",
+        "manifest_entry_sha256",
+        "parent_coverage_sha256",
         "audit_scope",
         "auditor_id",
         "audited_at",

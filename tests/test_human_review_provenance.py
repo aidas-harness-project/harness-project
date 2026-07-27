@@ -50,6 +50,9 @@ def _audit(findings):
         "normalized_sha256": "a" * 64,
         "inventory_sha256": "b" * 64,
         "reference_table_sha256": None,
+        "source_text_sha256": None,
+        "manifest_entry_sha256": None,
+        "parent_coverage_sha256": None,
         "audit_scope": {
             "source_completeness": True,
             "semantic_buckets": True,

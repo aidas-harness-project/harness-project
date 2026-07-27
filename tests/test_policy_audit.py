@@ -72,13 +72,15 @@ def _seed_contracts(isolated_dao):
             "downstream_disposition": "automated_text_pipeline",
         }],
     })
-    hashes = {
-        "normalized_sha256":
-            hashlib.sha256(normalized_path.read_bytes()).hexdigest(),
-        "inventory_sha256":
-            hashlib.sha256(inventory_path.read_bytes()).hexdigest(),
-        "reference_table_sha256": None,
-    }
+    # Take the binding digests from the DAO itself rather than recomputing a
+    # subset by hand: Part 11F widened the binding to the processed source text,
+    # the manifest entry/page_map, and the parent coverage, and a fixture that
+    # hardcodes only the contract hashes silently stops covering the rest.
+    hashes, _, _, _ = dao._policy_audit_context("CASE_030", "DOC_001")
+    assert hashlib.sha256(normalized_path.read_bytes()).hexdigest() == \
+        hashes["normalized_sha256"]
+    assert hashlib.sha256(inventory_path.read_bytes()).hexdigest() == \
+        hashes["inventory_sha256"]
     return out, normalized, inventory, hashes
 
 

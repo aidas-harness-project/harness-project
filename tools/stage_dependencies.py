@@ -80,6 +80,32 @@ def requires(stage: str) -> tuple:
     return _REQUIRES.get(stage, ())
 
 
+def dependents_of(stage: str) -> set:
+    """Every stage that transitively depends on `stage` (excluding itself).
+
+    The reverse closure of _REQUIRES. Used by the DAO's invalidation cascade:
+    when an upstream artifact changes, a downstream stage recorded `passed`
+    was derived from bytes that no longer exist, so its status is a false
+    claim -- it must be invalidated, not left standing (Part 11F).
+
+    Because this is derived from _REQUIRES rather than maintained separately,
+    extending the dependency graph automatically extends the cascade; the two
+    can never drift apart.
+    """
+    direct = {s for s, prereqs in _REQUIRES.items() if stage in prereqs}
+    out = set()
+    frontier = list(direct)
+    while frontier:
+        current = frontier.pop()
+        if current in out:
+            continue
+        out.add(current)
+        frontier.extend(
+            s for s, prereqs in _REQUIRES.items() if current in prereqs)
+    out.discard(stage)
+    return out
+
+
 def _stage_status_map(state: dict) -> dict:
     """{stage_name: status} from a run-state dict. A stage with no entry is
     absent from the map -- callers must treat 'absent' as unmet, never as a

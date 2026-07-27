@@ -59,7 +59,17 @@
         },
         "backup_path": {
           "type": ["string", "null"],
-          "description": "outputs/CASE_XXX/_backups/step_<N>_<stage_name>/ -- null until this stage has passed. When status is 'passed' this MUST be non-null: a stage is only ever recorded passed atomically with the snapshot that backs it (see finalize-stage), so a passed stage with no backup is a structurally impossible half-finalized state."
+          "description": "outputs/CASE_XXX/_backups/step_<N>_<stage_name>/ -- null until this stage has passed. When status is 'passed' this MUST be non-null: a stage is only ever recorded passed atomically with the snapshot that backs it (see finalize-stage), so a passed stage with no backup is a structurally impossible half-finalized state. A stage later invalidated by an upstream change keeps the path of the snapshot that did back it -- that snapshot is a real historical artifact and is never deleted or rewritten."
+        },
+        "invalidated_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "When this stage's recorded result was invalidated because an upstream input it was derived from changed. Set together with status='failed' and invalidation_reason by the DAO's cascade, never by an agent."
+        },
+        "invalidation_reason": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Why the stage was invalidated -- names the upstream stage and the artifact that changed (e.g. \"upstream document_processing changed: redacted text rewritten for DOC_005\"). A stage whose inputs moved must not stay 'passed': every boundary offset, evidence quote, and page mapping is expressed against exact upstream bytes, so a passed status derived from superseded bytes is a false claim about work that was never done against the current source."
         }
       },
       "required": ["stage_name", "status", "attempt_count"],

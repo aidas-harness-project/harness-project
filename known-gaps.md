@@ -1456,3 +1456,50 @@ assignment rejected; row span outside the declared region rejected; row-span
 quote must match the real page text; multi-page table with a declared repeated
 header passes; an undeclared repeated header reads as a missing row; layout
 ambiguity blocks finalization. 573 -> 582 pass.
+
+## 25. Finalize never re-checked evidence against the current source, and no upstream change invalidated anything -- RESOLVED 2026-07-27 (Part 11F)
+
+Two independent holes made a `passed` policy stage a claim about bytes that no
+longer existed:
+
+- **finalize re-validated the normalized contract's SHAPE only.**
+  `_policy_completion_blockers` ran `validate_instance(...)` against
+  `normalized_policy_clause.schema.json` but never re-ran
+  `check_normalized_policy_clause`, the check that compares every evidence quote
+  to the processed source. So the sequence `write a valid contract -> rewrite
+  redacted_text.md -> refresh only the inventory and audit -> finalize` passed
+  with evidence that matched nothing in the current source.
+- **nothing propagated an upstream change.** Rewriting `redacted_text.md` or
+  editing a manifest `page_map` left `policy_clause_processing` (and everything
+  downstream of it) sitting at `passed`, even though every boundary offset and
+  evidence quote is expressed against exactly those bytes.
+
+Fix:
+
+- finalize now re-runs the FULL cross-contract source check per document, with
+  `SourceUnavailable` reported as a blocker rather than a pass.
+- the audit binding widened from 3 digests to 6: `source_text_sha256` (the
+  processed text quotes are expressed against), `manifest_entry_sha256` (the
+  whole manifest entry, page_map included, serialised with sorted keys so key
+  order cannot fake a change), and `parent_coverage_sha256`. `check_policy_audit`
+  is generic over the digest dict, so all three are enforced automatically.
+- new `_invalidate_dependents()`: when an upstream artifact really changes,
+  every transitively dependent stage recorded `passed`/`in_progress` moves to
+  `failed` with `invalidated_at` + `invalidation_reason` (new run-state fields).
+  It runs wholly under the run-state lock and validates before writing, the same
+  fail-don't-persist contract every other run-state writer uses. The historical
+  `backup_path` is kept -- that snapshot really was taken, and P10 never
+  rewrites a backup.
+- wired into `write-redacted-text` (only when the bytes actually differ -- an
+  identical rewrite is a no-op) and `patch_manifest_document` (only for
+  provenance-bearing fields: page_map, segment_page_ranges, source identity,
+  paths, role/type/disposition -- descriptive metadata like ocr_quality does
+  not cascade). The cascade runs after the manifest lock is released.
+- `stage_dependencies.dependents_of()` computes the transitive reverse closure
+  of `_REQUIRES`, so extending the dependency graph automatically extends the
+  cascade -- the two cannot drift apart.
+
+The stage doing the writing is never invalidated by its own writes (those writes
+are how it produces its output); only what depends on it is.
+
+9 regression tests (tests/test_policy_stale_propagation.py). 582 -> 591 pass.

@@ -366,6 +366,48 @@ def _contract_sha256(case_id: str, filename: str) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _manifest_entry_sha256(case_id: str, doc_id: str) -> str | None:
+    """Digest of one document's manifest entry, page_map included.
+
+    An audit is bound to the logical->physical mapping its provenance is
+    checked against (Part 11F): if a segment's page_map is edited, every
+    physical-page claim downstream of it changes meaning, so the audit must go
+    stale even though no policy contract was touched. Serialised with sorted
+    keys so key ordering can never make an unchanged entry look changed.
+    """
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        return None
+    entry = next(
+        (d for d in manifest.get("documents", [])
+         if d.get("document_id") == doc_id), None)
+    if entry is None:
+        return None
+    encoded = json.dumps(
+        entry, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _parent_coverage_name_for(case_id: str, doc_id: str) -> str | None:
+    """The parent-coverage contract filename governing this document, if any:
+    the document's own when it is a physical parent, otherwise its parent's."""
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        return None
+    entry = next(
+        (d for d in manifest.get("documents", [])
+         if d.get("document_id") == doc_id), None)
+    if entry is None:
+        return None
+    parent_id = (
+        entry.get("source_document_id")
+        if entry.get("document_role") == "segment" else doc_id)
+    if not parent_id:
+        return None
+    return f"policy_parent_coverage_{parent_id}.json"
+
+
 def _policy_audit_context(case_id: str, doc_id: str):
     normalized_name = f"normalized_policy_clause_{doc_id}.json"
     inventory_name = f"policy_boundary_inventory_{doc_id}.json"
@@ -373,10 +415,22 @@ def _policy_audit_context(case_id: str, doc_id: str):
     normalized = read_contract_data(case_id, normalized_name)
     inventory = read_contract_data(case_id, inventory_name)
     reference = read_contract_data(case_id, reference_name)
+    # The audit binds to its SOURCES too, not only the contracts derived from
+    # them (Part 11F). Boundary offsets and evidence quotes are expressed
+    # against exact processed bytes and an exact page_map; a change to either
+    # invalidates conclusions drawn from them even if no contract was rewritten.
+    source_text = _redacted_text_for_doc(case_id, doc_id)
+    coverage_name = _parent_coverage_name_for(case_id, doc_id)
     hashes = {
         "normalized_sha256": _contract_sha256(case_id, normalized_name),
         "inventory_sha256": _contract_sha256(case_id, inventory_name),
         "reference_table_sha256": _contract_sha256(case_id, reference_name),
+        "source_text_sha256": (
+            hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+            if source_text is not None else None),
+        "manifest_entry_sha256": _manifest_entry_sha256(case_id, doc_id),
+        "parent_coverage_sha256": (
+            _contract_sha256(case_id, coverage_name) if coverage_name else None),
     }
     return hashes, normalized, inventory, reference
 
@@ -514,6 +568,21 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
         blockers.extend(
             f"{doc_id}: normalized schema: {error}"
             for error in normalized_errors)
+        # Re-run the FULL cross-contract check against the source as it is NOW,
+        # not just the schema shape (Part 11F). Without this, a contract written
+        # while its evidence matched could survive a later change to
+        # redacted_text.md: the write-time check passed once, and finalize only
+        # re-validated the JSON's shape. Every quote is re-verified here.
+        try:
+            normalized_source_errors = \
+                _cross_contract.check_normalized_policy_clause(
+                    normalized, normalized_name,
+                    _redacted_text_for_doc(case_id, doc_id))
+        except _cross_contract.SourceUnavailable as exc:
+            normalized_source_errors = [f"source unavailable: {exc}"]
+        blockers.extend(
+            f"{doc_id}: normalized source: {error}"
+            for error in normalized_source_errors)
         if inventory is None:
             blockers.append(f"{doc_id}: missing {inventory_name}")
             continue
@@ -1054,6 +1123,25 @@ def cmd_write_contract(args):
         release_lock(target)
 
 
+# Manifest fields that downstream provenance is expressed against. Changing one
+# moves the ground under every stage validated on top of it, so it triggers the
+# Part 11F invalidation cascade. Deliberately narrow: descriptive metadata
+# (classification_confidence, ocr_quality, …) does not invalidate anything.
+_PROVENANCE_MANIFEST_FIELDS = frozenset({
+    "page_map",
+    "segment_page_ranges",
+    "source_document_id",
+    "source_total_pages",
+    "derived_text_sha256",
+    "derived_text_path",
+    "redacted_text_path",
+    "ocr_text_path",
+    "document_role",
+    "document_type",
+    "downstream_disposition",
+})
+
+
 def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_by: str, run_id: str,
                              stage: str | None = None, purpose: str | None = None):
     """Atomically read-modify-write a single document's fields in
@@ -1072,6 +1160,7 @@ def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_b
     if existing_lock is not None:
         return False, (f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
                         f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+    provenance_changed: list[str] = []
     try:
         if not target.exists():
             return False, f"FAIL: no document_manifest.json for {case_id}"
@@ -1079,6 +1168,13 @@ def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_b
         doc = next((d for d in manifest["documents"] if d["document_id"] == document_id), None)
         if doc is None:
             return False, f"FAIL: document_id {document_id} not found in document_manifest.json"
+        # Which incoming fields actually change a value downstream provenance is
+        # expressed against (Part 11F)? Metadata like classification_confidence
+        # does not; the page mapping and source identity do.
+        provenance_changed = [
+            key for key in fields
+            if key in _PROVENANCE_MANIFEST_FIELDS and doc.get(key) != fields[key]
+        ]
         doc.update(fields)
         manifest["updated_at"] = now_iso()
         errors = _schema_check(manifest, "document_manifest.schema.json")
@@ -1097,12 +1193,24 @@ def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_b
             # patch never fails on run-state dependencies.
             state = _update_run_state(case_id, run_id, stage, "in_progress", held_by, dep_check="soft")
             if state is None:
-                return True, f"PASS: patched {document_id} in {target}\n" \
+                result = True, f"PASS: patched {document_id} in {target}\n" \
                     "WARNING: patch succeeded, but run-state could not be updated (lock contention) -- " \
                     "run-state may now lag behind actual progress; retry the run-state update."
-        return True, f"PASS: patched {document_id} in {target}"
+            else:
+                result = True, f"PASS: patched {document_id} in {target}"
+        else:
+            result = True, f"PASS: patched {document_id} in {target}"
     finally:
         release_lock(target)
+    # Cascade outside the manifest lock: a changed page_map/source identity
+    # moves the ground every downstream stage's provenance was checked against.
+    if provenance_changed:
+        _invalidate_dependents(
+            case_id, "document_processing",
+            f"upstream document_processing changed: {document_id} manifest "
+            f"{', '.join(sorted(provenance_changed))} updated",
+            held_by, run_id)
+    return result
 
 
 def cmd_patch_manifest_document(args):
@@ -1152,9 +1260,82 @@ def cmd_write_redacted_text(args):
         return 1
     try:
         text = Path(args.text_file).read_text(encoding="utf-8")
+        previous = target.read_text(encoding="utf-8") if target.exists() else None
         atomic_write_text(target, text)
         print(f"PASS: wrote {target}")
-        return 0
+    finally:
+        release_lock(target)
+    # The processed text is what every policy boundary offset and evidence
+    # quote is expressed against. Rewriting it silently strands downstream
+    # work that was validated against the old bytes (Part 11F). Only a real
+    # change cascades -- rewriting identical text is a no-op.
+    if previous is not None and previous != text:
+        _invalidate_dependents(
+            args.case_id, "document_processing",
+            f"upstream document_processing changed: redacted text rewritten "
+            f"for {args.doc_id}",
+            args.held_by, args.run_id)
+    return 0
+
+
+def _invalidate_dependents(case_id, upstream_stage, reason, held_by, run_id):
+    """Invalidate every stage that transitively depends on `upstream_stage`.
+
+    Part 11F. A downstream stage recorded `passed` was derived from upstream
+    bytes -- exact processed text, exact page_map offsets. When those bytes
+    change, the recorded status is a claim about work that was never done
+    against the current source, so it must not stand. Affected stages move to
+    `failed` with an explicit invalidation_reason; the historical backup_path
+    is kept (that snapshot really was taken, and P10 never rewrites a backup).
+
+    `upstream_stage` itself is NOT touched: these writes are how that stage
+    produces its own output, so invalidating it would fail the very stage
+    doing the work.
+
+    Runs entirely under the run-state lock (P5) and validates before writing,
+    the same fail-don't-persist contract every other run-state writer uses. A
+    missing/unreadable run-state is a no-op, not an error -- there is nothing
+    recorded to invalidate.
+    """
+    target = run_state_path(case_id)
+    if not target.exists():
+        return []
+    dependents = stage_dependencies.dependents_of(upstream_stage)
+    if not dependents:
+        return []
+    existing_lock = acquire_lock_blocking(
+        target, held_by, run_id or "unknown",
+        f"invalidate stages downstream of {upstream_stage}")
+    if existing_lock is not None:
+        print(f"LOCKED: could not invalidate downstream stages -- "
+              f"held_by={existing_lock['held_by']} run_id={existing_lock['run_id']}")
+        return []
+    try:
+        state = load_run_state(case_id)
+        changed = []
+        for entry in state.get("stages", []):
+            if entry.get("stage_name") not in dependents:
+                continue
+            if entry.get("status") not in ("passed", "in_progress"):
+                continue
+            entry["status"] = "failed"
+            entry["invalidated_at"] = now_iso()
+            entry["invalidation_reason"] = reason
+            changed.append(entry.get("stage_name"))
+        if not changed:
+            return []
+        state["updated_at"] = now_iso()
+        errors = _schema_check(state, "run_state.schema.json")
+        if errors:
+            print("WARNING: downstream invalidation would make run-state "
+                  "schema-invalid; not written:")
+            for error in errors:
+                print(f"  - {error}")
+            return []
+        save_run_state(case_id, state)
+        print(f"INVALIDATED (upstream {upstream_stage} changed): "
+              f"{', '.join(sorted(changed))}")
+        return changed
     finally:
         release_lock(target)
 
