@@ -1362,3 +1362,45 @@ false positive; heading-only boundary carrying a condition rejected; heading ->
 clause identity still passes; evidence outside declared boundaries rejected;
 evidence inside them passes; evidence landing in an excluded span rejected.
 565 tests pass.
+
+## 23. Administrative exclusions were never checked against the parent's real source -- RESOLVED 2026-07-27 (Part 11D)
+
+`check_policy_parent_coverage` verified only that an `administrative_excluded`
+page's evidence cited the right document_id and the right logical page. It never
+opened the parent's processed text, so the quote itself was unconstrained: a
+fabricated string, a real quote lifted from a different page, or an empty one all
+passed. Worse, a page that actually carried clauses could be dispositioned
+`administrative_excluded` and disappear from the completeness accounting
+entirely.
+
+Fix (`tools/policy_completeness.py`): the function now takes the parent's own
+processed text (the DAO supplies it at both call sites) and, for every
+administrative exclusion:
+
+- the cited quote must appear verbatim (whitespace-normalized) on that page of
+  the parent's processed text; empty/whitespace quotes are rejected;
+- the page is scanned for normative content -- an **operative policy predicate**
+  (지급합니다 / 보상하지 / 하여야 합니다 / 해지 / 면책 / 말합니다 …) refuses the
+  exclusion outright and routes the page to review_required;
+- failing that, structural anchors that are NOT table-of-contents entries are
+  refused the same way;
+- a reason that is only a generic category word (appendix / front matter / 부록 /
+  별첨 / 기타 …) is rejected as a blanket justification;
+- if the parent has no processed text, or the page is missing from it, the
+  exclusion is reported as UNVERIFIABLE rather than silently accepted
+  (fail-closed).
+
+Design note on the TOC exemption: an anchor-only rule would reject a legitimate
+목차 page, which lists 제N조 titles without stating any rule. So the primary
+normative signal is the operative predicate, and anchors only count when they are
+not dot-leader/page-number TOC entries. This keeps genuine covers and contents
+pages passing while catching a real clause hidden behind an "administrative"
+label. As in Part 11C, the quote's location is computed from the source rather
+than self-declared.
+
+8 regression tests (tests/test_policy_parent_coverage.py): fabricated quote
+rejected; a real quote from another page rejected; the same page's real quote
+passes; empty quote rejected; a page with an operative predicate cannot be
+administratively excluded; a genuine table-of-contents page still passes; a
+blanket reason is rejected; and a missing parent text is reported as
+unverifiable. 565 -> 573 pass.

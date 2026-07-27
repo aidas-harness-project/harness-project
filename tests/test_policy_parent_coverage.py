@@ -93,9 +93,23 @@ def _clean_data(total=3):
     }
 
 
+# The parent's own processed text (Part 11D). Page 1 is a genuine cover: it
+# carries the cited quote and no normative content. The DAO always supplies this
+# to check_policy_parent_coverage, so the clean fixture does too.
+PARENT_TEXT = (
+    "<<<PAGE page=1>>>\n"
+    "삼성화재 미니생활보험 약관 표지\n"
+    "<<<PAGE page=2>>>\n"
+    "제3조(보험금의 지급) 회사는 보험금을 지급합니다.\n"
+    "<<<PAGE page=3>>>\n"
+    "【별표 1】 장해분류표\n"
+)
+
+
 def test_clean_coverage_passes():
     errors = pc.check_policy_parent_coverage(
-        _clean_data(), FILENAME, _manifest(), _reference_table_for)
+        _clean_data(), FILENAME, _manifest(), _reference_table_for,
+        PARENT_TEXT)
     assert errors == [], errors
 
 
@@ -264,3 +278,90 @@ def test_extraction_failed_is_unresolved():
 
 def test_all_resolved_has_no_unresolved():
     assert pc.unresolved_parent_pages(_clean_data()) == []
+
+
+# --------------------------------------------------------------------------
+# Part 11D: administrative exclusions verified against the parent's own source.
+# --------------------------------------------------------------------------
+
+def _admin_data(quote, reason="표지", page=1):
+    data = _clean_data()
+    data["pages"][0] = _page(
+        1, "administrative_excluded", reason=reason,
+        evidence_references=[{
+            "document_id": "DOC_001", "page": page, "quote": quote,
+        }])
+    return data
+
+
+def test_fabricated_admin_quote_is_rejected():
+    """A quote that exists nowhere on the page must not pass."""
+    errors = pc.check_policy_parent_coverage(
+        _admin_data("THIS QUOTE DOES NOT EXIST"), FILENAME, _manifest(),
+        _reference_table_for, PARENT_TEXT)
+    assert any("does not appear on that page" in e for e in errors), errors
+
+
+def test_real_quote_from_another_page_is_rejected():
+    """A real quote lifted from a DIFFERENT page is not evidence for this one."""
+    errors = pc.check_policy_parent_coverage(
+        _admin_data("장해분류표"), FILENAME, _manifest(),
+        _reference_table_for, PARENT_TEXT)
+    assert any("does not appear on that page" in e for e in errors), errors
+
+
+def test_real_quote_from_the_same_page_passes():
+    errors = pc.check_policy_parent_coverage(
+        _admin_data("미니생활보험 약관 표지"), FILENAME, _manifest(),
+        _reference_table_for, PARENT_TEXT)
+    assert errors == [], errors
+
+
+def test_empty_admin_quote_is_rejected():
+    errors = pc.check_policy_parent_coverage(
+        _admin_data("   "), FILENAME, _manifest(),
+        _reference_table_for, PARENT_TEXT)
+    assert any("empty/whitespace quote" in e for e in errors), errors
+
+
+def test_normative_page_cannot_be_administratively_excluded():
+    """An operative policy predicate on the page defeats the exclusion."""
+    text = (
+        "<<<PAGE page=1>>>\n"
+        "제7조(보험금의 지급) 회사는 피보험자가 사망한 경우 보험금을 지급합니다.\n"
+        "<<<PAGE page=2>>>\n본문\n<<<PAGE page=3>>>\n표\n"
+    )
+    errors = pc.check_policy_parent_coverage(
+        _admin_data("제7조(보험금의 지급)"), FILENAME, _manifest(),
+        _reference_table_for, text)
+    assert any("operative policy predicate" in e for e in errors), errors
+
+
+def test_table_of_contents_page_is_still_administrative():
+    """A 목차 lists 제N조 titles but states no rule -- it must stay allowed."""
+    text = (
+        "<<<PAGE page=1>>>\n"
+        "목  차\n"
+        "제1조(목적) ............ 5\n"
+        "제2조(용어의 정의) ...... 6\n"
+        "<<<PAGE page=2>>>\n본문\n<<<PAGE page=3>>>\n표\n"
+    )
+    errors = pc.check_policy_parent_coverage(
+        _admin_data("목  차", reason="목차 페이지 -- 조문 본문 없음"),
+        FILENAME, _manifest(), _reference_table_for, text)
+    assert errors == [], errors
+
+
+def test_blanket_admin_reason_is_rejected():
+    errors = pc.check_policy_parent_coverage(
+        _admin_data("미니생활보험 약관 표지", reason="appendix"),
+        FILENAME, _manifest(), _reference_table_for, PARENT_TEXT)
+    assert any("blanket category" in e for e in errors), errors
+
+
+def test_admin_exclusion_without_parent_text_cannot_be_verified():
+    """Fail closed: no processed text means the exclusion is unverifiable."""
+    errors = pc.check_policy_parent_coverage(
+        _admin_data("미니생활보험 약관 표지"), FILENAME, _manifest(),
+        _reference_table_for, None)
+    assert any("cannot be verified" in e for e in errors), errors

@@ -614,6 +614,7 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
                 manifest,
                 lambda doc_id: read_contract_data(
                     case_id, f"reference_table_{doc_id}.json") if doc_id else None,
+                _redacted_text_for_doc(case_id, pid),
             )
         )
         blockers.extend(
@@ -960,18 +961,19 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
         if manifest is None:
             print(f"FAIL: no document_manifest.json -- cannot verify {target}")
             return 1
+        coverage_doc = policy_completeness.doc_id_from_parent_coverage_filename(
+            filename)
         errors = policy_completeness.check_policy_parent_coverage(
             data, filename, manifest,
             lambda doc_id: read_contract_data(
                 case_id, f"reference_table_{doc_id}.json") if doc_id else None,
+            _redacted_text_for_doc(case_id, coverage_doc),
         )
         if errors:
             print(f"FAIL: parent-coverage validation errors for {target}:")
             for error in errors:
                 print(f"  - {error}")
             return 1
-        coverage_doc = policy_completeness.doc_id_from_parent_coverage_filename(
-            filename)
         provenance_errors = human_review.check_unpaged_human_provenance(
             data, load_human_review_ledger(case_id), coverage_doc)
         if provenance_errors:

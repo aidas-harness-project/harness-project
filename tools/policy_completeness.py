@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from _cross_contract import split_pages
+from _cross_contract import split_pages, _normalize_ws as _normalize_admin_ws
 
 
 INVENTORY_SCHEMA = "policy_boundary_inventory.schema.json"
@@ -443,6 +443,37 @@ def unresolved_boundaries(data: dict) -> list[str]:
 PARENT_COVERAGE_SCHEMA = "policy_parent_coverage.schema.json"
 _PARENT_COVERAGE_DOC_RE = re.compile(r"_(DOC_\d+)\.json$")
 
+# --- Part 11D: administrative-exclusion provenance ------------------------
+# An operative policy predicate is the reliable signal that a page carries
+# NORMATIVE content and therefore cannot be dismissed as administrative. It is
+# used in preference to structural anchors alone because a legitimate 목차
+# (table of contents) page LISTS 제N조 titles without stating any rule -- an
+# anchor-only rule would reject exactly the administrative pages this is meant
+# to allow.
+_OPERATIVE_PREDICATE_RE = re.compile(
+    r"(?:지급합니다|지급하지|지급하여야|지급되지|"
+    r"보상합니다|보상하지|보상하여야|보상되지|"
+    r"하여야\s*합니다|해야\s*합니다|"
+    r"해지합니다|해지할\s*수\s*있습니다|해지됩니다|"
+    r"면책|부지급|무효로\s*합니다|"
+    r"말합니다|뜻합니다|의미합니다)"
+)
+# A table-of-contents entry: an article title trailed by dot leaders or a
+# right-aligned page number. Used to exempt a genuine TOC page from the
+# structural-anchor signal.
+_TOC_ENTRY_RE = re.compile(
+    r"제\s*\d+\s*조[^\n]{0,80}?(?:[.·⋯…]{2,}\s*\d+|\s\d+)\s*$",
+    re.MULTILINE,
+)
+# A reason that is ONLY a generic category word carries no page-specific
+# justification. Matching is against the WHOLE reason, so a detailed reason that
+# happens to contain the word is unaffected.
+_BLANKET_ADMIN_REASON_RE = re.compile(
+    r"^\s*(?:appendix|front\s*matter|back\s*matter|annex|administrative|"
+    r"부록|별첨|첨부|기타|해당\s*없음|행정\s*페이지)\s*[.]?\s*$",
+    re.IGNORECASE,
+)
+
 
 def doc_id_from_parent_coverage_filename(filename: str) -> str | None:
     match = _PARENT_COVERAGE_DOC_RE.search(filename)
@@ -453,7 +484,8 @@ def check_policy_parent_coverage(
         data: dict,
         filename: str,
         manifest: dict | None,
-        reference_table_for) -> list[str]:
+        reference_table_for,
+        parent_redacted_text: str | None = None) -> list[str]:
     """Validate that a parent-coverage contract accounts for every logical page
     of the parent PDF exactly once, and that each productive disposition
     resolves to something that really exists.
@@ -461,6 +493,14 @@ def check_policy_parent_coverage(
     reference_table_for(document_id) -> the reference_table_{document_id}.json
     dict (or None). Used to confirm a reference_table disposition's table_uid is
     actually present in that document's reference-table contract.
+
+    parent_redacted_text is the parent's own processed text (Part 11D). When
+    supplied, every administrative_excluded page's evidence quote is verified to
+    exist verbatim on the page it cites, and the page is scanned for normative
+    content that would make an administrative exclusion wrong. Passing None
+    keeps the historical behaviour for callers that only check accounting, but
+    the DAO always supplies it -- an exclusion whose quote cannot be verified is
+    reported rather than silently accepted.
 
     Returns all errors (empty = clean); callers refuse persistence/finalize on
     any non-empty list. Does NOT itself treat review_required/extraction_failed
@@ -478,6 +518,18 @@ def check_policy_parent_coverage(
         errors.append(
             f"parent_document_id {data.get('parent_document_id')!r} does not "
             f"match filename document {target_doc!r}")
+
+    # The parent's own processed pages, when available (Part 11D). None means
+    # "cannot verify" and is reported per administrative exclusion below --
+    # never silently treated as verified.
+    parent_pages: dict[int, str] | None = None
+    if parent_redacted_text is not None:
+        try:
+            parent_pages = split_pages(parent_redacted_text)
+        except Exception as exc:  # untrustworthy page boundaries
+            errors.append(
+                f"parent processed page boundaries unavailable: {exc}")
+            parent_pages = None
 
     by_id = {d.get("document_id"): d for d in (manifest or {}).get("documents", [])}
     # The parent must be a physical (non-segment) insurance_policy document.
@@ -681,6 +733,12 @@ def check_policy_parent_coverage(
                 errors.append(
                     f"page {lp}: administrative exclusion has no processed "
                     "page evidence")
+            reason = p.get("reason") or ""
+            if _BLANKET_ADMIN_REASON_RE.match(reason):
+                errors.append(
+                    f"page {lp}: administrative exclusion reason {reason!r} is a "
+                    "blanket category, not a page-specific justification -- state "
+                    "what is actually on this page")
             for ref in refs:
                 if ref.get("document_id") != target_doc:
                     errors.append(
@@ -690,6 +748,57 @@ def check_policy_parent_coverage(
                     errors.append(
                         f"page {lp}: administrative exclusion evidence cites "
                         f"logical page {ref.get('page')!r}")
+                quote = ref.get("quote")
+                if not quote or not quote.strip():
+                    errors.append(
+                        f"page {lp}: administrative exclusion evidence has an "
+                        "empty/whitespace quote")
+
+            # Verify the exclusion against the parent's OWN processed text.
+            # Before Part 11D only document_id/page were checked, so a quote
+            # that exists nowhere on the page -- or nowhere at all -- passed.
+            if parent_pages is not None:
+                page_text = parent_pages.get(lp)
+                if page_text is None:
+                    errors.append(
+                        f"page {lp}: administrative exclusion cannot be verified "
+                        "-- the parent's processed text has no such page, so the "
+                        "cited evidence is unverifiable")
+                else:
+                    normalized_page = _normalize_admin_ws(page_text)
+                    for ref in refs:
+                        quote = ref.get("quote") or ""
+                        if not quote.strip():
+                            continue  # already reported above
+                        if ref.get("page") != lp:
+                            continue  # cites another page; reported above
+                        if _normalize_admin_ws(quote) not in normalized_page:
+                            errors.append(
+                                f"page {lp}: administrative exclusion quote does "
+                                "not appear on that page of the parent's "
+                                f"processed text (quote={quote[:40]!r}...)")
+                    # A page carrying normative content is not administrative.
+                    if _OPERATIVE_PREDICATE_RE.search(page_text):
+                        errors.append(
+                            f"page {lp}: page contains an operative policy "
+                            "predicate -- it carries normative content and must "
+                            "not be dispositioned administrative_excluded; route "
+                            "it to review_required or normalize it")
+                    else:
+                        anchors = _STRUCTURAL_ANCHOR_RE.findall(page_text)
+                        toc_entries = _TOC_ENTRY_RE.findall(page_text)
+                        if anchors and len(toc_entries) < len(anchors):
+                            errors.append(
+                                f"page {lp}: page contains "
+                                f"{len(anchors)} article/paragraph/item anchor(s) "
+                                f"that are not table-of-contents entries -- route "
+                                "to review_required rather than excluding it as "
+                                "administrative")
+            elif refs:
+                errors.append(
+                    f"page {lp}: administrative exclusion cannot be verified -- "
+                    "the parent has no processed text, so its cited evidence "
+                    "cannot be confirmed against the real source")
 
     return errors
 
