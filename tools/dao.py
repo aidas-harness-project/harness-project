@@ -103,6 +103,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 from _validation import load_registry, validate_instance
 import _cross_contract
 import dao_transaction
+import source_provenance
 import stage_dependencies
 import segment_lineage
 import policy_completeness
@@ -1256,6 +1257,43 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
     return 0
 
 
+def _protected_manifest_errors(case_id: str, proposed: dict) -> list[str]:
+    """Refuse any caller-side difference in a DAO-owned manifest field.
+
+    Applied to the WHOLE manifest write, not only the per-document patch path
+    (Part 11J commit b). Sealing only `patch-manifest-document` would leave
+    `write-contract document_manifest.json` as an open door to the same
+    fields, and a seal with a door next to it is decoration. Insertion,
+    modification, deletion, and rollback-to-an-earlier-value are all refused
+    identically -- especially deletion, since a caller able to strip a sealed
+    field could supply its own value on the next write.
+
+    A document the current manifest does not yet contain may not arrive
+    carrying sealed fields either: the DAO derives them from evidence it has
+    observed, and it has observed none for a document it has never seen.
+    """
+    current = read_contract_data(case_id, "document_manifest.json") or {}
+    existing = {
+        d.get("document_id"): d for d in current.get("documents", [])}
+    errors = []
+    for entry in proposed.get("documents", []):
+        doc_id = entry.get("document_id")
+        errors.extend(source_provenance.protected_field_errors(
+            existing.get(doc_id), entry, location=str(doc_id)))
+    # A document present before and absent now would take its sealed
+    # provenance with it; deleting the entry is how you would erase a
+    # source_pdf_sha256 that no longer matched.
+    for doc_id, entry in existing.items():
+        if doc_id in {d.get("document_id") for d in proposed.get("documents", [])}:
+            continue
+        if any(field in entry for field in source_provenance.PROTECTED_MANIFEST_FIELDS):
+            errors.append(
+                f"{doc_id}: entry carries DAO-owned provenance and may not be "
+                "removed by a manifest write -- deleting the entry would erase "
+                "the sealed fields along with it")
+    return errors
+
+
 # Contracts that constitute the policy layer a downstream artifact's
 # upstream_policy_snapshot is computed over. Rewriting one moves the ground
 # under every stage that cited it, so it triggers the Part 11F/11I cascade.
@@ -1313,6 +1351,13 @@ def cmd_write_contract(args):
                     print(f"  - {error}")
                 return 1
         if schema_name == "document_manifest.schema.json":
+            sealed_errors = _protected_manifest_errors(args.case_id, data)
+            if sealed_errors:
+                print(f"FAIL: DAO-owned provenance fields may not be written "
+                      f"through write-contract for {target} -- not written:")
+                for e in sealed_errors:
+                    print(f"  - {e}")
+                return 1
             lineage_errors = _validate_manifest_lineage(args.case_id, data)
             if lineage_errors:
                 print(f"FAIL: segment-lineage validation errors for {target} -- not written:")
@@ -1416,6 +1461,15 @@ def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_b
         doc = next((d for d in manifest["documents"] if d["document_id"] == document_id), None)
         if doc is None:
             return False, f"FAIL: document_id {document_id} not found in document_manifest.json"
+        # DAO-owned provenance is refused here as well as in write-contract --
+        # a seal on one path with the other left open is decoration
+        # (Part 11J commit b).
+        sealed_errors = source_provenance.protected_field_errors(
+            doc, {**doc, **fields}, location=document_id)
+        if sealed_errors:
+            return False, (
+                "FAIL: DAO-owned provenance fields may not be patched -- not "
+                "written:\n" + "\n".join(f"  - {e}" for e in sealed_errors))
         # Which incoming fields actually change a value downstream provenance is
         # expressed against (Part 11F)? Metadata like classification_confidence
         # does not; the page mapping and source identity do.
@@ -1510,6 +1564,134 @@ def cmd_write_page_text(args):
         release_lock(target)
 
 
+def revision_index_path(case_id: str) -> Path:
+    return case_dir(case_id) / "_revision_index.json"
+
+
+def load_revision_index(case_id: str) -> dict:
+    data = load_json(revision_index_path(case_id))
+    if data is None:
+        return {"case_id": case_id, "documents": []}
+    return data
+
+
+def revision_entry_for(case_id: str, doc_id: str):
+    for entry in load_revision_index(case_id).get("documents", []):
+        if entry.get("document_id") == doc_id:
+            return entry
+    return None
+
+
+def uid_scheme_for(case_id: str, doc_id: str) -> str:
+    """A document with no registered revision is 'legacy': it predates the
+    revision index entirely, and assuming canonical for an unknown document
+    would claim a verification that never ran."""
+    entry = revision_entry_for(case_id, doc_id)
+    return (entry or {}).get("uid_scheme", "legacy")
+
+
+def registered_source_pdf_sha256(case_id: str, doc_id: str):
+    """Hash the registered raw source file ourselves (Part 11J commit b).
+
+    `source_pdf_sha256` is the first input to every canonical UID, so a
+    caller-supplied value would let a UID be minted against a file the case
+    never registered -- the one input that establishes WHICH document this is
+    would establish nothing. The manifest's file_path is only used to locate
+    the file; the digest always comes from reading it.
+    """
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        return None
+    entry = next(
+        (d for d in manifest.get("documents", [])
+         if d.get("document_id") == doc_id), None)
+    if entry is None or not entry.get("file_path"):
+        return None
+    # file_path is repo-relative ("data/raw/CASE_030/DOC_005.pdf"). Resolve it
+    # against DATA's parent rather than the module-level ROOT so it follows
+    # the same redirection every other DAO path does -- a path that ignored
+    # the configured data root would read outside the case it belongs to.
+    path = _require_within(DATA.parent, entry["file_path"])
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _register_revision(case_id, doc_id, text, revision_sha, held_by, run_id,
+                        supersedes=None, lock_already_held=False):
+    """Append a revision to the DAO-owned index and point `current` at it.
+
+    Every field is derived here, from the manifest and the registered bytes --
+    uid_stability from extraction_method, the extractor profile from what the
+    DAO observed, page digests from the text itself. Nothing is accepted from
+    a caller, because a caller that could state its own stability or
+    provenance could state whatever made its UIDs look verified.
+
+    Called INSIDE the revision transaction, after downstream invalidation and
+    immediately before the pointer flip, so the index and the pointer move
+    together or not at all.
+    """
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    entry = next(
+        (d for d in (manifest or {}).get("documents", [])
+         if d.get("document_id") == doc_id), None)
+
+    index = load_revision_index(case_id)
+    documents = index.setdefault("documents", [])
+    doc_entry = next(
+        (d for d in documents if d.get("document_id") == doc_id), None)
+    if doc_entry is None:
+        doc_entry = {
+            "document_id": doc_id,
+            "current_revision_sha256": revision_sha,
+            # New documents start legacy. canonical_v1 is only reachable
+            # through the dedicated verified command (commit c) -- defaulting
+            # to canonical would claim a verification that has not run.
+            "uid_scheme": "legacy",
+            "revisions": [],
+        }
+        documents.append(doc_entry)
+
+    known = {r.get("revision_sha256") for r in doc_entry["revisions"]}
+    if revision_sha not in known:
+        doc_entry["revisions"].append({
+            "revision_sha256": revision_sha,
+            "registered_at": now_iso(),
+            "registered_by": held_by,
+            "run_id": run_id,
+            "uid_stability": source_provenance.derive_uid_stability(entry),
+            "extractor": source_provenance.extractor_profile(
+                entry, "dao.write-redacted-text"),
+            "page_text_sha256": source_provenance.page_text_digests(text),
+            "supersedes": supersedes,
+        })
+    doc_entry["current_revision_sha256"] = revision_sha
+
+    errors = _schema_check(index, "revision_index.schema.json")
+    if errors:
+        raise dao_transaction.TransactionAborted(
+            "revision index would be schema-invalid: " + "; ".join(errors))
+
+    target = revision_index_path(case_id)
+    if not lock_already_held:
+        existing_lock = acquire_lock_blocking(
+            target, held_by, run_id or "unknown",
+            f"register revision for {doc_id}")
+        if existing_lock is not None:
+            raise dao_transaction.TransactionAborted(
+                f"revision index is locked by {existing_lock['held_by']}")
+    try:
+        atomic_write_json(target, index)
+    finally:
+        if not lock_already_held:
+            release_lock(target)
+    return doc_entry
+
+
 def revisions_dir(case_id: str, doc_id: str) -> Path:
     return processed_dir(case_id, doc_id) / "_revisions"
 
@@ -1600,10 +1782,17 @@ def cmd_write_redacted_text(args):
                 # First write, or identical bytes. Nothing downstream was ever
                 # derived from different text, so there is nothing to
                 # invalidate and no transaction to journal.
-                atomic_write_text(target, text)
                 atomic_write_text(
                     revision_file_path(args.case_id, args.doc_id, revision_sha),
                     text)
+                try:
+                    _register_revision(
+                        args.case_id, args.doc_id, text, revision_sha,
+                        args.held_by, args.run_id, supersedes=None)
+                except dao_transaction.TransactionAborted as exc:
+                    print(f"FAIL: source text NOT registered -- {exc}")
+                    return 1
+                atomic_write_text(target, text)
                 print(f"PASS: wrote {target} (revision {revision_sha[:12]})")
                 return 0
 
@@ -1640,6 +1829,22 @@ def cmd_write_redacted_text(args):
                 print(f"FAIL: source text NOT revised -- {exc}")
                 print("  the current revision pointer is unchanged; retry once "
                       "the run-state is writable")
+                return 1
+
+            # Register the revision (append-only history + current pointer)
+            # immediately before the switch, so the index and the text move
+            # together. A failure here still leaves the OLD text current.
+            try:
+                _register_revision(
+                    args.case_id, args.doc_id, text, revision_sha,
+                    args.held_by, args.run_id,
+                    supersedes=hashlib.sha256(
+                        previous.encode("utf-8")).hexdigest())
+            except dao_transaction.TransactionAborted as exc:
+                dao_transaction.clear_journal(case_directory)
+                print(f"FAIL: source text NOT revised -- {exc}")
+                print("  downstream stages were invalidated conservatively; "
+                      "the current revision pointer is unchanged")
                 return 1
 
             # Step 6: the only irreversible, observable step, and it is last.
@@ -2583,6 +2788,70 @@ def load_human_review_ledger(case_id: str) -> dict | None:
     return load_json(human_review_ledger_path(case_id))
 
 
+def cmd_record_source_digest(args):
+    """Record source_pdf_sha256 by hashing the registered raw file itself.
+
+    The only write path for this field. It is the first input to every
+    canonical UID, so accepting a caller-supplied value would let a UID be
+    minted against a file the case never registered -- and a submitted digest
+    that disagrees with the file on disk is refused rather than recorded,
+    since the disagreement is the finding.
+    """
+    actual = registered_source_pdf_sha256(args.case_id, args.doc_id)
+    if actual is None:
+        print(f"BLOCKED: no readable registered raw source for {args.doc_id} "
+              "-- source_pdf_sha256 is derived from the file itself and cannot "
+              "be recorded without it")
+        return 1
+    if args.expect and args.expect != actual:
+        print(f"REFUSED: submitted digest {args.expect!r} does not match the "
+              f"registered raw source ({actual!r}) -- the file this document "
+              "was extracted from is not the file the case registered")
+        return 1
+
+    target = case_dir(args.case_id) / "document_manifest.json"
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id,
+        f"record source digest for {args.doc_id}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} "
+              f"run_id={existing_lock['run_id']}")
+        return 1
+    try:
+        manifest = json.loads(target.read_text(encoding="utf-8"))
+        entry = next((d for d in manifest["documents"]
+                      if d["document_id"] == args.doc_id), None)
+        if entry is None:
+            print(f"FAIL: {args.doc_id} is not in document_manifest.json")
+            return 1
+        recorded = entry.get("source_pdf_sha256")
+        if recorded is not None and recorded != actual:
+            print(f"REFUSED: {args.doc_id} already records "
+                  f"{recorded!r}; the registered file now hashes to {actual!r} "
+                  "-- an immutable raw source changed, which is a case-integrity "
+                  "problem, not a field to overwrite")
+            return 1
+        entry["source_pdf_sha256"] = actual
+        manifest["updated_at"] = now_iso()
+        errors = _schema_check(manifest, "document_manifest.schema.json")
+        if errors:
+            print(f"FAIL: manifest would be schema-invalid -- not written:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
+        atomic_write_json(target, manifest)
+        print(f"PASS: {args.doc_id} source_pdf_sha256 = {actual}")
+        return 0
+    finally:
+        release_lock(target)
+
+
+def cmd_read_revision_index(args):
+    print(json.dumps(load_revision_index(args.case_id),
+                     ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_policy_snapshot(args):
     """Print the upstream_policy_snapshot value for the given documents.
 
@@ -2874,6 +3143,18 @@ def main():
 
     p = sub.add_parser("read-human-review-ledger"); p.add_argument("case_id")
     p.set_defaults(fn=cmd_read_human_review_ledger)
+
+    p = sub.add_parser("record-source-digest")
+    p.add_argument("case_id")
+    p.add_argument("--doc-id", dest="doc_id", required=True)
+    p.add_argument("--expect", default=None,
+                   help="optional: fail if the registered file does not hash to this")
+    p.add_argument("--held-by", dest="held_by", required=True)
+    p.add_argument("--run-id", dest="run_id", required=True)
+    p.set_defaults(fn=cmd_record_source_digest)
+
+    p = sub.add_parser("read-revision-index"); p.add_argument("case_id")
+    p.set_defaults(fn=cmd_read_revision_index)
 
     p = sub.add_parser("policy-snapshot")
     p.add_argument("case_id")
