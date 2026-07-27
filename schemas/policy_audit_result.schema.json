@@ -119,6 +119,11 @@
         "resolution_actor_type": {
           "type": ["string", "null"],
           "enum": ["human", "automated", null]
+        },
+        "human_review_uid": {
+          "type": ["string", "null"],
+          "pattern": "^HR-[a-f0-9]{16}$",
+          "description": "Reference into _human_review_ledger.json. Required whenever a human decision is claimed (resolution_actor_type=human, or status=accepted_risk). The DAO re-verifies this UID exists, was recorded for this finding, still matches the audit's current bytes, and carries decision=accepted_risk. A bare resolved_by name string can no longer stand in for a human decision -- that record must exist in the DAO-only ledger."
         }
       },
       "required": [
@@ -136,7 +141,8 @@
         "artifact_refs",
         "resolution_note",
         "resolved_by",
-        "resolution_actor_type"
+        "resolution_actor_type",
+        "human_review_uid"
       ],
       "anyOf": [
         { "properties": { "evidence_references": { "minItems": 1 } } },
@@ -152,7 +158,8 @@
             "properties": {
               "resolution_note": { "type": "null" },
               "resolved_by": { "type": "null" },
-              "resolution_actor_type": { "type": "null" }
+              "resolution_actor_type": { "type": "null" },
+              "human_review_uid": { "type": "null" }
             }
           }
         },
@@ -182,7 +189,42 @@
           },
           "then": {
             "properties": {
+              "resolution_actor_type": { "const": "human" },
+              "human_review_uid": {
+                "type": "string",
+                "pattern": "^HR-[a-f0-9]{16}$"
+              }
+            },
+            "required": ["human_review_uid"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
               "resolution_actor_type": { "const": "human" }
+            },
+            "required": ["resolution_actor_type"]
+          },
+          "then": {
+            "properties": {
+              "human_review_uid": {
+                "type": "string",
+                "pattern": "^HR-[a-f0-9]{16}$"
+              }
+            },
+            "required": ["human_review_uid"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resolution_actor_type": { "const": "automated" }
+            },
+            "required": ["resolution_actor_type"]
+          },
+          "then": {
+            "properties": {
+              "human_review_uid": { "type": "null" }
             }
           }
         }

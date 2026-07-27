@@ -100,7 +100,14 @@ excluding substantive text just because it is inconvenient. `review_required`/
 is exact (no gap/dup), verifies every disposition against the registered segment's
 actual logical/physical `page_map`, and requires page-specific processed evidence.
 Physical pages with no logical page require an explicit unpaged disposition;
-administrative exclusion there requires genuine human reviewer identity and time.
+an `administrative_excluded` unpaged page rests entirely on a human decision
+(no processed-page evidence can exist for a page with no printed number), so it
+requires a DAO-recorded human review, not just a reviewer-name string. A human
+runs `dao.py record-human-review --artifact-kind unpaged_physical_exclusion
+--artifact-id {parent} --target-key physical:{N} --decision verified`; the DAO
+computes the artifact hash itself and returns an `HR-…` review UID you then
+write into that page's `human_review_uid`. A bare `verified_by` name no longer
+satisfies the gate.
 
 `policy_audit_result_{document_id}.json` — write this last for every policy
 document. It binds the audit to the exact SHA-256 bytes of the normalized
@@ -108,10 +115,18 @@ clause, boundary inventory, and optional reference-table contracts, records
 the mandatory audit scope, and keeps every defect as a stable finding. Any
 later rewrite makes the audit stale automatically. Never finalize while a
 finding is `open`; fix it, mark a supported false positive/resolution, or
-obtain a human `accepted_risk` decision. An automated actor may not accept
-risk on a human's behalf. An empty agent-authored finding list is not proof of
-completeness: finalization independently reruns deterministic boundary,
-bidirectional-provenance, and review-state checks.
+obtain a human `accepted_risk` decision. An `accepted_risk` (or any
+`resolution_actor_type: human`) finding is not self-declarable: a human runs
+`dao.py record-human-review --artifact-kind policy_audit_finding --artifact-id
+{doc} --target-key {finding_uid} --decision accepted_risk` — recorded while the
+finding is still `open` — and you write the returned `HR-…` UID into the
+finding's `human_review_uid`, then flip status to `accepted_risk`. The DAO
+re-verifies the UID exists, was recorded for this finding against the audit's
+current substance, and carries the accepting decision; a name string alone,
+or an automated actor accepting risk on a human's behalf, is refused. An empty
+agent-authored finding list is not proof of completeness: finalization
+independently reruns deterministic boundary, bidirectional-provenance, and
+review-state checks.
 
 # Access rules
 

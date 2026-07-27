@@ -99,6 +99,7 @@ def _open_finding():
         "resolution_note": None,
         "resolved_by": None,
         "resolution_actor_type": None,
+        "human_review_uid": None,
     }
 
 

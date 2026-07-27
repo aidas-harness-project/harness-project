@@ -181,6 +181,11 @@
             { "type": "string", "format": "date-time" },
             { "type": "null" }
           ]
+        },
+        "human_review_uid": {
+          "type": ["string", "null"],
+          "pattern": "^HR-[a-f0-9]{16}$",
+          "description": "Reference into _human_review_ledger.json. Required for an administrative_excluded unpaged physical page: a cover/blank page with no printed logical number cannot be verified by any processed-page evidence, so its exclusion rests entirely on a human decision. A bare verified_by name string is no longer sufficient -- the DAO re-verifies this UID exists, was recorded for this physical page (target_key 'physical:<N>'), still matches the parent-coverage's current bytes, and carries decision=verified."
         }
       },
       "required": [
@@ -188,7 +193,8 @@
         "disposition",
         "reason",
         "verified_by",
-        "verified_at"
+        "verified_at",
+        "human_review_uid"
       ],
       "allOf": [
         {
@@ -201,7 +207,27 @@
           "then": {
             "properties": {
               "verified_by": { "type": "string", "minLength": 1 },
-              "verified_at": { "type": "string", "format": "date-time" }
+              "verified_at": { "type": "string", "format": "date-time" },
+              "human_review_uid": {
+                "type": "string",
+                "pattern": "^HR-[a-f0-9]{16}$"
+              }
+            },
+            "required": ["human_review_uid"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "enum": ["review_required", "extraction_failed"]
+              }
+            },
+            "required": ["disposition"]
+          },
+          "then": {
+            "properties": {
+              "human_review_uid": { "type": "null" }
             }
           }
         }

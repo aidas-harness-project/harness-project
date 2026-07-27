@@ -1242,3 +1242,46 @@ Note surfaced while building parent-coverage: DOC_001's processed layer only
 covers logical pages 1-12 (partial OCR), but `check_policy_parent_coverage` reads
 the manifest + reference tables, never DOC_001's processed text, so this does not
 affect the coverage accounting.
+
+## 20. Human provenance for policy decisions was self-declarable -- RESOLVED 2026-07-27 (Part 11A)
+
+Two policy decisions that are, by nature, human calls no automated check can
+substitute were reachable by writing the right strings into a normal
+`write-contract` JSON:
+
+- a `policy_audit_result` finding with `status: accepted_risk` +
+  `resolution_actor_type: human` + `resolved_by: "any-name"` -- an automated
+  agent could "accept" a residual risk on a human's behalf with a fabricated
+  name; and
+- an `administrative_excluded` unpaged physical page (a cover/blank with no
+  printed logical number) verified by a bare `verified_by: "any-name"` string.
+
+Both are the fabricated-human-review failure shape P7/D2 exist to prevent, at a
+different gate.
+
+Fix (`tools/human_review.py`, `schemas/human_review_ledger.schema.json`, DAO
+wiring): a per-case `_human_review_ledger.json` (leading-underscore shared
+state, like `_conflict_ledger.json`) written ONLY through
+`dao.py record-human-review`, never `write-contract`. Each record binds an
+immutable content-derived `HR-…` review UID to the reviewed artifact's
+CANONICAL hash -- computed by the DAO itself (an agent cannot supply its own
+hash or point at bytes it never saw). The canonical form nulls every
+review-disposition field (`status`, `resolved_by`, `human_review_uid`,
+`verified_by`, …) before hashing, so a genuine `open -> accepted_risk`
+transition plus writing the returned UID does not invalidate the record it just
+produced, while any SUBSTANTIVE edit still does. The audit-finding and
+unpaged-exclusion schemas now REQUIRE a non-null `human_review_uid` whenever a
+human decision is claimed (a bare name no longer type-checks), and both the
+write-time and finalize-time gates re-verify the UID exists, was recorded for
+that exact finding/page against the current substance, and carries the
+accepting decision (`accepted_risk` / `verified`; a `rejected` record never
+clears a gate). Trust model is unchanged from `mark-human-review-complete`: the
+CLI invocation is trusted to be a genuine human action -- what is removed is the
+ability to fabricate the decision inside a machine-authored contract.
+
+12 regression tests (`tests/test_human_review_provenance.py`): fake human name +
+`actor_type=human` rejected; nonexistent UID rejected; UID issued against
+different bytes rejected; UID for a different finding rejected; automated actor's
+`accepted_risk` rejected; a genuine DAO-recorded reference passes; the same six
+shapes for the unpaged exclusion; and a full `record-human-review` round-trip
+confirming the DAO computes and binds the hash itself. 551 tests pass.

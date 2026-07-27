@@ -74,6 +74,14 @@ Subcommands:
         --held-by NAME --run-id RUN_ID
     set-conflict-verdict CASE_ID CONFLICT_ID VERDICT --note TEXT --held-by NAME --run-id RUN_ID
     check-conflicts-clear CASE_ID
+    read-human-review-ledger CASE_ID
+    record-human-review CASE_ID --artifact-kind {policy_audit_finding|unpaged_physical_exclusion}
+        --artifact-id DOC_ID --target-key KEY --decision {accepted_risk|verified|rejected}
+        --reviewer NAME --note TEXT --held-by NAME --run-id RUN_ID
+        (the DAO-only path for a genuine human decision on a policy artifact;
+         computes the reviewed artifact's canonical hash itself and returns an
+         HR- review UID the artifact then references -- a machine-written
+         contract cannot self-declare a human decision with a name string)
 """
 import argparse
 import json
@@ -95,6 +103,7 @@ import stage_dependencies
 import segment_lineage
 import policy_completeness
 import policy_audit
+import human_review
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
@@ -556,6 +565,11 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
             f"{doc_id}: unresolved audit: {error}"
             for error in policy_audit.unresolved_findings(audit)
         )
+        blockers.extend(
+            f"{doc_id}: audit human-provenance: {error}"
+            for error in human_review.check_audit_human_provenance(
+                audit, load_human_review_ledger(case_id), doc_id)
+        )
 
     # Parent-level whole-page coverage. The per-document checks above only see
     # pages a segment already owns; they cannot detect a parent-PDF page that
@@ -598,6 +612,11 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
         blockers.extend(
             f"{pid}: unresolved parent page: {error}"
             for error in policy_completeness.unresolved_parent_pages(coverage)
+        )
+        blockers.extend(
+            f"{pid}: unpaged human-provenance: {error}"
+            for error in human_review.check_unpaged_human_provenance(
+                coverage, load_human_review_ledger(case_id), pid)
         )
     return blockers
 
@@ -919,6 +938,13 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
             for error in errors:
                 print(f"  - {error}")
             return 1
+        provenance_errors = human_review.check_audit_human_provenance(
+            data, load_human_review_ledger(case_id), target_doc)
+        if provenance_errors:
+            print(f"FAIL: policy audit human-provenance errors for {target}:")
+            for error in provenance_errors:
+                print(f"  - {error}")
+            return 1
     elif schema_name == policy_completeness.PARENT_COVERAGE_SCHEMA:
         manifest = read_contract_data(case_id, "document_manifest.json")
         if manifest is None:
@@ -932,6 +958,15 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
         if errors:
             print(f"FAIL: parent-coverage validation errors for {target}:")
             for error in errors:
+                print(f"  - {error}")
+            return 1
+        coverage_doc = policy_completeness.doc_id_from_parent_coverage_filename(
+            filename)
+        provenance_errors = human_review.check_unpaged_human_provenance(
+            data, load_human_review_ledger(case_id), coverage_doc)
+        if provenance_errors:
+            print(f"FAIL: parent-coverage human-provenance errors for {target}:")
+            for error in provenance_errors:
                 print(f"  - {error}")
             return 1
     return 0
@@ -1900,6 +1935,140 @@ def cmd_check_conflicts_clear(args):
     return 0 if clear else 1
 
 
+# --------------------------------------------------- human-review ledger --
+
+def human_review_ledger_path(case_id: str) -> Path:
+    return case_dir(case_id) / "_human_review_ledger.json"
+
+
+def load_human_review_ledger(case_id: str) -> dict | None:
+    """The DAO-only human-review ledger, or None if none exists yet. None is a
+    real state -- a case with no human reviews recorded -- and every verifier
+    treats a missing/None ledger as 'no such review', never as a pass."""
+    return load_json(human_review_ledger_path(case_id))
+
+
+def cmd_read_human_review_ledger(args):
+    ledger = load_human_review_ledger(args.case_id)
+    if ledger is None:
+        ledger = {"case_id": args.case_id, "records": []}
+    print(json.dumps(ledger, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_record_human_review(args):
+    """Record a genuine human decision, DAO-only (never write-contract). The
+    invocation itself is trusted to be a human action (same model as
+    mark-human-review-complete). What the DAO enforces structurally:
+
+      - the target artifact must exist and pass its own schema first;
+      - the review is bound to the artifact's CANONICAL (UID-stripped) bytes,
+        which the DAO computes here -- the caller cannot supply a hash;
+      - the target item (a finding_uid, or an unpaged physical page) must
+        actually exist in that artifact and, for a finding, be the kind of
+        thing a human accepts (a residual-risk acceptance).
+
+    The returned review_uid is what the agent then writes into the artifact's
+    human_review_uid field; because the hash is over the UID-stripped form,
+    inserting it does not invalidate the record.
+    """
+    kind = args.artifact_kind
+    if kind == "policy_audit_finding":
+        artifact_name = f"policy_audit_result_{args.artifact_id}.json"
+        schema_name = policy_audit.AUDIT_SCHEMA
+    elif kind == "unpaged_physical_exclusion":
+        artifact_name = f"policy_parent_coverage_{args.artifact_id}.json"
+        schema_name = policy_completeness.PARENT_COVERAGE_SCHEMA
+    else:
+        print(f"FAIL: unknown artifact_kind {kind!r}")
+        return 1
+
+    artifact = read_contract_data(args.case_id, artifact_name)
+    if artifact is None:
+        print(f"FAIL: target artifact {artifact_name} does not exist -- nothing to review")
+        return 1
+    schemas, registry = load_registry()
+    schema_errors = validate_instance(artifact, schema_name, schemas, registry)
+    if schema_errors:
+        print(f"FAIL: {artifact_name} does not pass its own schema; fix it before reviewing:")
+        for e in schema_errors:
+            print(f"  - {e}")
+        return 1
+
+    # The reviewed item must really exist in the artifact.
+    if kind == "policy_audit_finding":
+        finding = next(
+            (f for f in artifact.get("findings") or []
+             if f.get("finding_uid") == args.target_key), None)
+        if finding is None:
+            print(f"FAIL: finding_uid {args.target_key!r} is not present in {artifact_name}")
+            return 1
+        # The review is recorded against the finding's SUBSTANCE (bound via the
+        # canonical, disposition-stripped hash), so it may be filed while the
+        # finding is still 'open' -- the agent then flips status to
+        # accepted_risk and writes the returned UID. The canonical hash is
+        # invariant to that transition, so the record stays valid.
+    else:  # unpaged_physical_exclusion
+        if not args.target_key.startswith("physical:"):
+            print("FAIL: target_key for unpaged_physical_exclusion must be 'physical:<N>'")
+            return 1
+        try:
+            physical = int(args.target_key.split(":", 1)[1])
+        except (ValueError, IndexError):
+            print("FAIL: target_key must be 'physical:<integer>'")
+            return 1
+        page = next(
+            (p for p in artifact.get("unpaged_physical_pages") or []
+             if p.get("physical_page") == physical), None)
+        if page is None:
+            print(f"FAIL: unpaged physical page {physical} is not present in {artifact_name}")
+            return 1
+
+    artifact_sha = human_review.canonical_artifact_sha256(artifact)
+    reviewed_at = now_iso()
+    review_uid = human_review.compute_review_uid(
+        args.case_id, kind, args.artifact_id, args.target_key,
+        artifact_sha, reviewed_at)
+
+    target = human_review_ledger_path(args.case_id)
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id, f"record human review ({kind}:{args.target_key})")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        ledger = load_human_review_ledger(args.case_id)
+        if ledger is None:
+            ledger = {"case_id": args.case_id, "records": []}
+        if human_review.find_record(ledger, review_uid) is not None:
+            print(f"OK: identical review already recorded ({review_uid}) -- no change")
+            return 0
+        ledger["records"].append({
+            "review_uid": review_uid,
+            "reviewer": args.reviewer,
+            "artifact_kind": kind,
+            "artifact_id": args.artifact_id,
+            "target_key": args.target_key,
+            "artifact_sha256": artifact_sha,
+            "decision": args.decision,
+            "reviewed_at": reviewed_at,
+            "note": args.note,
+        })
+        errors = _schema_check(ledger, human_review.HUMAN_REVIEW_LEDGER_SCHEMA)
+        if errors:
+            print(f"FAIL: schema validation errors for {target} -- not written:")
+            for e in errors:
+                print(f"  - {e}")
+            return 1
+        atomic_write_json(target, ledger)
+    finally:
+        release_lock(target)
+    print(f"OK: recorded {review_uid} ({kind} {args.decision} on {args.target_key}). "
+          f"Write this review_uid into the artifact's human_review_uid field.")
+    return 0
+
+
 # ------------------------------------------------------------------- main --
 
 def main():
@@ -2042,6 +2211,24 @@ def main():
 
     p = sub.add_parser("check-conflicts-clear"); p.add_argument("case_id")
     p.set_defaults(fn=cmd_check_conflicts_clear)
+
+    p = sub.add_parser("read-human-review-ledger"); p.add_argument("case_id")
+    p.set_defaults(fn=cmd_read_human_review_ledger)
+
+    p = sub.add_parser("record-human-review")
+    p.add_argument("case_id")
+    p.add_argument("--artifact-kind", required=True,
+                   choices=["policy_audit_finding", "unpaged_physical_exclusion"])
+    p.add_argument("--artifact-id", required=True,
+                   help="the DOC_ID of the audit / parent-coverage artifact")
+    p.add_argument("--target-key", required=True,
+                   help="finding_uid, or 'physical:<N>' for an unpaged page")
+    p.add_argument("--decision", required=True,
+                   choices=["accepted_risk", "verified", "rejected"])
+    p.add_argument("--reviewer", required=True)
+    p.add_argument("--note", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_record_human_review)
 
     args = ap.parse_args()
     sys.exit(args.fn(args))
