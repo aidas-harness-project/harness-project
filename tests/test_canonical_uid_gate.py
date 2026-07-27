@@ -16,6 +16,7 @@ import json
 import pytest
 
 import dao
+import policy_uid
 
 
 TEXT = "<<<PAGE page=1>>>\n제3조(보험금의 지급) 회사는 보험금을 지급합니다.\n"
@@ -287,3 +288,82 @@ def test_a_binding_that_omits_a_referenced_document_is_refused(
         _inventory({"documents": [{"document_id": "DOC_999",
                                    "revision_sha256": "0" * 64}]}))
     assert any("does not cover DOC_005" in e for e in errors), errors
+
+
+# --- UID recomputation -----------------------------------------------------
+
+def _bound_inventory(span_uid, quote="제3조(보험금의 지급) 회사는 보험금을 지급합니다"):
+    current = dao.revision_entry_for(
+        "CASE_030", "DOC_005")["current_revision_sha256"]
+    data = _inventory({"documents": [{"document_id": "DOC_005",
+                                      "revision_sha256": current}]})
+    data["page_spans"][0].update({
+        "span_uid": span_uid, "quote": quote,
+        "start_char": 0, "end_char": len(quote),
+    })
+    return data
+
+
+def _canonical_case(make_args, isolated_dao):
+    _register_text(make_args, isolated_dao)
+    _record_digest(make_args)
+    assert _enable(make_args) == 0
+    manifest = dao.read_contract_data("CASE_030", "document_manifest.json")
+    return manifest["documents"][0]["source_pdf_sha256"]
+
+
+def test_a_fabricated_span_uid_is_recomputed_and_refused(case, isolated_dao,
+                                                         make_args):
+    """The defect this whole part exists to close: PC-/PS- plus sixteen hex
+    digits of anything used to pass."""
+    _canonical_case(make_args, isolated_dao)
+    errors = dao._canonical_uid_errors(
+        "CASE_030", "policy_boundary_inventory_DOC_005.json",
+        _bound_inventory("PS-1111111111111111"))
+    assert any("not the canonical identifier" in e for e in errors), errors
+
+
+def test_the_canonically_derived_span_uid_is_accepted(case, isolated_dao,
+                                                      make_args):
+    pdf_digest = _canonical_case(make_args, isolated_dao)
+    quote = "제3조(보험금의 지급) 회사는 보험금을 지급합니다"
+    expected = policy_uid.compute_uid(
+        "span", source_pdf_sha256=pdf_digest, physical_page=1,
+        span_text=quote, ordinal=1)
+    assert dao._canonical_uid_errors(
+        "CASE_030", "policy_boundary_inventory_DOC_005.json",
+        _bound_inventory(expected, quote)) == []
+
+
+def test_a_span_uid_from_another_document_does_not_transfer(case,
+                                                            isolated_dao,
+                                                            make_args):
+    """Identity includes WHICH immutable document -- the same text on the same
+    page of a different PDF is a different element."""
+    _canonical_case(make_args, isolated_dao)
+    quote = "제3조(보험금의 지급) 회사는 보험금을 지급합니다"
+    foreign = policy_uid.compute_uid(
+        "span", source_pdf_sha256="f" * 64, physical_page=1,
+        span_text=quote, ordinal=1)
+    assert dao._canonical_uid_errors(
+        "CASE_030", "policy_boundary_inventory_DOC_005.json",
+        _bound_inventory(foreign, quote))
+
+
+def test_legacy_documents_are_not_uid_checked(case, isolated_dao, make_args):
+    """Pre-11J artifacts keep working; what they must not do is pass as
+    canonical work."""
+    _register_text(make_args, isolated_dao)
+    assert dao._canonical_uid_errors(
+        "CASE_030", "policy_boundary_inventory_DOC_005.json",
+        _bound_inventory("PS-1111111111111111")) == []
+
+
+def test_write_contract_refuses_a_fabricated_uid_end_to_end(case,
+                                                            isolated_dao,
+                                                            make_args, capsys):
+    _canonical_case(make_args, isolated_dao)
+    assert _write_inventory(isolated_dao, make_args,
+                            _bound_inventory("PS-1111111111111111")) == 1
+    assert "non-canonical UIDs" in capsys.readouterr().out
+    assert not (case / "policy_boundary_inventory_DOC_005.json").exists()

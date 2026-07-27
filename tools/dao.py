@@ -107,6 +107,7 @@ import source_provenance
 import stage_dependencies
 import segment_lineage
 import policy_completeness
+import policy_uid
 import policy_audit
 import policy_roles
 import human_review
@@ -1322,6 +1323,117 @@ def _source_revision_binding_errors(case_id: str, filename: str,
     return errors
 
 
+def _physical_page_for(case_id: str, doc_id: str, logical_page: int):
+    """The immutable parent's physical page for a logical page.
+
+    Canonical identity is keyed to the PHYSICAL page, so a segment must
+    resolve through its page_map. A physical document's logical page IS its
+    physical page. Returns None when a segment's map does not cover the page,
+    which is a refusal upstream -- never a silent fallback to the logical
+    number, since that would mint the same UID for two different pages of the
+    same parent.
+    """
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    entry = next(
+        (d for d in (manifest or {}).get("documents", [])
+         if d.get("document_id") == doc_id), None)
+    if entry is None:
+        return None
+    if entry.get("document_role") != "segment":
+        return logical_page
+    for mapping in entry.get("page_map") or []:
+        if mapping.get("logical_page") == logical_page:
+            return mapping.get("source_physical_page")
+    return None
+
+
+def _canonical_uid_errors(case_id: str, filename: str,
+                           data: dict) -> list[str]:
+    """Recompute every UID whose identity inputs are present, and refuse a
+    submitted value that does not match (Part 11J commit d).
+
+    Only `page_span` currently carries the full identity set on the contract
+    itself -- page, exact quote, and the offset needed to pick which
+    occurrence is meant. Boundary/clause/condition/table UIDs are derived from
+    spans they reference rather than from fields of their own, so recomputing
+    them requires resolving through those spans; that resolution is not yet
+    built, and inventing a weaker rule for them here would be worse than the
+    honest gap: it would report "verified" for a derivation nobody checked.
+    The gap is recorded in known-gaps.md rather than papered over.
+
+    Scoped to canonical_v1 documents, like the revision binding.
+    """
+    doc_id = _cross_contract.doc_id_from_filename(filename)
+    if not doc_id or uid_scheme_for(case_id, doc_id) != "canonical_v1":
+        return []
+    spans = data.get("page_spans")
+    if not spans:
+        return []
+
+    source_pdf = (read_contract_data(case_id, "document_manifest.json") or {})
+    entry = next(
+        (d for d in source_pdf.get("documents", [])
+         if d.get("document_id") == doc_id), None)
+    parent_id = (entry or {}).get("source_document_id") or doc_id
+    pdf_digest = None
+    for candidate in (parent_id, doc_id):
+        found = next(
+            (d for d in source_pdf.get("documents", [])
+             if d.get("document_id") == candidate), None)
+        if found and found.get("source_pdf_sha256"):
+            pdf_digest = found["source_pdf_sha256"]
+            break
+    if not pdf_digest:
+        return [
+            f"{doc_id} is canonical_v1 but no immutable source digest is "
+            "recorded for it or its parent -- UIDs cannot be recomputed, and "
+            "an unverifiable UID is not a passing one"
+        ]
+
+    text = _redacted_text_for_doc(case_id, doc_id)
+    if text is None:
+        return [f"{doc_id} is canonical_v1 but has no processed source text; "
+                "UIDs cannot be recomputed"]
+    try:
+        pages = policy_completeness.split_pages(text)
+    except Exception as exc:  # noqa: BLE001
+        return [f"{doc_id}: processed source text is unusable for UID "
+                f"recomputation: {exc}"]
+
+    errors = []
+    for index, span in enumerate(spans):
+        logical = span.get("page")
+        page_text = pages.get(logical)
+        if page_text is None:
+            errors.append(
+                f"page_spans[{index}]: page {logical} does not exist in the "
+                "processed source, so its UID cannot be recomputed")
+            continue
+        physical = _physical_page_for(case_id, doc_id, logical)
+        if physical is None:
+            errors.append(
+                f"page_spans[{index}]: logical page {logical} has no physical "
+                "page mapping -- canonical identity is keyed to the immutable "
+                "parent's physical page and must not fall back to the logical "
+                "number")
+            continue
+        try:
+            ordinal = policy_uid.ordinal_of_span_at(
+                page_text, span.get("quote", ""), span.get("start_char", 0))
+        except policy_uid.UidInputError as exc:
+            errors.append(f"page_spans[{index}]: {exc}")
+            continue
+        errors.extend(
+            f"page_spans[{index}]: {error}"
+            for error in policy_uid.verify_uid(
+                span.get("span_uid", ""), "span",
+                source_pdf_sha256=pdf_digest,
+                physical_page=physical,
+                span_text=span.get("quote", ""),
+                ordinal=ordinal))
+    return errors
+
+
 def _protected_manifest_errors(case_id: str, proposed: dict) -> list[str]:
     """Refuse any caller-side difference in a DAO-owned manifest field.
 
@@ -1399,6 +1511,14 @@ def cmd_write_contract(args):
                 print(f"FAIL: {args.filename} is not bound to the current "
                       "registered source revision -- not written:")
                 for error in binding_errors:
+                    print(f"  - {error}")
+                return 1
+            uid_errors = _canonical_uid_errors(
+                args.case_id, args.filename, data)
+            if uid_errors:
+                print(f"FAIL: {args.filename} carries non-canonical UIDs -- "
+                      "not written:")
+                for error in uid_errors:
                     print(f"  - {error}")
                 return 1
         if (

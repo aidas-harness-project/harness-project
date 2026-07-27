@@ -1656,3 +1656,85 @@ pipeline.
 check; tests/test_downstream_policy_snapshot.py, 14 minus 2 shared helpers ->
 14 tests). The pre-existing `test_unknown_stage_has_no_prerequisites` asserted
 the OLD permissive behaviour and was inverted, not deleted. 622 -> 649 pass.
+
+## 29. Nothing computed or verified a policy UID (Part 11J -- FIXED, with two scoped residuals)
+
+The schemas said UIDs were `"derived from immutable source identity ... never
+from array position"`. Nothing enforced it. The only check was the regex
+`^PC-[a-f0-9]{16,64}$`, so `PC-` plus sixteen hex digits of anything passed --
+a counter, a hash of the array index, a random value. Parts 11F-11I bound what
+a UID POINTS AT (contract digests, page maps, roles, snapshots); none
+constrained where the UID itself came from.
+
+The cost is asymmetric. A position-derived UID breaks a join loudly when a
+clause is inserted, and silently hands the old UID to a DIFFERENT clause. Only
+the first is visible.
+
+**Identity vs evidence.** This split took three revisions to get right and the
+wrong versions are worth recording, because each looked reasonable:
+
+  * whole-document text hash as identity -> a typo fix on page 200 changes
+    every UID on page 1;
+  * page hash as identity -> the same failure, shrunk to one page: every clause
+    on a page re-identified by a one-character fix elsewhere on it;
+  * offsets as identity -> a one-character edit shifts every later offset, so
+    spans whose own bytes never changed still move.
+
+Final: identity = scheme + kind + `source_pdf_sha256` + physical page +
+NFC(span bytes) + occurrence ordinal + parent UID. Evidence (verified, never
+hashed) = offsets + quote + `physical_page_sha256`. The occurrence ordinal
+replaces the offset as the discriminator for repeated text: source order,
+recomputable from the page alone, distinct from the forbidden extraction order.
+
+**Fail-open cascade found while building this (commit a).**
+`_invalidate_dependents` returned `[]` both when nothing needed invalidating
+and when it COULD NOT invalidate. All four callers discarded it; three reported
+success. Rewriting processed text could leave downstream `passed` against bytes
+that no longer existed, at exit 0. Fixed by inverting the order -- validate and
+invalidate first, flip the observable pointer last -- so no interruption point
+yields new text beside a stale pass. Recovery blocks rather than resuming an
+interrupted transaction.
+
+### Residual 1: only `span_uid` is recomputed
+
+`page_span` is the only element carrying its full identity set on the contract
+(page, exact quote, and the offset that selects which occurrence is meant).
+Boundary/clause/condition/table/row/cell UIDs derive from spans they reference
+rather than from fields of their own, so recomputing them needs a resolution
+step through those spans that is not built. A weaker rule was deliberately NOT
+invented for them: reporting "verified" for a derivation nobody checked is
+worse than an admitted gap. Their canonical derivation exists and is tested
+(`tools/policy_uid.py`, `tests/test_policy_uid.py`); what is missing is the
+contract-side resolution that feeds it.
+
+### Residual 2: extractor sameness is not established
+
+`extractor_profile` records tool/method/mode so a CHANGE is detectable, and a
+change is treated as a new derivation. The reverse does NOT hold: these are
+external CLIs whose model deployments move without any version string moving,
+so an unchanged profile does not establish an unchanged derivation. Change
+detection is sound; inferring sameness is not. Recorded rather than assumed
+away.
+
+### Legacy migration
+
+`uid_scheme` is per document, `legacy` by default, and switched to
+`canonical_v1` only by `dao.py enable-canonical-uids`, which requires a
+readable raw source with a recorded digest, a registered source-text revision,
+and (for a segment) a page map. It is **one-way**: an off-switch would make the
+guarantee a bypass, since writing an arbitrary UID would only require
+downgrading first.
+
+Legacy documents stay fully readable and writable. Making canonical
+verification unconditional would strand every pre-11J artifact and destroy the
+audit trail this part exists to build. What legacy documents cannot do is pass
+as canonical work.
+
+**CASE_021 / CASE_022 / CASE_030 are all still `legacy`.** Their existing UIDs
+have never been verified against any derivation, and switching a document to
+canonical_v1 is expected to surface blockers rather than clear them. That is
+the intended direction: the switch is for re-extracted work, not a retroactive
+blessing of what is already on disk. No case was migrated automatically.
+
+73 tests across the four commits (10 transaction/fault-injection, 16 provenance
+sealing, 22 derivation, 17 canonical gate, plus fixture updates). 649 -> 714.
