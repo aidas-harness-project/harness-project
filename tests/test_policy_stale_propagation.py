@@ -208,7 +208,10 @@ def test_rewriting_redacted_text_invalidates_downstream_passed_stages(
     # invalidated with a reason, and keeps its historical snapshot path.
     assert by_name["document_processing"]["status"] == "passed"
     assert by_name["policy_clause_processing"]["status"] == "failed"
-    assert "redacted text rewritten" in \
+    # Part 11J commit a renamed this: the write became a source-text REVISION
+    # (new revision file, invalidate, then flip the pointer) rather than an
+    # in-place rewrite, and the recorded reason names the revision.
+    assert "source text revised" in \
         by_name["policy_clause_processing"]["invalidation_reason"]
     assert by_name["policy_clause_processing"]["backup_path"] is not None
     assert by_name["claim_analysis"]["status"] == "failed"

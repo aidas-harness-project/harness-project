@@ -102,6 +102,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from _validation import load_registry, validate_instance
 import _cross_contract
+import dao_transaction
 import stage_dependencies
 import segment_lineage
 import policy_completeness
@@ -1340,19 +1341,34 @@ def cmd_write_contract(args):
             if state is None:
                 print("WARNING: contract write succeeded, but run-state could not be updated (see LOCKED above) -- "
                       "run-state may now lag behind actual progress; retry the run-state update.")
-        return 0
     finally:
         release_lock(target)
-        # After the contract lock is released: the cascade takes the run-state
-        # lock, and a downstream stage recorded `passed` against the previous
-        # version of this policy contract is now a claim about bytes that no
-        # longer exist (Part 11I).
-        if policy_layer_changed is not None:
+
+    # After the contract lock is released: the cascade takes the run-state
+    # lock, and a downstream stage recorded `passed` against the previous
+    # version of this policy contract is now a claim about bytes that no
+    # longer exist (Part 11I).
+    #
+    # The contract write is already durable here, so a failed cascade cannot be
+    # undone -- but it must not be reported as success either. Part 11J commit
+    # a: surface it as a non-zero exit naming the exact repair, rather than the
+    # WARNING-and-exit-0 that let a stale `passed` stand unnoticed.
+    if policy_layer_changed is not None:
+        try:
             _invalidate_dependents(
                 args.case_id, "policy_clause_processing",
                 f"upstream policy_clause_processing changed: "
                 f"{policy_layer_changed} rewritten",
-                args.held_by, args.run_id)
+                args.held_by, args.run_id, strict=True)
+        except CascadeFailed as exc:
+            print(f"FAIL: {args.filename} was written, but downstream stages "
+                  f"could not be invalidated -- {exc}")
+            print("  downstream stages may still show 'passed' against the "
+                  "previous policy contract; rerun this write, or demote "
+                  "policy_clause_processing via update-run-state, before "
+                  "trusting any downstream result")
+            return 1
+    return 0
 
 
 # Manifest fields that downstream provenance is expressed against. Changing one
@@ -1436,12 +1452,24 @@ def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_b
         release_lock(target)
     # Cascade outside the manifest lock: a changed page_map/source identity
     # moves the ground every downstream stage's provenance was checked against.
+    # The patch is durable by now, so a failed cascade cannot be rolled back --
+    # but it is reported as a failure rather than swallowed (Part 11J commit a).
     if provenance_changed:
-        _invalidate_dependents(
-            case_id, "document_processing",
-            f"upstream document_processing changed: {document_id} manifest "
-            f"{', '.join(sorted(provenance_changed))} updated",
-            held_by, run_id)
+        try:
+            _invalidate_dependents(
+                case_id, "document_processing",
+                f"upstream document_processing changed: {document_id} manifest "
+                f"{', '.join(sorted(provenance_changed))} updated",
+                held_by, run_id, strict=True)
+        except CascadeFailed as exc:
+            return False, (
+                f"PATCHED BUT NOT INVALIDATED: {document_id} manifest "
+                f"{', '.join(sorted(provenance_changed))} updated, but "
+                f"downstream stages could not be invalidated -- {exc}. "
+                "Downstream stages may still show 'passed' against the "
+                "previous provenance; repeat this patch, or demote "
+                "document_processing via update-run-state, before trusting "
+                "any downstream result.")
     return result
 
 
@@ -1482,35 +1510,165 @@ def cmd_write_page_text(args):
         release_lock(target)
 
 
+def revisions_dir(case_id: str, doc_id: str) -> Path:
+    return processed_dir(case_id, doc_id) / "_revisions"
+
+
+def revision_file_path(case_id: str, doc_id: str, revision_sha: str) -> Path:
+    return revisions_dir(case_id, doc_id) / f"{revision_sha}.md"
+
+
 def cmd_write_redacted_text(args):
-    """Writes data/processed/CASE_XXX/DOC_XXX/redacted_text.md."""
-    target = processed_dir(args.case_id, args.doc_id) / "redacted_text.md"
-    existing_lock = acquire_lock_blocking(target, args.held_by, args.run_id, args.purpose or "write redacted text")
-    if existing_lock is not None:
-        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
-              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+    """Register a source-text revision as one fail-closed transaction.
+
+    Rewriting processed text is not a file write. Every policy boundary offset,
+    every evidence quote, and every UID computed from source bytes is expressed
+    against these exact bytes, so replacing them moves the ground under work
+    already recorded as passed. Three things must move together: the text, the
+    run-state that recorded what was validated against it, and the pointer
+    naming the current revision.
+
+    Ordering (see dao_transaction): everything that can fail runs first, and
+    the pointer -- the only observable "this is now current" -- flips last.
+
+      1. read + hash the new text; identical bytes are a no-op success
+      2. write the new revision file (unreferenced; a stray copy harms nothing)
+      3. build the prospective run-state and VALIDATE it
+      4. journal the intent
+      5. invalidate downstream stages -- conservatively, BEFORE the switch
+      6. flip the pointer
+      7. clear the journal
+
+    A crash between 5 and 6 leaves the OLD text with stages already
+    invalidated: over-invalidation, costing a rerun. A crash after 6 leaves the
+    new text with those same stages invalidated. The state this ordering makes
+    unreachable is the dangerous one -- new text alongside a stale `passed`.
+
+    The previous implementation did the reverse: it wrote the text, reported
+    success, then attempted the cascade, which returned quietly on lock
+    contention or a schema failure. The write was durable by then, so a failed
+    cascade produced exactly the state it existed to prevent, at exit code 0.
+    """
+    case_directory = case_dir(args.case_id)
+    blockers = dao_transaction.pending_journal_errors(case_directory)
+    if blockers:
+        for blocker in blockers:
+            print(f"BLOCKED: {blocker}")
         return 1
+
+    target = processed_dir(args.case_id, args.doc_id) / "redacted_text.md"
+    text = Path(args.text_file).read_text(encoding="utf-8")
+    previous = target.read_text(encoding="utf-8") if target.exists() else None
+    revision_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    # Locks in the global order (dao_transaction.LOCK_ORDER): run_state before
+    # current_pointer. Taking them the other way round is how two concurrent
+    # DAO operations deadlock, so the order is asserted rather than assumed.
+    lock_kinds = ("run_state", "current_pointer")
+    order_errors = dao_transaction.check_lock_order(lock_kinds)
+    if order_errors:
+        for error in order_errors:
+            print(f"FAIL: {error}")
+        return 1
+
+    state_target = run_state_path(args.case_id)
+    changed = previous is not None and previous != text
+    held_state_lock = False
+    if changed:
+        existing_lock = acquire_lock_blocking(
+            state_target, args.held_by, args.run_id,
+            f"revise source text for {args.doc_id}")
+        if existing_lock is not None:
+            print(f"LOCKED: held_by={existing_lock['held_by']} "
+                  f"run_id={existing_lock['run_id']} -- source text NOT "
+                  "revised (the downstream invalidation must be applied in "
+                  "the same operation, so a contended run-state aborts the "
+                  "whole revision rather than writing text nobody invalidated)")
+            return 1
+        held_state_lock = True
+
     try:
-        text = Path(args.text_file).read_text(encoding="utf-8")
-        previous = target.read_text(encoding="utf-8") if target.exists() else None
-        atomic_write_text(target, text)
-        print(f"PASS: wrote {target}")
+        existing_lock = acquire_lock_blocking(
+            target, args.held_by, args.run_id,
+            args.purpose or "write redacted text")
+        if existing_lock is not None:
+            print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+                  f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+            return 1
+        try:
+            if not changed:
+                # First write, or identical bytes. Nothing downstream was ever
+                # derived from different text, so there is nothing to
+                # invalidate and no transaction to journal.
+                atomic_write_text(target, text)
+                atomic_write_text(
+                    revision_file_path(args.case_id, args.doc_id, revision_sha),
+                    text)
+                print(f"PASS: wrote {target} (revision {revision_sha[:12]})")
+                return 0
+
+            # Step 2: the revision file is written before the pointer moves.
+            # Until the pointer names it, it is an unreferenced copy.
+            atomic_write_text(
+                revision_file_path(args.case_id, args.doc_id, revision_sha),
+                text)
+
+            reason = (f"upstream document_processing changed: source text "
+                      f"revised for {args.doc_id} (revision "
+                      f"{revision_sha[:12]})")
+            # Steps 3-5: validate and apply the invalidation FIRST. strict=True
+            # turns a contended lock or an invalid prospective state into an
+            # exception instead of a silent [] -- nothing irreversible has
+            # happened yet, so aborting here is clean.
+            dao_transaction.write_journal(case_directory, {
+                "operation": "revise_source_text",
+                "case_id": args.case_id,
+                "document_id": args.doc_id,
+                "from_revision": hashlib.sha256(
+                    previous.encode("utf-8")).hexdigest(),
+                "to_revision": revision_sha,
+                "status": "invalidating",
+                "started_at": now_iso(),
+            })
+            try:
+                _invalidate_dependents(
+                    args.case_id, "document_processing", reason,
+                    args.held_by, args.run_id, strict=True,
+                    lock_already_held=True)
+            except CascadeFailed as exc:
+                dao_transaction.clear_journal(case_directory)
+                print(f"FAIL: source text NOT revised -- {exc}")
+                print("  the current revision pointer is unchanged; retry once "
+                      "the run-state is writable")
+                return 1
+
+            # Step 6: the only irreversible, observable step, and it is last.
+            atomic_write_text(target, text)
+            dao_transaction.clear_journal(case_directory)
+            print(f"PASS: wrote {target} (revision {revision_sha[:12]})")
+            print(f"REVISED: {args.doc_id} source text replaced; downstream "
+                  "stages invalidated before the switch")
+            return 0
+        finally:
+            release_lock(target)
     finally:
-        release_lock(target)
-    # The processed text is what every policy boundary offset and evidence
-    # quote is expressed against. Rewriting it silently strands downstream
-    # work that was validated against the old bytes (Part 11F). Only a real
-    # change cascades -- rewriting identical text is a no-op.
-    if previous is not None and previous != text:
-        _invalidate_dependents(
-            args.case_id, "document_processing",
-            f"upstream document_processing changed: redacted text rewritten "
-            f"for {args.doc_id}",
-            args.held_by, args.run_id)
-    return 0
+        if held_state_lock:
+            release_lock(state_target)
 
 
-def _invalidate_dependents(case_id, upstream_stage, reason, held_by, run_id):
+class CascadeFailed(Exception):
+    """The invalidation cascade could not be applied (Part 11J commit a).
+
+    Distinct from "nothing needed invalidating". `_invalidate_dependents`
+    returned [] for both, and every caller discarded it, so a lock it could not
+    take or a run-state it could not validate became a silent success on top of
+    a durable write. Callers now have to handle this explicitly, and the
+    ordering guarantees nothing irreversible has happened when it is raised.
+    """
+
+
+def _invalidate_dependents(case_id, upstream_stage, reason, held_by, run_id,
+                            strict=False, lock_already_held=False):
     """Invalidate every stage that transitively depends on `upstream_stage`.
 
     Part 11F. A downstream stage recorded `passed` was derived from upstream
@@ -1535,13 +1693,24 @@ def _invalidate_dependents(case_id, upstream_stage, reason, held_by, run_id):
     dependents = stage_dependencies.dependents_of(upstream_stage)
     if not dependents:
         return []
-    existing_lock = acquire_lock_blocking(
-        target, held_by, run_id or "unknown",
-        f"invalidate stages downstream of {upstream_stage}")
-    if existing_lock is not None:
-        print(f"LOCKED: could not invalidate downstream stages -- "
-              f"held_by={existing_lock['held_by']} run_id={existing_lock['run_id']}")
-        return []
+    # `lock_already_held` is for callers running this INSIDE a transaction that
+    # took the run-state lock first (revise-source-text). Re-acquiring would
+    # self-deadlock against the caller's own lock, and releasing the caller's
+    # lock to take it here would reopen the window the ordering exists to
+    # close -- another writer could pass a stage between the invalidation and
+    # the pointer flip. The lock is not re-entrant, so the caller declares it.
+    if not lock_already_held:
+        existing_lock = acquire_lock_blocking(
+            target, held_by, run_id or "unknown",
+            f"invalidate stages downstream of {upstream_stage}")
+        if existing_lock is not None:
+            message = (f"could not invalidate downstream stages -- "
+                       f"held_by={existing_lock['held_by']} "
+                       f"run_id={existing_lock['run_id']}")
+            if strict:
+                raise CascadeFailed(message)
+            print(f"LOCKED: {message}")
+            return []
     try:
         state = load_run_state(case_id)
         changed = []
@@ -1559,6 +1728,10 @@ def _invalidate_dependents(case_id, upstream_stage, reason, held_by, run_id):
         state["updated_at"] = now_iso()
         errors = _schema_check(state, "run_state.schema.json")
         if errors:
+            if strict:
+                raise CascadeFailed(
+                    "downstream invalidation would make run-state "
+                    "schema-invalid: " + "; ".join(errors))
             print("WARNING: downstream invalidation would make run-state "
                   "schema-invalid; not written:")
             for error in errors:
@@ -1569,7 +1742,10 @@ def _invalidate_dependents(case_id, upstream_stage, reason, held_by, run_id):
               f"{', '.join(sorted(changed))}")
         return changed
     finally:
-        release_lock(target)
+        # Only release what this call acquired. Releasing a lock the caller
+        # owns would leave the rest of its transaction running unprotected.
+        if not lock_already_held:
+            release_lock(target)
 
 
 def _write_text_locked(case_id, filename, text_file, held_by, run_id, purpose=None):
@@ -1891,11 +2067,22 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
         release_lock(target)
 
     if demoted_from is not None:
-        _invalidate_dependents(
-            case_id, stage,
-            f"upstream {stage} left {demoted_from} (now {status}) -- every "
-            "dependent result was derived from a stage that no longer holds",
-            held_by, run_id)
+        # A demotion whose cascade fails leaves dependents claiming `passed`
+        # against a stage that no longer holds. The demotion itself is already
+        # written, so this returns None (caller reports failure) rather than
+        # handing back a state that looks successfully demoted (Part 11J).
+        try:
+            _invalidate_dependents(
+                case_id, stage,
+                f"upstream {stage} left {demoted_from} (now {status}) -- every "
+                "dependent result was derived from a stage that no longer holds",
+                held_by, run_id, strict=True)
+        except CascadeFailed as exc:
+            print(f"FAIL: {stage} was demoted to {status!r}, but its dependent "
+                  f"stages could not be invalidated -- {exc}")
+            print("  dependent stages may still show 'passed'; repeat this "
+                  "update once the run-state is writable")
+            return None
         # Re-read: the cascade may have demoted dependents after `updated` was
         # captured, and returning the pre-cascade snapshot would hand the
         # caller stages that are already invalidated.
