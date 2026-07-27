@@ -376,7 +376,7 @@ def test_direct_evidence_must_include_complete_operative_predicate():
         _contract([clause]), "normalized_policy_clause_DOC_001.json",
         REDACTED_TEXT)
     assert any("complete policy proposition" in error for error in errors)
-    assert any("negation/exclusion meaning absent" in error for error in errors)
+    assert any("polarity contradiction" in error for error in errors)
 
 
 def test_exclusion_bucket_requires_exclusion_marker_in_evidence():
@@ -412,6 +412,130 @@ def test_truncated_payment_sentence_is_rejected():
         _contract([clause]), "normalized_policy_clause_DOC_001.json",
         REDACTED_TEXT)
     assert any("complete policy proposition" in error for error in errors), errors
+
+
+# --------------------------------------------------------------------------
+# Part 11B: bidirectional polarity and complete operative predicates.
+# --------------------------------------------------------------------------
+
+# A redacted page carrying both a positive payout sentence and a negative
+# exclusion sentence, plus a truncated-predicate sentence, so each polarity
+# case can cite a verbatim quote.
+POLARITY_TEXT = (
+    "<<<PAGE page=1>>>\n"
+    "제3조(보험금의 지급) 회사는 피보험자가 사망한 경우 사망보험금을 지급합니다.\n"
+    "회사는 피보험자가 고의로 자신을 해친 경우 보험금을 지급하지 않습니다.\n"
+    "회사가 보험금을 지급하는 경우\n"
+)
+
+
+def _polarity_clause():
+    """A single positive payout condition citing the positive sentence."""
+    clause = _valid_clause()
+    clause["exclusions"] = []
+    clause["reduction_conditions"] = []
+    clause["payout_conditions"] = [{
+        "condition_uid": "CI-1111111111111111",
+        "text": "피보험자가 사망한 경우 사망보험금을 지급",
+        "evidence_references": [{
+            "document_id": "DOC_001", "page": 1,
+            "quote": "회사는 피보험자가 사망한 경우 사망보험금을 지급합니다",
+        }],
+        "support_level": "direct",
+        "support_rationale": "positive payout sentence",
+        "review_required": False,
+    }]
+    return clause
+
+
+def test_positive_condition_with_negative_evidence_is_rejected():
+    clause = _polarity_clause()
+    # Positive payout condition, but grounded ONLY in the negative sentence.
+    clause["payout_conditions"][0]["evidence_references"][0]["quote"] = \
+        "회사는 피보험자가 고의로 자신을 해친 경우 보험금을 지급하지 않습니다"
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        POLARITY_TEXT)
+    assert any("polarity contradiction" in e and "positive" in e for e in errors), errors
+
+
+def test_negative_condition_with_positive_evidence_is_rejected():
+    clause = _polarity_clause()
+    clause["payout_conditions"] = []
+    clause["exclusions"] = [{
+        "condition_uid": "CI-2222222222222222",
+        "text": "보험금을 지급하지 않는 경우",
+        "evidence_references": [{
+            "document_id": "DOC_001", "page": 1,
+            # A positive sentence cited for a negative exclusion condition.
+            "quote": "회사는 피보험자가 사망한 경우 사망보험금을 지급합니다",
+        }],
+        "support_level": "direct",
+        "support_rationale": "mismatched polarity",
+        "review_required": False,
+    }]
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        POLARITY_TEXT)
+    assert any("polarity contradiction" in e for e in errors), errors
+
+
+def test_unresolved_operative_predicate_is_rejected():
+    clause = _polarity_clause()
+    clause["payout_conditions"][0]["text"] = "회사가 보험금을 지급하는 경우"
+    clause["payout_conditions"][0]["evidence_references"][0]["quote"] = \
+        "회사가 보험금을 지급하는 경우"
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        POLARITY_TEXT)
+    assert any("unresolved operative predicate" in e for e in errors), errors
+
+
+def test_normal_positive_payout_passes_polarity():
+    clause = _polarity_clause()
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        POLARITY_TEXT)
+    assert not any("polarity" in e or "unresolved operative" in e for e in errors), errors
+
+
+def test_normal_exclusion_passes_polarity():
+    clause = _polarity_clause()
+    clause["payout_conditions"] = []
+    clause["exclusions"] = [{
+        "condition_uid": "CI-2222222222222222",
+        "text": "고의로 자신을 해친 경우 지급하지 않음",
+        "evidence_references": [{
+            "document_id": "DOC_001", "page": 1,
+            "quote": "회사는 피보험자가 고의로 자신을 해친 경우 보험금을 지급하지 않습니다",
+        }],
+        "support_level": "direct",
+        "support_rationale": "negative exclusion sentence",
+        "review_required": False,
+    }]
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        POLARITY_TEXT)
+    assert not any("polarity" in e for e in errors), errors
+
+
+def test_composite_mixed_polarity_requires_review():
+    clause = _polarity_clause()
+    clause["payout_conditions"][0].update({
+        "support_level": "composite",
+        "review_required": False,  # the offending state -- must be flagged
+        "text": "사망 시 지급하되 고의는 지급하지 않음",
+        "evidence_references": [
+            {"document_id": "DOC_001", "page": 1,
+             "quote": "회사는 피보험자가 사망한 경우 사망보험금을 지급합니다"},
+            {"document_id": "DOC_001", "page": 1,
+             "quote": "회사는 피보험자가 고의로 자신을 해친 경우 보험금을 지급하지 않습니다"},
+        ],
+    })
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        POLARITY_TEXT)
+    assert any("mixes positive and negative polarity" in e for e in errors), errors
 
 
 def test_reference_table_review_flags_are_finalize_blockers():

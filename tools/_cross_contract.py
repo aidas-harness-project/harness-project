@@ -69,6 +69,61 @@ _DIRECT_QUOTE_TERMINAL_RE = re.compile(
     r"해야|하여야|알려야|의무|해지|취소|무효|소멸)"
     r"(?:[.!?。]|[)”’\"])?$"
 )
+
+# --- Polarity (Part 11B) --------------------------------------------------
+# Negation/exclusion markers. A text carrying any of these expresses a
+# negative/exclusionary proposition ("회사는 지급하지 않습니다"), the opposite
+# outcome from a positive payout proposition ("회사는 지급합니다"). Polarity is
+# outcome-determinative in policy language, so it is checked BEFORE the lexical
+# floor -- a condition and its evidence sharing tokens but disagreeing on
+# polarity is a contradiction, not weak support.
+_NEGATION_MARKERS = (
+    "않", "아니", "없", "제외", "면책", "부지급", "불가",
+    "제한", "배제", "금한", "금합니다", "금지",
+    "인정하지 않", "인정되지 않", "해당하지 않", "지급하지 아니",
+)
+# Predicate stems whose *positive* form is the operative promise of a payout
+# clause. Used to detect a truncated quote that stops before the predicate is
+# resolved one way or the other ("보험금을 지급하는 경우" -- the sentence has
+# not yet said whether it IS or is NOT paid).
+_TRUNCATED_PREDICATE_RE = re.compile(
+    r"(?:지급|보상|지급하는|보상하는|지급되는|보상되는)\s*"
+    r"(?:경우|때|사유|사항)?\s*$"
+)
+# Buckets whose normalized condition is inherently a POSITIVE payout/coverage
+# proposition. A positive condition in one of these grounded only in negative
+# evidence is a polarity contradiction.
+_POSITIVE_BUCKETS = frozenset({
+    "payout_conditions",
+    "coverage_start_conditions",
+})
+# Buckets whose normalized condition is inherently NEGATIVE/exclusionary.
+_NEGATIVE_BUCKETS = frozenset({
+    "exclusions",
+})
+
+
+def _has_negation(text: str) -> bool:
+    return any(marker in text for marker in _NEGATION_MARKERS)
+
+
+def _quote_polarity(quote: str) -> str:
+    """'negative' if the quote carries a negation/exclusion marker, else
+    'positive'. A quote with no operative predicate at all is still classed
+    'positive' here; the truncated-predicate check handles the incomplete
+    case separately so the two failure modes report distinctly."""
+    return "negative" if _has_negation(_normalize_ws(quote)) else "positive"
+
+
+def _is_truncated_predicate(quote: str) -> bool:
+    """True if the quote ends on an unresolved payout/coverage predicate --
+    it names the operative verb but stops before saying paid vs not-paid.
+    A quote that already carries a negation marker is NOT truncated (its
+    polarity is resolved)."""
+    normalized = _normalize_ws(quote)
+    if _has_negation(normalized):
+        return False
+    return bool(_TRUNCATED_PREDICATE_RE.search(normalized))
 _BUCKET_EVIDENCE_MARKERS = {
     "payout_conditions": ("지급", "보상", "보험금"),
     "exclusions": ("않", "아니", "제외", "면책", "부지급"),
@@ -318,6 +373,20 @@ def check_condition_support(clauses: list[dict]) -> list[str]:
                         "proposition; cite through the operative predicate or use "
                         "composite support with review_required=true")
 
+                # A quote naming the payout/coverage predicate but stopping
+                # before it resolves ("보험금을 지급하는 경우") is not complete
+                # direct evidence of EITHER a positive or a negative
+                # proposition. Route it to review; never treat it as proof.
+                if level == "direct" and any(
+                        _is_truncated_predicate(q) for q in quotes) and not any(
+                        _DIRECT_QUOTE_TERMINAL_RE.search(_normalize_ws(q))
+                        and not _is_truncated_predicate(q) for q in quotes):
+                    errors.append(
+                        f"{loc}: cited evidence stops on an unresolved operative "
+                        "predicate (e.g. '지급하는 경우') -- it does not state "
+                        "whether the benefit is paid or not; cite through the "
+                        "predicate or route to review_required")
+
                 markers = _BUCKET_EVIDENCE_MARKERS.get(bucket, ())
                 if markers and quote_text and not any(
                         marker in quote_text for marker in markers):
@@ -335,19 +404,54 @@ def check_condition_support(clauses: list[dict]) -> list[str]:
                         f"terms absent from its evidence: "
                         f"{sorted(missing_numbers)}")
 
-                # Polarity is outcome-determinative in policy language.  A
-                # normalized negation may never be inferred from a quote that
-                # stops before the negating predicate (CASE_030 DOC_004).
-                condition_has_negation = any(
-                    marker in condition_text
-                    for marker in ("않", "아니", "제외", "면책", "부지급"))
-                quote_has_negation = any(
-                    marker in quote_text
-                    for marker in ("않", "아니", "제외", "면책", "부지급"))
-                if condition_has_negation and not quote_has_negation:
+                # Polarity is outcome-determinative in policy language, checked
+                # BIDIRECTIONALLY (Part 11B). A condition and its evidence that
+                # share tokens but disagree on paid-vs-not-paid is a
+                # contradiction, not weak support -- and must not be "fixed" by
+                # rewording the condition; route it to review or correct the
+                # extraction instead.
+                condition_has_negation = _has_negation(condition_text)
+                quote_polarities = {_quote_polarity(q) for q in quotes}
+                quote_has_negation = "negative" in quote_polarities
+                quote_has_positive = "positive" in quote_polarities
+
+                # (a) negative condition inferred from purely positive evidence.
+                if condition_has_negation and quotes and not quote_has_negation:
                     errors.append(
-                        f"{loc}: normalized condition contains negation/exclusion "
-                        "meaning absent from the cited evidence")
+                        f"{loc}: normalized condition asserts negation/exclusion "
+                        "but every cited quote is positive/affirmative -- polarity "
+                        "contradiction; the evidence does not support a negation")
+
+                # (b) positive condition inferred from purely negative evidence.
+                #     Applies to an inherently-positive bucket, OR to any
+                #     non-exclusion bucket whose condition text carries no
+                #     negation of its own (so the condition reads as an
+                #     affirmative proposition) while its evidence is entirely
+                #     exclusionary.
+                inherently_positive = bucket in _POSITIVE_BUCKETS
+                reads_positive = (
+                    not condition_has_negation and bucket not in _NEGATIVE_BUCKETS)
+                if (inherently_positive or reads_positive) and quotes \
+                        and quote_has_negation and not quote_has_positive:
+                    errors.append(
+                        f"{loc}: normalized condition reads as a positive "
+                        f"payout/coverage proposition but every cited quote is "
+                        "negative/exclusionary -- polarity contradiction; a "
+                        "'지급' condition may not be grounded solely in a "
+                        "'지급하지 않는다' quote")
+
+                # (c) composite evidence whose passages disagree on polarity is
+                #     not silently accepted just because review_required is set:
+                #     a mixed-polarity composite is a genuine ambiguity that a
+                #     human must resolve, reported as its own blocker.
+                if level == "composite" and quote_has_negation and \
+                        quote_has_positive:
+                    if item.get("review_required") is not True:
+                        errors.append(
+                            f"{loc}: composite evidence mixes positive and "
+                            "negative polarity passages -- this ambiguity must be "
+                            "routed to review_required, not merged into one "
+                            "condition")
 
                 if condition_tokens:
                     supported = {

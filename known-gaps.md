@@ -1285,3 +1285,29 @@ different bytes rejected; UID for a different finding rejected; automated actor'
 `accepted_risk` rejected; a genuine DAO-recorded reference passes; the same six
 shapes for the unpaged exclusion; and a full `record-human-review` round-trip
 confirming the DAO computes and binds the hash itself. 551 tests pass.
+
+## 21. Condition/evidence polarity was checked only one direction -- RESOLVED 2026-07-27 (Part 11B)
+
+`check_condition_support` caught a negation asserted from a quote lacking the
+negating predicate, but NOT the reverse: a positive payout condition ("회사는
+보험금을 지급합니다") grounded solely in a negative/exclusion quote ("회사는
+보험금을 지급하지 않습니다") passed, because the two share tokens and the lexical
+floor is polarity-blind. Polarity is outcome-determinative in policy language, so
+this could invert a benefit's meaning while every other check stayed green.
+
+Fix (`tools/_cross_contract.py`): polarity is now BIDIRECTIONAL and runs before
+the lexical floor. A negation marker set (않/아니/없/제외/면책/부지급/불가/제한/
+배제/금한/인정하지 않/…) classifies each quote's polarity. (a) a negative
+condition grounded only in positive evidence, and (b) a positive/coverage
+condition grounded only in negative evidence, are both polarity contradictions.
+A quote that names the operative predicate but stops before resolving it
+("보험금을 지급하는 경우") is rejected as an unresolved predicate -- not complete
+direct evidence of either outcome. A composite whose passages disagree on
+polarity must be routed to review_required, never merged into one condition. The
+fix message is explicit that the remedy is to correct the extraction or route to
+review, NOT to reword the condition to dodge the check.
+
+6 regression tests (tests/test_cross_contract.py): positive condition / negative
+evidence rejected; negative condition / positive evidence rejected; truncated
+'지급하는 경우' rejected; normal positive payout passes; normal exclusion passes;
+composite mixed-polarity requires review. 557 tests pass.
