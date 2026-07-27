@@ -36,6 +36,10 @@ archive/
 # Shared temp zip (schemas/ is the source of truth)
 schemas.zip
 
+# Local scratch workspace (extracted page PDFs/images etc.) -- transient working
+# files, never a source of truth. Raw sources live in source-cases/.
+tmp/
+
 # ocr_extract.py's project-local scratch (page images) -- transient, cleaned up on exit
 _ocr_scratch/
 _redaction_scratch/
