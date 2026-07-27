@@ -700,6 +700,17 @@ def check_reference_table_structure(
         tloc = f"tables[{table_index}]"
         column_keys = [c.get("column_key") for c in table.get("columns") or []]
 
+        # A table predating v0.2 carries none of the source structure. Report
+        # that once, clearly, instead of cascading offset errors for every
+        # absent span -- the schema already names the missing property, and a
+        # second wave of "page None does not exist" only obscures it.
+        if "source_regions" not in table:
+            errors.append(
+                f"{tloc}: no source_regions -- the table declares no source "
+                "region, so its rows cannot be checked for completeness "
+                "(re-extract with row/table source structure)")
+            continue
+
         regions = table.get("source_regions") or []
         for region_index, region in enumerate(regions):
             errors.extend(_span_text_errors(
@@ -715,6 +726,12 @@ def check_reference_table_structure(
         row_spans: list[tuple[int, int, int]] = []
         for row_index, row in enumerate(rows):
             rloc = f"{tloc}.rows[{row_index}]"
+            if "source_span" not in row:
+                errors.append(
+                    f"{rloc}: no source_span -- a row without its own source "
+                    "range cannot be distinguished from values that merely "
+                    "appear somewhere on the page")
+                continue
             span = row.get("source_span") or {}
             span_errors = _span_text_errors(span, pages, f"{rloc}.source_span")
             errors.extend(span_errors)
