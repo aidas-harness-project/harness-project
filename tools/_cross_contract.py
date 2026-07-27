@@ -647,6 +647,166 @@ def check_reference_table(
                 errors.append(
                     f"{loc}: cited quote does not contain the table title/cell "
                     f"value {value!r}")
+
+    # Row/column source structure and reverse row coverage (Part 11E). Cell-level
+    # grounding above proves each value exists; this proves the ROW does.
+    errors.extend(check_reference_table_structure(data, pages))
+    return errors
+
+
+def _span_text_errors(span: dict, pages: dict[int, str], loc: str) -> list[str]:
+    """Verify an exact-offset source span against the real page text."""
+    errors: list[str] = []
+    page = span.get("page")
+    start = span.get("start_char")
+    end = span.get("end_char")
+    quote = span.get("quote", "")
+    if page not in pages:
+        errors.append(f"{loc}: page {page!r} does not exist in processed source")
+        return errors
+    page_text = pages[page]
+    if not isinstance(start, int) or not isinstance(end, int):
+        errors.append(f"{loc}: start_char/end_char must be integers")
+        return errors
+    if start >= end:
+        errors.append(f"{loc}: start_char {start} must be < end_char {end}")
+        return errors
+    if start < 0 or end > len(page_text):
+        errors.append(
+            f"{loc}: offsets [{start}:{end}] exceed page {page} length "
+            f"{len(page_text)}")
+        return errors
+    if page_text[start:end] != quote:
+        errors.append(
+            f"{loc}: quote does not equal the exact page {page} text at "
+            f"[{start}:{end}]")
+    return errors
+
+
+def check_reference_table_structure(
+        data: dict, pages: dict[int, str]) -> list[str]:
+    """Validate row/column source structure and reverse row coverage (11E).
+
+    Cell-level grounding cannot prove a ROW: with source rows 'A 10' and
+    'B 20', an extraction of 'A 20' / 'B 10' has every individual value present
+    on the page. A row must therefore carry the exact source range of the
+    physical row it came from; every cell value must be found INSIDE that range,
+    in the order the columns declare; and the table's whole source region must
+    be accounted for by rows plus explicitly-declared header spans, which is how
+    a source row omitted from the extraction becomes visible.
+    """
+    errors: list[str] = []
+    for table_index, table in enumerate(data.get("tables") or []):
+        tloc = f"tables[{table_index}]"
+        column_keys = [c.get("column_key") for c in table.get("columns") or []]
+
+        regions = table.get("source_regions") or []
+        for region_index, region in enumerate(regions):
+            errors.extend(_span_text_errors(
+                region, pages, f"{tloc}.source_regions[{region_index}]"))
+
+        header_spans = table.get("header_spans") or []
+        for header_index, header in enumerate(header_spans):
+            errors.extend(_span_text_errors(
+                header.get("span") or {}, pages,
+                f"{tloc}.header_spans[{header_index}].span"))
+
+        rows = table.get("rows") or []
+        row_spans: list[tuple[int, int, int]] = []
+        for row_index, row in enumerate(rows):
+            rloc = f"{tloc}.rows[{row_index}]"
+            span = row.get("source_span") or {}
+            span_errors = _span_text_errors(span, pages, f"{rloc}.source_span")
+            errors.extend(span_errors)
+            if span_errors:
+                continue
+            page = span.get("page")
+            start = span.get("start_char")
+            end = span.get("end_char")
+            row_spans.append((page, start, end))
+            row_quote = span.get("quote", "")
+
+            # The row span must sit inside one of the table's source regions.
+            if regions and not any(
+                    region.get("page") == page
+                    and region.get("start_char", 0) <= start
+                    and end <= region.get("end_char", 0)
+                    for region in regions):
+                errors.append(
+                    f"{rloc}: source_span is outside every declared "
+                    "source_region of this table")
+
+            # Every cell value must be present in THIS row's source range, in
+            # the order the columns are declared. This is what makes a
+            # transposed value detectable.
+            cursor = 0
+            ordered_keys = [
+                key for key in column_keys
+                if any(cell.get("column_key") == key
+                       for cell in row.get("cells") or [])
+            ]
+            for key in ordered_keys:
+                cell = next(
+                    cell for cell in row.get("cells") or []
+                    if cell.get("column_key") == key)
+                value = (cell.get("value") or "").strip()
+                if not value:
+                    continue
+                position = row_quote.find(value, cursor)
+                if position == -1:
+                    if value in row_quote:
+                        errors.append(
+                            f"{rloc}.cells[{key!r}]: value {value!r} appears in "
+                            "the row but not in declared column order -- the "
+                            "column assignment disagrees with the source layout")
+                    else:
+                        errors.append(
+                            f"{rloc}.cells[{key!r}]: value {value!r} is not "
+                            "present in this row's source span "
+                            f"{row_quote[:40]!r} -- a cell may not be taken from "
+                            "another row; do not rearrange values to make a "
+                            "table validate")
+                    continue
+                cursor = position + len(value)
+
+        # Reverse coverage: every non-whitespace char of every declared region
+        # must be covered by a row span or a header span. An uncovered stretch
+        # is a source row that exists but was never extracted.
+        covered: dict[int, list[tuple[int, int]]] = {}
+        for page, start, end in row_spans:
+            covered.setdefault(page, []).append((start, end))
+        for header in header_spans:
+            span = header.get("span") or {}
+            if isinstance(span.get("start_char"), int) and \
+                    isinstance(span.get("end_char"), int):
+                covered.setdefault(span.get("page"), []).append(
+                    (span["start_char"], span["end_char"]))
+
+        for region_index, region in enumerate(regions):
+            page = region.get("page")
+            start = region.get("start_char")
+            end = region.get("end_char")
+            if page not in pages or not isinstance(start, int) or \
+                    not isinstance(end, int) or start >= end or \
+                    end > len(pages[page]):
+                continue  # already reported by _span_text_errors
+            page_text = pages[page]
+            occupied = [False] * (end - start)
+            for cstart, cend in covered.get(page, []):
+                for pos in range(max(cstart, start), min(cend, end)):
+                    occupied[pos - start] = True
+            uncovered = [
+                pos for pos in range(start, end)
+                if not page_text[pos].isspace() and not occupied[pos - start]
+            ]
+            if uncovered:
+                first = uncovered[0]
+                snippet = page_text[first:first + 60].replace("\n", "\\n")
+                errors.append(
+                    f"{tloc}.source_regions[{region_index}]: source text at page "
+                    f"{page} char {first} is in the table's region but belongs to "
+                    f"no extracted row and no declared header span -- a source "
+                    f"row appears to be missing from the extraction: {snippet!r}")
     return errors
 
 

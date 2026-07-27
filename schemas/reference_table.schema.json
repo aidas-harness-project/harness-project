@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "reference_table.schema.json",
-  "title": "reference_table_DOC_XXX.json -- structured policy appendices and decision tables v0.1",
-  "description": "Cell-level representation of policy appendices such as disability-rate, fracture, burn, diagnosis-code, and benefit-grade tables. Every title and cell is independently grounded in the processed source.",
+  "title": "reference_table_DOC_XXX.json -- structured policy appendices and decision tables v0.2",
+  "description": "Cell-level representation of policy appendices such as disability-rate, fracture, burn, diagnosis-code, and benefit-grade tables. Every title and cell is independently grounded in the processed source. v0.2 adds row/table SOURCE STRUCTURE (row.source_span, table.source_regions, table.header_spans): grounding each cell individually proved insufficient -- transposing values between rows (source 'A 10 / B 20' extracted as 'A 20 / B 10') passed every check because each value did exist on the page. A row must now carry the exact source range of the physical row it came from, every cell value must be found inside that range and in declared column order, and every non-whitespace character of the table's source region must be accounted for by a row or an explicit header span, which is what makes an omitted source row detectable.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -21,6 +21,18 @@
     }
   ],
   "$defs": {
+    "source_span": {
+      "type": "object",
+      "description": "An exact character range in a processed page body (the text AFTER that page's <<<PAGE page=N>>> marker), same offset convention as policy_boundary_inventory. quote must equal the page text at [start_char:end_char] verbatim -- the DAO checks this, so a span cannot be asserted loosely.",
+      "properties": {
+        "page": { "type": "integer", "minimum": 1 },
+        "start_char": { "type": "integer", "minimum": 0 },
+        "end_char": { "type": "integer", "minimum": 1 },
+        "quote": { "type": "string", "minLength": 1 }
+      },
+      "required": ["page", "start_char", "end_char", "quote"],
+      "additionalProperties": false
+    },
     "cell": {
       "type": "object",
       "properties": {
@@ -55,13 +67,29 @@
           "type": "string",
           "pattern": "^RR-[a-f0-9]{16,64}$"
         },
+        "source_span": {
+          "$ref": "#/$defs/source_span",
+          "description": "The exact source range of THIS ROW in the processed page -- the whole physical row line(s), not a per-cell fragment. Every cell value must be found inside this span, which is what makes a row a real row rather than a set of values that merely exist somewhere on the page. Without it, transposing values between rows (source 'A 10 / B 20' extracted as 'A 20 / B 10') is undetectable because each value is individually present."
+        },
         "cells": {
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/$defs/cell" }
         }
       },
-      "required": ["row_uid", "cells"],
+      "required": ["row_uid", "source_span", "cells"],
+      "additionalProperties": false
+    },
+    "header_span": {
+      "type": "object",
+      "description": "A non-data line inside the table's source region: the column header, a repeated header on a continuation page, a units line, a rule/separator. Declared explicitly so the reverse row-coverage check can tell 'not a data row' from 'a data row that was dropped'.",
+      "properties": {
+        "span": { "$ref": "#/$defs/source_span" },
+        "kind": {
+          "enum": ["column_header", "repeated_header", "caption", "separator", "note"]
+        }
+      },
+      "required": ["span", "kind"],
       "additionalProperties": false
     },
     "column": {
@@ -97,6 +125,17 @@
           "minItems": 1,
           "items": { "$ref": "#/$defs/row" }
         },
+        "source_regions": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The exact source range(s) this table occupies, one entry per page it spans (a multi-page table lists each page's region). Every non-whitespace character inside these regions must be accounted for by a row source_span or a header_span -- that reverse accounting is what detects a source row present in the document but MISSING from the extraction. Same completeness principle as policy_boundary_inventory's page coverage.",
+          "items": { "$ref": "#/$defs/source_span" }
+        },
+        "header_spans": {
+          "type": "array",
+          "description": "Non-data lines inside source_regions (column headers, headers repeated on a continuation page, captions, separators). Required so a repeated header on page 2 of a multi-page table is not mistaken for a dropped data row.",
+          "items": { "$ref": "#/$defs/header_span" }
+        },
         "evidence_references": {
           "type": "array",
           "minItems": 1,
@@ -104,7 +143,10 @@
             "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
           }
         },
-        "review_required": { "type": "boolean" }
+        "review_required": {
+          "type": "boolean",
+          "description": "true when the flat processed text cannot establish the row/column structure with certainty (merged cells, ambiguous column boundaries, a layout that only a real table extractor could resolve). A review_required table blocks policy_clause_processing finalization. Never rearrange values to avoid setting this."
+        }
       },
       "required": [
         "table_uid",
@@ -112,6 +154,8 @@
         "title",
         "columns",
         "rows",
+        "source_regions",
+        "header_spans",
         "evidence_references",
         "review_required"
       ],

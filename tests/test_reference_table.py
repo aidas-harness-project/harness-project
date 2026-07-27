@@ -1,8 +1,14 @@
-"""Part 6: structured policy appendices with cell-level provenance."""
+"""Part 6: structured policy appendices with cell-level provenance.
+
+Part 11E adds row/table SOURCE STRUCTURE on top: cell-level grounding proves a
+value exists on the page, never that the ROW does, so transposed and omitted
+rows were invisible. Fixtures below therefore carry real source spans computed
+from TEXT rather than hand-written offsets.
+"""
 import json
 
 import dao
-from _cross_contract import check_reference_table
+from _cross_contract import check_reference_table, split_pages
 
 
 TEXT = (
@@ -13,6 +19,19 @@ TEXT = (
     "<<<PAGE page=2>>>\n"
     "팔의 장해 30%\n"
 )
+
+
+def _span(page, needle, text=TEXT):
+    """An exact source span for `needle` on `page`, offsets computed from the
+    real page body so a fixture can never drift from the text it describes."""
+    body = split_pages(text)[page]
+    start = body.index(needle)
+    return {
+        "page": page,
+        "start_char": start,
+        "end_char": start + len(needle),
+        "quote": needle,
+    }
 
 
 def _contract():
@@ -30,8 +49,14 @@ def _contract():
                 {"column_key": "classification", "label": "장해분류"},
                 {"column_key": "rate", "label": "지급률"},
             ],
+            # The table occupies the column-header line plus its one data row.
+            "source_regions": [_span(1, "장해분류 지급률\n눈의 장해 50%")],
+            "header_spans": [
+                {"span": _span(1, "장해분류 지급률"), "kind": "column_header"},
+            ],
             "rows": [{
                 "row_uid": "RR-1111111111111111",
+                "source_span": _span(1, "눈의 장해 50%"),
                 "cells": [
                     {
                         "cell_uid": "RC-1111111111111111",

@@ -1404,3 +1404,55 @@ passes; empty quote rejected; a page with an operative predicate cannot be
 administratively excluded; a genuine table-of-contents page still passes; a
 blanket reason is rejected; and a missing parent text is reported as
 unverifiable. 565 -> 573 pass.
+
+## 24. Cell-level grounding could not prove a ROW -- transposed and omitted table rows were invisible -- RESOLVED 2026-07-27 (Part 11E)
+
+`reference_table` grounded every cell individually: the cell's value had to
+appear in its cited quote, and the quote had to appear on its cited page. That
+says a VALUE exists somewhere on the page. It says nothing about the row.
+
+The concrete failure:
+
+    source:      A  10          extraction:   A  20
+                 B  20                        B  10
+
+Both `10` and `20` are genuinely on the page, each cell's quote resolves, so
+every pre-11E check passed on a table whose payout rates had been swapped
+between classifications. An omitted source row was equally invisible -- nothing
+ever compared the extraction back against the table's source region.
+
+Fix (`schemas/reference_table.schema.json` v0.1 -> v0.2 +
+`tools/_cross_contract.py`), three new required structures:
+
+- `row.source_span` -- the exact source range of the physical row this row came
+  from. Every cell value must be found INSIDE that span, and in the order the
+  columns are declared (a cursor advances through the row quote). The transposed
+  example now fails: `20` is not inside the span `A 10`. A value present in the
+  row but out of column order is reported distinctly as a column-assignment
+  error rather than a missing value.
+- `table.source_regions` -- the exact region(s) the table occupies, one per page
+  it spans. Every non-whitespace character inside them must be covered by a row
+  span or a header span; an uncovered stretch is reported as a source row
+  missing from the extraction. This is the same completeness accounting
+  `policy_boundary_inventory` already uses for pages, applied to tables.
+- `table.header_spans` -- explicitly declared non-data lines (column header,
+  a header REPEATED on a continuation page, caption, separator). Required so a
+  multi-page table's repeated header is distinguishable from a dropped row; if
+  it is left undeclared the check fails closed and reports a missing row.
+
+`review_required` keeps its finalize-blocking role and its documented purpose is
+now explicit in the schema: set it when flat processed text cannot establish the
+row/column structure -- never rearrange values to avoid it.
+
+This is a deliberately breaking schema change. Existing reference-table
+contracts (CASE_030's `reference_table_DOC_007.json`, 17 tables) lack the new
+fields and will now fail validation, which is the intended outcome: those tables
+were accepted under a rule that could not detect a swapped or missing row, so
+they need real re-extraction rather than being grandfathered.
+
+9 regression tests (tests/test_reference_table_structure.py): correct two-row
+table passes; swapped row values rejected; omitted row detected; wrong column
+assignment rejected; row span outside the declared region rejected; row-span
+quote must match the real page text; multi-page table with a declared repeated
+header passes; an undeclared repeated header reads as a missing row; layout
+ambiguity blocks finalization. 573 -> 582 pass.
