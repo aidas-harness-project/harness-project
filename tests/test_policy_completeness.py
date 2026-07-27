@@ -394,7 +394,8 @@ def test_parent_coverage_review_required_page_blocks_finalize(isolated_dao):
 # inventory is still enforced.
 
 
-def _segment_doc(document_id, source_document_id="DOC_001"):
+def _segment_doc(document_id, source_document_id="DOC_001",
+                 policy_processing_role="reference_table_only"):
     return {
         "document_id": document_id,
         "file_name": f"{document_id}.pdf",
@@ -403,6 +404,7 @@ def _segment_doc(document_id, source_document_id="DOC_001"):
         "file_size_bytes": 100,
         "document_role": "segment",
         "source_document_id": source_document_id,
+        "policy_processing_role": policy_processing_role,
         "ocr_status": "completed",
         "cross_validation_status": "agreed",
         "redacted_text_path":
@@ -423,6 +425,7 @@ def test_segmented_parent_is_exempt_from_per_doc_normalization(isolated_dao):
         "document_id": "DOC_001", "file_name": "DOC_001.pdf",
         "file_path": "data/raw/CASE_030/DOC_001.pdf", "file_format": "pdf",
         "file_size_bytes": 100, "document_role": "physical",
+        "policy_processing_role": "segmented_parent",
         "ocr_status": "completed", "cross_validation_status": "agreed",
         "redacted_text_path": "data/processed/CASE_030/DOC_001/redacted_text.md",
         "document_type": "insurance_policy",

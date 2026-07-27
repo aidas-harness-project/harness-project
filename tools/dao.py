@@ -103,6 +103,7 @@ import stage_dependencies
 import segment_lineage
 import policy_completeness
 import policy_audit
+import policy_roles
 import human_review
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -481,40 +482,44 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
         return ["no automated insurance_policy document is registered"]
 
     schemas, registry = load_registry()
-    # A physical parent that has already been carved into segments is normalized
-    # THROUGH those segments, not on its own body: every clause it would contain
-    # lives in a segment, and its whole-page completeness is enforced by the
-    # parent-coverage contract below -- so the per-document normalization
-    # requirement does not apply to it. Detect a segmented parent as any doc that
-    # is some other doc's source_document_id.
-    segmented_parent_ids = {
-        d.get("source_document_id")
-        for d in manifest.get("documents", [])
-        if d.get("document_role") == "segment" and d.get("source_document_id")
-    }
+    # What each policy document owes is DECLARED (policy_processing_role) and
+    # verified against its real source and real children -- never inferred from
+    # which artifacts happen to exist (Part 11H). The old inference read "no
+    # clause contract was written" as "no clause contract is owed", so skipping
+    # normalization was self-exempting.
+    blockers.extend(policy_roles.check_policy_processing_roles(
+        manifest,
+        normalized_for=lambda d: read_contract_data(
+            case_id, f"normalized_policy_clause_{d}.json"),
+        reference_table_for=lambda d: read_contract_data(
+            case_id, f"reference_table_{d}.json"),
+        redacted_text_for=lambda d: _redacted_text_for_doc(case_id, d),
+        parent_coverage_for=lambda d: read_contract_data(
+            case_id, f"policy_parent_coverage_{d}.json"),
+    ))
+
     for doc in policy_docs:
         doc_id = doc.get("document_id")
         normalized_name = f"normalized_policy_clause_{doc_id}.json"
         inventory_name = f"policy_boundary_inventory_{doc_id}.json"
         audit_name = f"policy_audit_result_{doc_id}.json"
+        role = policy_roles.declared_role(doc)
 
-        if doc_id in segmented_parent_ids:
-            # Segmented physical parent -- normalization is delegated to its
-            # segments; parent-coverage (below) governs its completeness.
+        if role == "segmented_parent":
+            # Normalization is delegated to its segments; parent-coverage
+            # (below) governs its completeness. The role check above already
+            # confirmed the segments and the coverage contract are real.
             continue
 
-        # A reference-table-only segment (e.g. an appendix/별표 segment) carries
-        # structured tables in reference_table_{id}.json, not policy clauses. It
-        # still owes a complete boundary inventory (every page accounted for,
-        # boundaries dispositioned excluded_with_reason -> reference table), but
-        # a normalized_policy_clause contract and its clause-audit do not apply.
         reference_table = read_contract_data(
             case_id, f"reference_table_{doc_id}.json")
         normalized = read_contract_data(case_id, normalized_name)
         inventory = read_contract_data(case_id, inventory_name)
-        reference_table_only = (
-            reference_table is not None and normalized is None)
-        if reference_table_only:
+        # An appendix/별표 segment carries structured tables, not policy
+        # clauses. It still owes a complete boundary inventory (every page
+        # accounted for), but no clause contract or clause-audit -- and only
+        # because the verified role says so, not because none was written.
+        if role == "reference_table_only":
             if inventory is None:
                 blockers.append(f"{doc_id}: missing {inventory_name}")
                 continue

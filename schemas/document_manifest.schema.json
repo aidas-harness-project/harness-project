@@ -38,6 +38,16 @@
           "enum": ["physical", "segment"],
           "description": "owner: Case Intake / document-pipeline. 'physical' = a real raw file (data/raw/...). 'segment' = a derived page-range of a physical parent (source_document_id), e.g. CASE_030's DOC_004/005/006 carved from the 240-page policy. Absent is treated as 'physical' for backward compatibility."
         },
+        "policy_processing_role": {
+          "enum": [
+            "segmented_parent",
+            "clause_segment",
+            "reference_table_only",
+            "mixed_clause_and_table",
+            "standalone_policy"
+          ],
+          "description": "owner: document-pipeline / policy-pipeline. What KIND of policy processing this document owes, declared explicitly. It used to be inferred from which artifacts happened to exist -- a document with a reference_table and no normalized clauses was assumed to be a table-only appendix, so simply not writing a clause contract exempted a document from ever having to produce one. Declaring the role does not by itself grant the exemption: the DAO verifies each declaration against the document's real source and its real children (a reference_table_only whose source contains normative narrative is refused; a segmented_parent needs genuine segments with processed text AND a parent-coverage contract, so one dummy child cannot exempt a parent from normalization). Required for every automated insurance_policy document at policy finalization."
+        },
         "source_document_id": {
           "anyOf": [
             { "$ref": "common_component_output.schema.json#/$defs/document_id" },

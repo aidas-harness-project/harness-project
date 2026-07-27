@@ -1550,3 +1550,51 @@ detected; missing source file blocked; correct offset confirmed and bound; wrong
 offset rejected; missing page rejected; unreadable printed number blocks rather
 than guessing; partial confirmation blocks the whole run; end-to-end binding and
 marker assembly; and no writes when the mapping is unverified. 591 -> 605 pass.
+
+## 27. Policy processing roles were inferred from artifact existence, making the exemption self-granting -- RESOLVED 2026-07-27 (Part 11H)
+
+The completion gate decided what a document owed by looking at what had been
+written:
+
+    reference_table_only = (reference_table is not None and normalized is None)
+
+That reads "no clause contract was written" as "no clause contract is owed" --
+so the way to be exempted from normalizing a document was simply never to
+normalize it. A segment full of real policy narrative could ship one table
+contract and be treated as an appendix. The parent case had the same shape: any
+document that was some other document's `source_document_id` was treated as a
+segmented parent, so a single dummy child entry exempted a whole parent from
+normalization. (Both inferences were added in Part 9's carve-out, which fixed a
+real problem -- CASE_030's DOC_001/DOC_007 genuinely cannot satisfy the per-doc
+rule -- but granted the exemption on the wrong evidence.)
+
+Fix (`tools/policy_roles.py` + `schemas/document_manifest.schema.json`): a
+document now DECLARES `policy_processing_role`, and the DAO verifies the
+declaration against the document's real source and real children before honouring
+it:
+
+  segmented_parent        needs registered children that actually have processed
+                          text, AND a parent-coverage contract. A placeholder
+                          child does not carve a parent.
+  reference_table_only    needs a reference-table contract AND a processed source
+                          carrying no operative policy predicate. A document that
+                          states rules is clause_segment or mixed.
+  clause_segment          needs a non-empty normalized clause contract.
+  mixed_clause_and_table  needs both -- the honest role for an appendix that also
+                          states rules.
+  standalone_policy       must have no children and its own clauses.
+
+An undeclared or unknown role is a blocker: what a document owes is never
+inferred. Note the deliberate choice of signal in `_has_normative_narrative` --
+operative predicates only, NOT structural anchors: a classification table
+legitimately carries 제N조 references and numbered rows, and counting those as
+narrative would refuse exactly the appendix segments the role exists for (the
+same TOC-style reasoning as Part 11D).
+
+17 regression tests (tests/test_policy_roles.py): missing/unknown role rejected;
+table-only claimed without a table contract rejected; table-only over normative
+narrative rejected; genuine table-only appendix passes; table-only carrying
+clauses told to declare mixed; mixed requires both; clause_segment requires
+clauses; dummy segment does not exempt a parent; segmented_parent without
+children or without parent coverage rejected; a real segmented parent passes;
+standalone with children told to declare segmented_parent. 605 -> 622 pass.
