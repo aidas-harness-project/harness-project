@@ -63,7 +63,15 @@ def test_pending_and_failed_never_have_prerequisites():
     assert sd.check_dependencies("claim_analysis", "pending", _state()) == []
 
 
-def test_unknown_stage_has_no_prerequisites():
-    # A stage the graph was never told about is permissive, never blocking.
-    assert sd.requires("evaluation") == ()
-    assert sd.check_dependencies("evaluation", "in_progress", _state()) == []
+def test_unknown_stage_is_fail_closed():
+    """Part 11I reversed this. It used to assert that an unlisted stage was
+    permissive -- which made inventing a stage name the cheapest way past the
+    whole graph, and left `evaluation` (the sole ground-truth exception) with
+    no prerequisite at all. Both are now closed: every canonical stage has an
+    entry, and a name that is not one of them is refused."""
+    assert sd.requires("evaluation") == ("critic_v1",)
+    blockers = sd.check_dependencies("not_a_real_stage", "in_progress", _state())
+    assert any("unknown stage" in b for b in blockers), blockers
+    # Refused for every target status, not only advancement.
+    assert sd.check_dependencies("not_a_real_stage", "failed", _state())
+    assert sd.check_dependencies("not_a_real_stage", "skipped", _state())

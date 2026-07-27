@@ -1598,3 +1598,61 @@ clauses told to declare mixed; mixed requires both; clause_segment requires
 clauses; dummy segment does not exempt a parent; segmented_parent without
 children or without parent coverage rejected; a real segmented parent passes;
 standalone with children told to declare segmented_parent. 605 -> 622 pass.
+
+## 28. Stage dependency graph stopped at screening_report; downstream artifacts recorded no upstream snapshot (Part 11I -- FIXED)
+
+Two independent holes, both about a claim outliving the thing it was derived
+from.
+
+**The graph.** `_REQUIRES` covered `intake` through `screening_report` and
+nothing after it. Every later stage -- `draft_report_v1/v2`, `critic_v1/v2`,
+`denial_validation`, `evaluation` -- fell through `requires()`'s permissive
+default and had NO prerequisite at all. `draft_report_v2` could be finalized in
+a run where nothing was ever drafted, and `evaluation`, the sole D1
+ground-truth exception, was gated only by `read-ground-truth`'s per-version
+flag check at read time, never by the stage gate that lets it start. The same
+default meant an unknown stage name was free passage past the entire graph.
+
+Fixed: every stage in `run_state.schema.json`'s enum now has an explicit entry
+(a test asserts `KNOWN_STAGES == the enum`, so adding a pipeline stage without
+deciding its prerequisites fails loudly), an unknown stage is refused for every
+target status, and `evaluation` additionally takes a DAO-supplied
+`human_review_complete` argument that BLOCKS when it is None -- "the caller did
+not say" is not "the review happened". `denial_response` is deliberately
+`(document_processing,)` and NOT a prerequisite of `screening_report`: it is
+dependency-triggered, and most cases have no insurer response.
+
+**The snapshot.** A `coverage_result` pointing at `PC-1111…` asserts what that
+clause said when it was written, but nothing recorded WHICH policy layer that
+was. A clause could be renormalized, an inventory rewritten, a parent page map
+corrected, and the downstream artifact would keep resolving cleanly -- every
+check ran against the new bytes and agreed with itself. Detection of staleness
+was structurally impossible, which is worse than a detected failure.
+
+Fixed: `upstream_policy_snapshot` (coverage_result / requirement_matching_result
+/ denial_reason_result, all v0.2) records the per-document digest set, reusing
+`_policy_audit_context`'s hashes so the downstream binding and the audit binding
+cannot drift apart. Optional in the schema (an artifact citing no clause has
+nothing to bind), mandatory in the DAO the moment a reference exists, recomputed
+at write time so a forged digest is refused. `dao.py policy-snapshot` prints the
+current value -- computed by the DAO, never derived by an agent reading
+`outputs/` directly. Two further gates joined the same path: the whole
+`policy_clause_processing` stage must currently be `passed` (per-contract
+soundness is a different question from "did the policy stage clear" -- CASE_030's
+exact shape), and the governing parent coverage is re-validated rather than
+trusted to have passed once.
+
+**The cascade.** Part 11F invalidated dependents on redacted-text and manifest
+changes only. Two more triggers now fire it: a stage LEAVING `passed` (to
+failed/pending/in_progress) invalidates its transitive dependents, and rewriting
+any policy-layer contract invalidates everything downstream of
+`policy_clause_processing`. Both fire on real change only -- rewriting identical
+bytes invalidates nothing, since a cascade that fires on every write trains
+everyone to ignore it. Because `dependents_of()` is derived from `_REQUIRES`,
+completing the graph automatically widened the cascade to the end of the
+pipeline.
+
+27 regression tests (tests/test_stage_cascade.py, 15 incl. the enum-parity
+check; tests/test_downstream_policy_snapshot.py, 14 minus 2 shared helpers ->
+14 tests). The pre-existing `test_unknown_stage_has_no_prerequisites` asserted
+the OLD permissive behaviour and was inverted, not deleted. 622 -> 649 pass.

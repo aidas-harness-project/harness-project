@@ -25,13 +25,27 @@ it sits between `claim_analysis` and `screening_report` in the enum order. Enum
 adjacency and dependency are different graphs; conflating them is the bug this
 replaces.
 
-Only stages this task's scope actually reasons about (through
-`screening_report`) get explicit prerequisites. Later Phase-1/Phase-2 stages
-(draft/critic/evaluation/denial_validation) are left with no hard prereqs here
-rather than guessing a graph the task does not specify -- adding them is a
-one-line change per stage when their gating is designed. An unknown or
-unlisted stage is treated as having no prerequisites (permissive), so this
-module never blocks a stage it was never told about.
+Part 11I completed the graph. It previously stopped at `screening_report`, and
+every later stage (draft/critic/denial_validation/evaluation) fell through to a
+permissive default -- so `draft_report_v2` could be recorded `passed` in a run
+where nothing had ever been drafted, and `evaluation` (the sole D1 exception,
+the one stage allowed to read ground truth) had no prerequisite at all. Two
+things changed:
+
+  * every canonical stage in `run_state.schema.json`'s enum now has an explicit
+    entry here, and `KNOWN_STAGES` is asserted against that enum by the tests,
+    so adding a stage to the pipeline without deciding its prerequisites fails
+    loudly rather than inheriting "no prerequisites";
+  * an unknown stage is now FAIL-CLOSED. The old permissive default meant a
+    typo'd or newly-invented stage name was the easiest way to advance past
+    every gate in this module. Refusing a name we were never told about costs
+    one line in this file; accepting it costs the whole graph.
+
+`evaluation` additionally carries a non-graph gate: D1's human-review flag.
+That lives on disk (`_human_review_complete_{version}.flag`), not in run-state,
+so the DAO supplies it as the `human_review_complete` argument. It defaults to
+None and None BLOCKS -- "the caller did not tell us" is not "the review
+happened".
 """
 
 # --- optional stages -------------------------------------------------------
@@ -49,13 +63,34 @@ SKIPPABLE_STAGES = frozenset({
 # dependency-accepted `skipped`, see ACCEPTS_SKIPPED_FROM) before this stage
 # may go `in_progress` or `passed`. Empty tuple = no hard prerequisite.
 _REQUIRES = {
+    # --- Phase 1 ---------------------------------------------------------
     "intake": (),
     "document_processing": ("intake",),
     "indexing": ("document_processing",),
     "policy_clause_processing": ("document_processing",),
     "claim_analysis": ("policy_clause_processing",),
+    # Dependency-triggered, not phase-gated (pipeline.md): it needs an
+    # insurer-response document's processed text and nothing else. It is NOT a
+    # prerequisite of screening_report -- most cases have no insurer response.
+    "denial_response": ("document_processing",),
     "consistency_check": ("claim_analysis",),
     "screening_report": ("claim_analysis", "consistency_check"),
+    "draft_report_v1": ("screening_report",),
+    "critic_v1": ("draft_report_v1",),
+    # --- Phase 2 ---------------------------------------------------------
+    # Validates the insurer's stated denial reasons against the case's
+    # evidence, so it needs both: the reasons (denial_response) and the
+    # evidence base the consistency check cleared. It does NOT require the v1
+    # draft -- rebuttal points are built from evidence, not from the draft.
+    "denial_validation": ("denial_response", "consistency_check"),
+    # v2 is an UPDATE of v1 that incorporates the rebuttal points, so both.
+    "draft_report_v2": ("draft_report_v1", "denial_validation"),
+    "critic_v2": ("draft_report_v2",),
+    # The sole D1 exception. One canonical stage name covers both the v1 and
+    # v2 comparison, so the graph requires the v1 critic pass (the earliest
+    # point any reviewed draft exists) and the human-review gate is checked
+    # separately, per version, by the DAO.
+    "evaluation": ("critic_v1",),
 }
 
 # For each dependent stage, the subset of its prerequisites for which an
@@ -70,13 +105,31 @@ _ACCEPTS_SKIPPED_FROM = {
 }
 
 
+# Stages that need a gate this module cannot see in run-state. `evaluation` is
+# the only one: D1's human-review completion is a flag file on disk, owned by
+# the DAO. Listed here so the rule lives with the rest of the graph.
+HUMAN_REVIEW_GATED_STAGES = frozenset({"evaluation"})
+
+KNOWN_STAGES = frozenset(_REQUIRES)
+
+
 def is_skippable(stage: str) -> bool:
     """May this stage legitimately be recorded `skipped`?"""
     return stage in SKIPPABLE_STAGES
 
 
+def is_known(stage: str) -> bool:
+    """Whether this module was told about `stage` at all. An unknown stage is
+    refused, never treated as dependency-free -- see the module docstring."""
+    return stage in KNOWN_STAGES
+
+
 def requires(stage: str) -> tuple:
-    """Hard upstream prerequisites for `stage` (empty if none/unknown)."""
+    """Hard upstream prerequisites for `stage`.
+
+    Returns () for an unknown stage too, but callers must NOT read that as
+    "no prerequisites" -- check `is_known` first. `check_dependencies` does.
+    """
     return _REQUIRES.get(stage, ())
 
 
@@ -124,7 +177,8 @@ def _intake_present(state: dict) -> bool:
     return "intake" in _stage_status_map(state)
 
 
-def check_dependencies(stage: str, target_status: str, state: dict) -> list:
+def check_dependencies(stage: str, target_status: str, state: dict,
+                        human_review_complete: bool | None = None) -> list:
     """Return blocker strings for advancing `stage` to `target_status`.
 
     Empty list = allowed. Non-empty = refuse (the caller prints them and does
@@ -134,8 +188,24 @@ def check_dependencies(stage: str, target_status: str, state: dict) -> list:
 
     `skipped` additionally requires the stage to be in SKIPPABLE_STAGES; a
     non-skippable stage cannot be recorded skipped.
+
+    An unknown `stage` is refused outright, for every target status: a name
+    this module has never heard of is a typo or an invention, and either way
+    granting it free passage past the whole graph is the wrong default.
+
+    `human_review_complete` is the DAO-supplied answer to D1's on-disk gate for
+    HUMAN_REVIEW_GATED_STAGES. None (the default) blocks: not being told is not
+    the same as being told yes.
     """
     errors = []
+
+    if not is_known(stage):
+        errors.append(
+            f"unknown stage {stage!r} -- not one of the canonical stages "
+            f"{sorted(KNOWN_STAGES)}; an unrecognized stage name is refused "
+            "rather than treated as having no prerequisites"
+        )
+        return errors
 
     if target_status == "skipped" and not is_skippable(stage):
         errors.append(
@@ -164,5 +234,15 @@ def check_dependencies(stage: str, target_status: str, state: dict) -> list:
                 f"cannot advance {stage!r} to {target_status!r}: prerequisite "
                 f"{dep!r} is {shown} -- must be {'/'.join(sorted(ok_statuses))} first"
             )
+
+    if stage in HUMAN_REVIEW_GATED_STAGES and human_review_complete is not True:
+        shown = ("not supplied by the caller" if human_review_complete is None
+                 else "not marked complete")
+        errors.append(
+            f"cannot advance {stage!r} to {target_status!r}: human review is "
+            f"{shown} -- {stage!r} is the sole ground-truth exception "
+            "(harness-guardrails-dev D1) and may only run after a real "
+            "recorded expert review has been marked complete"
+        )
 
     return errors

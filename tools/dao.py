@@ -82,6 +82,9 @@ Subcommands:
          computes the reviewed artifact's canonical hash itself and returns an
          HR- review UID the artifact then references -- a machine-written
          contract cannot self-declare a human decision with a name string)
+    policy-snapshot CASE_ID --document-id DOC_ID [--document-id DOC_ID ...]
+        (prints the upstream_policy_snapshot a policy-referencing contract must
+         carry; the DAO recomputes and re-verifies it at write time)
 """
 import argparse
 import json
@@ -315,6 +318,30 @@ def cmd_read_page_text(args):
 
 def human_review_flag_path(case_id: str, version: str) -> Path:
     return case_dir(case_id) / f"_human_review_complete_{version}.flag"
+
+
+def human_review_complete_any(case_id: str) -> bool:
+    """Whether ANY draft version's D1 human-review gate has been marked
+    complete (Part 11I).
+
+    `evaluation` is one canonical run-state stage covering both the v1 and v2
+    comparison, so the run-state gate asks the weaker question -- "has a real
+    reviewed draft been signed off at all" -- while `read-ground-truth` keeps
+    asking the strict per-version question. Both must hold for evaluation to
+    do anything: this one lets the stage START, that one lets it READ.
+
+    Only versions that mark-human-review-complete actually produces count; the
+    flag itself is only writable after expert_review_{version}.json exists and
+    passes its schema, so this cannot be satisfied by an empty file dropped in
+    by hand under some invented version name.
+    """
+    directory = case_dir(case_id)
+    if not directory.is_dir():
+        return False
+    return any(
+        human_review_flag_path(case_id, version).exists()
+        for version in ("v1", "v2")
+    )
 
 
 def cmd_read_ground_truth(args):
@@ -759,6 +786,167 @@ def _reference_table_link_errors(case_id: str, normalized: dict) -> list[str]:
     return errors
 
 
+def policy_document_digest(case_id: str, doc_id: str) -> str:
+    """The upstream policy snapshot digest for one document (Part 11I).
+
+    A downstream artifact does not merely point INTO the policy layer, it is
+    an assertion about what that layer said at the moment it was written. So
+    it has to record which bytes it read. `_policy_audit_context` already
+    computes the full set that matters -- normalized contract, boundary
+    inventory, reference tables, processed source text, manifest entry
+    (page_map included), governing parent coverage -- and the audit itself
+    binds to exactly those, so reusing it keeps the downstream binding and the
+    audit binding from ever drifting apart.
+
+    Missing pieces are hashed as JSON null rather than skipped: "this document
+    has no reference table" and "this document's reference table was deleted"
+    must produce different digests from a state where one exists.
+    """
+    hashes, _, _, _ = _policy_audit_context(case_id, doc_id)
+    encoded = json.dumps(hashes, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def policy_snapshot_for(case_id: str, doc_ids) -> dict:
+    """The `upstream_policy_snapshot` value a downstream artifact must carry
+    for the given referenced documents. Deterministic: sorted, so the digest
+    depends on WHICH documents were read, never on the order they happened to
+    be referenced in."""
+    documents = [
+        {"document_id": doc_id,
+         "digest_sha256": policy_document_digest(case_id, doc_id)}
+        for doc_id in sorted(set(doc_ids))
+    ]
+    encoded = json.dumps(documents, sort_keys=True, separators=(",", ":"))
+    return {
+        "documents": documents,
+        "snapshot_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+    }
+
+
+def _upstream_snapshot_errors(case_id: str, data: dict, doc_ids) -> list[str]:
+    """Verify the recorded upstream snapshot against the live policy layer.
+
+    Enforced only when the artifact actually carries policy references, so a
+    coverage_result that matched no clause at all is unaffected. Where refs do
+    exist the field is mandatory -- an artifact that cites the policy layer
+    without recording which version of it, cannot be checked for staleness
+    later, and 'cannot be checked' is the state this whole part exists to
+    remove.
+    """
+    expected = policy_snapshot_for(case_id, doc_ids)
+    recorded = data.get("upstream_policy_snapshot")
+    if recorded is None:
+        return [
+            "upstream_policy_snapshot is missing -- an artifact that references "
+            "policy clauses must record the policy snapshot it was derived "
+            f"from (expected snapshot_sha256 {expected['snapshot_sha256']}; "
+            "compute it with `dao.py policy-snapshot`)"
+        ]
+    errors = []
+    recorded_docs = {
+        entry.get("document_id"): entry.get("digest_sha256")
+        for entry in recorded.get("documents") or []
+    }
+    expected_docs = {
+        entry["document_id"]: entry["digest_sha256"]
+        for entry in expected["documents"]
+    }
+    for doc_id, digest in expected_docs.items():
+        if doc_id not in recorded_docs:
+            errors.append(
+                f"upstream_policy_snapshot does not cover referenced document "
+                f"{doc_id}")
+        elif recorded_docs[doc_id] != digest:
+            errors.append(
+                f"upstream_policy_snapshot for {doc_id} is stale: recorded "
+                f"{recorded_docs[doc_id]!r}, current {digest!r} -- the policy "
+                "layer changed after this artifact was derived from it")
+    for doc_id in recorded_docs.keys() - expected_docs.keys():
+        errors.append(
+            f"upstream_policy_snapshot records {doc_id}, which this artifact "
+            "does not reference -- the snapshot must describe exactly the "
+            "documents it read")
+    if not errors and recorded.get("snapshot_sha256") != expected["snapshot_sha256"]:
+        errors.append(
+            "upstream_policy_snapshot.snapshot_sha256 does not match its own "
+            f"documents list (recorded {recorded.get('snapshot_sha256')!r}, "
+            f"expected {expected['snapshot_sha256']!r})")
+    return errors
+
+
+def _policy_stage_passed_errors(case_id: str) -> list[str]:
+    """`policy_clause_processing` must be currently `passed` before anything
+    downstream may cite it (Part 11I).
+
+    Every per-document check below asks "is this contract internally sound".
+    None of them ask the question the completion gate asks: did the policy
+    stage as a whole ever clear -- every document accounted for, every role
+    verified, every unresolved boundary closed. Without this, a run could cite
+    a clean-looking clause out of a policy stage that is sitting `failed`,
+    which is exactly CASE_030's shape.
+    """
+    state = load_run_state(case_id)
+    status = next(
+        (entry.get("status") for entry in state.get("stages", [])
+         if entry.get("stage_name") == "policy_clause_processing"),
+        None)
+    if status == "passed":
+        return []
+    shown = status if status is not None else "absent (never recorded)"
+    return [
+        f"policy_clause_processing is {shown}, not 'passed' -- downstream "
+        "artifacts may not reference policy clauses until the policy stage "
+        "itself has cleared its completion gate"
+    ]
+
+
+def _parent_coverage_current_errors(case_id: str, doc_id: str) -> list[str]:
+    """The parent coverage governing `doc_id` must exist and still validate.
+
+    A segment's clause is only trustworthy if the parent it was carved from is
+    still fully accounted for. Re-running the check (rather than trusting the
+    fact that it passed once at write time) is the point: the parent's page
+    map or processed text may have moved since.
+    """
+    coverage_name = _parent_coverage_name_for(case_id, doc_id)
+    if coverage_name is None:
+        return []
+    parent_id = coverage_name[len("policy_parent_coverage_"):-len(".json")]
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        return ["document_manifest.json is missing"]
+    parent_entry = next(
+        (d for d in manifest.get("documents", [])
+         if d.get("document_id") == parent_id), None)
+    # Only a segmented physical parent owes a coverage contract; a standalone
+    # policy document has no parent to account for.
+    if parent_entry is None or parent_entry.get("document_role") == "segment":
+        return []
+    if policy_roles.declared_role(parent_entry) != "segmented_parent":
+        return []
+    coverage = read_contract_data(case_id, coverage_name)
+    if coverage is None:
+        return [f"{coverage_name} is missing"]
+    errors = [
+        f"parent coverage: {error}"
+        for error in policy_completeness.check_policy_parent_coverage(
+            coverage, coverage_name, manifest,
+            lambda d: read_contract_data(
+                case_id, f"reference_table_{d}.json") if d else None,
+            _redacted_text_for_doc(case_id, parent_id),
+        )
+    ]
+    errors.extend(
+        f"parent coverage: unresolved page: {error}"
+        for error in policy_completeness.unresolved_parent_pages(coverage))
+    errors.extend(
+        f"parent coverage: unpaged human-provenance: {error}"
+        for error in human_review.check_unpaged_human_provenance(
+            coverage, load_human_review_ledger(case_id), parent_id))
+    return errors
+
+
 def _downstream_policy_ref_errors(
         case_id: str, schema_name: str, data: dict) -> list[str]:
     """Resolve downstream policy UIDs only against current, clear audits."""
@@ -789,7 +977,15 @@ def _downstream_policy_ref_errors(
             for match_index, match in enumerate(reason.get("policy_matches") or [])
         ]
 
-    errors = []
+    if not refs:
+        return []
+
+    # The whole policy stage must currently hold, not just the individual
+    # contracts this artifact happens to cite (Part 11I).
+    errors = list(_policy_stage_passed_errors(case_id))
+    errors.extend(_upstream_snapshot_errors(
+        case_id, data, [ref.get("document_id") for _, ref in refs]))
+
     checked_docs = {}
     for loc, ref in refs:
         doc_id = ref.get("document_id")
@@ -815,6 +1011,7 @@ def _downstream_policy_ref_errors(
                     reference,
                 ))
                 doc_errors.extend(policy_audit.unresolved_findings(audit))
+            doc_errors.extend(_parent_coverage_current_errors(case_id, doc_id))
             checked_docs[doc_id] = (normalized, doc_errors)
         normalized, doc_errors = checked_docs[doc_id]
         errors.extend(f"{loc}: {error}" for error in doc_errors)
@@ -1058,6 +1255,18 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
     return 0
 
 
+# Contracts that constitute the policy layer a downstream artifact's
+# upstream_policy_snapshot is computed over. Rewriting one moves the ground
+# under every stage that cited it, so it triggers the Part 11F/11I cascade.
+_POLICY_LAYER_SCHEMAS = frozenset({
+    _cross_contract.NORMALIZED_POLICY_CLAUSE_SCHEMA,
+    policy_completeness.INVENTORY_SCHEMA,
+    policy_completeness.PARENT_COVERAGE_SCHEMA,
+    policy_audit.AUDIT_SCHEMA,
+    "reference_table.schema.json",
+})
+
+
 def cmd_write_contract(args):
     target = _require_within(case_dir(args.case_id), args.filename)
     existing_lock = acquire_lock_blocking(target, args.held_by, args.run_id, args.purpose or f"write {args.filename}")
@@ -1065,6 +1274,7 @@ def cmd_write_contract(args):
         print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return 1
+    policy_layer_changed = None
     try:
         data = json.loads(Path(args.data_file).read_text(encoding="utf-8"))
         schemas, registry = load_registry()
@@ -1108,8 +1318,15 @@ def cmd_write_contract(args):
                 for e in lineage_errors:
                     print(f"  - {e}")
                 return 1
+        # Captured before the write so the cascade below fires on a real change
+        # only -- rewriting identical bytes must not invalidate anything.
+        previous_contract = load_json(target) if target.exists() else None
         atomic_write_json(target, data)
         print(f"PASS: wrote {target}")
+        if (schema_name in _POLICY_LAYER_SCHEMAS
+                and previous_contract is not None
+                and previous_contract != data):
+            policy_layer_changed = args.filename
         if args.stage:
             # A different target (_run_state.json, not this contract file) --
             # no deadlock risk nesting this inside the contract file's lock.
@@ -1126,6 +1343,16 @@ def cmd_write_contract(args):
         return 0
     finally:
         release_lock(target)
+        # After the contract lock is released: the cascade takes the run-state
+        # lock, and a downstream stage recorded `passed` against the previous
+        # version of this policy contract is now a claim about bytes that no
+        # longer exist (Part 11I).
+        if policy_layer_changed is not None:
+            _invalidate_dependents(
+                args.case_id, "policy_clause_processing",
+                f"upstream policy_clause_processing changed: "
+                f"{policy_layer_changed} rewritten",
+                args.held_by, args.run_id)
 
 
 # Manifest fields that downstream provenance is expressed against. Changing one
@@ -1611,11 +1838,13 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
         print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return None
+    demoted_from = None
     try:
         state = load_run_state(case_id)
         state["run_id"] = run_id or state.get("run_id")
 
-        blockers = stage_dependencies.check_dependencies(stage, status, state)
+        blockers = stage_dependencies.check_dependencies(
+            stage, status, state, human_review_complete_any(case_id))
         if blockers:
             if dep_check == "soft":
                 print(f"NOTE: stage {stage!r} not advanced to {status!r} -- unmet dependencies:")
@@ -1635,6 +1864,13 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
             entry = {"stage_name": stage, "status": "pending", "started_at": None,
                       "completed_at": None, "attempt_count": 0, "backup_path": None}
             stages.append(entry)
+        # A stage leaving `passed` un-grounds everything derived from it, so
+        # note the demotion here (inside the lock, where the old status is
+        # authoritative) and cascade after the lock is released -- the cascade
+        # takes the same lock (Part 11I).
+        if (entry.get("status") == "passed"
+                and status in ("failed", "pending", "in_progress")):
+            demoted_from = "passed"
         if status == "in_progress":
             entry["started_at"] = entry["started_at"] or now_iso()
             entry["attempt_count"] += 1
@@ -1650,9 +1886,21 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
                 print(f"  - {e}")
             return None
         save_run_state(case_id, state)
-        return state
+        updated = state
     finally:
         release_lock(target)
+
+    if demoted_from is not None:
+        _invalidate_dependents(
+            case_id, stage,
+            f"upstream {stage} left {demoted_from} (now {status}) -- every "
+            "dependent result was derived from a stage that no longer holds",
+            held_by, run_id)
+        # Re-read: the cascade may have demoted dependents after `updated` was
+        # captured, and returning the pre-cascade snapshot would hand the
+        # caller stages that are already invalidated.
+        updated = load_run_state(case_id)
+    return updated
 
 
 def cmd_update_run_state(args):
@@ -1688,7 +1936,8 @@ def cmd_migrate_run_state_v03(args):
             reasons = []
             if not entry.get("backup_path"):
                 reasons.append("missing P10 backup_path")
-            blockers = stage_dependencies.check_dependencies(stage, "passed", state)
+            blockers = stage_dependencies.check_dependencies(
+                stage, "passed", state, human_review_complete_any(args.case_id))
             if blockers:
                 reasons.append("unmet dependencies: " + "; ".join(blockers))
             if reasons:
@@ -1925,7 +2174,8 @@ def _finalize_stage(case_id, run_id, stage, held_by):
         # publication and the live state write, so no run-state transition can
         # interleave with finalization.
         state = load_run_state(case_id)
-        blockers = stage_dependencies.check_dependencies(stage, "passed", state)
+        blockers = stage_dependencies.check_dependencies(
+            stage, "passed", state, human_review_complete_any(case_id))
         if blockers:
             print(f"REFUSED: cannot finalize {stage!r} -- unmet dependencies:")
             for b in blockers:
@@ -2144,6 +2394,31 @@ def load_human_review_ledger(case_id: str) -> dict | None:
     real state -- a case with no human reviews recorded -- and every verifier
     treats a missing/None ledger as 'no such review', never as a pass."""
     return load_json(human_review_ledger_path(case_id))
+
+
+def cmd_policy_snapshot(args):
+    """Print the upstream_policy_snapshot value for the given documents.
+
+    An agent writing a policy-referencing contract needs the exact digests the
+    DAO will recompute at write time; making it derive them by hand would mean
+    reading `outputs/` directly, which P2 forbids. So the DAO computes and
+    prints them, and still verifies at write time -- printing here is a
+    convenience, never the authority.
+    """
+    doc_ids = sorted(set(args.document_id))
+    missing = [
+        doc_id for doc_id in doc_ids
+        if read_contract_data(
+            args.case_id, f"normalized_policy_clause_{doc_id}.json") is None
+    ]
+    if missing:
+        print(f"BLOCKED: no normalized policy contract for {', '.join(missing)} -- "
+              "a snapshot may only be issued for documents the policy layer has "
+              "actually produced")
+        return 1
+    print(json.dumps(policy_snapshot_for(args.case_id, doc_ids),
+                     ensure_ascii=False, indent=2))
+    return 0
 
 
 def cmd_read_human_review_ledger(args):
@@ -2412,6 +2687,12 @@ def main():
 
     p = sub.add_parser("read-human-review-ledger"); p.add_argument("case_id")
     p.set_defaults(fn=cmd_read_human_review_ledger)
+
+    p = sub.add_parser("policy-snapshot")
+    p.add_argument("case_id")
+    p.add_argument("--document-id", required=True, action="append",
+                   help="referenced policy document; repeat for each one")
+    p.set_defaults(fn=cmd_policy_snapshot)
 
     p = sub.add_parser("record-human-review")
     p.add_argument("case_id")

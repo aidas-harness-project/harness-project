@@ -11,6 +11,30 @@ def _write_json(path, data):
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _pass_policy_stage(out):
+    """Part 11I: a downstream reference is only resolvable while the policy
+    stage itself is currently `passed`."""
+    _write_json(out / "_run_state.json", {
+        "case_id": "CASE_030",
+        "run_id": "RUN_20260724_001",
+        "stages": [{
+            "stage_name": "policy_clause_processing",
+            "status": "passed",
+            "attempt_count": 1,
+            "backup_path": "outputs/CASE_030/_backups/step_01_policy_clause_processing",
+        }],
+    })
+
+
+def _with_snapshot(data, doc_ids=("DOC_001",)):
+    """Part 11I: attach the upstream policy snapshot a policy-referencing
+    artifact must carry. Taken from the DAO so the fixture tracks the real
+    digest inputs instead of freezing a subset."""
+    data["upstream_policy_snapshot"] = dao.policy_snapshot_for(
+        "CASE_030", doc_ids)
+    return data
+
+
 def _audit(hashes, findings=None):
     return {
         "case_id": "CASE_030",
@@ -203,14 +227,15 @@ def test_accepted_risk_requires_human_actor(isolated_dao):
 
 def test_downstream_reference_requires_current_clear_audit(isolated_dao):
     out, _, _, hashes = _seed_contracts(isolated_dao)
-    data = {
+    _pass_policy_stage(out)
+    data = _with_snapshot({
         "coverages": [{
             "matched_clause_ref": {
                 "document_id": "DOC_001",
                 "clause_uid": "PC-1111111111111111",
             },
         }],
-    }
+    })
     assert any(
         "policy audit is missing" in error
         for error in dao._downstream_policy_ref_errors(
@@ -225,11 +250,12 @@ def test_downstream_reference_requires_current_clear_audit(isolated_dao):
 
 def test_downstream_condition_uid_must_resolve_within_clause(isolated_dao):
     out, _, _, hashes = _seed_contracts(isolated_dao)
+    _pass_policy_stage(out)
     _write_json(
         out / "policy_audit_result_DOC_001.json",
         _audit(hashes),
     )
-    data = {
+    data = _with_snapshot({
         "coverage_requirements": [{
             "requirements": [{
                 "clause_ref": {
@@ -239,7 +265,7 @@ def test_downstream_condition_uid_must_resolve_within_clause(isolated_dao):
                 },
             }],
         }],
-    }
+    })
     errors = dao._downstream_policy_ref_errors(
         "CASE_030", "requirement_matching_result.schema.json", data)
     assert any("condition_uid" in error and "does not resolve" in error

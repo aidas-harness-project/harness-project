@@ -27,6 +27,8 @@ The taxonomy's `상`/`중`/`하` frequency tier is operational metadata supplied
 
 `denial_reason_result.json` (denial reasons + candidate codes + amounts + policy matches).
 
+Whenever any denial reason carries a `policy_matches` entry, the file must also carry `upstream_policy_snapshot` — fetch it with `python tools/dao.py policy-snapshot CASE_ID --document-id DOC_ID [--document-id ...]` for exactly the policy documents you matched against, and paste the printed object in verbatim. It records which version of the policy layer your matches were made against, so a later renormalization makes this file provably stale instead of silently agreeing with bytes it never read. The DAO also requires `policy_clause_processing` to be currently `passed` before any `policy_matches` entry is writable; if it is not, extract the denial reasons without policy matches rather than citing an uncleared policy stage.
+
 # Consumers
 
 Your output is read by **both** `screening-report` (Phase 1, §2 — insurer's determination) and `denial-validation` (Phase 2, evidence retrieval + rebuttal generation) — the same result, not regenerated per consumer. If you're invoked again because a *new* denial letter arrived later, that's a fresh run producing a new result; you don't re-run for stages that already consumed an earlier result.
