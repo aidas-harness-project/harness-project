@@ -16,9 +16,38 @@ from _cross_contract import split_pages
 
 INVENTORY_SCHEMA = "policy_boundary_inventory.schema.json"
 _DOC_ID_RE = re.compile(r"_(DOC_\d+)\.json$")
+# Korean insurance-policy structural anchors. The blacklist a boundary/exclusion
+# span is checked against must cover the item markers a heading-only boundary
+# would otherwise hide body text behind (Part 11C):
+#   제1조 / 제1조의2        article, with 가지번호
+#   ① .. ⑳                  circled-number paragraphs
+#   ㉮ .. ㉺ / ㈀ ..         circled Korean item markers
+#   1. / 1) / (1)           arabic item markers (line-anchored or parenthesised)
+#   가. / 가) / (가)         Korean-consonant item markers
+# The arabic/consonant "N." and "가." forms are line-anchored (^) so a decimal
+# like "50.5" or a mid-sentence "다." ending doesn't false-positive; the
+# parenthesised and circled forms are safe to match anywhere.
+_ITEM_LETTERS = "가나다라마바사아자차카타파하"
 _STRUCTURAL_ANCHOR_RE = re.compile(
-    r"(?:제\s*\d+\s*조(?:의\s*\d+)?(?:\s*\([^)]*\))?|[①-⑳]|^\s*\d+\.\s+)",
+    r"(?:"
+    r"제\s*\d+\s*조(?:의\s*\d+)?(?:\s*\([^)]*\))?"        # 제1조 / 제1조의2
+    r"|[①-⑳]"                                   # ①-⑳
+    r"|[㉠-㉿]"                                   # ㉠-㉿ (incl. ㉮)
+    r"|[㈀-㈞]"                                   # ㈀-㈞
+    r"|^[ \t]*\(?\d+\)"                                   # (1) / 1)
+    rf"|^[ \t]*\([{_ITEM_LETTERS}]\)"                     # (가)
+    r"|^[ \t]*\d+\.[ \t]"                                 # 1.  (line-anchored)
+    rf"|^[ \t]*[{_ITEM_LETTERS}][.)][ \t]"                # 가. / 가)
+    r")",
     re.MULTILINE,
+)
+# A span that, after normalization, is ONLY a clause/article heading -- an
+# article number and its parenthesised title, nothing else. Such a span cannot
+# be the sole representation of a normalized boundary: the body it heads must
+# have its own boundary span. Distinct from _HEADING_ONLY_RE in _cross_contract
+# (that one guards evidence quotes; this one guards boundary spans).
+_SPAN_HEADING_ONLY_RE = re.compile(
+    r"^\s*제\s*\d+\s*조(?:의\s*\d+)?\s*(?:\([^)]{1,80}\))?\s*$"
 )
 _BLANKET_BODY_EXCLUSION_RE = re.compile(
     r"(?:covered\s+under|not\s+separately\s+normalized|"
@@ -100,6 +129,10 @@ def check_policy_boundary_inventory(
             f"but processed source pages are {sorted(pages)}")
 
     boundary_span_count = {uid: 0 for uid in boundary_set}
+    # Per boundary: does it have at least one span that is NOT heading-only?
+    # A normalized boundary represented solely by its article heading has no
+    # body span to substantiate any condition (Part 11C).
+    boundary_has_body_span = {uid: False for uid in boundary_set}
     by_page: dict[int, list[dict]] = {}
     for index, span in enumerate(spans):
         page = span.get("page")
@@ -111,10 +144,37 @@ def check_policy_boundary_inventory(
                     f"page_spans[{index}] references unknown boundary_uid {uid!r}")
             else:
                 boundary_span_count[uid] += 1
+                quote = span.get("quote") or ""
+                if not _SPAN_HEADING_ONLY_RE.match(quote.strip()):
+                    boundary_has_body_span[uid] = True
 
     for uid, count in boundary_span_count.items():
         if count == 0:
             errors.append(f"boundary {uid!r} has no source page span")
+
+    # A normalized boundary whose spans are ALL heading-only may only carry the
+    # clause's identity (bucket 'clause') -- never a condition. A title cannot
+    # substantiate the body condition it heads; that operative text must be its
+    # own boundary span. (The legitimate pattern is a heading boundary mapped to
+    # 'clause' PLUS separate body boundaries for each condition.)
+    for uid in boundary_set:
+        boundary = boundary_by_id.get(uid, {})
+        if (boundary.get("disposition") == "normalized"
+                and boundary_span_count.get(uid, 0) > 0
+                and not boundary_has_body_span.get(uid, False)):
+            condition_buckets = sorted({
+                mapping.get("bucket")
+                for mapping in boundary.get("normalized_mappings") or []
+                if mapping.get("bucket") not in (None, "clause")
+            })
+            if condition_buckets:
+                errors.append(
+                    f"boundary {uid!r} ({boundary.get('label')}): every source "
+                    "span is a clause/article heading only, yet it maps to "
+                    f"condition bucket(s) {condition_buckets} -- a title cannot "
+                    "substantiate the body condition it heads; map the condition "
+                    "to the boundary covering its operative text, or route the "
+                    "boundary to review_required")
 
     for page_num, page_text in pages.items():
         occupied = [False] * len(page_text)
@@ -235,6 +295,126 @@ def check_policy_boundary_inventory(
                     f"not map back to clause_uid {clause_uid!r}: "
                     f"{sorted(unbacked)}")
 
+    return errors
+
+
+def _iter_clause_evidence(clause: dict):
+    """Yield (location_label, ref) for a clause's own + all condition refs."""
+    for ref in clause.get("evidence_references") or []:
+        yield "clause", ref
+    for bucket in (
+        "payout_conditions", "exclusions", "reduction_conditions",
+        "definitions", "obligations", "claim_requirements",
+        "termination_conditions", "dispute_resolution_conditions",
+        "coverage_start_conditions",
+    ):
+        for idx, item in enumerate(clause.get(bucket) or []):
+            for ref in item.get("evidence_references") or []:
+                yield f"{bucket}[{idx}]", ref
+
+
+def check_clause_evidence_within_boundaries(
+        normalized_contract: dict | None,
+        inventory: dict,
+        redacted_text: str | None) -> list[str]:
+    """Every clause/condition evidence quote must sit inside the exact source
+    range of one of the clause's OWN declared source boundaries, and must not
+    overlap any excluded span (Part 11C).
+
+    Before this, a clause could declare source_boundary_uids for provenance yet
+    cite a quote physically located in a DIFFERENT boundary, or inside a span
+    the inventory excluded as non-normative -- the quote-verbatim check only
+    proved the quote existed *somewhere* on the page, not that it came from the
+    range this clause claims. Matching is on the raw page text, so offsets line
+    up with the inventory's exact-offset spans.
+
+    Returns all errors (empty = clean). A missing normalized contract or
+    unavailable source is not this function's failure to report -- callers
+    handle those; here they simply mean 'nothing to bind'.
+    """
+    errors: list[str] = []
+    if normalized_contract is None or redacted_text is None:
+        return errors
+    try:
+        pages = split_pages(redacted_text)
+    except Exception:
+        return errors  # source-boundary trust is reported by the caller.
+
+    spans = inventory.get("page_spans") or []
+    # boundary_uid -> list of (page, start, end) for its boundary spans.
+    boundary_spans: dict[str, list[tuple[int, int, int]]] = {}
+    # page -> list of (start, end) excluded spans.
+    excluded_by_page: dict[int, list[tuple[int, int]]] = {}
+    for span in spans:
+        page = span.get("page")
+        start = span.get("start_char")
+        end = span.get("end_char")
+        if not isinstance(start, int) or not isinstance(end, int):
+            continue
+        if span.get("disposition") == "boundary":
+            uid = span.get("boundary_uid")
+            if uid:
+                boundary_spans.setdefault(uid, []).append((page, start, end))
+        elif span.get("disposition") == "excluded":
+            excluded_by_page.setdefault(page, []).append((start, end))
+
+    for clause_index, clause in enumerate(
+            normalized_contract.get("clauses") or []):
+        declared = clause.get("source_boundary_uids") or []
+        allowed = [
+            (p, s, e)
+            for uid in declared
+            for (p, s, e) in boundary_spans.get(uid, [])
+        ]
+        for label, ref in _iter_clause_evidence(clause):
+            loc = f"clauses[{clause_index}].{label}"
+            page = ref.get("page")
+            quote = ref.get("quote")
+            if page is None or not quote or not quote.strip():
+                continue  # structural completeness is checked elsewhere.
+            page_text = pages.get(page)
+            if page_text is None:
+                continue  # page-existence is checked elsewhere.
+            # Every raw occurrence of the quote on this page.
+            occurrences = []
+            start = page_text.find(quote)
+            while start != -1:
+                occurrences.append((start, start + len(quote)))
+                start = page_text.find(quote, start + 1)
+            if not occurrences:
+                continue  # verbatim presence is checked by _cross_contract.
+
+            # The quote must fall entirely within one of the clause's own
+            # boundary spans on this page.
+            within_allowed = any(
+                p == page and s <= qs and qe <= e
+                for (qs, qe) in occurrences
+                for (p, s, e) in allowed
+            )
+            if allowed and not within_allowed:
+                errors.append(
+                    f"{loc}: evidence quote on page {page} does not fall within "
+                    "any source span of the clause's declared "
+                    f"source_boundary_uids {sorted(set(declared))} -- a clause may "
+                    "only cite text inside its own boundaries")
+            # And it must not overlap an excluded (non-normative) span.
+            overlaps_excluded = any(
+                not (qe <= xs or xe <= qs)
+                for (qs, qe) in occurrences
+                for (xs, xe) in excluded_by_page.get(page, [])
+                # only penalise an occurrence that is otherwise the one being
+                # relied on: if it also lies in an allowed span, the allowed
+                # match above governs; here we flag a quote whose ONLY location
+                # is an excluded span.
+                if not any(
+                    s <= qs and qe <= e
+                    for (p, s, e) in allowed if p == page)
+            )
+            if overlaps_excluded:
+                errors.append(
+                    f"{loc}: evidence quote on page {page} overlaps a span the "
+                    "inventory marked excluded (non-normative) -- excluded source "
+                    "text may not substantiate a normalized condition")
     return errors
 
 

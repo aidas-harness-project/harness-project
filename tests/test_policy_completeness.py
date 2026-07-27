@@ -542,3 +542,138 @@ def test_reference_table_only_segment_cannot_finalize_with_review_flags(
     assert any("unresolved reference table" in blocker
                and "review_required=true" in blocker
                for blocker in blockers), blockers
+
+
+# --------------------------------------------------------------------------
+# Part 11C: structural anchors, heading-only boundaries, evidence binding.
+# --------------------------------------------------------------------------
+
+def _excluded_page(page_body, reason="목차/표지"):
+    """An inventory whose single excluded span covers the whole page."""
+    return {
+        "case_id": "CASE_030",
+        "component": "policy-pipeline",
+        "status": "success",
+        "source_document_id": "DOC_001",
+        "boundaries": [],
+        "page_spans": [{
+            "span_uid": _uid("PS", page_body),
+            "page": 1,
+            "start_char": 0,
+            "end_char": len(page_body),
+            "quote": page_body,
+            "disposition": "excluded",
+            "boundary_uid": None,
+            "exclusion_reason": reason,
+        }],
+    }
+
+
+def _anchor_errors(page_body):
+    return pc.check_policy_boundary_inventory(
+        _excluded_page(page_body),
+        "policy_boundary_inventory_DOC_001.json",
+        f"<<<PAGE page=1>>>\n{page_body}",
+        None,
+    )
+
+
+def test_korean_item_marker_hidden_in_excluded_span_is_rejected():
+    """'가. 회사는 보험금을 지급하지 않습니다' is normative -- it may not be
+    buried in an excluded span."""
+    errors = _anchor_errors("가. 회사는 보험금을 지급하지 않습니다\n")
+    assert any("anchor" in e and "excluded source span" in e
+               for e in errors), errors
+
+
+def test_parenthesised_and_bare_number_item_markers_are_recognised():
+    for body in ("(1) 회사는 보상합니다\n",
+                 "1) 회사는 보상합니다\n",
+                 "(가) 회사는 보상합니다\n"):
+        errors = _anchor_errors(body)
+        assert any("anchor" in e and "excluded source span" in e
+                   for e in errors), (body, errors)
+
+
+def test_ordinary_prose_is_not_a_false_positive_anchor():
+    """A sentence-ending syllable + period must not read as an item marker."""
+    errors = _anchor_errors("회사는 보험금을 지급합니다. 다만 예외가 있습니다\n")
+    assert not any("anchor" in e for e in errors), errors
+
+
+def test_heading_only_boundary_cannot_carry_a_condition():
+    """A title span mapped to a condition bucket is rejected; the body needs
+    its own boundary span."""
+    inventory = _inventory()
+    # Re-point the heading boundary's mapping from 'clause' to a condition.
+    inventory["boundaries"][0]["normalized_mappings"][0].update({
+        "bucket": "payout_conditions",
+        "condition_uid": "CI-1111111111111111",
+    })
+    errors = pc.check_policy_boundary_inventory(
+        inventory,
+        "policy_boundary_inventory_DOC_001.json",
+        REDACTED,
+        _normalized(),
+    )
+    assert any("heading only" in e and "payout_conditions" in e
+               for e in errors), errors
+
+
+def test_heading_boundary_mapped_to_clause_identity_still_passes():
+    """The legitimate pattern: heading -> clause, body -> conditions."""
+    errors = pc.check_policy_boundary_inventory(
+        _inventory(),
+        "policy_boundary_inventory_DOC_001.json",
+        REDACTED,
+        _normalized(),
+    )
+    assert not any("heading only" in e for e in errors), errors
+
+
+def test_clause_evidence_outside_its_declared_boundaries_is_rejected():
+    """A clause may not cite text physically located in another boundary."""
+    normalized = _normalized()
+    clause = normalized["clauses"][0]
+    # Declare only the heading + first paragraph, but keep citing the second.
+    clause["source_boundary_uids"] = [
+        _uid("PB", "제1조(지급)\n"),
+        _uid("PB", "① 진단 시 지급\n"),
+    ]
+    errors = pc.check_clause_evidence_within_boundaries(
+        normalized, _inventory(), REDACTED)
+    assert any("does not fall within" in e and "reduction_conditions" in e
+               for e in errors), errors
+
+
+def test_clause_evidence_inside_declared_boundaries_passes():
+    errors = pc.check_clause_evidence_within_boundaries(
+        _normalized(), _inventory(), REDACTED)
+    assert errors == [], errors
+
+
+def test_evidence_landing_in_an_excluded_span_is_rejected():
+    """Excluded (non-normative) source text may not substantiate a condition."""
+    inventory = _inventory()
+    # Turn the second paragraph's span into an excluded one, while the clause
+    # keeps citing it.
+    span = inventory["page_spans"][2]
+    excluded_uid = span["boundary_uid"]
+    span.update({
+        "disposition": "excluded",
+        "boundary_uid": None,
+        "exclusion_reason": "판단상 비규범 텍스트",
+    })
+    inventory["boundaries"] = [
+        b for b in inventory["boundaries"]
+        if b["boundary_uid"] != excluded_uid
+    ]
+    normalized = _normalized()
+    normalized["clauses"][0]["source_boundary_uids"] = [
+        _uid("PB", "제1조(지급)\n"),
+        _uid("PB", "① 진단 시 지급\n"),
+    ]
+    errors = pc.check_clause_evidence_within_boundaries(
+        normalized, inventory, REDACTED)
+    assert any("overlaps a span the inventory marked excluded" in e
+               for e in errors), errors

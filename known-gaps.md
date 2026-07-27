@@ -1311,3 +1311,54 @@ review, NOT to reword the condition to dodge the check.
 evidence rejected; negative condition / positive evidence rejected; truncated
 '지급하는 경우' rejected; normal positive payout passes; normal exclusion passes;
 composite mixed-polarity requires review. 557 tests pass.
+
+## 22. Boundary anchors missed Korean item markers; clause evidence was never bound to its own source range -- RESOLVED 2026-07-27 (Part 11C)
+
+Three related holes in the boundary/evidence layer:
+
+- **The structural-anchor regex only knew `제N조`, `①-⑳`, and `N.`** So a
+  normative sub-item written `가.` / `나)` / `(1)` / `1)` / `(가)` / `㉮` was
+  invisible to both anchor checks: it neither forced a multi-anchor boundary to
+  split, nor tripped the "normative text hidden in an excluded span" rule. A
+  whole exclusion clause ("가. 회사는 보험금을 지급하지 않습니다") could be
+  buried in an `excluded` span and the gate stayed green.
+- **A heading-only boundary could carry a body condition.** `제1조(목적)` as the
+  sole span of a normalized boundary could be mapped to a payout/exclusion
+  condition -- a title standing in for the operative text it heads.
+- **Clause evidence was never bound to the clause's own source range.** The
+  quote-verbatim check proved a quote existed *somewhere* on the cited page; it
+  could physically sit in a DIFFERENT boundary, or inside a span the inventory
+  had excluded as non-normative, and still pass.
+
+Fix (`tools/policy_completeness.py`):
+
+- The anchor regex now covers `제1조의2`, `①-⑳`, `㉠-㉿` (incl. `㉮`), `㈀-㈞`,
+  `(1)`/`1)`, `(가)`, and line-anchored `1.` / `가.` / `가)`. The Korean item
+  letters are restricted to the 가나다 set and the bare `N.`/`가.` forms are
+  line-anchored with `[ \t]*` (never `\s*`), so a sentence-ending syllable
+  ("…합니다. 다만…") or a decimal ("50.5%") is not a false positive -- verified
+  against a 10-match / 4-non-match probe.
+- A normalized boundary whose spans are ALL heading-only may map only to the
+  clause identity (`bucket: clause`); mapping it to a condition bucket is
+  refused. The legitimate pattern (heading -> clause, body spans -> conditions)
+  is unaffected.
+- New `check_clause_evidence_within_boundaries()`: every clause/condition
+  evidence quote must fall entirely inside a page span belonging to one of the
+  clause's OWN declared `source_boundary_uids`, and must not land in an
+  `excluded` span. Wired into both the inventory write path and
+  `_policy_completion_blockers`.
+
+Design note: evidence references deliberately do NOT gain an agent-supplied
+`span_uid` field. An agent-declared span address is just another
+self-declaration surface; instead the DAO locates the verbatim quote's real
+offset in the raw page text and compares it against the inventory's exact-offset
+spans -- a computed location cannot be fabricated. Reference-table-only segments
+get the same excluded-span anchor scan (the completion gate already runs the
+inventory check for them), so normative text cannot hide there either.
+
+8 regression tests (tests/test_policy_completeness.py): 가.-item hidden in an
+excluded span rejected; (1)/1)/(가) variants rejected; ordinary prose is not a
+false positive; heading-only boundary carrying a condition rejected; heading ->
+clause identity still passes; evidence outside declared boundaries rejected;
+evidence inside them passes; evidence landing in an excluded span rejected.
+565 tests pass.

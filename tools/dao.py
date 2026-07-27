@@ -533,6 +533,13 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
             )
         )
         blockers.extend(
+            f"{doc_id}: evidence-boundary binding: {error}"
+            for error in
+            policy_completeness.check_clause_evidence_within_boundaries(
+                normalized, inventory,
+                _redacted_text_for_doc(case_id, doc_id))
+        )
+        blockers.extend(
             f"{doc_id}: unresolved boundary: {error}"
             for error in policy_completeness.unresolved_boundaries(inventory)
         )
@@ -896,6 +903,9 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
             _redacted_text_for_doc(case_id, target_doc),
             normalized,
         )
+        errors.extend(
+            policy_completeness.check_clause_evidence_within_boundaries(
+                normalized, data, _redacted_text_for_doc(case_id, target_doc)))
         if errors:
             print(f"FAIL: policy completeness errors for {target}:")
             for error in errors:
