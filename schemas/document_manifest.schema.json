@@ -109,6 +109,11 @@
           "minimum": 1,
           "description": "owner: document-pipeline (checkpoint 1). Immutable physical page count read from the original PDF container before any page-range extraction. Required by policy parent-coverage finalization so total pages cannot be self-declared by the policy agent. null for non-PDF inputs and segments."
         },
+        "source_pdf_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "owner: document-pipeline (checkpoint 1). SHA-256 of the immutable raw source file itself. Every segment carved from this parent binds its page mapping to this digest, so extracting from a DIFFERENT file -- or from a file that changed after the segments were derived -- is detectable rather than being an unverifiable claim about which PDF a page came from. null for non-PDF inputs and segments."
+        },
         "ocr_status": {
           "enum": ["pending", "completed", "failed", "not_applicable"],
           "description": "owner: document-pipeline (checkpoint 1). Initialized to pending by Case Intake."
@@ -245,10 +250,20 @@
     },
     "page_map_entry": {
       "type": "object",
-      "description": "Maps one of a segment's logical printed pages to the parent PDF's physical page. logical_page is the number that appears in the segment's <<<PAGE page=N>>> markers (and in evidence-reference `page` values); source_physical_page is the parent PDF's 1-based physical page index, which may differ from the printed number. source_physical_page is optional: when the parent's physical indexing is unknown it may be omitted, but logical_page is always required and is what the lineage validator checks against the markers.",
+      "description": "Maps one of a segment's logical printed pages to the parent PDF's physical page. logical_page is the number that appears in the segment's <<<PAGE page=N>>> markers (and in evidence-reference `page` values); source_physical_page is the parent PDF's 1-based physical page index, which may differ from the printed number. physical_page_sha256 and logical_page_evidence bind that mapping to the actual parent page rather than leaving it a declaration: a page offset asserted by a caller cannot be distinguished from a correct one unless the page's real content is hashed and its printed number independently read back.",
       "properties": {
         "logical_page": { "type": "integer", "minimum": 1 },
-        "source_physical_page": { "type": "integer", "minimum": 1 }
+        "source_physical_page": { "type": "integer", "minimum": 1 },
+        "physical_page_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "owner: document-pipeline. SHA-256 of the text extracted from the parent PDF's source_physical_page. Binds this mapping to the exact page it came from: re-running with a different PDF, or a shifted page offset, produces a different digest, so a wrong mapping cannot silently look consistent."
+        },
+        "logical_page_evidence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "owner: document-pipeline. The verbatim printed page marker found ON that physical page confirming its logical number (e.g. '12 / 240'). The page offset is only ever a CANDIDATE; this is the independent confirmation that the candidate was right. A page whose printed number cannot be read is not written with a guess -- extraction blocks for review."
+        }
       },
       "required": ["logical_page", "source_physical_page"],
       "additionalProperties": false

@@ -1503,3 +1503,50 @@ The stage doing the writing is never invalidated by its own writes (those writes
 are how it produces its output); only what depends on it is.
 
 9 regression tests (tests/test_policy_stale_propagation.py). 582 -> 591 pass.
+
+## 26. Segment page maps were asserted, not verified -- any PDF, any offset -- RESOLVED 2026-07-27 (Part 11G)
+
+`extract_embedded_segment.py` accepted an arbitrary `--pdf` path and an
+authoritative `--page-offset`. Both were unverifiable claims. Point it at a
+different file, or state an offset that is wrong by two, and the manifest, the
+`<<<PAGE page=N>>>` markers, and the processed text would all agree with each
+other perfectly while describing pages that were never the source. Nothing
+downstream could tell -- every later check (quote-on-page, boundary offsets,
+parent coverage) validates against the processed text, which would be internally
+consistent and externally wrong.
+
+Fix (`tools/extract_embedded_segment.py`, `schemas/document_manifest.schema.json`):
+
+- **the source is resolved, not supplied.** The caller names a
+  `--parent-document-id`; the registered physical parent's manifest `file_path`
+  is the only file opened, and it must live under `data/raw/`. A segment, an
+  unregistered id, or a path outside `data/raw/` are each refused.
+- **the parent is verified.** Its SHA-256 must match the manifest's
+  `source_pdf_sha256` (new field) when one is recorded, and its real page count
+  must match `source_total_pages`. A parent whose bytes changed since
+  registration is refused.
+- **the offset is a candidate, not an authority.** For every logical page the
+  tool reads the PRINTED page marker off the physical page the candidate lands
+  on and requires it to state that logical number. A bare number is deliberately
+  NOT accepted as confirmation -- it is indistinguishable from an amount or an
+  article number, and a coincidence is exactly what this rules out; only
+  `N / TOTAL`, `- N -`, and `page N` forms count.
+- **an unconfirmable page blocks the whole extraction.** No page is ever written
+  on a guessed mapping, and a partially-verified range writes nothing at all
+  (verified by a test asserting zero DAO calls on a bad offset).
+- **the mapping is bound to real content.** Each page_map entry now records
+  `physical_page_sha256` (digest of the text actually extracted from that
+  physical page) and `logical_page_evidence` (the verbatim printed marker).
+
+The verification logic is pure and injectable (`manifest_reader`, `page_reader`,
+`page_counter`, `source_verifier`, `dao_call`), so it is tested without a real
+PDF or a real dao subprocess; production passes none of them.
+
+20 tests (tests/test_extract_embedded_segment.py, rewritten for the new
+contract): marker forms recognised; bare number rejected; wrong printed number
+rejected; unregistered/segment/non-raw parents refused; missing manifest blocks;
+changed parent digest detected; matching digest passes; page-count disagreement
+detected; missing source file blocked; correct offset confirmed and bound; wrong
+offset rejected; missing page rejected; unreadable printed number blocks rather
+than guessing; partial confirmation blocks the whole run; end-to-end binding and
+marker assembly; and no writes when the mapping is unverified. 591 -> 605 pass.
