@@ -4,7 +4,9 @@
   "title": "policy_boundary_inventory_DOC_XXX.json -- complete source-boundary accounting v0.1",
   "description": "Produced by policy-pipeline before the stage can finalize. Every non-whitespace character of every processed policy page must belong to an exact-offset page span. Each span is either assigned to a policy boundary or explicitly excluded with a reason. Every boundary then resolves to normalized, excluded_with_reason, review_required, or extraction_failed. The DAO cross-contract verifies exact offsets, full page coverage, and normalized mappings.",
   "allOf": [
-    { "$ref": "common_component_output.schema.json" },
+    {
+      "$ref": "common_component_output.schema.json"
+    },
     {
       "type": "object",
       "properties": {
@@ -14,15 +16,54 @@
         "boundaries": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/boundary" }
+          "items": {
+            "$ref": "#/$defs/boundary"
+          }
         },
         "page_spans": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/page_span" }
+          "items": {
+            "$ref": "#/$defs/page_span"
+          }
+        },
+        "source_text_revision": {
+          "type": "object",
+          "description": "Which registered source-text revision this contract's offsets, quotes and source-derived UIDs were computed against (Part 11J). A single hash cannot express a contract that reads several documents, so this is a per-document map -- the same shape as upstream_policy_snapshot in Part 11I, deliberately, since using two shapes for one idea is itself a drift source. Absent on legacy (v0.1) contracts, which stay readable and migratable but cannot be written or finalized as new work; required once the document is canonical_v1.",
+          "properties": {
+            "documents": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "document_id": {
+                    "$ref": "common_component_output.schema.json#/$defs/document_id"
+                  },
+                  "revision_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "document_id",
+                  "revision_sha256"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "documents"
+          ],
+          "additionalProperties": false
         }
       },
-      "required": ["source_document_id", "boundaries", "page_spans"]
+      "required": [
+        "source_document_id",
+        "boundaries",
+        "page_spans"
+      ]
     }
   ],
   "$defs": {
@@ -54,12 +95,19 @@
           ]
         },
         "condition_uid": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "pattern": "^CI-[a-f0-9]{16,64}$",
           "description": "Stable condition address; null when bucket=clause."
         }
       },
-      "required": ["clause_uid", "bucket", "condition_uid"],
+      "required": [
+        "clause_uid",
+        "bucket",
+        "condition_uid"
+      ],
       "additionalProperties": false
     },
     "boundary": {
@@ -71,9 +119,20 @@
           "description": "Stable deterministic identifier for this source boundary, preferably derived from document id + exact source span."
         },
         "boundary_level": {
-          "enum": ["article", "paragraph", "item", "definition", "table", "heading", "other"]
+          "enum": [
+            "article",
+            "paragraph",
+            "item",
+            "definition",
+            "table",
+            "heading",
+            "other"
+          ]
         },
-        "label": { "type": "string", "minLength": 1 },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
         "disposition": {
           "enum": [
             "normalized",
@@ -84,10 +143,20 @@
         },
         "normalized_mappings": {
           "type": "array",
-          "items": { "$ref": "#/$defs/normalized_mapping" }
+          "items": {
+            "$ref": "#/$defs/normalized_mapping"
+          }
         },
-        "reason": { "type": ["string", "null"], "minLength": 1 },
-        "review_required": { "type": "boolean" }
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "review_required": {
+          "type": "boolean"
+        }
       },
       "required": [
         "boundary_uid",
@@ -101,14 +170,27 @@
       "allOf": [
         {
           "if": {
-            "properties": { "disposition": { "const": "normalized" } },
-            "required": ["disposition"]
+            "properties": {
+              "disposition": {
+                "const": "normalized"
+              }
+            },
+            "required": [
+              "disposition"
+            ]
           },
           "then": {
             "properties": {
-              "normalized_mappings": { "type": "array", "minItems": 1 },
-              "reason": { "type": "null" },
-              "review_required": { "const": false }
+              "normalized_mappings": {
+                "type": "array",
+                "minItems": 1
+              },
+              "reason": {
+                "type": "null"
+              },
+              "review_required": {
+                "const": false
+              }
             }
           }
         },
@@ -116,25 +198,47 @@
           "if": {
             "properties": {
               "disposition": {
-                "enum": ["excluded_with_reason", "review_required", "extraction_failed"]
+                "enum": [
+                  "excluded_with_reason",
+                  "review_required",
+                  "extraction_failed"
+                ]
               }
             },
-            "required": ["disposition"]
+            "required": [
+              "disposition"
+            ]
           },
           "then": {
             "properties": {
-              "normalized_mappings": { "type": "array", "maxItems": 0 },
-              "reason": { "type": "string", "minLength": 1 }
+              "normalized_mappings": {
+                "type": "array",
+                "maxItems": 0
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         },
         {
           "if": {
-            "properties": { "disposition": { "const": "review_required" } },
-            "required": ["disposition"]
+            "properties": {
+              "disposition": {
+                "const": "review_required"
+              }
+            },
+            "required": [
+              "disposition"
+            ]
           },
           "then": {
-            "properties": { "review_required": { "const": true } }
+            "properties": {
+              "review_required": {
+                "const": true
+              }
+            }
           }
         }
       ],
@@ -147,17 +251,42 @@
           "type": "string",
           "pattern": "^PS-[a-f0-9]{16,64}$"
         },
-        "page": { "type": "integer", "minimum": 1 },
-        "start_char": { "type": "integer", "minimum": 0 },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start_char": {
+          "type": "integer",
+          "minimum": 0
+        },
         "end_char": {
           "type": "integer",
           "minimum": 1,
           "description": "Exclusive end offset in the exact processed page body after the <<<PAGE>>> marker."
         },
-        "quote": { "type": "string", "minLength": 1 },
-        "disposition": { "enum": ["boundary", "excluded"] },
-        "boundary_uid": { "type": ["string", "null"] },
-        "exclusion_reason": { "type": ["string", "null"], "minLength": 1 }
+        "quote": {
+          "type": "string",
+          "minLength": 1
+        },
+        "disposition": {
+          "enum": [
+            "boundary",
+            "excluded"
+          ]
+        },
+        "boundary_uid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exclusion_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
       },
       "required": [
         "span_uid",
@@ -172,8 +301,14 @@
       "allOf": [
         {
           "if": {
-            "properties": { "disposition": { "const": "boundary" } },
-            "required": ["disposition"]
+            "properties": {
+              "disposition": {
+                "const": "boundary"
+              }
+            },
+            "required": [
+              "disposition"
+            ]
           },
           "then": {
             "properties": {
@@ -181,19 +316,32 @@
                 "type": "string",
                 "pattern": "^PB-[a-f0-9]{16,64}$"
               },
-              "exclusion_reason": { "type": "null" }
+              "exclusion_reason": {
+                "type": "null"
+              }
             }
           }
         },
         {
           "if": {
-            "properties": { "disposition": { "const": "excluded" } },
-            "required": ["disposition"]
+            "properties": {
+              "disposition": {
+                "const": "excluded"
+              }
+            },
+            "required": [
+              "disposition"
+            ]
           },
           "then": {
             "properties": {
-              "boundary_uid": { "type": "null" },
-              "exclusion_reason": { "type": "string", "minLength": 1 }
+              "boundary_uid": {
+                "type": "null"
+              },
+              "exclusion_reason": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         }

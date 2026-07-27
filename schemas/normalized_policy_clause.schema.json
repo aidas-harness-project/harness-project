@@ -4,16 +4,53 @@
   "title": "normalized_policy_clause.json -- normalized policy clauses for one policy document v0.4",
   "description": "Produced by policy-pipeline. Stable clause/condition UIDs are the machine addresses; sequential clause_id is display-only. Semantic clause kinds are stored in dedicated buckets so obligations, definitions, procedures, termination, disputes, and coverage-start rules cannot be mistaken for payout conditions.",
   "allOf": [
-    { "$ref": "common_component_output.schema.json" },
+    {
+      "$ref": "common_component_output.schema.json"
+    },
     {
       "type": "object",
       "properties": {
         "clauses": {
           "type": "array",
-          "items": { "$ref": "#/$defs/clause" }
+          "items": {
+            "$ref": "#/$defs/clause"
+          }
+        },
+        "source_text_revision": {
+          "type": "object",
+          "description": "Which registered source-text revision this contract's offsets, quotes and source-derived UIDs were computed against (Part 11J). A single hash cannot express a contract that reads several documents, so this is a per-document map -- the same shape as upstream_policy_snapshot in Part 11I, deliberately, since using two shapes for one idea is itself a drift source. Absent on legacy (v0.1) contracts, which stay readable and migratable but cannot be written or finalized as new work; required once the document is canonical_v1.",
+          "properties": {
+            "documents": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "document_id": {
+                    "$ref": "common_component_output.schema.json#/$defs/document_id"
+                  },
+                  "revision_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "document_id",
+                  "revision_sha256"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "documents"
+          ],
+          "additionalProperties": false
         }
       },
-      "required": ["clauses"]
+      "required": [
+        "clauses"
+      ]
     }
   ],
   "$defs": {
@@ -25,15 +62,24 @@
           "pattern": "^CI-[a-f0-9]{16,64}$",
           "description": "Stable deterministic identifier derived from immutable source identity (document + source boundary/span), never from array position."
         },
-        "text": { "type": "string", "minLength": 1 },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
         "evidence_references": {
           "type": "array",
           "minItems": 1,
           "description": "Every condition carries its OWN source location -- document_id/page/quote all required (strict_evidence_reference). A condition may not inherit its provenance from the clause or from structural context; cross-contract validation additionally verifies each quote appears verbatim on the cited page.",
-          "items": { "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference" }
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
+          }
         },
         "support_level": {
-          "enum": ["direct", "composite", "insufficient"],
+          "enum": [
+            "direct",
+            "composite",
+            "insufficient"
+          ],
           "description": "direct=one source passage substantially supports the normalized condition; composite=the condition is assembled from multiple passages and must be reviewed; insufficient=cannot be emitted in a successful normalized contract."
         },
         "support_rationale": {
@@ -41,7 +87,9 @@
           "minLength": 1,
           "description": "Short explanation of how the cited source supports the normalized condition. This is auditable metadata, not a substitute for deterministic source checks."
         },
-        "review_required": { "type": "boolean" }
+        "review_required": {
+          "type": "boolean"
+        }
       },
       "required": [
         "condition_uid",
@@ -55,21 +103,42 @@
         {
           "if": {
             "properties": {
-              "support_level": { "enum": ["composite", "insufficient"] }
+              "support_level": {
+                "enum": [
+                  "composite",
+                  "insufficient"
+                ]
+              }
             },
-            "required": ["support_level"]
+            "required": [
+              "support_level"
+            ]
           },
           "then": {
-            "properties": { "review_required": { "const": true } }
+            "properties": {
+              "review_required": {
+                "const": true
+              }
+            }
           }
         },
         {
           "if": {
-            "properties": { "support_level": { "const": "composite" } },
-            "required": ["support_level"]
+            "properties": {
+              "support_level": {
+                "const": "composite"
+              }
+            },
+            "required": [
+              "support_level"
+            ]
           },
           "then": {
-            "properties": { "evidence_references": { "minItems": 2 } }
+            "properties": {
+              "evidence_references": {
+                "minItems": 2
+              }
+            }
           }
         }
       ],
@@ -92,7 +161,10 @@
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "type": "string", "pattern": "^PB-[a-f0-9]{16,64}$" }
+          "items": {
+            "type": "string",
+            "pattern": "^PB-[a-f0-9]{16,64}$"
+          }
         },
         "clause_kind": {
           "enum": [
@@ -113,41 +185,59 @@
         "payout_conditions": {
           "type": "array",
           "description": "Itemized. Empty array if the clause states no conditions beyond the base coverage trigger.",
-          "items": { "$ref": "#/$defs/condition_item" }
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
         },
         "exclusions": {
           "type": "array",
           "description": "Itemized. Empty array if none.",
-          "items": { "$ref": "#/$defs/condition_item" }
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
         },
         "reduction_conditions": {
           "type": "array",
           "description": "Itemized. Empty array if none.",
-          "items": { "$ref": "#/$defs/condition_item" }
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
         },
         "definitions": {
           "type": "array",
-          "items": { "$ref": "#/$defs/condition_item" }
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
         },
         "obligations": {
           "type": "array",
-          "items": { "$ref": "#/$defs/condition_item" }
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
         },
         "claim_requirements": {
           "type": "array",
-          "items": { "$ref": "#/$defs/condition_item" }
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
         },
         "termination_conditions": {
           "type": "array",
-          "items": { "$ref": "#/$defs/condition_item" }
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
         },
         "dispute_resolution_conditions": {
           "type": "array",
-          "items": { "$ref": "#/$defs/condition_item" }
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
         },
         "coverage_start_conditions": {
           "type": "array",
-          "items": { "$ref": "#/$defs/condition_item" }
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
         },
         "reference_table_refs": {
           "type": "array",
@@ -176,19 +266,30 @@
                 }
               }
             },
-            "required": ["document_id", "table_uid"],
+            "required": [
+              "document_id",
+              "table_uid"
+            ],
             "additionalProperties": false
           }
         },
-        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "confidence": {
+          "$ref": "common_component_output.schema.json#/$defs/confidence"
+        },
         "evidence_references": {
           "type": "array",
           "minItems": 1,
           "description": "Clause-level source location (e.g. the clause heading/quote), independent of the per-condition references above -- document_id/page/quote all required (strict_evidence_reference), verified verbatim against the processed text by cross-contract validation.",
-          "items": { "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference" }
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
+          }
         },
-        "review_required": { "type": "boolean" },
-        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+        "review_required": {
+          "type": "boolean"
+        },
+        "reviewer_role": {
+          "$ref": "common_component_output.schema.json#/$defs/reviewer_role"
+        }
       },
       "required": [
         "clause_uid",
@@ -212,42 +313,174 @@
       ],
       "allOf": [
         {
-          "if": { "properties": { "clause_kind": { "const": "coverage" } }, "required": ["clause_kind"] },
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "coverage"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
           "then": {
             "anyOf": [
-              { "properties": { "payout_conditions": { "minItems": 1 } } },
-              { "properties": { "exclusions": { "minItems": 1 } } },
-              { "properties": { "reduction_conditions": { "minItems": 1 } } }
+              {
+                "properties": {
+                  "payout_conditions": {
+                    "minItems": 1
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "exclusions": {
+                    "minItems": 1
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "reduction_conditions": {
+                    "minItems": 1
+                  }
+                }
+              }
             ]
           }
         },
         {
-          "if": { "properties": { "clause_kind": { "const": "definition" } }, "required": ["clause_kind"] },
-          "then": { "properties": { "definitions": { "minItems": 1 } } }
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "definition"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "definitions": {
+                "minItems": 1
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "clause_kind": { "const": "obligation" } }, "required": ["clause_kind"] },
-          "then": { "properties": { "obligations": { "minItems": 1 } } }
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "obligation"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "obligations": {
+                "minItems": 1
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "clause_kind": { "const": "procedure" } }, "required": ["clause_kind"] },
-          "then": { "properties": { "claim_requirements": { "minItems": 1 } } }
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "procedure"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "claim_requirements": {
+                "minItems": 1
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "clause_kind": { "const": "termination" } }, "required": ["clause_kind"] },
-          "then": { "properties": { "termination_conditions": { "minItems": 1 } } }
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "termination"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "termination_conditions": {
+                "minItems": 1
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "clause_kind": { "const": "dispute_resolution" } }, "required": ["clause_kind"] },
-          "then": { "properties": { "dispute_resolution_conditions": { "minItems": 1 } } }
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "dispute_resolution"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "dispute_resolution_conditions": {
+                "minItems": 1
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "clause_kind": { "const": "coverage_start" } }, "required": ["clause_kind"] },
-          "then": { "properties": { "coverage_start_conditions": { "minItems": 1 } } }
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "coverage_start"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "coverage_start_conditions": {
+                "minItems": 1
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "clause_kind": { "const": "other" } }, "required": ["clause_kind"] },
-          "then": { "properties": { "review_required": { "const": true } } }
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "other"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "review_required": {
+                "const": true
+              }
+            }
+          }
         }
       ],
       "additionalProperties": false

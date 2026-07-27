@@ -1257,6 +1257,71 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
     return 0
 
 
+def _referenced_policy_documents(case_id: str, filename: str,
+                                  data: dict) -> list[str]:
+    """Every document a policy-layer contract's claims are expressed against.
+
+    Usually just the one named in the filename; a parent-coverage contract and
+    an audit can read several, which is why the binding is a map rather than a
+    single hash.
+    """
+    doc_ids = set()
+    own = _cross_contract.doc_id_from_filename(filename)
+    if own:
+        doc_ids.add(own)
+    if data.get("source_document_id"):
+        doc_ids.add(data["source_document_id"])
+    for page in data.get("pages") or []:
+        if isinstance(page, dict) and page.get("owning_document_id"):
+            doc_ids.add(page["owning_document_id"])
+    return sorted(doc_ids)
+
+
+def _source_revision_binding_errors(case_id: str, filename: str,
+                                     data: dict) -> list[str]:
+    """Bind a policy-layer contract to the exact registered source revision.
+
+    Enforced per document, and only once that document is `canonical_v1`. A
+    legacy document keeps its existing contracts readable and migratable --
+    making the field unconditionally required would strand every pre-11J
+    artifact and destroy the audit trail this part is trying to build -- but
+    once canonical is switched on, new work must state which registered bytes
+    it was derived from, and that statement is checked against the current
+    pointer rather than believed.
+    """
+    doc_ids = _referenced_policy_documents(case_id, filename, data)
+    canonical = [d for d in doc_ids if uid_scheme_for(case_id, d) == "canonical_v1"]
+    if not canonical:
+        return []
+
+    binding = data.get("source_text_revision")
+    if binding is None:
+        return [
+            "source_text_revision is missing -- "
+            f"{', '.join(canonical)} is canonical_v1, so a contract must "
+            "record the registered source revision its offsets, quotes and "
+            "UIDs were computed against (see `dao.py read-revision-index`)"
+        ]
+    recorded = {
+        item.get("document_id"): item.get("revision_sha256")
+        for item in binding.get("documents") or []
+    }
+    errors = []
+    for doc_id in canonical:
+        entry = revision_entry_for(case_id, doc_id)
+        current = (entry or {}).get("current_revision_sha256")
+        if doc_id not in recorded:
+            errors.append(
+                f"source_text_revision does not cover {doc_id}, which this "
+                "contract is expressed against")
+        elif recorded[doc_id] != current:
+            errors.append(
+                f"source_text_revision for {doc_id} is stale: recorded "
+                f"{recorded[doc_id]!r}, current {current!r} -- the source text "
+                "was revised after this contract was derived from it")
+    return errors
+
+
 def _protected_manifest_errors(case_id: str, proposed: dict) -> list[str]:
     """Refuse any caller-side difference in a DAO-owned manifest field.
 
@@ -1327,6 +1392,15 @@ def cmd_write_contract(args):
             for e in errors:
                 print(f"  - {e}")
             return 1
+        if schema_name in _POLICY_LAYER_SCHEMAS:
+            binding_errors = _source_revision_binding_errors(
+                args.case_id, args.filename, data)
+            if binding_errors:
+                print(f"FAIL: {args.filename} is not bound to the current "
+                      "registered source revision -- not written:")
+                for error in binding_errors:
+                    print(f"  - {error}")
+                return 1
         if (
             _cross_contract.has_cross_contract_check(schema_name)
             or schema_name == policy_completeness.INVENTORY_SCHEMA
@@ -2846,6 +2920,103 @@ def cmd_record_source_digest(args):
         release_lock(target)
 
 
+def cmd_enable_canonical_uids(args):
+    """Activate canonical_v1 UID verification for one document.
+
+    A dedicated, verified command rather than a writable field. Everything it
+    checks is a precondition for canonical UIDs meaning anything:
+
+      - the raw source must be readable and its digest recorded, because
+        source_pdf_sha256 is the first identity input;
+      - a source-text revision must be registered, because a UID is computed
+        from registered bytes and verifying against unregistered text would
+        re-derive whatever happens to be on disk;
+      - for a segment, the page map must be present, because identity is keyed
+        to the PHYSICAL page of the immutable parent, not the logical one.
+
+    One-way: there is no disable. A verification that can be switched off is
+    not a guarantee -- writing an arbitrary UID would only require turning it
+    off first.
+    """
+    doc_id = args.doc_id
+    manifest = read_contract_data(args.case_id, "document_manifest.json")
+    if manifest is None:
+        print("BLOCKED: document_manifest.json does not exist")
+        return 1
+    entry = next((d for d in manifest.get("documents", [])
+                  if d.get("document_id") == doc_id), None)
+    if entry is None:
+        print(f"BLOCKED: {doc_id} is not a registered document")
+        return 1
+
+    blockers = []
+    actual = registered_source_pdf_sha256(args.case_id, doc_id)
+    recorded = entry.get("source_pdf_sha256")
+    if actual is None:
+        blockers.append(
+            "the registered raw source is missing or unreadable -- "
+            "source_pdf_sha256 is the first identity input of every canonical "
+            "UID and cannot be derived without it")
+    elif recorded is None:
+        blockers.append(
+            "source_pdf_sha256 is not recorded yet -- run record-source-digest "
+            "first (the DAO hashes the registered file itself)")
+    elif recorded != actual:
+        blockers.append(
+            f"recorded source_pdf_sha256 {recorded!r} does not match the "
+            f"registered raw source ({actual!r})")
+
+    revision_entry = revision_entry_for(args.case_id, doc_id)
+    if revision_entry is None:
+        blockers.append(
+            "no source-text revision is registered -- a canonical UID is "
+            "computed from registered bytes, and verifying against "
+            "unregistered text would just re-derive whatever is on disk")
+
+    if entry.get("document_role") == "segment" and not entry.get("page_map"):
+        blockers.append(
+            "this segment has no page_map -- canonical identity is keyed to "
+            "the physical page of the immutable parent, which a segment "
+            "cannot resolve without one")
+
+    if blockers:
+        print(f"BLOCKED: cannot enable canonical_v1 for {doc_id}:")
+        for blocker in blockers:
+            print(f"  - {blocker}")
+        return 1
+
+    target = revision_index_path(args.case_id)
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id, f"enable canonical UIDs ({doc_id})")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} "
+              f"run_id={existing_lock['run_id']}")
+        return 1
+    try:
+        index = load_revision_index(args.case_id)
+        doc_entry = next((d for d in index.get("documents", [])
+                          if d.get("document_id") == doc_id), None)
+        errors = source_provenance.scheme_transition_errors(
+            doc_entry.get("uid_scheme"), "canonical_v1")
+        if errors:
+            for error in errors:
+                print(f"REFUSED: {error}")
+            return 1
+        doc_entry["uid_scheme"] = "canonical_v1"
+        schema_errors = _schema_check(index, "revision_index.schema.json")
+        if schema_errors:
+            print("FAIL: revision index would be schema-invalid -- not written:")
+            for error in schema_errors:
+                print(f"  - {error}")
+            return 1
+        atomic_write_json(target, index)
+        print(f"PASS: {doc_id} is now canonical_v1 -- every policy UID on this "
+              "document is recomputed and must match. This cannot be undone.")
+        return 0
+    finally:
+        release_lock(target)
+
+
 def cmd_read_revision_index(args):
     print(json.dumps(load_revision_index(args.case_id),
                      ensure_ascii=False, indent=2))
@@ -3152,6 +3323,13 @@ def main():
     p.add_argument("--held-by", dest="held_by", required=True)
     p.add_argument("--run-id", dest="run_id", required=True)
     p.set_defaults(fn=cmd_record_source_digest)
+
+    p = sub.add_parser("enable-canonical-uids")
+    p.add_argument("case_id")
+    p.add_argument("--doc-id", dest="doc_id", required=True)
+    p.add_argument("--held-by", dest="held_by", required=True)
+    p.add_argument("--run-id", dest="run_id", required=True)
+    p.set_defaults(fn=cmd_enable_canonical_uids)
 
     p = sub.add_parser("read-revision-index"); p.add_argument("case_id")
     p.set_defaults(fn=cmd_read_revision_index)

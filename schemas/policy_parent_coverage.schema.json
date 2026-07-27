@@ -4,7 +4,9 @@
   "title": "policy_parent_coverage_DOC_XXX.json -- whole-parent logical and physical page coverage v0.2",
   "description": "Produced by policy-pipeline for a physical policy parent document (e.g. CASE_030's 240-page 보험약관 PDF, DOC_001). The per-document boundary inventory only accounts for the pages a segment already owns; it structurally cannot see a page of the parent that was never carved into any segment at all -- exactly CASE_030's hole, where 133 of 240 logical pages (front matter 1-11, gap page 56, and the entire appendix/별표 region 120-240) belonged to no document and were invisible to the completeness gate. This contract closes that: every logical page of the parent PDF, 1..total_logical_pages, must appear exactly once with an explicit disposition. owned_by_segment/reference_table are the productive dispositions; administrative_excluded requires a concrete per-page reason (not a blanket 'appendix'); review_required/extraction_failed are unresolved and block policy_clause_processing finalize. The DAO cross-contract verifies the 1..N coverage is exact (no gap/dup/out-of-range) and that each owned_by_segment/reference_table disposition resolves to a really-registered segment or a really-present reference table.",
   "allOf": [
-    { "$ref": "common_component_output.schema.json" },
+    {
+      "$ref": "common_component_output.schema.json"
+    },
     {
       "type": "object",
       "properties": {
@@ -25,12 +27,47 @@
         "pages": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/page_disposition" }
+          "items": {
+            "$ref": "#/$defs/page_disposition"
+          }
         },
         "unpaged_physical_pages": {
           "type": "array",
           "description": "Physical pages with no printed logical N/total footer, such as covers. Together with pages[].physical_page these must cover 1..total_physical_pages exactly once.",
-          "items": { "$ref": "#/$defs/unpaged_physical_page" }
+          "items": {
+            "$ref": "#/$defs/unpaged_physical_page"
+          }
+        },
+        "source_text_revision": {
+          "type": "object",
+          "description": "Which registered source-text revision this contract's offsets, quotes and source-derived UIDs were computed against (Part 11J). A single hash cannot express a contract that reads several documents, so this is a per-document map -- the same shape as upstream_policy_snapshot in Part 11I, deliberately, since using two shapes for one idea is itself a drift source. Absent on legacy (v0.1) contracts, which stay readable and migratable but cannot be written or finalized as new work; required once the document is canonical_v1.",
+          "properties": {
+            "documents": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "document_id": {
+                    "$ref": "common_component_output.schema.json#/$defs/document_id"
+                  },
+                  "revision_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "document_id",
+                  "revision_sha256"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "documents"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -67,25 +104,39 @@
         },
         "owner_document_id": {
           "anyOf": [
-            { "$ref": "common_component_output.schema.json#/$defs/document_id" },
-            { "type": "null" }
+            {
+              "$ref": "common_component_output.schema.json#/$defs/document_id"
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "For owned_by_segment: the segment/physical document that carries this page's processed text and normalized clauses. null otherwise."
         },
         "table_uid": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "pattern": "^RT-[a-f0-9]{16,64}$",
           "description": "For reference_table: the table in reference_table_{owner}.json this page's appendix content was extracted into. null otherwise."
         },
         "reference_table_document_id": {
           "anyOf": [
-            { "$ref": "common_component_output.schema.json#/$defs/document_id" },
-            { "type": "null" }
+            {
+              "$ref": "common_component_output.schema.json#/$defs/document_id"
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "For reference_table: the document_id whose reference_table_{id}.json holds table_uid. null otherwise."
         },
         "reason": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1,
           "description": "For administrative_excluded/review_required/extraction_failed: the concrete, page-specific reason. null for owned_by_segment/reference_table."
         },
@@ -97,48 +148,45 @@
           }
         }
       },
-      "required": ["logical_page", "physical_page", "disposition", "owner_document_id", "table_uid", "reference_table_document_id", "reason", "evidence_references"],
+      "required": [
+        "logical_page",
+        "physical_page",
+        "disposition",
+        "owner_document_id",
+        "table_uid",
+        "reference_table_document_id",
+        "reason",
+        "evidence_references"
+      ],
       "allOf": [
         {
           "if": {
-            "properties": { "disposition": { "const": "owned_by_segment" } },
-            "required": ["disposition"]
-          },
-          "then": {
             "properties": {
-              "owner_document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
-              "table_uid": { "type": "null" },
-              "reference_table_document_id": { "type": "null" },
-              "reason": { "type": "null" },
-              "evidence_references": { "maxItems": 0 }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": { "disposition": { "const": "reference_table" } },
-            "required": ["disposition"]
-          },
-          "then": {
-            "properties": {
-              "owner_document_id": { "type": "null" },
-              "table_uid": { "type": "string", "pattern": "^RT-[a-f0-9]{16,64}$" },
-              "reference_table_document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
-              "reason": { "type": "null" },
-              "evidence_references": { "maxItems": 0 }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "disposition": { "const": "administrative_excluded" }
+              "disposition": {
+                "const": "owned_by_segment"
+              }
             },
-            "required": ["disposition"]
+            "required": [
+              "disposition"
+            ]
           },
           "then": {
             "properties": {
-              "evidence_references": { "minItems": 1 }
+              "owner_document_id": {
+                "$ref": "common_component_output.schema.json#/$defs/document_id"
+              },
+              "table_uid": {
+                "type": "null"
+              },
+              "reference_table_document_id": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "null"
+              },
+              "evidence_references": {
+                "maxItems": 0
+              }
             }
           }
         },
@@ -146,17 +194,83 @@
           "if": {
             "properties": {
               "disposition": {
-                "enum": ["administrative_excluded", "review_required", "extraction_failed"]
+                "const": "reference_table"
               }
             },
-            "required": ["disposition"]
+            "required": [
+              "disposition"
+            ]
           },
           "then": {
             "properties": {
-              "owner_document_id": { "type": "null" },
-              "table_uid": { "type": "null" },
-              "reference_table_document_id": { "type": "null" },
-              "reason": { "type": "string", "minLength": 1 }
+              "owner_document_id": {
+                "type": "null"
+              },
+              "table_uid": {
+                "type": "string",
+                "pattern": "^RT-[a-f0-9]{16,64}$"
+              },
+              "reference_table_document_id": {
+                "$ref": "common_component_output.schema.json#/$defs/document_id"
+              },
+              "reason": {
+                "type": "null"
+              },
+              "evidence_references": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "const": "administrative_excluded"
+              }
+            },
+            "required": [
+              "disposition"
+            ]
+          },
+          "then": {
+            "properties": {
+              "evidence_references": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "enum": [
+                  "administrative_excluded",
+                  "review_required",
+                  "extraction_failed"
+                ]
+              }
+            },
+            "required": [
+              "disposition"
+            ]
+          },
+          "then": {
+            "properties": {
+              "owner_document_id": {
+                "type": "null"
+              },
+              "table_uid": {
+                "type": "null"
+              },
+              "reference_table_document_id": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         }
@@ -166,7 +280,10 @@
     "unpaged_physical_page": {
       "type": "object",
       "properties": {
-        "physical_page": { "type": "integer", "minimum": 1 },
+        "physical_page": {
+          "type": "integer",
+          "minimum": 1
+        },
         "disposition": {
           "enum": [
             "administrative_excluded",
@@ -174,16 +291,33 @@
             "extraction_failed"
           ]
         },
-        "reason": { "type": "string", "minLength": 1 },
-        "verified_by": { "type": ["string", "null"], "minLength": 1 },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verified_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
         "verified_at": {
           "anyOf": [
-            { "type": "string", "format": "date-time" },
-            { "type": "null" }
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "human_review_uid": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "pattern": "^HR-[a-f0-9]{16}$",
           "description": "Reference into _human_review_ledger.json. Required for an administrative_excluded unpaged physical page: a cover/blank page with no printed logical number cannot be verified by any processed-page evidence, so its exclusion rests entirely on a human decision. A bare verified_by name string is no longer sufficient -- the DAO re-verifies this UID exists, was recorded for this physical page (target_key 'physical:<N>'), still matches the parent-coverage's current bytes, and carries decision=verified."
         }
@@ -200,34 +334,53 @@
         {
           "if": {
             "properties": {
-              "disposition": { "const": "administrative_excluded" }
+              "disposition": {
+                "const": "administrative_excluded"
+              }
             },
-            "required": ["disposition"]
+            "required": [
+              "disposition"
+            ]
           },
           "then": {
             "properties": {
-              "verified_by": { "type": "string", "minLength": 1 },
-              "verified_at": { "type": "string", "format": "date-time" },
+              "verified_by": {
+                "type": "string",
+                "minLength": 1
+              },
+              "verified_at": {
+                "type": "string",
+                "format": "date-time"
+              },
               "human_review_uid": {
                 "type": "string",
                 "pattern": "^HR-[a-f0-9]{16}$"
               }
             },
-            "required": ["human_review_uid"]
+            "required": [
+              "human_review_uid"
+            ]
           }
         },
         {
           "if": {
             "properties": {
               "disposition": {
-                "enum": ["review_required", "extraction_failed"]
+                "enum": [
+                  "review_required",
+                  "extraction_failed"
+                ]
               }
             },
-            "required": ["disposition"]
+            "required": [
+              "disposition"
+            ]
           },
           "then": {
             "properties": {
-              "human_review_uid": { "type": "null" }
+              "human_review_uid": {
+                "type": "null"
+              }
             }
           }
         }

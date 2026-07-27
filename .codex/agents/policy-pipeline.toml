@@ -46,6 +46,24 @@ global code. Identity is source-local and deterministic. Cross-policy similarity
 future canonical code assignment is a separate, evidence-backed matching layer and
 must never rewrite source UIDs.
 
+**Canonical UIDs (`canonical_v1`).** For a document the DAO has switched to
+`canonical_v1` (check with `python tools/dao.py read-revision-index CASE_ID`), UIDs
+are not yours to choose — `tools/policy_uid.py` derives them from immutable source
+identity: the registered source PDF digest, the physical page, the NFC-normalized
+exact span bytes, that span's occurrence ordinal on the page, and the parent UID for
+nested elements. The DAO recomputes every UID and refuses a mismatch, so compute
+them rather than inventing them. Deliberately NOT inputs: character offsets and
+page/document digests, both of which move when unrelated text elsewhere is corrected
+— a typo fix on one page must not re-identify clauses that never changed. Offsets
+and quotes stay in your contracts and are still verified; they establish that a span
+really sits where you say, not what it *is*.
+
+Contracts on a `canonical_v1` document must also carry `source_text_revision` —
+the registered revision your offsets, quotes and UIDs were computed against, per
+document (`read-revision-index` prints the current one). A revision recorded before
+a re-extraction is stale and the write is refused: re-derive rather than re-stamping.
+Legacy (pre-`canonical_v1`) documents keep working unchanged and need neither.
+
 Set `clause_kind` and use only its dedicated semantic bucket: `coverage` → `payout_conditions`/`exclusions`/`reduction_conditions`; `definition` → `definitions`; `obligation` → `obligations`; `procedure` → `claim_requirements`; `termination` → `termination_conditions`; `dispute_resolution` → `dispute_resolution_conditions`; `coverage_start` → `coverage_start_conditions`. Split a source clause into multiple normalized clauses when it contains materially different kinds. Never put disclosure duties, definitions, claim-submission procedures, cancellation rules, dispute procedures, or coverage-start rules in `payout_conditions`. Use `other` only with `review_required: true`. Every bucket is required; an empty list means none found, not an omission. Each item carries its own `evidence_references` (P1) at the granularity downstream matching needs. Any judgment beyond direct restatement gets hedged and flagged per P3.
 
 For every condition item, set `support_level`, `support_rationale`, and
