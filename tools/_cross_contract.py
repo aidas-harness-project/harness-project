@@ -114,6 +114,22 @@ class PolarityAnalysis:
 _AMBIGUOUS_POLARITY_PATTERNS = (
     (
         re.compile(
+            r"(?P<predicate>지급|보상|보장|제한|면책|제외|배제)\s*"
+            r"(?:하|되)?지\s*않"
+            r"(?:"
+            r"(?:으)?면\s*안\s*(?:됩|된|됩니다|된다)|"
+            r"(?:을|ㄹ)\s*수\s*없|"
+            r"아도\s*되는\s*것\s*(?:은|는)?\s*(?:아니|아닙|아닌)|"
+            r"는\s*것\s*(?:은|는)?\s*(?:아니|아닙|아닌)"
+            r")"
+        ),
+        "modal_or_repeated_negation",
+        "a negated payout/restriction predicate is governed by another "
+        "negative obligation, impossibility, or modal construction; counting "
+        "negations cannot safely establish the policy outcome",
+    ),
+    (
+        re.compile(
             r"(?P<predicate>지급|보상|보장)\s*(?:하|되)?지\s*않는\s*"
             r"(?:것|사항)\s*(?:은|는|이|가)?\s*(?:아니|아닙|아닌|없)"
         ),
@@ -660,8 +676,6 @@ def check_condition_support(clauses: list[dict]) -> list[str]:
                 if polarity_sensitive:
                     condition_analysis = _analyze_policy_polarity(
                         condition_text, expected_condition_outcome)
-                    quote_analyses = [
-                        _analyze_policy_polarity(quote) for quote in quotes]
 
                     if condition_analysis.classification in (MIXED, AMBIGUOUS):
                         errors.append(
@@ -671,6 +685,31 @@ def check_condition_support(clauses: list[dict]) -> list[str]:
                             "wording and route it to review_required or split "
                             "the propositions, rather than rewriting it to pass")
 
+                    # The bucket is the contract's semantic assertion.  It is a
+                    # third party to the comparison, not merely a fallback for a
+                    # trigger-only condition.  A condition that explicitly says
+                    # "do not pay" cannot live in payout_conditions even if its
+                    # evidence repeats the same wrong outcome, and an affirmative
+                    # "not exempt" condition cannot live in exclusions.  Never
+                    # repair this by rewriting text or moving the bucket.
+                    condition_polarity = condition_analysis.classification
+                    if condition_polarity in (
+                            AFFIRMATIVE, RESTRICTIVE_OR_NEGATIVE) and \
+                            condition_polarity != expected_condition_outcome:
+                        errors.append(
+                            f"{loc}: bucket-condition polarity mismatch -- "
+                            f"semantic bucket {bucket!r} requires "
+                            f"{expected_condition_outcome}, but the condition's "
+                            f"explicit operative predicate is "
+                            f"{condition_polarity}; correct the extraction or "
+                            "route to review, but do not rewrite the condition "
+                            "or move it automatically")
+
+                    # Evidence comes only after the condition itself is settled
+                    # and bound to its bucket.  This preserves the three-party
+                    # order: condition -> bucket -> evidence -> lexical support.
+                    quote_analyses = [
+                        _analyze_policy_polarity(quote) for quote in quotes]
                     unsettled_quotes = [
                         analysis for analysis in quote_analyses
                         if analysis.classification in (MIXED, AMBIGUOUS)
@@ -697,7 +736,6 @@ def check_condition_support(clauses: list[dict]) -> list[str]:
                             "to review_required or split into separate "
                             "conditions, not merged because tokens overlap")
 
-                    condition_polarity = condition_analysis.classification
                     if not unsettled_quotes and len(
                             settled_quote_polarities) == 1 and \
                             condition_polarity in (

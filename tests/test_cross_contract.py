@@ -674,6 +674,123 @@ def test_polarity_validation_never_mutates_normalized_condition():
     assert contract == before
 
 
+# --------------------------------------------------------------------------
+# P1-2 follow-up: bucket/condition binding and modal double negation.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "보험금을 지급하지 않으면 안 됩니다",
+    "보험금을 지급하지 않을 수 없습니다",
+    "보험금을 지급하지 않아도 되는 것은 아닙니다",
+    "보험금 지급을 제한하지 않을 수 없습니다",
+    "보험금 지급을 제한하지 않는 것은 아닙니다",
+    "회사가 면책하지 않는 것은 아닙니다",
+])
+def test_modal_or_repeated_negation_is_ambiguous(text):
+    analysis = _cross_contract._analyze_policy_polarity(text)
+
+    assert analysis.classification == "ambiguous"
+    assert analysis.matches
+    assert any(match.negation_scope == "modal_or_repeated_negation"
+               for match in analysis.matches)
+
+
+def _single_bucket_clause(bucket, condition, evidence):
+    clause = _polarity_clause()
+    for name in (
+            "payout_conditions", "exclusions", "reduction_conditions",
+            "coverage_start_conditions"):
+        clause[name] = []
+    clause[bucket] = [{
+        "condition_uid": "CI-9999999999999999",
+        "text": condition,
+        "evidence_references": [{
+            "document_id": "DOC_001",
+            "page": 1,
+            "quote": evidence,
+        }],
+        "support_level": "direct",
+        "support_rationale": "P1-2 follow-up polarity fixture",
+        "review_required": False,
+    }]
+    return clause
+
+
+@pytest.mark.parametrize("bucket, condition, evidence, expected", [
+    (
+        "payout_conditions",
+        "보험금을 지급하지 않습니다",
+        "보험금을 지급하지 않습니다",
+        "affirmative",
+    ),
+    (
+        "exclusions",
+        "회사는 이 사유로 면책하지 않습니다",
+        "회사는 이 사유로 면책하지 않습니다",
+        "restrictive_or_negative",
+    ),
+    (
+        "reduction_conditions",
+        "보험금을 전액 지급합니다",
+        "보험금을 전액 지급합니다",
+        "restrictive_or_negative",
+    ),
+    (
+        "coverage_start_conditions",
+        "회사는 보장하지 않습니다",
+        "회사는 보장하지 않습니다",
+        "affirmative",
+    ),
+])
+def test_condition_and_evidence_cannot_agree_against_bucket(
+        bucket, condition, evidence, expected):
+    text = (
+        "<<<PAGE page=1>>>\n"
+        "제3조(보험금의 지급사유)\n"
+        f"{evidence}\n"
+    )
+    clause = _single_bucket_clause(bucket, condition, evidence)
+
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json", text)
+
+    assert any(
+        "bucket-condition polarity mismatch" in error
+        and bucket in error
+        and expected in error
+        for error in errors
+    ), errors
+
+
+def test_trigger_only_condition_keeps_bucket_fallback():
+    clause = _valid_clause()
+
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        REDACTED_TEXT)
+
+    assert not any("bucket-condition polarity mismatch" in error
+                   for error in errors), errors
+
+
+def test_followup_polarity_checks_do_not_mutate_contract():
+    evidence = "보험금을 지급하지 않습니다"
+    clause = _single_bucket_clause(
+        "payout_conditions", evidence, evidence)
+    contract = _contract([clause])
+    before = copy.deepcopy(contract)
+    text = (
+        "<<<PAGE page=1>>>\n"
+        "제3조(보험금의 지급사유)\n"
+        f"{evidence}\n"
+    )
+
+    check_normalized_policy_clause(
+        contract, "normalized_policy_clause_DOC_001.json", text)
+
+    assert contract == before
+
+
 def test_reference_table_review_flags_are_finalize_blockers():
     table = {
         "tables": [{

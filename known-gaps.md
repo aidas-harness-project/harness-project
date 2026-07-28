@@ -1314,6 +1314,17 @@ its semantic bucket only as a fallback when it stores a trigger without
 repeating the outcome; source evidence gets no fallback and must state the
 operative proposition itself.
 
+P1-2 follow-up 2 closes two remaining seams. First, polarity is a three-party
+contract: condition -> semantic bucket -> evidence. A negative condition and
+negative evidence no longer agree their way into `payout_conditions`, and an
+affirmative negation of 면책 cannot live in `exclusions`; explicit condition
+polarity must match the bucket before evidence is considered. Trigger-only
+conditions retain the bucket fallback. Second, a negated predicate governed by
+another modal/negative construction (`지급하지 않으면 안 됩니다`,
+`지급하지 않을 수 없습니다`, `제한하지 않는 것은 아닙니다`, etc.) is
+`ambiguous`, never settled by counting negation markers. These states block for
+review and are not repaired by rewriting the condition or moving its bucket.
+
 (a) a negative condition grounded only in positive evidence, and (b) a
 positive/coverage condition grounded only in negative evidence, remain polarity
 contradictions.
@@ -1328,7 +1339,9 @@ Regression tests (`tests/test_cross_contract.py`) cover the original six cases
 plus unrestricted payment, negated restriction, direct payout negation,
 impossibility, responsibility, reduction, double negation, nested scope,
 mixed propositions inside one quote, bidirectional end-to-end contradiction,
-determinism, and proof that validation never rewrites the condition.
+determinism, bucket/condition/evidence disagreement, six modal or repeated-
+negation forms, trigger-only fallback, and proof that validation never rewrites
+the condition.
 
 ## 22. Boundary anchors missed Korean item markers; clause evidence was never bound to its own source range -- RESOLVED 2026-07-27 (Part 11C)
 
