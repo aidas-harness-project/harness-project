@@ -90,6 +90,23 @@ passages. Every row range must lie inside the table source regions;
 each cell span must identify exactly the cell value inside its row; and two
 cells may not overlap in source.
 
+**Scan every policy document for tables, before anything else (P0-8).** Whether
+a document contains tables is a fact about its PDF, not something the pipeline
+infers from whether you wrote a `reference_table`. So each `canonical_v1`
+policy document must carry its own DAO-derived scan:
+
+    python tools/dao.py scan-table-candidates CASE_ID --doc-id DOC_ID \\
+        --held-by policy-pipeline --run-id RUN_ID
+
+This is an obligation of the **document**, not of the extraction: run it even
+when you believe the document has no tables. `policy_clause_processing` refuses
+to finalize while any policy document has no current scan, because "nobody
+scanned it" and "it has no tables" are different states and only the second one
+is a verified result. A scan that finds zero candidates is a real answer and
+clears the gate; a missing scan never does. Re-run it after any source-text
+revision — a revision makes the previous scan stale, and a table the revision
+introduced would sit entirely outside it.
+
 **A table's source region is not yours to declare (P0-8).** Before writing a
 `reference_table` for a `canonical_v1` document, register the table's region:
 
@@ -103,13 +120,21 @@ set `source_regions` to exactly the receipt's extent, and extract exactly one
 row per `data_row` band.
 
 `--page` is a **seed, not a range**: give it the page where the table STARTS.
-The DAO decides where the table ends by following continuations itself (column
-geometry, the reprinted header, any new heading), so a table running pages
-12-13 is registered with `--page 12` and comes back with both pages. Do not
-pass a page list hoping to widen or narrow the extent -- you cannot, and naming
-several pages that each hold a candidate is refused as an ambiguous selector.
-`--anchor` likewise only SELECTS among candidates the DAO found; an anchor
-matching two tables, or none, issues no receipt.
+The DAO decides where the table ends by following continuations itself, so a
+table running pages 12-13 is registered with `--page 12` and comes back with
+both pages. Do not pass a page list hoping to widen or narrow the extent -- you
+cannot, and naming several pages that each hold a candidate is refused as an
+ambiguous selector. `--anchor` likewise only SELECTS among candidates the DAO
+found; an anchor matching two tables, or none, issues no receipt.
+
+Joining two pages into one table needs **positive** evidence, not resemblance.
+A matching column grid and a reprinted header are necessary but not sufficient
+— two independent 별표 printed with the same layout look exactly like that. The
+DAO additionally requires either that page 1's table ran out of page while page
+2's resumes at the top, or an explicit continuation heading ("(계속)",
+"(cont.)"). Without one of those it refuses rather than guessing, because
+merging two tables fabricates one that does not exist and splitting a real one
+hides rows.
 
 This exists because every other check on a table runs *downwards* from
 `source_regions`: declare the region narrowly and the rows outside it are never
@@ -120,10 +145,17 @@ relabelling a data row `note` or `separator` is the same omission as deleting
 it, and is refused.
 
 **Every table the DAO's scan finds must be extracted.** The scan records a
-candidate inventory for the whole document, and finalization refuses while any
-detected table is unaccounted for — so registering one appendix and quietly
-ignoring a second one blocks the stage rather than passing. There is no
-"ignore this candidate" field to set.
+candidate inventory for the whole document, sealed by a content-derived
+`scan_id`, and finalization refuses while any detected table is unaccounted for
+— so registering one appendix and quietly ignoring a second one blocks the
+stage rather than passing. There is no "ignore this candidate" field to set,
+and editing the inventory is detected: the seal is recomputed from the whole
+candidate list at every gate.
+
+A declared `policy_processing_role` cannot exempt a document from this either.
+If a `clause_segment` turns out to contain a table, redeclare it
+`mixed_clause_and_table` and extract the table — the role is a statement about
+what the document owes, and it has to match what the document actually is.
 
 If the DAO refuses to issue a receipt (no ruled table detected, image-only/OCR
 document, merged cells, ambiguous candidates, an unresolvable continuation onto

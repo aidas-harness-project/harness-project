@@ -82,12 +82,16 @@ def test_caller_cannot_hide_a_continuation_page_via_page_spec(
     A verified receipt with extent == {1} is the failure this test exists to
     forbid -- it would let the whole of page 2 vanish while every downstream
     check reports a complete table.
+
+    The layout is a GENUINE continuation (page 1 runs out of page, page 2 is
+    marked as its continuation), which is what makes outcome 1 the one the DAO
+    must actually reach here rather than escaping via a refusal.
     """
     case(pages=[
         {"rows": [("Grade", "Rate"), ("A", "10"), ("B", "20")],
-         "title": "Disability Table"},
+         "title": "Disability Table", "fills_page": True},
         {"rows": [("Grade", "Rate"), ("C", "30"), ("D", "40")],
-         "title": "Disability Table"},
+         "title": "Disability Table (cont.)"},
     ])
 
     rc = dao.cmd_register_table_region(make_args(
@@ -115,9 +119,9 @@ def test_page_one_only_receipt_cannot_be_obtained_for_a_two_page_table(
     two acceptable outcomes the implementation picks."""
     case(pages=[
         {"rows": [("Grade", "Rate"), ("A", "10"), ("B", "20")],
-         "title": "Disability Table"},
+         "title": "Disability Table", "fills_page": True},
         {"rows": [("Grade", "Rate"), ("C", "30"), ("D", "40")],
-         "title": "Disability Table"},
+         "title": "Disability Table (cont.)"},
     ])
 
     dao.cmd_register_table_region(make_args(
@@ -224,10 +228,15 @@ def test_a_multi_page_table_covers_the_candidate_on_every_page_it_spans(
     legitimate multi-page table, which is a false positive as harmful as the
     omission it is meant to catch."""
     case(pages=[
+        # A GENUINE continuation: page 1's table runs out of page and page 2's
+        # is marked as its continuation. Follow-up 2 requires that positive
+        # evidence -- a repeated header alone is what two INDEPENDENT
+        # appendices also look like, so it can no longer join two pages on its
+        # own (see the same-header attack in this file).
         {"rows": [("Grade", "Rate"), ("A", "10"), ("B", "20")],
-         "title": "Disability Table"},
+         "title": "Disability Table", "fills_page": True},
         {"rows": [("Grade", "Rate"), ("C", "30"), ("D", "40")],
-         "title": "Disability Table"},
+         "title": "Disability Table (cont.)"},
     ])
     assert dao.cmd_register_table_region(make_args(
         case_id=CASE, doc_id="DOC_001", page="1", anchor="Grade",

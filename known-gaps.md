@@ -1859,7 +1859,9 @@ not an edit to what `canonical_v1` computes.
 - ~~**P0-7 -- exact evidence binding.**~~ RESOLVED 2026-07-28; see the section
   below.
 - ~~**P0-8 -- authoritative table-region detection.**~~ RESOLVED 2026-07-28;
-  see the section below.
+  see the three sections below (the original pass, then two follow-ups: the
+  first closed receipt ISSUANCE, the second put the gate on the actual
+  finalization path and made the document-wide scan mandatory).
 
 ### The declared table region was never the table's real extent -- RESOLVED (P0-8)
 
@@ -2052,6 +2054,92 @@ field.
 23 new tests (`tests/test_table_region_followup.py`). canonical_v1 UID values
 remain unchanged -- `policy_uid.py`/`policy_uid_resolver.py` are untouched by
 this pass and the frozen vectors still pass unmodified.
+
+### The table gate was never on the finalization path -- RESOLVED (P0-8 follow-up 2)
+
+Review of the follow-up (`600bcfc`) found the gate had been built and wired to
+almost nothing. `_table_region_finalize_blockers` was called by **tests and by
+nothing else**: `_policy_completion_blockers`, the function that actually
+decides whether `policy_clause_processing` may finalize, never mentioned it.
+Every claim the follow-up made about receipt derivation was true and
+unreachable. Four defects:
+
+1. **Not on the production path.** A document whose PDF is full of tables, with
+   no `reference_table` and no scan, finalized cleanly through the real
+   `dao.py finalize-stage --stage policy_clause_processing`. Now called for
+   every automated policy document, before any role-specific branching -- which
+   is the point: several of those branches `continue`, so a gate placed after
+   them would have skipped exactly the roles most likely to hide a table.
+   `segmented_parent` is the one exemption and a structural one -- it owns no
+   text of its own and each of its segments is separately in the loop, so
+   scanning the parent too would report every segment's tables a second time.
+
+2. **An absent `reference_table` was a free pass.** The gate opened with
+   `if tables is None: return []`, so it ran only on documents somebody had
+   already chosen to extract a table from. The way to make a table invisible
+   was simply never to mention it -- the same self-declaration defect P0-8
+   exists to remove, one level up: the caller could no longer declare a table's
+   *extent*, but could still decide whether the document *had* tables.
+
+   The obligation now belongs to the **document**. Every `canonical_v1` policy
+   document must carry a current scan; a scan finding zero candidates clears
+   the gate, a missing scan never does. A declared `policy_processing_role`
+   cannot exempt it either -- a `clause_segment` containing a table must be
+   redeclared `mixed_clause_and_table`, because a role is a statement about
+   what a document owes and cannot overrule a fact about its bytes.
+
+3. **The candidate inventory was unsealed.** Each `candidate_id` verified
+   against its own geometry, but nothing verified the SET -- so deleting the
+   entry for an unextracted table left every survivor verifying perfectly, in
+   the one artifact whose entire job is to answer "were there other tables?".
+   `compute_scan_id` now seals the whole scan (document, PDF owner and bytes,
+   revision, page map, detector profile and config, the pages actually
+   examined, and the full sorted candidate list), re-derived at every gate by
+   `inventory_integrity_errors`.
+
+   `scanned_logical_pages` is part of that seal because the inventory's real
+   claim is a NEGATIVE one -- "these are all the tables in this document" --
+   and it is only as wide as the pages the detector looked at. Without it, a
+   scan of pages 1-2 was indistinguishable from a 4-page scan that found
+   nothing on 3-4.
+
+4. **Continuation was decided by resemblance.** Matching column grid + matching
+   header + no new heading returned `continues` **unconditionally**,
+   contradicting `continuation_decision`'s own fail-closed docstring. Two
+   independent appendices printed with the same layout -- an ordinary way to
+   lay out a policy schedule -- were welded into one table. The asymmetry
+   matters: a wrongly-SPLIT table leaves its second half as an uncovered
+   candidate that blocks finalization, while a wrongly-MERGED one reports a
+   complete, verified table spanning content that was never one table.
+
+   Matching grid and header are now treated as necessary but **not
+   sufficient**. `continues` additionally requires either that the first
+   table ran out of page while the next resumes at the top of its page, or an
+   explicit continuation heading ("(계속)", "(cont.)"). Both are read off
+   geometry the DAO measured itself. Otherwise: `ambiguous`, which refuses.
+
+**Separation of scan from registration.** `dao.py scan-table-candidates` is a
+new, standalone command. While the inventory was a side effect of
+`register-table-region`, a document nobody registered a table for had no scan
+at all -- and the gate then read that absence as "nothing to check". The gate
+is deliberately **pure**: it verifies a current scan exists and never runs the
+detector itself, so finalization cannot mutate state and a skipped pipeline
+step is reported rather than silently performed. A scan-only commit goes
+through the same locked, journalled, validate-before-write transaction as a
+receipt, and invalidates downstream the same way.
+
+**Known limitation, unchanged from the previous pass:** the human-review escape
+hatch for an un-extractable candidate is still a seam --
+`human_review_ledger.schema.json`'s `artifact_kind` enum does not admit
+`table_candidate`. Combined with this pass making the scan mandatory, the
+practical consequence is now larger: an embedded-text policy document
+containing a table the detector cannot establish (merged cells, no ruling)
+cannot finalize by any route. That is fail-closed and intended, but it is a
+real operational limit, not a theoretical one.
+
+28 new tests (`tests/test_table_scan_obligation.py`), including two that drive
+the real `finalize-stage` command end to end. canonical_v1 UID values remain
+unchanged.
 
 ### Evidence proved a phrase existed, not which occurrence it was -- RESOLVED (P0-7)
 

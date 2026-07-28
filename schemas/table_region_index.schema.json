@@ -153,10 +153,23 @@
     },
     "candidate_inventory": {
       "type": "object",
-      "description": "The DAO's scan of one document: every table the detector found, whether or not anybody registered it. Replaced (not accumulated) on each scan, since an inventory listing candidates from an older revision would block on tables that no longer exist.",
+      "description": "The DAO's scan of one document: every table the detector found, whether or not anybody registered it. Written only by `dao.py scan-table-candidates` (and by register-table-region, which scans the same way before it can derive anything). Replaced (not accumulated) on each scan, since an inventory listing candidates from an older revision would block on tables that no longer exist. Sealed by `scan_id`: the individual candidate_ids each verify against their own geometry, but ids alone say nothing about the SET, so deleting an inconvenient entry left every survivor verifying perfectly -- in the one artifact whose entire job is to answer 'were there other tables?'.",
       "properties": {
+        "scheme": {
+          "const": "table_candidate_scan_v1",
+          "description": "The scan contract this inventory was produced under. An unrecognized scheme is refused rather than assumed equivalent."
+        },
+        "scan_id": {
+          "type": "string",
+          "pattern": "^TRS-[a-f0-9]{48}$",
+          "description": "Computed by the DAO from the whole scan: document, PDF owner and its bytes, revision, page map, detector profile and config, the pages actually scanned, and the full sorted candidate list. Recomputed and compared at every gate, so removing or editing a candidate is detected. Excludes `scanned_at`, so re-scanning unchanged bytes yields the identical scan_id and is a recognizable no-op."
+        },
         "document_id": {
           "$ref": "common_component_output.schema.json#/$defs/document_id"
+        },
+        "pdf_owner_document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id",
+          "description": "Whose raw PDF was actually opened. For a segment this is the PARENT, matching canonical UID identity rules -- recorded so a scan cannot silently be attributed to a different owner's bytes."
         },
         "source_pdf_sha256": {
           "type": "string",
@@ -166,8 +179,17 @@
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
         },
+        "segment_derivation_receipt_id": {
+          "type": ["string", "null"],
+          "description": "For a segment, the P0-6 derivation fixing which physical pages this document owns; null for a physical document. A re-derived page map changes which pages the scan should have covered, so it makes the scan stale."
+        },
         "detector_profile": { "type": "string", "minLength": 1 },
         "detector_config_fingerprint": { "type": "string", "minLength": 1 },
+        "scanned_logical_pages": {
+          "type": "array",
+          "description": "Every logical page the detector actually examined. The inventory's real claim is a NEGATIVE one -- 'these are all the tables in this document' -- and that claim is only as wide as the pages it looked at. A page missing here is an UNSCANNED page, never a page established to have no table, and finalization refuses while any page the document currently owns is absent.",
+          "items": { "type": "integer", "minimum": 1 }
+        },
         "scanned_at": { "type": "string", "format": "date-time" },
         "candidates": {
           "type": "array",
@@ -207,11 +229,16 @@
         }
       },
       "required": [
+        "scheme",
+        "scan_id",
         "document_id",
+        "pdf_owner_document_id",
         "source_pdf_sha256",
         "source_text_revision_sha256",
+        "segment_derivation_receipt_id",
         "detector_profile",
         "detector_config_fingerprint",
+        "scanned_logical_pages",
         "scanned_at",
         "candidates"
       ],

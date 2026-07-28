@@ -133,6 +133,27 @@ REGION_KINDS = (DATA_ROW_KIND,) + NON_DATA_KINDS + (AMBIGUOUS_KIND,)
 # wanted to -- it has to be resolved by review.
 _DECLARABLE_HEADER_KINDS = frozenset(NON_DATA_KINDS)
 
+# Headings that STATE a table is a continuation, as printed in Korean and
+# English policy documents. This is positive evidence read off the page, unlike
+# "the next table happens to look the same", which is what P0-8's second pass
+# wrongly accepted on its own. Matched against the heading line above a table.
+_CONTINUATION_MARKERS = (
+    re.compile(r"계\s*속"),
+    re.compile(r"이어짐"),
+    re.compile(r"\bcont(?:inued|\.|'d)?\b", re.IGNORECASE),
+)
+
+# How close to the page's text extent a table must sit for "it was cut off by
+# the page break" / "it resumes at the top" to be readable off the geometry.
+# In PDF points; a generous single line of body text.
+PAGE_EDGE_TOLERANCE = 24.0
+
+# How close the page's LAST LINE must come to the paper's edge for the page to
+# count as full. Without this, a small table alone on a page is trivially its
+# own last line and would read as "cut off by the page break" when it plainly
+# ends mid-page. A conventional bottom margin, generously.
+PAGE_BOTTOM_MARGIN = 108.0
+
 
 def text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -315,6 +336,22 @@ def _header_texts(candidate):
                  for cell in rows[0]["cells"])
 
 
+def _continuation_marker(candidate) -> str | None:
+    """A heading above the table that SAYS it is a continuation, e.g. "(계속)".
+
+    Positive, self-describing evidence rather than an inference from sameness.
+    Matched on the heading line the detector captured above the table, so it is
+    layout the DAO read, not a field anyone submitted.
+    """
+    heading = (candidate.get("preceding_heading") or "").strip()
+    if not heading:
+        return None
+    for pattern in _CONTINUATION_MARKERS:
+        if pattern.search(heading):
+            return heading
+    return None
+
+
 def continuation_decision(head, following):
     """Whether `following` continues `head`, on independent layout evidence.
 
@@ -323,11 +360,35 @@ def continuation_decision(head, following):
     downstream check would agree it was complete. The scope has to be derived,
     not received.
 
-    The evidence used, all of it structural:
+    The second pass then overcorrected: matching grid + matching header + no
+    new heading returned `continues` unconditionally, which contradicted this
+    docstring's own fail-closed claim. Two independent appendices printed with
+    the same column layout and no heading -- an entirely ordinary way to lay out
+    a policy schedule -- were welded into one table, fabricating a receipt for a
+    table that does not exist. Note the asymmetry that makes that the worse
+    error: a wrongly-split table still leaves the second half as an uncovered
+    candidate that blocks finalization, whereas a wrongly-merged one reports a
+    complete, verified table spanning content that was never one table.
 
-      * identical column geometry (same column count and edge positions)
-      * an identical column header reprinted at the top of the next page
-      * page adjacency (already guaranteed by the caller of this function)
+    Matching grid and header are now treated as what they are -- NECESSARY but
+    not SUFFICIENT. On top of them, `continues` requires one piece of positive,
+    independent evidence that this is one table:
+
+      * `head` visibly RAN OUT OF PAGE: its table ends at the last line of text
+        on the page and that line is itself near the paper's bottom edge
+        (`reaches_page_bottom`), so its rows were cut off rather than
+        concluded, and
+      * `following` starts at the top of the next page's body
+        (`starts_at_page_top`), so nothing intervenes between them
+
+      -- or --
+
+      * `following` is introduced by an explicit continuation marker
+        ("(계속)", "(cont.)", "continued"), which is a heading that states the
+        relationship rather than one inferred from resemblance
+
+    Both facts come from the detector's own geometry (bbox against the page's
+    text extent), computed by the DAO when it scans, never from the caller.
 
     Returns `("continues", None)`, `("separate", reason)`, or
     `("ambiguous", reason)`. **Ambiguous is not a merge and not a split** -- it
@@ -359,18 +420,33 @@ def continuation_decision(head, following):
             "the next page's table has a different column header, so it is a "
             "different table")
 
-    # Same grid AND same header. That is what a continuation looks like -- and
-    # also what two same-shaped sibling appendices look like. A title printed
-    # above the next page's table is the discriminator: a continuation does not
-    # introduce a new one.
+    # Same grid AND same header: consistent with a continuation, and equally
+    # consistent with two sibling appendices. A NEW heading above the next
+    # table settles it as separate outright.
     following_title = (following.get("preceding_heading") or "").strip()
     head_title = (head.get("preceding_heading") or "").strip()
-    if following_title and following_title != head_title:
+    marker = _continuation_marker(following)
+    if following_title and following_title != head_title and not marker:
         return "separate", (
             f"the next page's table is introduced by its own heading "
             f"{following_title!r}, so it is a different table rather than a "
             "continuation")
-    return "continues", None
+
+    # Positive evidence, required. Resemblance alone is not it.
+    if marker:
+        return "continues", None
+    if head.get("reaches_page_bottom") and following.get("starts_at_page_top"):
+        return "continues", None
+
+    return "ambiguous", (
+        "the next page's table has the same column grid and the same header, "
+        "but nothing independent shows the two are ONE table: the first "
+        "table does not run to the bottom of its page (so its rows were not "
+        "cut off), the second does not begin at the top of its page, and no "
+        "continuation heading (e.g. '(계속)', '(cont.)') introduces it. Two "
+        "separate tables laid out identically look exactly like this, so "
+        "merging them would fabricate a table that does not exist and "
+        "splitting them would hide rows. Resolve by review")
 
 
 def classification_review_reasons(regions) -> list[str]:
@@ -410,6 +486,47 @@ def compute_candidate_id(*, document_id, source_pdf_sha256,
     )
     digest = hashlib.sha256(repr(fingerprint).encode("utf-8")).hexdigest()
     return f"TRC-{digest[:32]}"
+
+
+def compute_scan_id(inventory: dict) -> str:
+    """Seal a whole candidate inventory to the scan that produced it.
+
+    Each `candidate_id` already binds one candidate to its own geometry, but
+    ids alone say nothing about the SET: dropping an inconvenient entry left
+    every surviving id verifying perfectly, and the inventory is precisely the
+    artifact that answers "were there other tables?". So the scan needs an
+    identity of its own, derived from everything the scan was a function of --
+    the document, the PDF owner and its bytes, the revision, the page map, the
+    detector, and the full sorted candidate list.
+
+    Excludes `scanned_at`: re-scanning unchanged bytes must produce the
+    identical scan_id, which is what makes a re-scan a recognizable no-op
+    instead of a new scan that invalidates downstream work.
+    """
+    fingerprint = (
+        inventory.get("scheme"),
+        inventory.get("document_id"),
+        inventory.get("pdf_owner_document_id"),
+        inventory.get("source_pdf_sha256"),
+        inventory.get("source_text_revision_sha256"),
+        inventory.get("segment_derivation_receipt_id"),
+        inventory.get("detector_profile"),
+        inventory.get("detector_config_fingerprint"),
+        tuple(sorted(int(page) for page in
+                     inventory.get("scanned_logical_pages") or ())),
+        tuple(sorted(
+            (
+                candidate.get("candidate_id"),
+                candidate.get("page"),
+                candidate.get("physical_page"),
+                tuple(round(float(v), 2) for v in candidate.get("bbox") or ()),
+                candidate.get("row_count"),
+            )
+            for candidate in inventory.get("candidates") or []
+        )),
+    )
+    digest = hashlib.sha256(repr(fingerprint).encode("utf-8")).hexdigest()
+    return f"TRS-{digest[:48]}"
 
 
 def build_receipt(*, document_id, case_id, source_pdf_sha256,
@@ -692,6 +809,175 @@ def receipt_currency_errors(*, receipt: dict, current_pdf_sha256: str | None,
 
 # --- binding a contract to its receipt -------------------------------------
 
+SCAN_SCHEME = "table_candidate_scan_v1"
+
+
+def inventory_integrity_errors(inventory: dict, document_id: str,
+                               location: str = "") -> list[str]:
+    """Re-derive the inventory's own claims before any of it is relied on.
+
+    Same reasoning as `index_integrity_errors`, one level up. Without this the
+    inventory was a list somebody could edit: deleting the entry for a table
+    nobody extracted left the remaining candidate_ids each verifying against
+    their own geometry, so the omission was invisible exactly where it mattered
+    most -- the artifact whose entire job is to say what else is in the
+    document.
+
+    Checked here, all fail-closed: the scan's own scheme, `scan_id` recomputed
+    from the whole body, every `candidate_id` recomputed from its own geometry,
+    no duplicate candidate ids, and the inventory bound to the document it sits
+    under. Anything failing is reported as a corrupt scan, deliberately NOT as
+    "no scan exists" -- that reading would invite re-scanning over a tampered
+    file and calling the result clean.
+    """
+    prefix = f"{location}: " if location else ""
+    errors: list[str] = []
+
+    scheme = inventory.get("scheme")
+    if scheme != SCAN_SCHEME:
+        return [
+            f"{prefix}table candidate scan scheme {scheme!r} is not "
+            f"{SCAN_SCHEME!r} -- an unrecognized scan is refused rather than "
+            "assumed equivalent"
+        ]
+    if inventory.get("document_id") != document_id:
+        errors.append(
+            f"{prefix}the candidate scan is bound to document "
+            f"{inventory.get('document_id')!r}, not {document_id!r}")
+
+    candidates = inventory.get("candidates")
+    if not isinstance(candidates, list):
+        return errors + [
+            f"{prefix}table candidate scan integrity: `candidates` is not a "
+            "list"]
+
+    seen: set = set()
+    for position, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            errors.append(
+                f"{prefix}table candidate scan integrity: entry {position} is "
+                "not an object")
+            continue
+        candidate_id = candidate.get("candidate_id")
+        try:
+            recomputed = compute_candidate_id(
+                document_id=inventory.get("document_id"),
+                source_pdf_sha256=inventory.get("source_pdf_sha256"),
+                source_text_revision_sha256=inventory.get(
+                    "source_text_revision_sha256"),
+                detector_profile=inventory.get("detector_profile"),
+                config_fingerprint=inventory.get(
+                    "detector_config_fingerprint"),
+                pages_geometry=(
+                    candidate.get("page"), candidate.get("physical_page"),
+                    tuple(round(float(v), 2)
+                          for v in candidate.get("bbox") or ())),
+            )
+        except (TypeError, ValueError) as exc:
+            errors.append(
+                f"{prefix}table candidate scan integrity: candidate "
+                f"{candidate_id!r} has unusable geometry: {exc}")
+            continue
+        if candidate_id != recomputed:
+            errors.append(
+                f"{prefix}table candidate scan integrity: candidate "
+                f"{candidate_id!r} does not hash to its own geometry "
+                f"(recomputed {recomputed!r}) -- the entry was changed after "
+                "the scan")
+            continue
+        if candidate_id in seen:
+            errors.append(
+                f"{prefix}table candidate scan integrity: duplicate "
+                f"candidate_id {candidate_id!r}")
+            continue
+        seen.add(candidate_id)
+
+    recomputed_scan = compute_scan_id(inventory)
+    if inventory.get("scan_id") != recomputed_scan:
+        errors.append(
+            f"{prefix}table candidate scan integrity: scan "
+            f"{inventory.get('scan_id')!r} does not hash to its own contents "
+            f"(recomputed {recomputed_scan!r}) -- the candidate list was "
+            "changed after the scan, so it no longer states what the detector "
+            "found. A candidate removed from a scan is the exact omission this "
+            "inventory exists to make visible")
+    return errors
+
+
+def inventory_currency_errors(inventory: dict, *, current_pdf_sha256,
+                              current_revision_sha256, current_pages,
+                              segment_receipt_id=None,
+                              location: str = "") -> list[str]:
+    """Whether the scan still describes the document as it is now.
+
+    A scan is a statement that THESE bytes, read with THIS detector, contain
+    exactly these tables. Any input moving makes it a true statement about a
+    state that no longer exists -- and a stale scan is worse than none, because
+    a table added by a revision would sit outside it entirely while every
+    surviving candidate still verified.
+    """
+    prefix = f"{location}: " if location else ""
+    errors: list[str] = []
+
+    profile = inventory.get("detector_profile")
+    if profile not in DETECTOR_PROFILES:
+        errors.append(
+            f"{prefix}the scan was run with detector profile {profile!r}, "
+            "which this build does not define -- it must be re-run")
+    elif inventory.get("detector_config_fingerprint") != detector_fingerprint(
+            profile):
+        errors.append(
+            f"{prefix}detector profile {profile!r} has been reconfigured since "
+            "this scan was run -- which tables the detector finds is a "
+            "function of its configuration, so the document must be re-scanned")
+
+    if current_pdf_sha256 is None:
+        errors.append(
+            f"{prefix}the document's registered raw source cannot be read or "
+            "hashed now, so the scan cannot be re-confirmed against it")
+    elif inventory.get("source_pdf_sha256") != current_pdf_sha256:
+        errors.append(
+            f"{prefix}the raw source changed since this scan "
+            f"(scan {inventory.get('source_pdf_sha256')!r}, current "
+            f"{current_pdf_sha256!r}) -- a table added or removed by the new "
+            "bytes would be invisible to it; re-scan")
+
+    if current_revision_sha256 is None:
+        errors.append(
+            f"{prefix}the document has no current registered source-text "
+            "revision to confirm the scan against")
+    elif inventory.get("source_text_revision_sha256") != \
+            current_revision_sha256:
+        errors.append(
+            f"{prefix}the source text was revised after this scan "
+            f"(scan {inventory.get('source_text_revision_sha256')!r}, current "
+            f"{current_revision_sha256!r}) -- re-scan")
+
+    if segment_receipt_id is not None or inventory.get(
+            "segment_derivation_receipt_id") is not None:
+        recorded = inventory.get("segment_derivation_receipt_id")
+        if recorded != segment_receipt_id:
+            errors.append(
+                f"{prefix}the P0-6 segment derivation this scan was bound to "
+                f"changed (scan {recorded!r}, current {segment_receipt_id!r}) "
+                "-- which physical pages this document owns is no longer what "
+                "was scanned; re-scan")
+
+    # The scan must have covered every logical page the document owns NOW. A
+    # scan of pages 1-3 cannot speak for a page 4 that exists today, and
+    # "page 4 was not scanned" must never read as "page 4 has no table".
+    if current_pages is not None:
+        scanned = {int(page) for page in
+                   inventory.get("scanned_logical_pages") or ()}
+        unscanned = sorted(set(current_pages) - scanned)
+        if unscanned:
+            errors.append(
+                f"{prefix}logical page(s) {unscanned} of this document were "
+                "never covered by the candidate scan -- an unscanned page is "
+                "not a page without a table; re-scan the document")
+    return errors
+
+
 def candidate_coverage_errors(inventory: dict | None, receipts,
                               extracted_receipt_ids, human_reviewed_ids=(),
                               location: str = "") -> list[str]:
@@ -720,11 +1006,11 @@ def candidate_coverage_errors(inventory: dict | None, receipts,
     prefix = f"{location}: " if location else ""
     if inventory is None:
         return [
-            f"{prefix}no DAO-derived table candidate inventory exists -- "
-            "without a scan of the whole document, a table the detector would "
-            "have found but nobody extracted is invisible. Run `dao.py "
-            "register-table-region` (which scans as it registers) or "
-            "`dao.py scan-table-candidates`"
+            f"{prefix}no DAO-derived table candidate scan exists for this "
+            "document -- without a scan of the whole document, a table the "
+            "detector would have found but nobody extracted is invisible, and "
+            "the ABSENCE of a scan is not evidence that there are no tables. "
+            "Run `dao.py scan-table-candidates`"
         ]
     extracted = set(extracted_receipt_ids or ())
     reviewed = set(human_reviewed_ids or ())

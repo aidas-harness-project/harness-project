@@ -115,6 +115,17 @@ Subcommands:
          _table_region_index.json as one fail-closed transaction; a
          reference_table then cites it by table_region_receipt_id, and its
          source_regions must equal the derived extent exactly.)
+    scan-table-candidates CASE_ID --doc-id DOC_ID --held-by NAME
+        --run-id RUN_ID [--detector-profile NAME]
+        (P0-8 follow-up 2. Records what tables the DAO's own detector finds in
+         a document, sealed by a content-derived scan_id. Separate from
+         register-table-region on purpose: while the inventory was a side
+         effect of registration, a document nobody registered a table for had
+         NO scan, and the finalization gate read that absence as "nothing to
+         check" -- so the way to hide a table was to never mention it. Every
+         automated policy document must carry a current scan before
+         policy_clause_processing may finalize, and finalization VERIFIES the
+         scan rather than running one, so it stays a pure gate.)
     read-table-region-index CASE_ID
 """
 import argparse
@@ -688,6 +699,19 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
         inventory_name = f"policy_boundary_inventory_{doc_id}.json"
         audit_name = f"policy_audit_result_{doc_id}.json"
         role = policy_roles.declared_role(doc)
+
+        # P0-8 follow-up 2. Runs for EVERY automated policy document, before
+        # any role-specific branching -- including the `continue` paths below,
+        # which is exactly why it sits here. Whether a document contains tables
+        # is a fact about the PDF, established by the DAO's own scan; it is not
+        # implied by the role somebody declared and not implied by whether
+        # anybody wrote a reference_table. A segmented_parent is the one
+        # exception, and a structural one: it owns no text of its own, its
+        # pages belong to its segments, and each segment is itself in this
+        # loop -- scanning the parent as well would report every segment's
+        # tables a second time as the parent's unhandled candidates.
+        if role != "segmented_parent":
+            blockers.extend(_table_region_finalize_blockers(case_id, doc_id))
 
         if role == "segmented_parent":
             # Normalization is delegated to its segments; parent-coverage
@@ -4621,8 +4645,19 @@ def table_candidate_inventory_for(case_id: str, doc_id: str):
 
 
 def _build_candidate_inventory(case_id, doc_id, candidates, detector,
-                               pdf_digest, revision_sha):
-    """One inventory entry per detected table, with a stable candidate_id."""
+                               pdf_digest, revision_sha, *,
+                               scanned_logical_pages, pdf_owner=None,
+                               segment_receipt_id=None):
+    """One inventory entry per detected table, sealed by a content-derived
+    `scan_id`.
+
+    `scanned_logical_pages` is recorded because the inventory's real claim is a
+    NEGATIVE one -- "these are all the tables in this document" -- and that
+    claim is only as wide as the pages the detector actually looked at. Without
+    it, a scan of pages 1-2 read identically to a scan of a 4-page document
+    that found nothing on 3-4, which is the "no scan means no tables" inference
+    this whole gate exists to refuse.
+    """
     entries = []
     for candidate in candidates:
         logical = candidate.get("logical_page")
@@ -4648,15 +4683,21 @@ def _build_candidate_inventory(case_id, doc_id, candidates, detector,
             "header_preview": " | ".join(str(name) for name in header)[:200],
         })
     entries.sort(key=lambda entry: (entry["page"], entry["bbox"][1]))
-    return {
+    inventory = {
+        "scheme": table_region_provenance.SCAN_SCHEME,
         "document_id": doc_id,
+        "pdf_owner_document_id": pdf_owner or doc_id,
         "source_pdf_sha256": pdf_digest,
         "source_text_revision_sha256": revision_sha,
+        "segment_derivation_receipt_id": segment_receipt_id,
         "detector_profile": detector["profile"],
         "detector_config_fingerprint": detector["config_fingerprint"],
+        "scanned_logical_pages": sorted(int(p) for p in scanned_logical_pages),
         "scanned_at": now_iso(),
         "candidates": entries,
     }
+    inventory["scan_id"] = table_region_provenance.compute_scan_id(inventory)
+    return inventory
 
 
 def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
@@ -4714,6 +4755,11 @@ def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
             # text (see table_region_provenance.align_words_to_text); the
             # detector's geometry decides, not a substring search.
             words = list(page.get_text("words"))
+            # Where the page's printed content actually starts and ends, from
+            # the words themselves rather than the paper size -- margins vary,
+            # and "the table runs to the bottom of the page" has to mean the
+            # bottom of the TEXT. Feeds the continuation evidence below.
+            body_top, body_bottom, page_bottom = _page_body_extent(words, page)
             for order, table in enumerate(found.tables):
                 rows = []
                 for row in table.rows:
@@ -4754,10 +4800,59 @@ def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
                     # continuation (continuation_decision reads this).
                     "preceding_heading": _preceding_heading(
                         page, table.bbox, found.tables, order),
+                    # Positive continuation evidence, read off the geometry the
+                    # DAO itself measured. A table that runs out of PAGE was cut
+                    # off by the break; one that begins at the top of the next
+                    # page's body resumes it. Matching header and grid alone are
+                    # not evidence of that -- two identically laid out
+                    # appendices look the same -- so continuation_decision
+                    # requires one of these.
+                    #
+                    # "Runs out of page" needs both the last line of text and
+                    # the paper's edge: a small table alone on a page is
+                    # trivially its own last line, which would otherwise read as
+                    # cut off when it plainly ends mid-page.
+                    "reaches_page_bottom": (
+                        body_bottom is not None
+                        and float(table.bbox[3]) >= body_bottom
+                        - table_region_provenance.PAGE_EDGE_TOLERANCE
+                        and body_bottom >= page_bottom
+                        - table_region_provenance.PAGE_BOTTOM_MARGIN),
+                    "starts_at_page_top": (
+                        body_top is not None
+                        and float(table.bbox[1]) <= body_top
+                        + table_region_provenance.PAGE_EDGE_TOLERANCE),
                 })
         return candidates, detector, None
     finally:
         doc.close()
+
+
+def _page_body_extent(words, page):
+    """Where the page's printed text starts and ends, and where the paper does.
+
+    Both are needed, and neither alone works:
+
+      * text extent alone is degenerate when the table IS the whole page body.
+        A small table alone on a page trivially sits at both the first and last
+        line, which would read as "cut off at the bottom" for a table that
+        plainly ends mid-page.
+      * paper edge alone ignores margins, so a table that genuinely runs to the
+        last printable line looks like it stops well short.
+
+    So `reaches_page_bottom` requires the table to end at the last line of text
+    AND for that line to be near the bottom of the paper -- i.e. the text ran
+    out of page, which is what a page break cutting a table looks like.
+
+    Returns `(body_top, body_bottom, page_bottom)`, all None for a page with no
+    words -- on which neither continuation fact can be established, so
+    `continuation_decision` falls through to ambiguous rather than guessing.
+    """
+    tops = [float(word[1]) for word in words if str(word[4]).strip()]
+    bottoms = [float(word[3]) for word in words if str(word[4]).strip()]
+    if not tops or not bottoms:
+        return None, None, None
+    return min(tops), max(bottoms), float(page.rect.height)
 
 
 def _preceding_heading(page, table_bbox, tables, order) -> str:
@@ -5032,18 +5127,115 @@ def _derive_table_regions(candidates_by_page, pages, physical_for, profile):
 
 
 def _table_region_finalize_blockers(case_id: str, doc_id: str) -> list[str]:
-    """P0-8 gate: every table cited by this document's reference_table contract
-    must still rest on a receipt that describes the world as it is now.
+    """P0-8 gate: this document must have been SCANNED, and everything the scan
+    found must have a disposition.
 
-    A table with no receipt is a BLOCKER, never a skipped check: "the proof
-    field is absent, so there is nothing to verify" is the exact reasoning that
-    let a narrowly-declared region look complete.
+    The follow-up's version asked the wrong question. It started from the
+    reference_table contract -- `if tables is None: return []` -- so the gate
+    only ran on documents somebody had already chosen to extract a table from.
+    A policy PDF full of tables with no reference_table contract at all was not
+    "unverified", it was UNASKED, and finalization was clean. That is the same
+    self-declaration defect P0-8 exists to remove, moved up one more level: the
+    caller could no longer declare a table's extent, but could still decide
+    whether the document had tables by simply not writing a contract.
+
+    So the gate now begins at the document, not the contract:
+
+      1. the document must carry a CURRENT candidate scan (its absence is a
+         blocker, never a pass -- "nobody scanned" is not "no tables")
+      2. the scan's own integrity and currency are re-derived here
+      3. if the scan found candidates, a reference_table contract is required,
+         and every candidate must be extracted or human-reviewed
+      4. if the scan found none, no contract is owed
+
+    Deliberately a PURE gate: it verifies a scan exists and is current, and
+    never runs the detector itself. Scanning here would mean finalization
+    mutated state, and a document that had never been scanned would silently
+    acquire one at the last moment instead of the operator being told a real
+    step was skipped.
     """
-    tables = read_contract_data(case_id, f"reference_table_{doc_id}.json")
-    if tables is None:
-        return []
     if uid_scheme_for(case_id, doc_id) != "canonical_v1":
         return []
+
+    tables = read_contract_data(case_id, f"reference_table_{doc_id}.json")
+    location = f"{doc_id} table scan"
+
+    index = load_table_region_index(case_id)
+    integrity = table_region_provenance.index_integrity_errors(
+        index, case_id, location)
+    if integrity:
+        return integrity
+    schema_errors = _schema_check(index, table_region_provenance.INDEX_SCHEMA)
+    if schema_errors:
+        return [f"{location}: the table region index is schema-invalid, so "
+                f"nothing in it may be relied on: {error}"
+                for error in schema_errors]
+
+    inventory = table_candidate_inventory_for(case_id, doc_id)
+    if inventory is None:
+        return [
+            f"{doc_id}: no DAO-derived table candidate scan exists -- a "
+            "policy document may not finalize on the assumption that it "
+            "contains no tables. Run `dao.py scan-table-candidates "
+            f"--case-id {case_id} --doc-id {doc_id}`"
+        ]
+
+    blockers = table_region_provenance.inventory_integrity_errors(
+        inventory, doc_id, location)
+    if blockers:
+        return blockers
+
+    text = _registered_revision_text(case_id, doc_id)
+    current_pages = None
+    if text is not None:
+        try:
+            current_pages = policy_completeness.split_pages(text)
+        except Exception:  # noqa: BLE001
+            current_pages = None
+    segment_receipt = segment_derivation_receipt_for(case_id, doc_id)
+    blockers = table_region_provenance.inventory_currency_errors(
+        inventory,
+        current_pdf_sha256=registered_source_pdf_sha256(
+            case_id, _table_region_pdf_owner(case_id, doc_id)),
+        current_revision_sha256=(revision_entry_for(case_id, doc_id) or {}).get(
+            "current_revision_sha256"),
+        current_pages=current_pages,
+        segment_receipt_id=(_segment_receipt_digest(segment_receipt)
+                            if segment_receipt else None),
+        location=location,
+    )
+    if blockers:
+        return blockers
+
+    detected = inventory.get("candidates") or []
+    if not detected:
+        # The one case where no reference_table is owed -- and only because the
+        # DAO looked and found nothing, which is a scanned result, not an
+        # absent one.
+        return []
+
+    if tables is None:
+        role = policy_roles.declared_role(next(
+            (d for d in (read_contract_data(
+                case_id, "document_manifest.json") or {}).get("documents", [])
+             if d.get("document_id") == doc_id), {}) or {})
+        pages = sorted({candidate.get("page") for candidate in detected})
+        extra = ""
+        if role in ("clause_segment", "standalone_policy"):
+            # A clause document that turns out to contain tables is not exempt
+            # by virtue of its role -- the role has to change to match what the
+            # document actually is.
+            extra = (f" This document declares policy_processing_role "
+                     f"{role!r}, which owes no reference_table; a "
+                     f"{role!r} containing tables must be redeclared "
+                     "'mixed_clause_and_table' and extract them.")
+        return [
+            f"{doc_id}: the DAO's scan found {len(detected)} table(s) on "
+            f"logical page(s) {pages}, but no reference_table_{doc_id}.json "
+            "extracts any of them -- a document with detected tables and no "
+            "extraction is unverified, not table-free." + extra
+        ]
+
     # Candidate coverage is a FINALIZATION question, not a write-time one: a
     # document is built up one table at a time, so demanding every candidate be
     # extracted on the first write would make an incremental extraction
@@ -5141,12 +5333,22 @@ def _table_region_binding_blockers(case_id: str, doc_id: str, tables: dict,
         # Only meaningful once the cited tables themselves verify: reporting
         # "another candidate is unaccounted for" on top of a broken table would
         # bury the finding that matters.
+        inventory = table_candidate_inventory_for(case_id, doc_id)
+        location = f"reference_table_{doc_id}.json"
+        # The inventory's own integrity FIRST. Coverage reads the candidate
+        # list to decide what still needs a disposition, so an edited list
+        # would let coverage confirm the very omission it exists to detect.
+        if inventory is not None:
+            integrity = table_region_provenance.inventory_integrity_errors(
+                inventory, doc_id, location)
+            if integrity:
+                return integrity
         blockers.extend(table_region_provenance.candidate_coverage_errors(
-            table_candidate_inventory_for(case_id, doc_id),
+            inventory,
             receipts,
             {receipt.get("receipt_id") for receipt in fresh},
             _table_candidate_human_reviews(case_id, doc_id),
-            f"reference_table_{doc_id}.json",
+            location,
         ))
     return blockers
 
@@ -5192,6 +5394,206 @@ def _segment_receipt_digest(receipt: dict) -> str:
              ).encode("utf-8")).hexdigest()
 
 
+class _TableScanRefused(Exception):
+    """The document cannot be scanned; the message is the caller-facing reason.
+
+    Raised rather than returned so a partially-prepared scan can never be
+    mistaken for a completed one: there is no value to accidentally treat as
+    success.
+    """
+
+
+def _prepare_table_scan(case_id: str, doc_id: str, profile: str | None):
+    """Everything both `scan-table-candidates` and `register-table-region`
+    must establish before a single table candidate may be believed.
+
+    Extracted so the two commands cannot drift: a scan issued by one and a
+    receipt issued by the other have to rest on the SAME verified source
+    identity, or a receipt could be current against bytes its own scan never
+    saw. Raises `_TableScanRefused` on any failure -- the whole point is that
+    an unverifiable source produces no scan at all, never a partial one.
+
+    Returns a dict with the verified source identity, the registered pages, the
+    logical->physical map, the detected candidates and the detector identity.
+    """
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        raise _TableScanRefused(
+            "document_manifest.json does not exist -- no registered source "
+            "can be resolved, so no PDF may be opened")
+    entry = next((d for d in manifest.get("documents", [])
+                  if d.get("document_id") == doc_id), None)
+    if entry is None:
+        raise _TableScanRefused(
+            f"{doc_id} is not registered in document_manifest.json")
+
+    method = entry.get("extraction_method")
+    if method not in table_region_provenance.VERIFIABLE_EXTRACTION_METHODS:
+        raise _TableScanRefused(
+            f"extraction_method {method!r} has no deterministic text layer to "
+            "scan for tables. Establishing what tables an image-only page "
+            "contains means running OCR, which UID verification may not do, so "
+            "no scan can be issued and the document cannot finalize. This is a "
+            "stated P0-8 limitation, not a state to work around -- resolve it "
+            "by human review.")
+
+    pdf_owner = _table_region_pdf_owner(case_id, doc_id)
+    pdf_path = _raw_source_path(case_id, pdf_owner)
+    if pdf_path is None:
+        raise _TableScanRefused(
+            f"{pdf_owner} has no readable registered raw file -- there is no "
+            "immutable source to derive a region from")
+    actual_pdf_digest = registered_source_pdf_sha256(case_id, pdf_owner)
+    if actual_pdf_digest is None:
+        raise _TableScanRefused(f"{pdf_owner}'s raw source could not be hashed")
+    recorded_digest = next(
+        (d.get("source_pdf_sha256") for d in manifest.get("documents", [])
+         if d.get("document_id") == pdf_owner), None)
+    if recorded_digest and recorded_digest != actual_pdf_digest:
+        raise _TableScanRefused(
+            f"{pdf_owner} records source_pdf_sha256 {recorded_digest!r} but "
+            f"the registered file now hashes to {actual_pdf_digest!r} -- the "
+            "raw source changed; a region derived from it cannot be trusted")
+
+    revision_sha = (revision_entry_for(case_id, doc_id) or {}).get(
+        "current_revision_sha256")
+    if not revision_sha:
+        raise _TableScanRefused(
+            f"{doc_id} has no registered source-text revision -- a table scan "
+            "must be bound to the exact processed bytes its offsets index "
+            "into, or a later rewrite would silently inherit this "
+            "derivation's verification.")
+    text = _registered_revision_text(case_id, doc_id)
+    if text is None:
+        raise _TableScanRefused(
+            f"{doc_id}'s registered revision text could not be read")
+    try:
+        pages = policy_completeness.split_pages(text)
+    except Exception as exc:  # noqa: BLE001
+        raise _TableScanRefused(
+            f"{doc_id}'s registered source text is unusable: {exc}") from exc
+    if not pages:
+        raise _TableScanRefused(
+            f"{doc_id}'s registered source text has no pages to scan")
+
+    # Which physical pages this document actually OWNS. For a segment that is
+    # the P0-6 page map, so a segment's scan covers the parent's pages it owns
+    # and no others -- scanning the whole parent would report its siblings'
+    # tables as this document's unhandled candidates.
+    physical_by_logical = {}
+    unmapped = []
+    for logical in sorted(pages):
+        physical = _physical_page_for(case_id, doc_id, logical)
+        if physical is None:
+            unmapped.append(logical)
+            continue
+        physical_by_logical[logical] = physical
+    if unmapped:
+        raise _TableScanRefused(
+            f"logical page(s) {unmapped} of {doc_id} have no physical page "
+            "mapping, so they cannot be scanned -- and an unscanned page is "
+            "not a page without a table. For a segment this mapping comes from "
+            "the P0-6 derivation receipt, which must be registered first")
+
+    profile = profile or table_region_provenance.DEFAULT_DETECTOR_PROFILE
+    candidates, detector, detect_error = _detect_table_candidates(
+        pdf_path, sorted(physical_by_logical.values()), profile)
+    if detect_error:
+        raise _TableScanRefused(detect_error)
+
+    logical_by_physical = {physical: logical
+                           for logical, physical in physical_by_logical.items()}
+    for candidate in candidates:
+        candidate["logical_page"] = logical_by_physical.get(
+            candidate["physical_page"])
+
+    segment_receipt = segment_derivation_receipt_for(case_id, doc_id)
+    return {
+        "manifest": manifest,
+        "entry": entry,
+        "pdf_owner": pdf_owner,
+        "pdf_path": pdf_path,
+        "pdf_digest": actual_pdf_digest,
+        "revision_sha": revision_sha,
+        "pages": pages,
+        "physical_by_logical": physical_by_logical,
+        "candidates": candidates,
+        "detector": detector,
+        "segment_receipt_id": (
+            _segment_receipt_digest(segment_receipt) if segment_receipt
+            else None),
+    }
+
+
+def _scan_inventory_from(case_id, doc_id, prepared):
+    """Build the sealed inventory from a prepared scan."""
+    return _build_candidate_inventory(
+        case_id, doc_id, prepared["candidates"], prepared["detector"],
+        prepared["pdf_digest"], prepared["revision_sha"],
+        scanned_logical_pages=sorted(prepared["physical_by_logical"]),
+        pdf_owner=prepared["pdf_owner"],
+        segment_receipt_id=prepared["segment_receipt_id"],
+    )
+
+
+def cmd_scan_table_candidates(args):
+    """Record what tables the DAO's own detector finds in a document.
+
+    Separated from `register-table-region` deliberately. When the inventory was
+    a side effect of registration, a document nobody registered a table for had
+    NO scan -- and the finalization gate then read the absent scan as "nothing
+    to check", so the way to make a table invisible was simply never to mention
+    it. The scan has to be an obligation the document carries, independent of
+    whether anybody chose to extract anything.
+
+    This is also why finalization does not silently run the detector itself:
+    the gate is a pure verification that a current scan exists, so it cannot
+    mutate state, and refusing tells the operator that a real step is missing
+    rather than quietly performing it.
+    """
+    case_id, doc_id = args.case_id, args.doc_id
+    case_directory = case_dir(case_id)
+
+    blockers = dao_transaction.pending_journal_errors(case_directory)
+    if blockers:
+        for blocker in blockers:
+            print(f"BLOCKED: {blocker}")
+        return 1
+
+    try:
+        prepared = _prepare_table_scan(case_id, doc_id, args.detector_profile)
+    except _TableScanRefused as refusal:
+        print(f"BLOCKED: {refusal}")
+        return 1
+
+    inventory = _scan_inventory_from(case_id, doc_id, prepared)
+    existing = table_candidate_inventory_for(case_id, doc_id)
+    if existing is not None and existing.get("scan_id") == inventory["scan_id"]:
+        # Identical bytes, identical detector, identical findings. Re-scanning
+        # must not cost a downstream rerun.
+        print(f"PASS: {doc_id} table candidate scan is unchanged (no-op) -- "
+              f"{len(inventory['candidates'])} candidate(s) across "
+              f"{len(inventory['scanned_logical_pages'])} page(s), scan "
+              f"{inventory['scan_id'][:16]}")
+        return 0
+
+    rc = _commit_table_region(case_id, doc_id, None, inventory,
+                              args.held_by, args.run_id)
+    if rc == 0:
+        print(f"PASS: {doc_id} scanned -- {len(inventory['candidates'])} table "
+              f"candidate(s) across {len(inventory['scanned_logical_pages'])} "
+              f"page(s), scan {inventory['scan_id'][:16]}")
+        for candidate in inventory["candidates"]:
+            print(f"  {candidate['candidate_id'][:20]} logical page "
+                  f"{candidate['page']}: {candidate['row_count']} row band(s), "
+                  f"header {candidate['header_preview']!r}")
+        if not inventory["candidates"]:
+            print("  no tables detected -- recorded as a scanned result, which "
+                  "is what lets finalization tell 'no tables' from 'never "
+                  "looked'")
+    return rc
+
+
 def cmd_register_table_region(args):
     """Derive a table's authoritative region and issue a table_region_v1
     receipt.
@@ -5222,65 +5624,24 @@ def cmd_register_table_region(args):
             print(f"BLOCKED: {blocker}")
         return 1
 
-    manifest = read_contract_data(case_id, "document_manifest.json")
-    if manifest is None:
-        print("BLOCKED: document_manifest.json does not exist -- no registered "
-              "source can be resolved, so no PDF may be opened")
-        return 1
-    entry = next((d for d in manifest.get("documents", [])
-                  if d.get("document_id") == doc_id), None)
-    if entry is None:
-        print(f"BLOCKED: {doc_id} is not registered in document_manifest.json")
-        return 1
-
-    method = entry.get("extraction_method")
-    if method not in table_region_provenance.VERIFIABLE_EXTRACTION_METHODS:
-        print(f"BLOCKED: extraction_method {method!r} has no deterministic "
-              "text layer to derive a table region from. Confirming a table's "
-              "extent on an image-only page means running OCR, which UID "
-              "verification may not do, so no receipt can be issued and the "
-              "table cannot finalize. This is a stated P0-8 limitation, not a "
-              "state to work around -- resolve it by human review.")
-        return 1
-
-    # --- 1. the source, verified by reading it -----------------------------
-    pdf_owner = _table_region_pdf_owner(case_id, doc_id)
-    pdf_path = _raw_source_path(case_id, pdf_owner)
-    if pdf_path is None:
-        print(f"BLOCKED: {pdf_owner} has no readable registered raw file -- "
-              "there is no immutable source to derive a region from")
-        return 1
-    actual_pdf_digest = registered_source_pdf_sha256(case_id, pdf_owner)
-    if actual_pdf_digest is None:
-        print(f"BLOCKED: {pdf_owner}'s raw source could not be hashed")
-        return 1
-    recorded_digest = next(
-        (d.get("source_pdf_sha256") for d in manifest.get("documents", [])
-         if d.get("document_id") == pdf_owner), None)
-    if recorded_digest and recorded_digest != actual_pdf_digest:
-        print(f"REFUSED: {pdf_owner} records source_pdf_sha256 "
-              f"{recorded_digest!r} but the registered file now hashes to "
-              f"{actual_pdf_digest!r} -- the raw source changed; a region "
-              "derived from it cannot be trusted")
-        return 1
-
-    revision_sha = (revision_entry_for(case_id, doc_id) or {}).get(
-        "current_revision_sha256")
-    if not revision_sha:
-        print(f"BLOCKED: {doc_id} has no registered source-text revision -- a "
-              "table region must be bound to the exact processed bytes its "
-              "offsets index into, or a later rewrite would silently inherit "
-              "this derivation's verification.")
-        return 1
-    text = _registered_revision_text(case_id, doc_id)
-    if text is None:
-        print(f"BLOCKED: {doc_id}'s registered revision text could not be read")
-        return 1
+    # --- 1+2. the verified source, and a scan of the WHOLE document --------
+    # Shared with `scan-table-candidates` so a receipt and the scan that must
+    # account for it always rest on the same verified source identity.
     try:
-        pages = policy_completeness.split_pages(text)
-    except Exception as exc:  # noqa: BLE001
-        print(f"BLOCKED: {doc_id}'s registered source text is unusable: {exc}")
+        prepared = _prepare_table_scan(case_id, doc_id, args.detector_profile)
+    except _TableScanRefused as refusal:
+        print(f"BLOCKED: {refusal}")
         return 1
+
+    pages = prepared["pages"]
+    physical_by_logical = prepared["physical_by_logical"]
+    candidates = prepared["candidates"]
+    detector = prepared["detector"]
+    actual_pdf_digest = prepared["pdf_digest"]
+    revision_sha = prepared["revision_sha"]
+    profile = detector["profile"]
+    physical_for = (lambda logical: _physical_page_for(
+        case_id, doc_id, logical))
 
     # `--page` is a SEED, not the scope. The whole document's logical pages are
     # available to the DAO, and the table's real extent is derived below by
@@ -5295,37 +5656,6 @@ def cmd_register_table_region(args):
         print(f"BLOCKED: seed page(s) {missing} are not in {doc_id}'s "
               "registered source-text revision")
         return 1
-
-    physical_for = (lambda logical: _physical_page_for(
-        case_id, doc_id, logical))
-    all_logical = sorted(pages)
-    physical_by_logical = {}
-    for logical in all_logical:
-        physical = physical_for(logical)
-        if physical is None:
-            if logical in seed_pages:
-                print(f"BLOCKED: logical page {logical} has no physical page "
-                      "mapping -- for a segment this comes from the P0-6 "
-                      "derivation receipt, which must be registered first")
-                return 1
-            continue
-        physical_by_logical[logical] = physical
-
-    # --- 2. scan the WHOLE document, not just the seed ---------------------
-    # The scan is what makes both the continuation search and the candidate
-    # inventory possible: neither can be answered from pages the caller chose.
-    profile = args.detector_profile or \
-        table_region_provenance.DEFAULT_DETECTOR_PROFILE
-    candidates, detector, detect_error = _detect_table_candidates(
-        pdf_path, sorted(physical_by_logical.values()), profile)
-    if detect_error:
-        print(f"BLOCKED: {detect_error}")
-        return 1
-    logical_by_physical = {physical: logical
-                           for logical, physical in physical_by_logical.items()}
-    for candidate in candidates:
-        candidate["logical_page"] = logical_by_physical.get(
-            candidate["physical_page"])
 
     # --- 3. the selector picks ONE starting candidate ----------------------
     anchor = args.anchor
@@ -5391,8 +5721,7 @@ def cmd_register_table_region(args):
         return 1
 
     # --- 5. build the receipt; an identical one is a no-op -----------------
-    inventory = _build_candidate_inventory(
-        case_id, doc_id, candidates, detector, actual_pdf_digest, revision_sha)
+    inventory = _scan_inventory_from(case_id, doc_id, prepared)
 
     def _candidate_id_of(candidate):
         return table_region_provenance.compute_candidate_id(
@@ -5414,7 +5743,6 @@ def cmd_register_table_region(args):
         _candidate_id_of(by_page[logical]) for logical in sorted(by_page))
     candidate_id = _candidate_id_of(by_page[min(by_page)])
 
-    segment_receipt = segment_derivation_receipt_for(case_id, doc_id)
     receipt = table_region_provenance.build_receipt(
         document_id=doc_id,
         case_id=case_id,
@@ -5426,9 +5754,7 @@ def cmd_register_table_region(args):
         extent=extent,
         regions=regions,
         selector={"anchor": anchor, "logical_pages": logical_pages},
-        segment_derivation_receipt_id=(
-            _segment_receipt_digest(segment_receipt)
-            if segment_receipt else None),
+        segment_derivation_receipt_id=prepared["segment_receipt_id"],
         issued_at=now_iso(),
         issued_by=args.held_by,
         run_id=args.run_id,
@@ -5437,10 +5763,9 @@ def cmd_register_table_region(args):
     existing = next(
         (r for r in table_region_receipts_for(case_id, doc_id)
          if r.get("receipt_id") == receipt.get("receipt_id")), None)
-    if existing is not None and table_candidate_inventory_for(
-            case_id, doc_id) == inventory | {
-                "scanned_at": (table_candidate_inventory_for(case_id, doc_id)
-                               or {}).get("scanned_at")}:
+    existing_inventory = table_candidate_inventory_for(case_id, doc_id) or {}
+    if existing is not None and existing_inventory.get("scan_id") == \
+            inventory["scan_id"]:
         # Same PDF bytes, same revision, same detector output, same scan.
         # Nothing changed, so nothing downstream may be invalidated --
         # re-running a registration must not cost a rerun.
@@ -5455,8 +5780,13 @@ def cmd_register_table_region(args):
 
 
 def _commit_table_region(case_id, doc_id, receipt, inventory, held_by, run_id):
-    """Write the receipt and the downstream invalidation as one fail-closed
-    transaction.
+    """Write the receipt and/or scan, plus the downstream invalidation, as one
+    fail-closed transaction.
+
+    `receipt` is None for a scan-only commit (`scan-table-candidates`): the
+    inventory changes what finalization must account for, so it invalidates
+    downstream work exactly as a receipt does, and goes through the identical
+    locked, journalled, validate-before-write path rather than a lighter one.
 
     Locks are taken in dao_transaction.LOCK_ORDER and asserted rather than
     assumed. The prospective index is schema-validated BEFORE anything is
@@ -5476,9 +5806,11 @@ def _commit_table_region(case_id, doc_id, receipt, inventory, held_by, run_id):
 
     held: list[Path] = []
     try:
+        action = ("register table region" if receipt is not None
+                  else "scan table candidates")
         for target, purpose in (
-            (state_target, f"register table region for {doc_id}"),
-            (index_target, f"issue table region receipt for {doc_id}"),
+            (state_target, f"{action} for {doc_id}"),
+            (index_target, f"{action} for {doc_id}"),
         ):
             existing_lock = acquire_lock_blocking(
                 target, held_by, run_id or "unknown", purpose)
@@ -5492,26 +5824,32 @@ def _commit_table_region(case_id, doc_id, receipt, inventory, held_by, run_id):
             held.append(target)
 
         # First guaranteed-fresh reads: everything above ran before the locks.
+        # The inventory carries the same two digests as a receipt, so a
+        # scan-only commit is checked against exactly the same moving world.
+        derived = receipt if receipt is not None else inventory
         fresh_revision = (revision_entry_for(case_id, doc_id) or {}).get(
             "current_revision_sha256")
-        if fresh_revision != receipt.get("source_text_revision_sha256"):
+        if fresh_revision != derived.get("source_text_revision_sha256"):
             print(f"FAIL: {doc_id} source-text revision changed while its "
-                  "table region was being derived; rerun from fresh state")
+                  "table regions were being derived; rerun from fresh state")
             return 1
         fresh_pdf = registered_source_pdf_sha256(
             case_id, _table_region_pdf_owner(case_id, doc_id))
-        if fresh_pdf != receipt.get("source_pdf_sha256"):
+        if fresh_pdf != derived.get("source_pdf_sha256"):
             print(f"FAIL: {doc_id}'s raw source bytes changed while its table "
-                  "region was being derived; rerun from fresh state")
+                  "regions were being derived; rerun from fresh state")
             return 1
 
         index = load_table_region_index(case_id)
-        tables = [t for t in index.get("tables", [])
-                  if t.get("receipt_id") != receipt.get("receipt_id")]
-        # Superseded receipts are KEPT: they are the audit record of what was
-        # once derived, and P0-8's follow-up scopes currency checking to the
-        # receipts a contract actually cites, so history no longer blocks.
-        tables.append(receipt)
+        tables = list(index.get("tables", []))
+        if receipt is not None:
+            tables = [t for t in tables
+                      if t.get("receipt_id") != receipt.get("receipt_id")]
+            # Superseded receipts are KEPT: they are the audit record of what
+            # was once derived, and P0-8's follow-up scopes currency checking
+            # to the receipts a contract actually cites, so history no longer
+            # blocks.
+            tables.append(receipt)
         tables.sort(key=lambda t: (t.get("document_id") or "",
                                    t.get("receipt_id") or ""))
         index["tables"] = tables
@@ -5539,22 +5877,27 @@ def _commit_table_region(case_id, doc_id, receipt, inventory, held_by, run_id):
 
         # Step 7: journal, then invalidate. Nothing irreversible yet.
         dao_transaction.write_journal(case_directory, {
-            "operation": "register_table_region",
+            "operation": ("register_table_region" if receipt is not None
+                          else "scan_table_candidates"),
             "case_id": case_id,
             "document_id": doc_id,
-            "receipt_id": receipt.get("receipt_id"),
+            "receipt_id": (receipt.get("receipt_id") if receipt is not None
+                           else inventory.get("scan_id")),
             "status": "invalidating",
             "started_at": now_iso(),
         })
         try:
             _invalidate_policy_layer(
                 case_id,
-                f"table region re-derived for {doc_id}: a reference table's "
-                "source regions must be re-bound to the new receipt",
+                (f"table region re-derived for {doc_id}: a reference table's "
+                 "source regions must be re-bound to the new receipt")
+                if receipt is not None else
+                (f"table candidates re-scanned for {doc_id}: which tables the "
+                 "document must account for has changed"),
                 held_by, run_id, lock_already_held=True)
         except CascadeFailed as exc:
             dao_transaction.clear_journal(case_directory)
-            print(f"FAIL: {doc_id} table region NOT registered -- {exc}")
+            print(f"FAIL: {doc_id} table region index NOT updated -- {exc}")
             print("  the existing receipt index is unchanged")
             return 1
 
@@ -5580,13 +5923,15 @@ def _commit_table_region(case_id, doc_id, receipt, inventory, held_by, run_id):
         try:
             dao_transaction.clear_journal(case_directory)
         except Exception as exc:  # noqa: BLE001
-            print("FAIL: the table region receipt was committed and downstream "
+            print("FAIL: the table region index was committed and downstream "
                   "was invalidated, but the transaction journal could not be "
                   f"cleared: {exc}")
             print("  the pending journal intentionally blocks further work; "
                   "do not delete it without inspecting the index")
             return 1
 
+        if receipt is None:
+            return 0  # scan-only; the caller reports the candidate list
         data_rows = [r for r in receipt["regions"]
                      if r["kind"] == table_region_provenance.DATA_ROW_KIND]
         print(f"PASS: issued {table_region_provenance.RECEIPT_SCHEME} receipt "
@@ -5991,6 +6336,25 @@ def main():
     p.add_argument("--held-by", dest="held_by", required=True)
     p.add_argument("--run-id", dest="run_id", required=True)
     p.set_defaults(fn=cmd_register_table_region)
+
+    p = sub.add_parser(
+        "scan-table-candidates",
+        help="record every table the DAO's detector finds in a document -- "
+             "the obligation a policy document carries whether or not anyone "
+             "extracts a table from it")
+    p.add_argument("case_id")
+    p.add_argument("--doc-id", dest="doc_id", required=True,
+                   help="the document to scan; every logical page it owns is "
+                        "examined, and the scanned page list is recorded so an "
+                        "unscanned page can never read as a table-free one")
+    p.add_argument("--detector-profile", dest="detector_profile", default=None,
+                   help=f"detection profile (default: "
+                        f"{table_region_provenance.DEFAULT_DETECTOR_PROFILE}). "
+                        "Enters the scan fingerprint, so reconfiguring it "
+                        "makes existing scans stale")
+    p.add_argument("--held-by", dest="held_by", required=True)
+    p.add_argument("--run-id", dest="run_id", required=True)
+    p.set_defaults(fn=cmd_scan_table_candidates)
 
     p = sub.add_parser("read-table-region-index")
     p.add_argument("case_id")

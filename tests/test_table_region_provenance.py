@@ -104,6 +104,15 @@ def table_pdf():
         for offset, line in enumerate(spec.get("leading_prose") or []):
             page.insert_text((72, 78 + offset * 18), line, fontsize=10)
             top = 78 + offset * 18 + 40
+        # `fills_page` renders a table that RUNS OUT OF PAGE -- what a real
+        # continuation looks like, and what the DAO requires as positive
+        # evidence before it will join two pages into one table. A short table
+        # sitting alone mid-page is NOT a continuation just because the next
+        # page repeats its header, which is the whole point of the
+        # same-header/independent-tables attack.
+        if spec.get("fills_page"):
+            top = max(top, page.rect.height - 60
+                      - 25 * len(list(spec["rows"])))
         bottom = _draw_table(page, top=top, rows=list(spec["rows"]))
         if spec.get("second_table_rows"):
             bottom = _draw_table(page, top=bottom + 40,
@@ -647,15 +656,27 @@ def test_body_text_cannot_be_excused_as_a_note(
 
 @pytest.fixture
 def two_page_case(case):
+    """A GENUINE two-page continuation, laid out the way a real one is.
+
+    Page 1's table runs out of page (`fills_page`) and page 2's is introduced
+    by an explicit continuation heading. Both matter: after P0-8 follow-up 2 a
+    matching grid and a repeated header are NECESSARY but not SUFFICIENT to
+    join two pages, because two independent appendices printed identically look
+    exactly the same. This fixture supplies the positive evidence a real
+    continuation carries; `test_unrelated_same_header_tables_are_not_merged*`
+    is the same shape WITHOUT it, and must refuse.
+    """
     def _build():
         return case(pages=[
             {"rows": [("Grade", "Rate"), ("A", "10"), ("B", "20")],
-             "title": "Disability Table"},
-            # Same title on the continuation page, as a real Korean policy
-            # appendix repeats it -- which is also what makes page 2's header
-            # band a `repeated_header` rather than a fresh table.
+             "title": "Disability Table", "fills_page": True},
+            # A real appendix repeats its title and marks the continuation --
+            # in a Korean policy this is "(계속)"; the fixture uses the ASCII
+            # form because pymupdf's built-in font cannot render Hangul (the
+            # Korean pattern is covered directly in
+            # test_table_region_followup's continuation-marker tests).
             {"rows": [("Grade", "Rate"), ("C", "30"), ("D", "40")],
-             "title": "Disability Table"},
+             "title": "Disability Table (cont.)"},
         ])
     return _build
 
