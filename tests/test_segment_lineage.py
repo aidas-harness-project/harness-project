@@ -279,7 +279,9 @@ def test_dao_manifest_write_accepts_a_dao_issued_page_map(
     parent = _physical()
     parent["source_total_pages"] = 10
     # Register the parent and the segment with NO page_map: the DAO issues it.
-    seg_text = "<<<PAGE page=1>>>\na\n<<<PAGE page=2>>>\nb\n"
+    seg_text = (
+        "<<<PAGE page=1>>>\nClause 1 body\n1 / 8\n\n"
+        "<<<PAGE page=2>>>\nClause 2 body\n2 / 8\n\n")
     _seed_processed(isolated_dao, "DOC_004", seg_text)
     seg = _segment(ranges=({"start": 1, "end": 2},), logical=(1, 2))
     seg["derived_text_sha256"] = hashlib.sha256(

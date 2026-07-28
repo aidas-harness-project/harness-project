@@ -95,7 +95,7 @@ Subcommands:
          mapping is recorded only where the parent's own pages confirm it.
          --page-offset is a search hint, never a proof, and a submitted
          --page-map-file is compared, never stored. Issues a
-         segment_page_map_v1 receipt into _segment_derivation_index.json and
+         segment_page_map_v2 receipt into _segment_derivation_index.json and
          projects it into the manifest as one fail-closed transaction.)
     read-segment-derivation-index CASE_ID
 """
@@ -187,6 +187,23 @@ def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
     tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _restore_file_preimage(path: Path, preimage: bytes | None) -> None:
+    """Restore one transaction participant exactly, under its existing lock.
+
+    `None` means the file did not exist before the transition.  This helper is
+    only used while rolling back a caught write failure; a hard process crash
+    is represented by the durable pending journal instead.
+    """
+    if preimage is None:
+        if path.exists():
+            path.unlink()
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".rollback{os.getpid()}")
+    tmp.write_bytes(preimage)
     os.replace(tmp, path)
 
 
@@ -3311,6 +3328,14 @@ def _finalize_stage(case_id, run_id, stage, held_by):
     failure (dependency unmet, snapshot failure, lock contention, schema
     failure) -- in every None case the stage is NOT passed.
     """
+    journal_blockers = dao_transaction.pending_journal_errors(
+        case_dir(case_id))
+    if journal_blockers:
+        print(f"REFUSED: cannot finalize {stage!r} while a DAO transaction "
+              "is incomplete:")
+        for blocker in journal_blockers:
+            print(f"  - {blocker}")
+        return None
     target = run_state_path(case_id)
     existing_lock = acquire_lock_blocking(
         target, held_by, run_id or "unknown", f"finalize stage: {stage}")
@@ -3394,6 +3419,22 @@ def _finalize_stage(case_id, run_id, stage, held_by):
                 return None
         elif stage in stage_dependencies.dependents_of(
                 "policy_clause_processing"):
+            # P0-6 follow-up. A recorded policy pass can predate an out-of-band
+            # parent-source change or a corrupted derivation receipt. Raw input
+            # is immutable by rule, but a live finalization gate must still
+            # refuse the representable bad state instead of relying on a
+            # cascade that no DAO operation had a chance to trigger.
+            downstream_manifest = read_contract_data(
+                case_id, "document_manifest.json")
+            if downstream_manifest is not None:
+                derivation_blockers = _segment_derivation_blockers(
+                    case_id, downstream_manifest)
+                if derivation_blockers:
+                    print(f"REFUSED: cannot finalize {stage!r} -- segment "
+                          "derivation provenance is no longer current:")
+                    for blocker in derivation_blockers:
+                        print(f"  - {blocker}")
+                    return None
             # P0-3. The dependency check above only asks whether
             # policy_clause_processing is RECORDED passed; that record can
             # predate canonical verification entirely. A stage built on top of
@@ -3837,12 +3878,14 @@ def _raw_source_path(case_id: str, doc_id: str):
 
 
 def _extract_parent_pages(pdf_path: Path, physical_pages):
-    """{physical_page: extracted_text} read by the DAO from the parent PDF.
+    """Structured parent pages read directly by the DAO.
 
     The DAO does this itself rather than accepting an extraction someone else
     performed: the whole point of the receipt is that the digests and the
     printed page numbers come from bytes this process read out of the
-    registered file. Returns `(pages, extractor, error)`.
+    registered file.  Text blocks retain coordinates so a body reference to
+    "page 12" cannot impersonate a printed header/footer page number.
+    Returns `(pages, extractor, error)`.
     """
     try:
         import fitz  # pymupdf
@@ -3855,7 +3898,9 @@ def _extract_parent_pages(pdf_path: Path, physical_pages):
         "tool": "dao.register-segment-derivation",
         "library": "pymupdf",
         "library_version": getattr(fitz, "VersionBind", None) or None,
-        "settings": "page.get_text()",
+        "settings": (
+            "page.get_text() + page.get_text('blocks'); "
+            "header_footer_blocks_v1"),
     }
     try:
         doc = fitz.open(pdf_path)
@@ -3872,7 +3917,22 @@ def _extract_parent_pages(pdf_path: Path, physical_pages):
                 # page is reported as unconfirmable rather than mapped on a
                 # digest of nothing.
                 continue
-            pages[physical] = text
+            page = doc[physical - 1]
+            blocks = []
+            for block in page.get_text("blocks"):
+                if len(block) < 5:
+                    continue
+                blocks.append({
+                    "bbox": [float(block[0]), float(block[1]),
+                             float(block[2]), float(block[3])],
+                    "text": str(block[4]),
+                })
+            pages[physical] = {
+                "text": text,
+                "width": float(page.rect.width),
+                "height": float(page.rect.height),
+                "blocks": blocks,
+            }
         return pages, extractor, None
     finally:
         doc.close()
@@ -3909,6 +3969,12 @@ def _current_segment_revision_reader(case_id):
     return _read
 
 
+def _current_segment_text_reader(case_id):
+    def _read(doc_id):
+        return _registered_revision_text(case_id, doc_id)
+    return _read
+
+
 def _segment_derivation_blockers(case_id: str, manifest: dict) -> list[str]:
     """P0-6 finalization gate: every segment's page map must still be the one
     the DAO derived from the parent PDF that is on disk right now."""
@@ -3917,11 +3983,12 @@ def _segment_derivation_blockers(case_id: str, manifest: dict) -> list[str]:
         lambda doc_id: segment_derivation_receipt_for(case_id, doc_id),
         _current_parent_digest_reader(case_id),
         _current_segment_revision_reader(case_id),
+        _current_segment_text_reader(case_id),
     )
 
 
 def cmd_register_segment_derivation(args):
-    """Issue a segment_page_map_v1 receipt and project it into the manifest.
+    """Issue a segment_page_map_v2 receipt and project it into the manifest.
 
     The ONLY writer of a segment's `page_map` (the field is sealed against
     write-contract and patch-manifest-document in
@@ -4093,6 +4160,21 @@ def cmd_register_segment_derivation(args):
               "rewrite would silently inherit this mapping's verification.")
         return 1
 
+    segment_revision_text = _registered_revision_text(case_id, doc_id)
+    verified_pages, binding_errors = segment_derivation.bind_segment_revision(
+        verified_pages, segment_revision_text or "",
+        lambda physical: (
+            (parent_pages.get(physical) or {}).get("text")))
+    if binding_errors:
+        print(f"BLOCKED: {doc_id}'s registered segment text was not derived "
+              "exactly from the verified parent pages; NOTHING was written:")
+        for error in binding_errors:
+            print(f"  - {error}")
+        print("  embedded-text segment receipts require exact page bytes "
+              "after only CRLF/LF and Unicode NFC normalization; lexical or "
+              "semantic similarity is not provenance")
+        return 1
+
     receipt = segment_derivation.build_receipt(
         segment_document_id=doc_id,
         parent_document_id=parent_id,
@@ -4155,6 +4237,8 @@ def _commit_segment_derivation(case_id, doc_id, parent_id, receipt, projection,
     state_target = run_state_path(case_id)
     manifest_target = case_directory / "document_manifest.json"
     index_target = segment_derivation_index_path(case_id)
+    index_preimage: bytes | None = None
+    manifest_preimage: bytes | None = None
 
     held: list[Path] = []
     try:
@@ -4185,6 +4269,40 @@ def _commit_segment_derivation(case_id, doc_id, parent_id, receipt, projection,
                       if d.get("document_id") == doc_id), None)
         if entry is None:
             print(f"FAIL: {doc_id} is no longer in document_manifest.json")
+            return 1
+        if entry.get("document_role") != "segment":
+            print(f"FAIL: {doc_id} is no longer a segment -- derivation "
+                  "candidate discarded before persistence")
+            return 1
+        if entry.get("source_document_id") != parent_id:
+            print(f"FAIL: {doc_id} was re-parented to "
+                  f"{entry.get('source_document_id')!r} while its receipt was "
+                  f"being derived for {parent_id!r}; rerun from fresh state")
+            return 1
+        if entry.get("derivation_method") != receipt.get("derivation_method"):
+            print(f"FAIL: {doc_id} derivation_method changed while its receipt "
+                  "was being derived; rerun from fresh state")
+            return 1
+        fresh_revision = revision_entry_for(case_id, doc_id)
+        fresh_revision_sha = (
+            fresh_revision or {}).get("current_revision_sha256")
+        if fresh_revision_sha != receipt.get(
+                "segment_source_text_revision_sha256"):
+            print(f"FAIL: {doc_id} source-text revision changed while its "
+                  "receipt was being derived; rerun from fresh state")
+            return 1
+        fresh_parent_digest = registered_source_pdf_sha256(case_id, parent_id)
+        if fresh_parent_digest != receipt.get("parent_source_pdf_sha256"):
+            print(f"FAIL: parent {parent_id} source bytes changed while the "
+                  "receipt was being derived; rerun from fresh state")
+            return 1
+        fresh_parent_path = _raw_source_path(case_id, parent_id)
+        fresh_parent_total = (
+            _parent_page_count(fresh_parent_path)
+            if fresh_parent_path is not None else None)
+        if fresh_parent_total != receipt.get("parent_source_total_pages"):
+            print(f"FAIL: parent {parent_id} page count changed while the "
+                  "receipt was being derived; rerun from fresh state")
             return 1
 
         index = load_segment_derivation_index(case_id)
@@ -4223,6 +4341,13 @@ def _commit_segment_derivation(case_id, doc_id, parent_id, receipt, projection,
                 print(f"  - {error}")
             return 1
 
+        # Preserve exact preimages for caught write failures. A hard crash can
+        # still happen between the two atomic replaces; the durable journal is
+        # what makes that intermediate state visible and blocking.
+        index_preimage = (
+            index_target.read_bytes() if index_target.exists() else None)
+        manifest_preimage = manifest_target.read_bytes()
+
         # Step 6: journal, then invalidate. Nothing irreversible yet.
         dao_transaction.write_journal(case_directory, {
             "operation": "register_segment_derivation",
@@ -4245,21 +4370,59 @@ def _commit_segment_derivation(case_id, doc_id, parent_id, receipt, projection,
             print("  the existing receipt and manifest page_map are unchanged")
             return 1
 
-        # Step 7: the receipt first, then the projection. A crash between them
-        # leaves a receipt the manifest does not yet project, which the
-        # finalization gate reports as a mismatch -- visible and blocking,
-        # never a silent pass.
-        atomic_write_json(index_target, index)
-        atomic_write_json(manifest_target, manifest)
-        dao_transaction.clear_journal(case_directory)
+        # Step 7: the receipt first, then the projection. A caught second-write
+        # failure rolls the receipt back to its exact preimage. A hard crash
+        # between the replaces leaves the journal pending; every subsequent
+        # registration/finalization is blocked rather than treating the
+        # partial state as committed.
+        try:
+            atomic_write_json(index_target, index)
+            atomic_write_json(manifest_target, manifest)
+        except Exception as exc:  # noqa: BLE001
+            rollback_error = None
+            try:
+                # Restore both participants regardless of which call raised.
+                # A wrapper may raise *after* os.replace completed, so a local
+                # "write returned" flag cannot establish whether the file
+                # changed.
+                _restore_file_preimage(index_target, index_preimage)
+                _restore_file_preimage(
+                    manifest_target, manifest_preimage)
+                dao_transaction.clear_journal(case_directory)
+            except Exception as restore_exc:  # noqa: BLE001
+                rollback_error = restore_exc
+            print(f"FAIL: segment derivation persistence failed: {exc}")
+            if rollback_error is None:
+                print("  receipt and manifest were restored to their exact "
+                      "pre-transaction bytes; downstream remains "
+                      "conservatively invalidated")
+            else:
+                print("  ROLLBACK INCOMPLETE: the transaction journal remains "
+                      f"pending and blocks further work: {rollback_error}")
+            return 1
+
+        try:
+            dao_transaction.clear_journal(case_directory)
+        except Exception as exc:  # noqa: BLE001
+            # Both new documents are consistent and downstream is invalidated,
+            # but the uncleared journal must force explicit operator recovery.
+            print("FAIL: derivation files were committed and downstream was "
+                  "invalidated, but the transaction journal could not be "
+                  f"cleared: {exc}")
+            print("  the pending journal intentionally blocks further work; "
+                  "do not delete it without inspecting both files")
+            return 1
 
         print(f"PASS: issued {segment_derivation.RECEIPT_SCHEME} receipt for "
               f"{doc_id} -- {len(projection)} pages verified against parent "
               f"{parent_id} ({receipt['parent_source_pdf_sha256'][:12]})")
         for page in receipt["pages"]:
+            evidence = page["logical_page_evidence"]
+            quote = (evidence.get("quote")
+                     if isinstance(evidence, dict) else evidence)
             print(f"  logical {page['logical_page']} -> physical "
                   f"{page['source_physical_page']} "
-                  f"(printed {page['logical_page_evidence']!r})")
+                  f"(printed {quote!r})")
         print(f"  bound to segment revision "
               f"{receipt['segment_source_text_revision_sha256'][:12]}")
         return 0
@@ -4283,31 +4446,79 @@ def _parse_logical_pages(spec: str) -> list[int]:
     return sorted(pages)
 
 
-# Korean policy books print the page as 'N / TOTAL', '- N -', or 'page N'. A
-# BARE number is deliberately not accepted: it appears constantly inside body
-# text (amounts, article numbers, rates), and a coincidence is exactly what this
-# confirmation exists to rule out. Kept in step with
-# extract_embedded_segment.find_printed_logical_page -- the DAO does its own
-# reading rather than importing that tool, because the tool is an agent-run
-# helper and this is the verification of its output.
-def _printed_page_patterns(logical_page: int):
-    n = re.escape(str(logical_page))
+# Korean policy books print the page as 'N / TOTAL', '- N -', or 'page N'.
+# Evidence is accepted only from positioned text blocks in a narrow header or
+# footer band. Whole-page regex search is intentionally forbidden: a body
+# sentence saying "see page 12" is not page identity.
+_HEADER_MAX_RATIO = 0.07
+_FOOTER_MIN_RATIO = 0.80
+_PAGE_EVIDENCE_PROFILE = "header_footer_blocks_v1"
+
+
+def _printed_page_patterns():
     return [
-        re.compile(rf"(?<!\d){n}\s*/\s*\d+(?!\d)"),
-        re.compile(rf"-\s*{n}\s*-"),
-        re.compile(rf"(?:page|페이지|쪽)\s*{n}(?!\d)", re.IGNORECASE),
+        re.compile(r"(?<!\d)(\d+)\s*/\s*\d+(?!\d)"),
+        re.compile(r"-\s*(\d+)\s*-"),
+        re.compile(
+            r"(?:page|페이지|쪽)\s*(\d+)(?!\d)", re.IGNORECASE),
     ]
 
 
-def _find_printed_logical_page(page_text: str, logical_page: int):
-    """The verbatim printed marker confirming `logical_page` on this page, or
-    None when it cannot be confirmed. None blocks the registration; it is never
-    a value to work around."""
-    for pattern in _printed_page_patterns(logical_page):
-        match = pattern.search(page_text)
-        if match:
-            return match.group(0).strip()
-    return None
+def _find_printed_logical_page(page_record: dict, logical_page: int):
+    """Position-bound page-number evidence, or None.
+
+    Conflicting header/footer numbers also return None.  A receipt must identify
+    one page, not select whichever of several numbers agrees with the caller's
+    candidate offset.
+    """
+    if not isinstance(page_record, dict):
+        return None
+    width = page_record.get("width")
+    height = page_record.get("height")
+    blocks = page_record.get("blocks") or []
+    if not isinstance(width, (int, float)) or not isinstance(
+            height, (int, float)) or width <= 0 or height <= 0:
+        return None
+
+    candidates = []
+    for block in blocks:
+        bbox = block.get("bbox") or []
+        if len(bbox) != 4:
+            continue
+        y_center = (float(bbox[1]) + float(bbox[3])) / 2
+        ratio = y_center / float(height)
+        if ratio <= _HEADER_MAX_RATIO:
+            region = "header"
+        elif ratio >= _FOOTER_MIN_RATIO:
+            region = "footer"
+        else:
+            continue
+        block_text = str(block.get("text") or "")
+        for pattern in _printed_page_patterns():
+            for match in pattern.finditer(block_text):
+                candidates.append({
+                    "logical": int(match.group(1)),
+                    "quote": match.group(0).strip(),
+                    "bbox": [float(v) for v in bbox],
+                    "region": region,
+                    "page_width": float(width),
+                    "page_height": float(height),
+                    "evidence_profile": _PAGE_EVIDENCE_PROFILE,
+                })
+
+    numbers = {candidate["logical"] for candidate in candidates}
+    if numbers != {logical_page}:
+        return None
+    matching = [candidate for candidate in candidates
+                if candidate["logical"] == logical_page]
+    if not matching:
+        return None
+    matching.sort(key=lambda item: (
+        0 if item["region"] == "footer" else 1,
+        item["bbox"][1], item["bbox"][0], item["quote"]))
+    evidence = dict(matching[0])
+    evidence.pop("logical")
+    return evidence
 
 
 def cmd_read_segment_derivation_index(args):

@@ -93,7 +93,10 @@ def segment_pdf():
                unnumbered=(), front_matter_body="표지"):
         """Physical page = logical + offset. The first `offset` physical pages
         are unnumbered front matter, exactly like CASE_030's real policy PDF."""
-        body_for = body_for or (lambda lp: f"제{lp}조 본문 내용")
+        # ASCII keeps the generated PDF's embedded-text layer deterministic
+        # with PyMuPDF's built-in test font. Tests for Korean extraction live
+        # at the OCR/document layer; these fixtures test provenance identity.
+        body_for = body_for or (lambda lp: f"Clause {lp} body")
         doc = fitz.open()
         for _ in range(offset):
             page = doc.new_page()

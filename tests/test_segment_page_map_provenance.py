@@ -27,10 +27,13 @@ cannot be reached by any command. Writing them directly is how a test can ask
 """
 import hashlib
 import json
+import unicodedata
+from pathlib import Path
 
 import pytest
 
 import dao
+import dao_transaction
 import segment_derivation as sd
 import source_provenance
 
@@ -103,9 +106,12 @@ def _seed_manifest(isolated_dao, documents):
 
 
 def _segment_text(logical_pages, body_for=None):
-    body_for = body_for or (lambda lp: f"제{lp}조 본문 내용\n{lp} / {TOTAL_LOGICAL}")
-    return "".join(
-        f"<<<PAGE page={lp}>>>\n{body_for(lp)}\n" for lp in logical_pages)
+    body_for = body_for or (
+        lambda lp: f"Clause {lp} body\n{lp} / {TOTAL_LOGICAL}\n")
+    # Mirrors extract_embedded_segment.py exactly: complete page texts are
+    # joined with one assembly newline, which is not part of either page.
+    return "\n".join(
+        f"<<<PAGE page={lp}>>>\n{body_for(lp)}" for lp in logical_pages) + "\n"
 
 
 def _seed_segment_text(isolated_dao, make_args, doc_id, text):
@@ -183,7 +189,10 @@ def test_correct_mapping_is_derived_from_the_parent_pdf(
     assert [p["source_physical_page"] for p in receipt["pages"]] == [19, 20]
     assert [p["logical_page"] for p in receipt["pages"]] == [12, 13]
     # The evidence is the marker the DAO actually read off the page.
-    assert receipt["pages"][0]["logical_page_evidence"] == "12 / 30"
+    evidence = receipt["pages"][0]["logical_page_evidence"]
+    assert evidence["quote"] == "12 / 30"
+    assert evidence["region"] == "footer"
+    assert evidence["evidence_profile"] == "header_footer_blocks_v1"
     # Bound to the parent bytes and to the segment's registered revision.
     assert receipt["parent_source_pdf_sha256"] == \
         dao.registered_source_pdf_sha256(CASE, "DOC_001")
@@ -206,6 +215,42 @@ def test_finalization_passes_once_the_mapping_is_registered(
         held_by="document-pipeline"))
 
     assert rc == 0, "a fully derived mapping must not block finalization"
+
+
+def test_correct_markers_with_fabricated_segment_bodies_are_refused(
+        case, isolated_dao, make_args, register_derivation, capsys):
+    """A revision hash proves persistence, not parent-page derivation."""
+    fabricated = _segment_text(
+        [12, 13],
+        body_for=lambda lp: (
+            f"Fabricated coverage obligation for {lp}\n"
+            f"{lp} / {TOTAL_LOGICAL}\n"))
+    _seed_segment_text(
+        isolated_dao, make_args, "DOC_004", fabricated)
+
+    rc = register_derivation(
+        make_args, CASE, "DOC_004", "12,13", OFFSET)
+
+    assert rc == 1
+    assert "does not exactly equal parent physical page" in \
+        capsys.readouterr().out
+    assert _receipt() is None
+
+
+def test_one_character_segment_body_change_is_refused(
+        case, isolated_dao, make_args, register_derivation, capsys):
+    changed = _segment_text(
+        [12, 13],
+        body_for=lambda lp: (
+            f"Clause {lp} bodX\n{lp} / {TOTAL_LOGICAL}\n"
+            if lp == 12 else
+            f"Clause {lp} body\n{lp} / {TOTAL_LOGICAL}\n"))
+    _seed_segment_text(isolated_dao, make_args, "DOC_004", changed)
+
+    assert register_derivation(
+        make_args, CASE, "DOC_004", "12,13", OFFSET) == 1
+    assert "does not exactly equal" in capsys.readouterr().out
+    assert _receipt() is None
 
 
 def _seed_classification(isolated_dao, doc_id, doc_type="insurance_policy"):
@@ -235,7 +280,7 @@ def test_offset_off_by_one_is_rejected(case, make_args, register_derivation,
     assert rc == 1
     out = capsys.readouterr().out
     assert "could not be verified" in out
-    assert "no printed page number on that page confirms logical 12" in out
+    assert "no printed page number in a verified header/footer region" in out
     assert _receipt() is None, "a refused registration must issue no receipt"
 
 
@@ -316,7 +361,7 @@ def test_mutually_consistent_false_mapping_is_rejected(
     assert rc == 1
     out = capsys.readouterr().out
     assert "not bound to verified parent provenance" in out
-    assert "no segment_page_map_v1 derivation receipt exists" in out
+    assert "no segment_page_map_v2 derivation receipt exists" in out
 
 
 def test_submitted_map_disagreeing_with_the_pdf_is_reported_not_ignored(
@@ -437,7 +482,7 @@ def test_evidence_present_but_for_the_wrong_logical_number_is_rejected(
 
     assert rc == 1
     out = capsys.readouterr().out
-    assert "no printed page number on that page confirms logical 13" in out
+    assert "no printed page number in a verified header/footer region" in out
 
 
 # ==========================================================================
@@ -469,11 +514,53 @@ def test_a_page_without_a_printed_number_blocks_rather_than_inferring(
 
     assert rc == 1
     out = capsys.readouterr().out
-    assert "no printed page number on that page confirms logical 13" in out
+    assert "no printed page number in a verified header/footer region" in out
     assert "an offset that is merely consistent elsewhere does not prove" in out
     assert _receipt() is None, \
         "the confirmed pages must not be recorded either -- a partial mapping " \
         "is not a mapping"
+
+
+def test_a_body_page_reference_cannot_impersonate_a_footer(
+        isolated_dao, segment_pdf, make_args, register_derivation, capsys):
+    """The requested number exists only in body text; the footer disagrees."""
+    raw = isolated_dao / "data" / "raw" / CASE
+    raw.mkdir(parents=True)
+    segment_pdf(
+        raw / "DOC_001.pdf", total_logical=TOTAL_LOGICAL, offset=OFFSET,
+        body_for=lambda lp: (
+            "See page 12 for details" if lp == 13 else
+            f"Clause {lp} body"))
+    _seed_manifest(isolated_dao, [
+        _physical_entry(),
+        _segment_entry(
+            "DOC_004", "DOC_001", [12], [{"start": 12, "end": 12}]),
+    ])
+    _seed_segment_text(
+        isolated_dao, make_args, "DOC_004",
+        _segment_text(
+            [12],
+            body_for=lambda lp: "See page 12 for details\n13 / 30\n"))
+
+    # Offset +1 points logical 12 at physical page 20. Its body mentions page
+    # 12, but its real footer identifies logical page 13.
+    assert register_derivation(
+        make_args, CASE, "DOC_004", "12", OFFSET + 1) == 1
+    assert "verified header/footer region" in capsys.readouterr().out
+    assert _receipt() is None
+
+
+def test_positioned_page_evidence_rejects_conflicting_header_and_footer():
+    record = {
+        "text": "12 / 30\nbody\n13 / 30\n",
+        "width": 595.0,
+        "height": 842.0,
+        "blocks": [
+            {"bbox": [72, 20, 120, 35], "text": "12 / 30"},
+            {"bbox": [72, 700, 120, 715], "text": "13 / 30"},
+        ],
+    }
+    assert dao._find_printed_logical_page(record, 12) is None
 
 
 def test_there_is_no_manual_confirmation_override(case):
@@ -490,7 +577,8 @@ def test_there_is_no_manual_confirmation_override(case):
     assert page["additionalProperties"] is False
     assert set(page["properties"]) == {
         "logical_page", "source_physical_page",
-        "source_page_text_sha256", "logical_page_evidence",
+        "source_page_text_sha256", "segment_page_text_sha256",
+        "logical_page_evidence",
     }
     receipt = schema["$defs"]["derivation_receipt"]
     assert receipt["additionalProperties"] is False
@@ -604,7 +692,15 @@ def test_the_receipt_index_is_not_a_write_contract_target(case, isolated_dao,
                           "library_version": None, "settings": None},
             "pages": [{"logical_page": 12, "source_physical_page": 20,
                        "source_page_text_sha256": "a" * 64,
-                       "logical_page_evidence": "12 / 30"}],
+                       "segment_page_text_sha256": "a" * 64,
+                       "logical_page_evidence": {
+                           "quote": "12 / 30",
+                           "bbox": [72, 690, 120, 710],
+                           "region": "footer",
+                           "page_width": 595,
+                           "page_height": 842,
+                           "evidence_profile":
+                               "header_footer_blocks_v1"}}],
             "issued_at": "2026-07-28T00:00:00+09:00",
             "issued_by": "attacker",
         }],
@@ -689,6 +785,33 @@ def test_policy_clause_finalization_also_re_verifies(
             or "unmet dependencies" in out)
 
 
+def test_transitive_downstream_finalization_rechecks_live_receipts(
+        case, isolated_dao, make_args, register_derivation, segment_pdf,
+        monkeypatch, capsys):
+    """A historical policy pass cannot hide a now-stale parent receipt."""
+    assert register_derivation(
+        make_args, CASE, "DOC_004", "12,13", OFFSET) == 0
+    segment_pdf(
+        isolated_dao / "data" / "raw" / CASE / "DOC_001.pdf",
+        total_logical=TOTAL_LOGICAL + 3, offset=OFFSET)
+
+    # Isolate the live provenance gate from graph setup. The test asks whether
+    # a downstream stage with otherwise-satisfied prerequisites still rechecks
+    # the receipt.
+    monkeypatch.setattr(
+        dao.stage_dependencies, "check_dependencies",
+        lambda *args, **kwargs: [])
+
+    rc = dao.cmd_snapshot_backup(make_args(
+        case_id=CASE, run_id=RUN, stage="screening_report",
+        held_by="screening-report"))
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "segment derivation provenance is no longer current" in out
+    assert "parent raw source changed" in out
+
+
 # ==========================================================================
 # 12. Re-registering identical bytes is a no-op
 # ==========================================================================
@@ -739,8 +862,9 @@ def test_multi_range_segment_binds_every_page_independently(
     ])
     _seed_segment_text(
         isolated_dao, make_args, "DOC_004",
-        "".join(f"<<<PAGE page={lp}>>>\n제{lp}조 본문 내용\n{lp} / 130\n"
-                for lp in logical))
+        "\n".join(
+            f"<<<PAGE page={lp}>>>\nClause {lp} body\n{lp} / 130\n"
+            for lp in logical) + "\n")
 
     assert register_derivation(
         make_args, CASE, "DOC_004", "57,58,118,119", OFFSET) == 0
@@ -748,7 +872,8 @@ def test_multi_range_segment_binds_every_page_independently(
     receipt = _receipt()
     assert [p["source_physical_page"] for p in receipt["pages"]] == \
         [64, 65, 125, 126]
-    assert [p["logical_page_evidence"] for p in receipt["pages"]] == \
+    assert [p["logical_page_evidence"]["quote"]
+            for p in receipt["pages"]] == \
         ["57 / 130", "58 / 130", "118 / 130", "119 / 130"]
     # Every page's digest is distinct -- no page's proof was reused.
     digests = [p["source_page_text_sha256"] for p in receipt["pages"]]
@@ -764,7 +889,7 @@ def test_swapping_two_pages_is_rejected_even_with_shared_vocabulary(
     """
     raw = isolated_dao / "data" / "raw" / CASE
     raw.mkdir(parents=True)
-    shared = "회사는 보험금을 지급합니다 지급하지 아니합니다"
+    shared = "coverage paid not paid"
     segment_pdf(raw / "DOC_001.pdf", total_logical=TOTAL_LOGICAL,
                 offset=OFFSET, body_for=lambda lp: shared)
     _seed_manifest(isolated_dao, [
@@ -772,8 +897,12 @@ def test_swapping_two_pages_is_rejected_even_with_shared_vocabulary(
         _segment_entry("DOC_004", "DOC_001", [12, 13],
                        [{"start": 12, "end": 13}]),
     ])
-    _seed_segment_text(isolated_dao, make_args, "DOC_004",
-                       _segment_text([12, 13], body_for=lambda lp: shared))
+    _seed_segment_text(
+        isolated_dao, make_args, "DOC_004",
+        _segment_text(
+            [12, 13],
+            body_for=lambda lp: (
+                f"{shared}\n{lp} / {TOTAL_LOGICAL}\n")))
 
     import fitz
     doc = fitz.open(raw / "DOC_001.pdf")
@@ -836,7 +965,7 @@ def test_finalize_blocked_when_the_manifest_projection_is_tampered_with(
 
     assert rc == 1
     out = capsys.readouterr().out
-    assert "does not match the segment_page_map_v1 receipt's projection" in out
+    assert "does not match the segment_page_map_v2 receipt's projection" in out
 
 
 def test_finalize_blocked_when_the_receipt_is_deleted(
@@ -850,7 +979,7 @@ def test_finalize_blocked_when_the_receipt_is_deleted(
         held_by="document-pipeline"))
 
     assert rc == 1
-    assert "no segment_page_map_v1 derivation receipt exists" in \
+    assert "no segment_page_map_v2 derivation receipt exists" in \
         capsys.readouterr().out
 
 
@@ -874,7 +1003,7 @@ def test_a_legacy_evidence_free_page_map_blocks_finalization(
         held_by="document-pipeline"))
 
     assert rc == 1
-    assert "no segment_page_map_v1 derivation receipt exists" in \
+    assert "no segment_page_map_v2 derivation receipt exists" in \
         capsys.readouterr().out
 
 
@@ -1004,6 +1133,91 @@ def test_lock_contention_aborts_the_whole_registration(
     assert _snapshot(isolated_dao) == before
 
 
+def test_receipt_is_rolled_back_when_manifest_persistence_fails(
+        case, isolated_dao, make_args, monkeypatch, capsys):
+    """The second atomic replace fails after the receipt index landed."""
+    manifest_path = (
+        isolated_dao / "outputs" / CASE / "document_manifest.json")
+    manifest_before = manifest_path.read_bytes()
+    index_path = dao.segment_derivation_index_path(CASE)
+    assert not index_path.exists()
+    real_write = dao.atomic_write_json
+
+    def _fail_manifest(path, obj):
+        if Path(path).name == "document_manifest.json":
+            raise OSError("injected second-write failure")
+        return real_write(path, obj)
+
+    monkeypatch.setattr(dao, "atomic_write_json", _fail_manifest)
+
+    rc = dao.cmd_register_segment_derivation(make_args(
+        case_id=CASE, doc_id="DOC_004", pages="12,13",
+        page_offset=OFFSET, held_by="document-pipeline", run_id=RUN))
+
+    assert rc == 1
+    assert "restored to their exact pre-transaction bytes" in \
+        capsys.readouterr().out
+    assert not index_path.exists()
+    assert manifest_path.read_bytes() == manifest_before
+    assert not (dao.case_dir(CASE) / "_transaction_journal.json").exists()
+
+
+def test_receipt_is_rolled_back_when_first_write_raises_after_replace(
+        case, isolated_dao, make_args, monkeypatch, capsys):
+    """A writer can fail after os.replace; return flags cannot prove no write."""
+    manifest_path = (
+        isolated_dao / "outputs" / CASE / "document_manifest.json")
+    manifest_before = manifest_path.read_bytes()
+    index_path = dao.segment_derivation_index_path(CASE)
+    real_write = dao.atomic_write_json
+
+    def _write_then_fail(path, obj):
+        result = real_write(path, obj)
+        if Path(path).name == "_segment_derivation_index.json":
+            raise OSError("injected post-replace failure")
+        return result
+
+    monkeypatch.setattr(dao, "atomic_write_json", _write_then_fail)
+
+    assert dao.cmd_register_segment_derivation(make_args(
+        case_id=CASE, doc_id="DOC_004", pages="12,13",
+        page_offset=OFFSET, held_by="document-pipeline", run_id=RUN)) == 1
+
+    assert "restored to their exact pre-transaction bytes" in \
+        capsys.readouterr().out
+    assert not index_path.exists()
+    assert manifest_path.read_bytes() == manifest_before
+    assert not (dao.case_dir(CASE) / "_transaction_journal.json").exists()
+
+
+def test_failed_rollback_leaves_a_blocking_journal(
+        case, isolated_dao, make_args, monkeypatch, capsys):
+    real_write = dao.atomic_write_json
+
+    def _fail_manifest(path, obj):
+        if Path(path).name == "document_manifest.json":
+            raise OSError("injected second-write failure")
+        return real_write(path, obj)
+
+    monkeypatch.setattr(dao, "atomic_write_json", _fail_manifest)
+
+    def _fail_restore(*args, **kwargs):
+        raise OSError("injected rollback failure")
+
+    monkeypatch.setattr(dao, "_restore_file_preimage", _fail_restore)
+
+    assert dao.cmd_register_segment_derivation(make_args(
+        case_id=CASE, doc_id="DOC_004", pages="12,13",
+        page_offset=OFFSET, held_by="document-pipeline", run_id=RUN)) == 1
+    assert "ROLLBACK INCOMPLETE" in capsys.readouterr().out
+    assert dao_transaction.pending_journal_errors(dao.case_dir(CASE))
+
+    assert dao.cmd_snapshot_backup(make_args(
+        case_id=CASE, run_id=RUN, stage="document_processing",
+        held_by="document-pipeline")) == 1
+    assert "transaction is incomplete" in capsys.readouterr().out
+
+
 def test_an_interrupted_transaction_blocks_new_registrations(
         case, isolated_dao, make_args, register_derivation, capsys):
     """A pending journal is not resumed automatically -- the stage reruns."""
@@ -1101,7 +1315,14 @@ def test_receipt_fingerprint_ignores_timestamps_but_not_the_mapping():
                    "settings": None},
         pages=[{"logical_page": 12, "source_physical_page": 19,
                 "source_page_text_sha256": "c" * 64,
-                "logical_page_evidence": "12 / 30"}],
+                "segment_page_text_sha256": "c" * 64,
+                "logical_page_evidence": {
+                    "quote": "12 / 30",
+                    "bbox": [72, 690, 120, 710],
+                    "region": "footer",
+                    "page_width": 595,
+                    "page_height": 842,
+                    "evidence_profile": "header_footer_blocks_v1"}}],
         page_offset_candidate=7, run_id=RUN)
     first = sd.build_receipt(issued_at="2026-07-28T00:00:00+09:00",
                              issued_by="a", **base)
@@ -1118,7 +1339,48 @@ def test_receipt_fingerprint_ignores_timestamps_but_not_the_mapping():
 
 def test_an_unknown_receipt_scheme_is_refused_not_assumed_equivalent():
     errors = sd.receipt_currency_errors(
-        receipt={"scheme": "segment_page_map_v2_future"},
+        receipt={"scheme": "segment_page_map_v3_future"},
         parent_entry=None, current_parent_pdf_sha256="a" * 64,
         current_segment_revision_sha256="b" * 64)
-    assert any("is not 'segment_page_map_v1'" in e for e in errors)
+    assert any("is not 'segment_page_map_v2'" in e for e in errors)
+
+
+def test_v1_receipt_is_not_silently_upgraded_to_v2():
+    errors = sd.receipt_currency_errors(
+        receipt={"scheme": "segment_page_map_v1"},
+        parent_entry=None, current_parent_pdf_sha256="a" * 64,
+        current_segment_revision_sha256="b" * 64)
+    assert any("is not 'segment_page_map_v2'" in error for error in errors)
+
+
+def test_segment_binding_normalizes_only_newlines_and_unicode():
+    source = "보험금 café\n12 / 30\n"
+    source_nfd = unicodedata.normalize("NFD", source)
+    source_digest = sd.text_sha256(sd.canonical_source_page_text(source))
+    page = {
+        "logical_page": 12,
+        "source_physical_page": 19,
+        "source_page_text_sha256": source_digest,
+        "logical_page_evidence": {
+            "quote": "12 / 30",
+            "bbox": [72, 690, 120, 710],
+            "region": "footer",
+            "page_width": 595,
+            "page_height": 842,
+            "evidence_profile": "header_footer_blocks_v1",
+        },
+    }
+    crlf_revision = (
+        "<<<PAGE page=12>>>\r\n"
+        + source_nfd.replace("\n", "\r\n")
+        + "\r\n")
+    bound, errors = sd.bind_segment_revision(
+        [page], crlf_revision, lambda physical: source)
+    assert errors == []
+    assert bound[0]["segment_page_text_sha256"] == source_digest
+
+    spaced = crlf_revision.replace("caf", "caf ")
+    bound, errors = sd.bind_segment_revision(
+        [page], spaced, lambda physical: source)
+    assert bound == []
+    assert any("does not exactly equal" in error for error in errors)

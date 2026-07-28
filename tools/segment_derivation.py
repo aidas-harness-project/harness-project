@@ -28,7 +28,7 @@ mapping is recorded only when the parent's own pages confirm it.
 
 The receipt
 -----------
-`register_segment_derivation` (dao.py) issues a `segment_page_map_v1` receipt
+`register_segment_derivation` (dao.py) issues a `segment_page_map_v2` receipt
 into `_segment_derivation_index.json`, a DAO-owned file no agent-facing write
 path can touch. The manifest's `page_map` becomes a PROJECTION of that receipt:
 if the two disagree, finalization stops. A caller cannot write the projection
@@ -75,8 +75,10 @@ embedded-text case and refuses the OCR case, it does not solve both.
 from __future__ import annotations
 
 import hashlib
+import re
+import unicodedata
 
-RECEIPT_SCHEME = "segment_page_map_v1"
+RECEIPT_SCHEME = "segment_page_map_v2"
 INDEX_SCHEMA = "segment_derivation_index.schema.json"
 
 # Which derivation methods this verification can actually establish. An
@@ -85,9 +87,155 @@ INDEX_SCHEMA = "segment_derivation_index.schema.json"
 # do. Listing it here with a weaker check would be the fail-open version.
 VERIFIABLE_METHODS = frozenset({"embedded_text_segment", "page_extraction"})
 
+_PAGE_MARKER_RE = re.compile(r"(?m)^<<<PAGE page=(\d+)>>>\r?\n?")
+
 
 def text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def canonical_source_page_text(text: str) -> str:
+    """Canonical bytes for an embedded-text page derivation.
+
+    This is deliberately much narrower than evidence quote normalization:
+    line-ending transport differences and Unicode normalization are harmless,
+    while spaces, punctuation, ordering and wording are identity-bearing and
+    must remain exact.
+    """
+    return unicodedata.normalize(
+        "NFC", text.replace("\r\n", "\n").replace("\r", "\n"))
+
+
+def split_segment_revision(text: str) -> tuple[dict[int, str], list[str]]:
+    """Strictly split a registered segment revision into page bodies.
+
+    `extract_embedded_segment.py` joins complete parent-page texts with one
+    assembly newline.  The newline is not part of either parent page, so this
+    parser removes exactly one trailing separator from each page body.  It
+    does not strip or collapse any other whitespace.
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    matches = list(_PAGE_MARKER_RE.finditer(normalized))
+    if not matches:
+        return {}, [
+            "segment revision has no <<<PAGE page=N>>> markers, so its page "
+            "bodies cannot be bound to parent pages"
+        ]
+    errors: list[str] = []
+    if normalized[:matches[0].start()].strip():
+        errors.append(
+            "segment revision contains non-whitespace content before the "
+            "first page marker")
+    pages: dict[int, str] = {}
+    last_page = 0
+    for index, match in enumerate(matches):
+        logical = int(match.group(1))
+        if logical <= last_page:
+            errors.append(
+                f"segment page markers are not strictly increasing: "
+                f"logical {logical} follows {last_page}")
+        last_page = logical
+        start = match.end()
+        end = (matches[index + 1].start()
+               if index + 1 < len(matches) else len(normalized))
+        body = normalized[start:end]
+        if body.endswith("\n"):
+            body = body[:-1]  # exactly the assembler's separator
+        if not body.strip():
+            errors.append(f"segment logical page {logical} has an empty body")
+        if logical in pages:
+            errors.append(
+                f"segment logical page {logical} appears more than once")
+        pages[logical] = canonical_source_page_text(body)
+    return pages, errors
+
+
+def bind_segment_revision(verified_pages: list[dict],
+                          segment_revision_text: str,
+                          parent_text_for) -> tuple[list[dict], list[str]]:
+    """Prove that the registered segment contains the mapped parent pages.
+
+    A revision hash alone proves only that the segment stayed unchanged; it
+    does not prove where those bytes came from.  This comparison closes that
+    gap page by page before a receipt is issued.
+    """
+    segment_pages, errors = split_segment_revision(segment_revision_text)
+    expected_pages = [page.get("logical_page") for page in verified_pages]
+    actual_pages = list(segment_pages)
+    if actual_pages != expected_pages:
+        errors.append(
+            f"segment revision pages {actual_pages} do not exactly match the "
+            f"verified mapping pages {expected_pages}")
+
+    bound: list[dict] = []
+    for page in verified_pages:
+        logical = page.get("logical_page")
+        physical = page.get("source_physical_page")
+        source_text = parent_text_for(physical)
+        segment_text = segment_pages.get(logical)
+        if source_text is None:
+            errors.append(
+                f"logical {logical}: parent physical page {physical} text is "
+                "unavailable while binding the segment revision")
+            continue
+        if segment_text is None:
+            continue
+        canonical_source = canonical_source_page_text(source_text)
+        source_digest = text_sha256(canonical_source)
+        segment_digest = text_sha256(segment_text)
+        if source_digest != page.get("source_page_text_sha256"):
+            errors.append(
+                f"logical {logical}: the verified source-page digest changed "
+                "before the segment revision could be bound")
+        if segment_digest != source_digest:
+            errors.append(
+                f"logical {logical}: registered segment page text does not "
+                f"exactly equal parent physical page {physical} text "
+                f"(segment {segment_digest}, parent {source_digest})")
+        item = dict(page)
+        item["segment_page_text_sha256"] = segment_digest
+        bound.append(item)
+    if errors:
+        return [], errors
+    return bound, []
+
+
+def segment_revision_binding_errors(receipt: dict,
+                                    segment_revision_text: str | None,
+                                    location: str = "") -> list[str]:
+    """Re-check a receipt against the current registered segment bytes."""
+    prefix = f"{location}: " if location else ""
+    if segment_revision_text is None:
+        return [
+            f"{prefix}the current registered segment revision cannot be read "
+            "for page-by-page derivation verification"
+        ]
+    pages, errors = split_segment_revision(segment_revision_text)
+    result = [f"{prefix}{error}" for error in errors]
+    expected = [page.get("logical_page") for page in receipt.get("pages") or []]
+    if list(pages) != expected:
+        result.append(
+            f"{prefix}current segment revision pages {list(pages)} do not "
+            f"match receipt pages {expected}")
+        return result
+    for page in receipt.get("pages") or []:
+        logical = page.get("logical_page")
+        body = pages.get(logical)
+        if body is None:
+            continue
+        actual = text_sha256(body)
+        recorded_segment = page.get("segment_page_text_sha256")
+        recorded_source = page.get("source_page_text_sha256")
+        if actual != recorded_segment:
+            result.append(
+                f"{prefix}logical {logical}: current segment page digest "
+                f"{actual!r} does not match receipt "
+                f"{recorded_segment!r}")
+        if recorded_segment != recorded_source:
+            result.append(
+                f"{prefix}logical {logical}: receipt does not prove exact "
+                "derivation because its segment and parent page digests differ")
+    return result
 
 
 # --- candidate verification -----------------------------------------------
@@ -136,17 +284,20 @@ def verify_candidate_mapping(logical_pages, page_offset_candidate,
             continue
         seen_physical[physical] = logical
 
-        text = page_text_for(physical)
-        if text is None:
+        page_record = page_text_for(physical)
+        if page_record is None:
             errors.append(
                 f"logical {logical} -> physical {physical}: the parent PDF has "
                 "no such page, or its text could not be extracted")
             continue
-        evidence = printed_page_finder(text, logical)
+        text = (page_record.get("text")
+                if isinstance(page_record, dict) else page_record)
+        evidence = printed_page_finder(page_record, logical)
         if evidence is None:
             errors.append(
                 f"logical {logical} -> physical {physical}: no printed page "
-                f"number on that page confirms logical {logical} (candidate "
+                f"number in a verified header/footer region confirms logical "
+                f"{logical} (candidate "
                 f"offset {page_offset_candidate:+d} is unverified here) -- "
                 "review this page; an offset that is merely consistent "
                 "elsewhere does not prove this mapping")
@@ -156,7 +307,8 @@ def verify_candidate_mapping(logical_pages, page_offset_candidate,
             "source_physical_page": physical,
             # Named for what it is: the digest of the text the DAO extracted
             # from that physical page, not of the page's PDF bytes.
-            "source_page_text_sha256": text_sha256(text),
+            "source_page_text_sha256": text_sha256(
+                canonical_source_page_text(text)),
             "logical_page_evidence": evidence,
         })
 
@@ -211,13 +363,19 @@ def submitted_value_conflicts(pages, submitted_page_map):
                     f"physical page {mine['source_physical_page']} "
                     f"({mine['source_page_text_sha256']!r})")
         claimed_evidence = entry.get("logical_page_evidence")
+        verified_evidence = mine["logical_page_evidence"]
+        verified_quote = (
+            verified_evidence.get("quote")
+            if isinstance(verified_evidence, dict) else verified_evidence)
+        if isinstance(claimed_evidence, dict):
+            claimed_evidence = claimed_evidence.get("quote")
         if (claimed_evidence is not None
-                and claimed_evidence.strip() != mine["logical_page_evidence"].strip()):
+                and claimed_evidence.strip() != verified_quote.strip()):
             errors.append(
                 f"logical {logical}: submitted logical_page_evidence "
                 f"{claimed_evidence!r} is not the printed marker the DAO read "
                 f"on physical page {mine['source_physical_page']} "
-                f"({mine['logical_page_evidence']!r})")
+                f"({verified_quote!r})")
     return errors
 
 
@@ -266,9 +424,24 @@ def receipt_fingerprint(receipt: dict) -> tuple:
         receipt.get("derivation_method"),
         tuple(
             (p.get("logical_page"), p.get("source_physical_page"),
-             p.get("source_page_text_sha256"), p.get("logical_page_evidence"))
+             p.get("source_page_text_sha256"),
+             p.get("segment_page_text_sha256"),
+             _evidence_fingerprint(p.get("logical_page_evidence")))
             for p in receipt.get("pages") or []
         ),
+    )
+
+
+def _evidence_fingerprint(evidence) -> tuple:
+    if not isinstance(evidence, dict):
+        return (evidence,)
+    return (
+        evidence.get("quote"),
+        tuple(evidence.get("bbox") or []),
+        evidence.get("region"),
+        evidence.get("page_width"),
+        evidence.get("page_height"),
+        evidence.get("evidence_profile"),
     )
 
 
@@ -286,7 +459,10 @@ def manifest_page_map_from_receipt(receipt: dict) -> list[dict]:
             "logical_page": page["logical_page"],
             "source_physical_page": page["source_physical_page"],
             "physical_page_sha256": page["source_page_text_sha256"],
-            "logical_page_evidence": page["logical_page_evidence"],
+            "logical_page_evidence": (
+                page["logical_page_evidence"]["quote"]
+                if isinstance(page.get("logical_page_evidence"), dict)
+                else page["logical_page_evidence"]),
         }
         for page in receipt.get("pages") or []
     ]
@@ -397,7 +573,8 @@ def receipt_currency_errors(*, receipt: dict, parent_entry: dict | None,
 
 def segment_finalization_blockers(manifest, receipt_for,
                                   current_parent_digest_for,
-                                  current_segment_revision_for) -> list[str]:
+                                  current_segment_revision_for,
+                                  current_segment_text_for) -> list[str]:
     """Every reason a manifest's segments may not be finalized (P0-6).
 
     Applied at `document_processing` and `policy_clause_processing`
@@ -450,5 +627,7 @@ def segment_finalization_blockers(manifest, receipt_for,
             current_segment_revision_sha256=current_segment_revision_for(seg_id),
             location=location,
         ))
+        blockers.extend(segment_revision_binding_errors(
+            receipt, current_segment_text_for(seg_id), location))
 
     return blockers

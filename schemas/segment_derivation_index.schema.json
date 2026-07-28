@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "segment_derivation_index.schema.json",
-  "title": "_segment_derivation_index.json -- DAO-owned segment page-map receipts v0.1",
-  "description": "P0-6. One `segment_page_map_v1` receipt per segment, recording that the DAO itself opened the registered parent PDF, extracted each physical page, hashed the text IT read, and found a printed page number on that page confirming the logical number claimed for it. DAO-OWNED: written only by `dao.py register-segment-derivation`. No agent-facing path (write-contract, patch-manifest-document, the revision index) may create, change, or delete a receipt, and `page_map` is sealed in source_provenance.PROTECTED_MANIFEST_FIELDS so the manifest's copy can only ever be this file's projection. Before this existed, segment_lineage.py compared the manifest's page_map to the segment's own <<<PAGE>>> markers, page ranges, and derived-text digest -- all values produced by the same extracting agent, so a mapping that was wrong in a mutually consistent way (logical 12 declared on physical 20 instead of 19, with the markers and ranges written to match) passed every check. Nothing compared the mapping to the parent PDF. FIELD-NAME NOTE: the receipt calls a page's digest `source_page_text_sha256`, which is what it actually is -- the SHA-256 of the text extracted from that physical page, never of the page's PDF bytes. document_manifest.schema.json keeps the older, less accurate name `physical_page_sha256` for the same value, because CASE_030's data and that schema's page_map_entry (additionalProperties:false) predate the rename; segment_derivation.manifest_page_map_from_receipt owns the translation between them, so the writer and every verifier cannot drift apart. A future manifest schema bump may rename the manifest field to match; until then the receipt is the authoritative spelling.",
+  "title": "_segment_derivation_index.json -- DAO-owned segment page-map receipts v0.2",
+  "description": "P0-6. One `segment_page_map_v2` receipt per segment. v2 adds two guarantees v1 did not establish: the registered segment page body must exactly equal the mapped parent-page text, and printed-page evidence must come from a positioned header/footer block rather than an unscoped whole-page regex match. A v1 receipt is not silently upgraded; it must be re-issued from current source bytes. DAO-OWNED: written only by `dao.py register-segment-derivation`. No agent-facing path may create, change, or delete a receipt, and `page_map` is sealed so the manifest copy can only be this file's projection. The receipt calls a page digest `source_page_text_sha256`, accurately describing a digest of deterministically normalized extracted text rather than PDF page binary bytes.",
   "type": "object",
   "properties": {
     "case_id": {
@@ -24,7 +24,7 @@
       "description": "One segment's verified mapping. Valid only for the exact triple it names: these parent bytes, this parent page count, and this segment source-text revision. Any of the three moving makes the receipt a true statement about a state that no longer exists, which is why finalization re-checks all of them against freshly computed values instead of trusting the recorded ones.",
       "properties": {
         "scheme": {
-          "const": "segment_page_map_v1",
+          "const": "segment_page_map_v2",
           "description": "The verification this receipt was issued under. A value this build does not recognize is refused rather than treated as equivalent -- an unknown scheme is not a verified one."
         },
         "document_id": {
@@ -111,16 +111,43 @@
           "pattern": "^[a-f0-9]{64}$",
           "description": "SHA-256 of the text the DAO extracted from source_physical_page of the parent PDF. Accurate name for the value the manifest calls physical_page_sha256 (see the top-level description). Computed by the DAO over what it read; a submitted value is only ever compared against it, never stored."
         },
-        "logical_page_evidence": {
+        "segment_page_text_sha256": {
           "type": "string",
-          "minLength": 1,
-          "description": "The verbatim printed page marker the DAO found ON that physical page confirming this logical number (e.g. '12 / 240'). Found by the DAO in the page text it extracted -- a caller cannot supply it. A page with no readable printed number is never mapped on a guessed or 'consistent' offset: registration blocks for review, and there is deliberately no override field, because a writable confirmed-flag would be this gate's off-switch."
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 of the corresponding page body parsed from the registered segment revision after only CRLF/CR to LF and Unicode NFC normalization and removal of the assembler's one separator newline. It must equal source_page_text_sha256 when the receipt is issued and is rechecked at finalization."
+        },
+        "logical_page_evidence": {
+          "type": "object",
+          "description": "Position-bound printed page evidence derived by the DAO. Whole-page string search is not accepted because a body sentence can mention another page.",
+          "properties": {
+            "quote": { "type": "string", "minLength": 1 },
+            "bbox": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": { "type": "number" }
+            },
+            "region": { "enum": ["header", "footer"] },
+            "page_width": { "type": "number", "exclusiveMinimum": 0 },
+            "page_height": { "type": "number", "exclusiveMinimum": 0 },
+            "evidence_profile": { "const": "header_footer_blocks_v1" }
+          },
+          "required": [
+            "quote",
+            "bbox",
+            "region",
+            "page_width",
+            "page_height",
+            "evidence_profile"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
         "logical_page",
         "source_physical_page",
         "source_page_text_sha256",
+        "segment_page_text_sha256",
         "logical_page_evidence"
       ],
       "additionalProperties": false

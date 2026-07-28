@@ -1854,12 +1854,8 @@ one.** That means: a new scheme name, a transition path in
 `enable-canonical-uids`, and a migration for existing canonical documents --
 not an edit to what `canonical_v1` computes.
 
-### Still open, deliberately
+### Still open after P0-6
 
-- **P0-6 -- segment page-map provenance.** A segment's `page_map` is what
-  turns a logical page into the physical page canonical identity is keyed to.
-  It is verified as present and structurally sound, not as *true against the
-  parent PDF*. Out of scope here.
 - **P0-7 -- exact evidence binding.** Identity spans and `evidence_references`
   are currently matched after collapsing incidental whitespace, because an
   evidence quote carries no offsets and equality-after-normalization is the
@@ -1872,6 +1868,39 @@ not an edit to what `canonical_v1` computes.
   regions, cells in rows). Nothing independently establishes that the declared
   region is the table's real extent on the page, so a region drawn too
   narrowly still hides rows. Reverse coverage is P0-8.
+
+### Segment page maps were self-consistent but not source-derived -- RESOLVED (P0-6 + follow-up)
+
+The old lineage gate compared only values supplied by the extracting process:
+`page_map`, `segment_page_ranges`, `<<<PAGE>>>` markers and
+`derived_text_sha256`. A wrong mapping could make all four agree while naming
+the wrong physical page.
+
+`dao.py register-segment-derivation` is now the sole page-map issuer. It opens
+the registered physical parent itself, recomputes the raw PDF digest and page
+count, extracts the candidate physical pages, and accepts a logical number only
+from positioned header/footer evidence. Whole-page regex search is not a page
+identity proof: a body sentence mentioning "page 12" cannot satisfy the gate.
+
+The DAO-owned `_segment_derivation_index.json` carries
+`segment_page_map_v2` receipts. v2 deliberately supersedes v1 rather than
+silently strengthening the old scheme. Each page records both the canonical
+parent-page text digest and the corresponding registered segment-page digest;
+the two must be identical after only line-ending and Unicode NFC
+normalization. Spaces, punctuation, ordering and wording remain exact.
+Consequently, a correct page number above fabricated segment text is refused.
+
+The manifest `page_map` is an exact projection of the receipt and is sealed
+against generic manifest writes. Document processing, policy processing and
+every transitive downstream finalization recheck the live receipt, parent
+digest and current segment revision. Receipt/manifest persistence is journaled
+and downstream invalidation happens first. Caught second-write failures restore
+both exact preimages; a hard crash or failed rollback leaves the journal
+pending, which blocks finalization instead of claiming multi-file atomicity.
+
+OCR segments remain fail-closed: they cannot obtain this deterministic
+embedded-text receipt and therefore cannot finalize. That is a stated
+limitation, not weaker provenance presented as equivalent.
 
 ### Corrupt `uid_scheme` could be laundered into `canonical_v1` -- RESOLVED (P0-3 follow-up)
 
