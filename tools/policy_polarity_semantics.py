@@ -90,8 +90,11 @@ CONDITION_TEXT: {json.dumps(condition_text, ensure_ascii=False)}
 """
 
 
-def parse_analysis(text: str, source_length: int) -> dict:
+def parse_analysis(text: str, source_passage: str) -> dict:
     """Parse a provider response strictly; ambiguity is explicit, never guessed."""
+    if not isinstance(source_passage, str) or not source_passage:
+        raise ValueError("source passage must be non-empty")
+    source_length = len(source_passage)
     try:
         value = json.loads(text)
     except (json.JSONDecodeError, TypeError) as exc:
@@ -103,7 +106,7 @@ def parse_analysis(text: str, source_length: int) -> dict:
     if classification not in CLASSIFICATIONS:
         raise ValueError(f"unsupported classification {classification!r}")
     predicates = value.get("target_predicates")
-    if (not isinstance(predicates, list)
+    if (not isinstance(predicates, list) or not predicates
             or not all(isinstance(item, str) and item for item in predicates)):
         raise ValueError("target_predicates must be a list of non-empty strings")
     if not isinstance(value.get("negation_scope_analysis"), str) or not value[
@@ -129,6 +132,10 @@ def parse_analysis(text: str, source_length: int) -> dict:
         for key in ("text", "reason"):
             if not isinstance(proposition.get(key), str) or not proposition[key]:
                 raise ValueError(f"propositions[{index}].{key} must be non-empty")
+        if source_passage[start:end] != proposition["text"]:
+            raise ValueError(
+                f"propositions[{index}].text does not equal source passage "
+                "at its declared offsets")
     for key in ("meaning_preserved", "review_required"):
         if not isinstance(value.get(key), bool):
             raise ValueError(f"{key} must be boolean")
@@ -138,6 +145,17 @@ def parse_analysis(text: str, source_length: int) -> dict:
     if not value["meaning_preserved"] and not value["review_required"]:
         raise ValueError(
             "meaning_preserved=false must set review_required=true")
+    proposition_outcomes = {
+        item["classification"] for item in propositions}
+    if classification in {"affirmative", "restrictive_or_negative"} and \
+            proposition_outcomes != {classification}:
+        raise ValueError(
+            "settled overall classification conflicts with proposition "
+            "classifications")
+    if classification == "ambiguous" and "ambiguous" not in proposition_outcomes:
+        raise ValueError(
+            "ambiguous overall classification must identify an ambiguous "
+            "proposition")
     return value
 
 
@@ -226,6 +244,7 @@ def receipt_integrity_errors(receipt: dict, location: str = "receipt") -> list[s
 def index_id(index: dict) -> str:
     return sha256_text(canonical_json({
         "case_id": index.get("case_id"),
+        "active_analyzer": index.get("active_analyzer"),
         "receipts": index.get("receipts") or [],
     }))
 

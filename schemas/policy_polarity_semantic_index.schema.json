@@ -12,6 +12,12 @@
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
     },
+    "active_analyzer": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/analyzer"}
+      ]
+    },
     "receipts": {
       "type": "array",
       "items": {
@@ -19,7 +25,7 @@
       }
     }
   },
-  "required": ["case_id", "index_id", "receipts"],
+  "required": ["case_id", "index_id", "active_analyzer", "receipts"],
   "additionalProperties": false,
   "$defs": {
     "classification": {
@@ -29,6 +35,27 @@
         "mixed",
         "ambiguous"
       ]
+    },
+    "analyzer": {
+      "type": "object",
+      "properties": {
+        "provider": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "prompt_version": {
+          "const": "policy_polarity_semantic_v1"
+        },
+        "settings_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "prompt_version",
+        "settings_fingerprint"
+      ],
+      "additionalProperties": false
     },
     "proposition": {
       "type": "object",
@@ -104,6 +131,7 @@
         "classification": {"$ref": "#/$defs/classification"},
         "target_predicates": {
           "type": "array",
+          "minItems": 1,
           "items": {"type": "string", "minLength": 1}
         },
         "negation_scope_analysis": {
@@ -117,27 +145,7 @@
         },
         "meaning_preserved": {"type": "boolean"},
         "review_required": {"type": "boolean"},
-        "analyzer": {
-          "type": "object",
-          "properties": {
-            "provider": {"type": "string", "minLength": 1},
-            "model": {"type": "string", "minLength": 1},
-            "prompt_version": {
-              "const": "policy_polarity_semantic_v1"
-            },
-            "settings_fingerprint": {
-              "type": "string",
-              "pattern": "^[a-f0-9]{64}$"
-            }
-          },
-          "required": [
-            "provider",
-            "model",
-            "prompt_version",
-            "settings_fingerprint"
-          ],
-          "additionalProperties": false
-        },
+        "analyzer": {"$ref": "#/$defs/analyzer"},
         "analyzed_at": {
           "type": "string",
           "format": "date-time"

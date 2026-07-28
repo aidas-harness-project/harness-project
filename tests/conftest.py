@@ -4,6 +4,7 @@ never the real outputs/ or data/ -- see isolated_dao below.
 schemas/ is NOT faked -- tests validate against the project's real schema
 files, since that's the actual contract being tested.
 """
+import json
 import sys
 from pathlib import Path
 
@@ -13,6 +14,9 @@ sys.path.insert(0, str(ROOT / "tools"))
 import pytest
 
 import dao
+import llm_providers
+import policy_polarity_semantics
+import policy_uid_resolver
 
 
 @pytest.fixture
@@ -71,6 +75,104 @@ def canonicalize():
         assert dao.uid_scheme_for(case_id, doc_id) == "canonical_v1"
 
     return _canonicalize
+
+
+@pytest.fixture
+def issue_semantic_receipts(isolated_dao, make_args, monkeypatch):
+    """Issue real DAO receipts for unrelated canonical policy test fixtures.
+
+    Tests whose subject is UID/evidence/table behavior still have to satisfy
+    the production semantic gate. They use a mocked provider but the real
+    command, source-span resolution, protected index, schema, and receipt hash;
+    no test can regain the old self-declared-polarity path.
+    """
+    counter = 0
+    expected_by_bucket = {
+        "payout_conditions": "affirmative",
+        "coverage_start_conditions": "affirmative",
+        "exclusions": "restrictive_or_negative",
+        "reduction_conditions": "restrictive_or_negative",
+    }
+
+    def _issue(contract, case_id, doc_id):
+        nonlocal counter
+        context, errors = dao._uid_source_context(case_id, doc_id)
+        assert not errors
+        for clause in contract.get("clauses") or []:
+            for bucket, classification in expected_by_bucket.items():
+                for condition in clause.get(bucket) or []:
+                    records = policy_uid_resolver.resolve_spans(
+                        context, condition.get("source_span_uids"),
+                        "semantic test fixture")
+                    records = sorted(
+                        records,
+                        key=lambda item: (
+                            item["physical_page"], item["start_char"],
+                            item["end_char"], item["uid"]))
+                    passage = policy_polarity_semantics.source_passage(records)
+                    response = {
+                        "classification": classification,
+                        "target_predicates": ["fixture"],
+                        "negation_scope_analysis":
+                            "mocked semantic fixture for an unrelated gate",
+                        "propositions": [{
+                            "text": passage,
+                            "classification": classification,
+                            "source_start": 0,
+                            "source_end": len(passage),
+                            "reason": "fixture classification",
+                        }],
+                        "meaning_preserved": True,
+                        "review_required": False,
+                    }
+                    provider = llm_providers.FixtureProvider(
+                        model_name="semantic-fixture-v1",
+                        responses={
+                            "compare_text": json.dumps(
+                                response, ensure_ascii=False),
+                        })
+                    monkeypatch.setattr(
+                        dao.llm_providers, "build_provider",
+                        lambda *args, _provider=provider, **kwargs: _provider)
+                    counter += 1
+                    selector_file = (
+                        isolated_dao / f"semantic_selector_{counter}.json")
+                    selector_file.write_text(json.dumps(
+                        {"source_spans": condition["source_span_uids"]},
+                        ensure_ascii=False), encoding="utf-8")
+                    condition_file = (
+                        isolated_dao / f"semantic_condition_{counter}.txt")
+                    condition_file.write_text(
+                        condition["text"], encoding="utf-8")
+                    args = make_args(
+                        case_id=case_id,
+                        doc_id=doc_id,
+                        source_span_uid=[item["uid"] for item in records],
+                        source_selector_file=str(selector_file),
+                        condition_text_file=str(condition_file),
+                        bucket=bucket,
+                        provider="fixture",
+                        model="semantic-fixture-v1",
+                        held_by="policy-pipeline",
+                        run_id=contract.get("run_id")
+                        or "RUN_20260728_001",
+                    )
+                    assert dao.cmd_analyze_policy_polarity(args) == 0
+                    condition_hash = policy_polarity_semantics.sha256_text(
+                        condition["text"])
+                    receipt = next(
+                        item for item in
+                        dao.load_policy_polarity_semantic_index(
+                            case_id)["receipts"]
+                        if item["condition_text_sha256"] == condition_hash
+                        and item["bucket"] == bucket
+                        and item["source_span_uids"] == [
+                            record["uid"] for record in records])
+                    condition["polarity_analysis_receipt_id"] = \
+                        receipt["receipt_id"]
+        return contract
+
+    return _issue
 
 
 @pytest.fixture

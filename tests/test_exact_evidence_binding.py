@@ -917,7 +917,8 @@ def test_write_contract_refuses_evidence_with_no_offsets(
 
 
 def test_write_contract_accepts_the_exact_binding(
-        semantic_case, isolated_dao, make_args, capsys):
+        semantic_case, isolated_dao, make_args, capsys,
+        issue_semantic_receipts):
     """The gate is a gate, not a wall: the correct contract goes through.
 
     Written against the SECOND occurrence of a sentence that appears twice on
@@ -929,6 +930,7 @@ def test_write_contract_accepts_the_exact_binding(
         semantic_case, condition_occurrence=2)
     assert _span(1, PAYOUT_SENTENCE, occurrence=1)["quote"] == \
         condition_span["quote"]
+    issue_semantic_receipts(data, "CASE_030", "DOC_005")
 
     rc = _write_clauses(isolated_dao, make_args, data)
     assert rc == 0, capsys.readouterr().out
@@ -1008,7 +1010,8 @@ def test_finalization_accepts_the_exact_binding(canonical):
 # =========================================================================
 
 def test_offsets_valid_under_revision_a_go_stale_under_revision_b(
-        semantic_case, isolated_dao, make_args, capsys):
+        semantic_case, isolated_dao, make_args, capsys,
+        issue_semantic_receipts):
     """Requirement G, end to end through the real revision path.
 
     REV-A: identity and evidence agree exactly, the contract passes the
@@ -1021,6 +1024,7 @@ def test_offsets_valid_under_revision_a_go_stale_under_revision_b(
     """
     data, _ = _semantic_contract(semantic_case, condition_occurrence=2)
     assert _check_clauses(data) == [], "REV-A must be clean to start"
+    issue_semantic_receipts(data, "CASE_030", "DOC_005")
     assert _write_clauses(isolated_dao, make_args, data) == 0, \
         capsys.readouterr().out
 

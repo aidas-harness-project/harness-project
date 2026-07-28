@@ -801,7 +801,8 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
             normalized_source_errors = \
                 _cross_contract.check_normalized_policy_clause(
                     normalized, normalized_name,
-                    _redacted_text_for_doc(case_id, doc_id))
+                    _redacted_text_for_doc(case_id, doc_id),
+                    _semantic_receipt_validator(case_id, doc_id))
         except _cross_contract.SourceUnavailable as exc:
             normalized_source_errors = [f"source unavailable: {exc}"]
         blockers.extend(
@@ -1304,7 +1305,9 @@ def _run_cross_contract(case_id, filename, schema_name, data, target) -> int:
 
         redacted_text = _redacted_text_for_doc(case_id, target_doc)
         try:
-            errors = _cross_contract.check_normalized_policy_clause(data, filename, redacted_text)
+            errors = _cross_contract.check_normalized_policy_clause(
+                data, filename, redacted_text,
+                _semantic_receipt_validator(case_id, target_doc))
         except _cross_contract.SourceUnavailable as exc:
             print(f"FAIL: cross-contract source could not be verified for {target}:")
             print(f"  - SOURCE_UNAVAILABLE: {exc}")
@@ -2846,6 +2849,11 @@ def cmd_write_text(args):
     Symmetric to write-contract's arbitrary-filename JSON write, for a
     free-form text artifact instead (e.g. an annotated document -- there's
     nothing to schema-validate)."""
+    if Path(args.filename).name in _PROTECTED_CONTRACT_FILES:
+        print(
+            f"FAIL: {args.filename} is DAO-owned and cannot be replaced "
+            "through write-text -- use its dedicated issuing command")
+        return 1
     return _write_text_locked(args.case_id, args.filename, args.text_file, args.held_by, args.run_id, args.purpose)
 
 
@@ -6365,7 +6373,11 @@ def policy_polarity_semantic_index_path(case_id: str) -> Path:
 def load_policy_polarity_semantic_index(case_id: str) -> dict:
     data = load_json(policy_polarity_semantic_index_path(case_id))
     if data is None:
-        data = {"case_id": case_id, "receipts": []}
+        data = {
+            "case_id": case_id,
+            "active_analyzer": None,
+            "receipts": [],
+        }
         data["index_id"] = policy_polarity_semantics.index_id(data)
     return data
 
@@ -6392,6 +6404,166 @@ def _semantic_index_errors(index: dict, case_id: str) -> list[str]:
     errors.extend(policy_polarity_semantics.index_integrity_errors(
         index, case_id))
     return errors
+
+
+_SEMANTIC_BUCKET_OUTCOME = {
+    "payout_conditions": "affirmative",
+    "coverage_start_conditions": "affirmative",
+    "exclusions": "restrictive_or_negative",
+    "reduction_conditions": "restrictive_or_negative",
+}
+
+
+def _semantic_receipt_binding_errors(
+        case_id: str, doc_id: str, condition: dict, bucket: str,
+        location: str) -> list[str]:
+    """Deterministically bind condition -> receipt -> registered source.
+
+    This function never builds a provider and never invokes an extractor. The
+    receipt is semantic authority; Python verifies only integrity, currency,
+    exact source occurrence, condition bytes, bucket outcome, and the
+    fail-closed review flags.
+    """
+    expected = _SEMANTIC_BUCKET_OUTCOME.get(bucket)
+    if expected is None:
+        return []
+    # Historical non-canonical artifacts remain readable for audit/migration.
+    # P0-3 independently blocks them from new policy writes/finalization; the
+    # semantic receipt obligation begins where canonical policy work begins.
+    if uid_scheme_for(case_id, doc_id) != "canonical_v1":
+        return []
+    receipt_id = condition.get("polarity_analysis_receipt_id")
+    if not receipt_id:
+        return [
+            f"{location}: missing polarity_analysis_receipt_id -- {bucket} "
+            "requires an analysis produced by `dao.py "
+            "analyze-policy-polarity`; an agent cannot self-declare polarity"
+        ]
+
+    index = load_policy_polarity_semantic_index(case_id)
+    index_errors = _semantic_index_errors(index, case_id)
+    if index_errors:
+        return [
+            f"{location}: semantic receipt index is invalid: {error}"
+            for error in index_errors]
+    receipt = next(
+        (item for item in index.get("receipts") or []
+         if item.get("receipt_id") == receipt_id),
+        None,
+    )
+    if receipt is None:
+        return [
+            f"{location}: semantic receipt {receipt_id!r} does not resolve in "
+            "the DAO-owned index"]
+
+    errors = [
+        f"{location}: {error}"
+        for error in policy_polarity_semantics.receipt_integrity_errors(
+            receipt, "semantic receipt")]
+    if receipt.get("case_id") != case_id:
+        errors.append(
+            f"{location}: semantic receipt belongs to another case")
+    if receipt.get("document_id") != doc_id:
+        errors.append(
+            f"{location}: semantic receipt belongs to "
+            f"{receipt.get('document_id')!r}, not {doc_id!r}")
+    revision = (revision_entry_for(
+        case_id, doc_id) or {}).get("current_revision_sha256")
+    if receipt.get("source_text_revision_sha256") != revision:
+        errors.append(
+            f"{location}: semantic receipt is stale for the current source "
+            "revision")
+    if receipt.get("condition_text_sha256") != \
+            policy_polarity_semantics.sha256_text(
+                str(condition.get("text") or "")):
+        errors.append(
+            f"{location}: condition text changed after semantic analysis")
+    if receipt.get("bucket") != bucket:
+        errors.append(
+            f"{location}: semantic receipt was issued for bucket "
+            f"{receipt.get('bucket')!r}, not {bucket!r}")
+
+    active = index.get("active_analyzer")
+    if receipt.get("analyzer") != active:
+        errors.append(
+            f"{location}: semantic receipt analyzer is stale; active profile "
+            f"is {active!r}")
+
+    context, context_errors = _uid_source_context(case_id, doc_id)
+    if context_errors:
+        errors.extend(f"{location}: {error}" for error in context_errors)
+        return errors
+    try:
+        records = policy_uid_resolver.resolve_spans(
+            context, condition.get("source_span_uids"),
+            f"{location}.source_span_uids")
+    except (policy_uid_resolver.UidResolutionError,
+            policy_uid.UidInputError) as exc:
+        errors.append(
+            f"{location}: semantic source occurrence cannot be resolved: {exc}")
+        return errors
+    ordered = sorted(
+        records,
+        key=lambda item: (
+            item["physical_page"], item["start_char"], item["end_char"],
+            item["uid"]),
+    )
+    span_uids = [item["uid"] for item in ordered]
+    if receipt.get("source_span_uids") != span_uids:
+        errors.append(
+            f"{location}: receipt source spans do not equal this condition's "
+            "DAO-recomputed exact occurrences")
+    if receipt.get("source_span_uid") != span_uids[0]:
+        errors.append(
+            f"{location}: receipt primary source span is inconsistent")
+    quote_hash = policy_polarity_semantics.source_quote_sha256(ordered)
+    if receipt.get("source_quote_sha256") != quote_hash:
+        errors.append(
+            f"{location}: receipt source quote hash is stale or belongs to "
+            "another exact occurrence")
+
+    analyzer = receipt.get("analyzer") or {}
+    expected_cache_key = policy_polarity_semantics.analysis_cache_key(
+        case_id=case_id,
+        document_id=doc_id,
+        source_revision=revision,
+        source_span_uids=span_uids,
+        source_quote_hash=quote_hash,
+        condition_hash=policy_polarity_semantics.sha256_text(
+            str(condition.get("text") or "")),
+        bucket=bucket,
+        provider=analyzer.get("provider", ""),
+        model=analyzer.get("model", ""),
+    )
+    if receipt.get("cache_key") != expected_cache_key:
+        errors.append(
+            f"{location}: semantic receipt cache identity is inconsistent")
+
+    classification = receipt.get("classification")
+    if classification in {"mixed", "ambiguous"}:
+        errors.append(
+            f"{location}: semantic receipt is {classification}; no "
+            "authenticated human-review artifact exists for this receipt "
+            "kind, so it remains fail-closed")
+    elif classification != expected:
+        errors.append(
+            f"{location}: bucket-condition-evidence mismatch -- {bucket} "
+            f"requires {expected}, but the semantic source receipt is "
+            f"{classification}")
+    if receipt.get("meaning_preserved") is not True:
+        errors.append(
+            f"{location}: semantic receipt says the normalized condition does "
+            "not preserve the source meaning")
+    if receipt.get("review_required") is True:
+        errors.append(
+            f"{location}: semantic receipt requires unresolved review")
+    return errors
+
+
+def _semantic_receipt_validator(case_id: str, doc_id: str):
+    return lambda condition, bucket, location: \
+        _semantic_receipt_binding_errors(
+            case_id, doc_id, condition, bucket, location)
 
 
 def cmd_analyze_policy_polarity(args):
@@ -6444,16 +6616,6 @@ def cmd_analyze_policy_polarity(args):
             item["uid"]),
     )
     derived_uids = [item["uid"] for item in ordered]
-    selector_uids = [
-        item.get("span_uid")
-        for item in selector.get("source_spans") or []]
-    if (not all(isinstance(item, str) for item in selector_uids)
-            or sorted(selector_uids) != sorted(derived_uids)):
-        print(
-            "FAIL: selector span_uid values do not match the exact occurrence "
-            f"UIDs recomputed by the DAO (submitted={selector_uids}, "
-            f"derived={derived_uids})")
-        return 1
     submitted_uids = list(args.source_span_uid or [])
     if submitted_uids != derived_uids:
         print(
@@ -6490,6 +6652,13 @@ def cmd_analyze_policy_polarity(args):
         provider=provider.provider_name,
         model=provider.model_name,
     )
+    requested_analyzer = {
+        "provider": provider.provider_name,
+        "model": provider.model_name,
+        "prompt_version": policy_polarity_semantics.PROMPT_VERSION,
+        "settings_fingerprint":
+            policy_polarity_semantics.settings_fingerprint(),
+    }
 
     target = policy_polarity_semantic_index_path(args.case_id)
     existing_lock = acquire_lock_blocking(
@@ -6512,6 +6681,17 @@ def cmd_analyze_policy_polarity(args):
             return 1
         for receipt in index.get("receipts") or []:
             if receipt.get("cache_key") == cache_key:
+                if index.get("active_analyzer") != requested_analyzer:
+                    index["active_analyzer"] = requested_analyzer
+                    index["index_id"] = \
+                        policy_polarity_semantics.index_id(index)
+                    errors = _semantic_index_errors(index, args.case_id)
+                    if errors:
+                        print("FAIL: cached analyzer profile transition failed:")
+                        for error in errors:
+                            print(f"  - {error}")
+                        return 1
+                    atomic_write_json(target, index)
                 print(
                     "PASS: semantic analysis cache hit "
                     f"{receipt['receipt_id']} (provider not called)")
@@ -6526,7 +6706,7 @@ def cmd_analyze_policy_polarity(args):
                 raise ValueError(
                     "provider returned a different prompt version")
             analysis = policy_polarity_semantics.parse_analysis(
-                result.text, len(source_passage))
+                result.text, source_passage)
         except (llm_providers.ProviderExecutionError, ValueError) as exc:
             print(
                 "FAIL: semantic analysis produced no receipt; "
@@ -6546,19 +6726,13 @@ def cmd_analyze_policy_polarity(args):
             "condition_text_sha256": condition_hash,
             "bucket": args.bucket,
             **analysis,
-            "analyzer": {
-                "provider": result.provider_name,
-                "model": result.model_name,
-                "prompt_version": result.prompt_version,
-                "settings_fingerprint":
-                    policy_polarity_semantics.settings_fingerprint(),
-            },
+            "analyzer": requested_analyzer,
             "analyzed_at": now_iso(),
         }
         # A provider cannot substitute a different identity than the configured
         # one used in the cache key.
-        if (receipt["analyzer"]["provider"] != provider.provider_name
-                or receipt["analyzer"]["model"] != provider.model_name):
+        if (result.provider_name != provider.provider_name
+                or result.model_name != provider.model_name):
             print(
                 "FAIL: provider result identity differs from the configured "
                 "analyzer; no receipt issued")
@@ -6566,6 +6740,7 @@ def cmd_analyze_policy_polarity(args):
         receipt["receipt_id"] = policy_polarity_semantics.receipt_id(receipt)
         prospective = {
             "case_id": args.case_id,
+            "active_analyzer": requested_analyzer,
             "receipts": [*(index.get("receipts") or []), receipt],
         }
         prospective["index_id"] = policy_polarity_semantics.index_id(

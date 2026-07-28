@@ -2318,3 +2318,21 @@ stays refused.
 (`tests/test_cross_document_uid.py`) that drives real `cmd_write_contract`
 calls rather than monkeypatched pools, and pins RT/RR/RC to a hand-computed
 SHA so a fixture agreeing with the validator is not what makes it pass.
+
+### Semantic polarity human review has no authenticated resolution path -- OPEN
+
+P1-2 moved Korean policy polarity out of substring/regex authority and into a
+DAO-issued `policy_polarity_semantic_v1` receipt. The explicit
+`analyze-policy-polarity` command is the only LLM-calling path; write and
+finalization deterministically verify the frozen receipt against the current
+registered revision, exact P0-7 source occurrence, condition bytes, semantic
+bucket, prompt version, provider/model identity, and settings fingerprint.
+
+`mixed`, `ambiguous`, `meaning_preserved=false`, and provider/schema failure
+are deliberately fail-closed. The existing authenticated human-review ledger
+does not define an artifact kind or decision semantics for a polarity receipt,
+so there is currently no legitimate override. Adding a reviewer name or
+setting `review_required=false` cannot clear the blocker. Operationally, a
+condition that cannot be split into settled propositions stops
+`policy_clause_processing` until a dedicated receipt-bound human-review
+contract and command are designed.

@@ -91,6 +91,43 @@ passages. Every row range must lie inside the table source regions;
 each cell span must identify exactly the cell value inside its row; and two
 cells may not overlap in source.
 
+**Semantic polarity receipts (P1-2).** Python does not attempt to understand
+arbitrary Korean negation scope. Before writing an outcome-sensitive condition
+(`payout_conditions`, `coverage_start_conditions`, `exclusions`, or
+`reduction_conditions`), run the explicit analysis command against the exact
+P0-7 source occurrence:
+
+    python tools/dao.py analyze-policy-polarity CASE_ID --doc-id DOC_ID \
+        --source-span-uid PS_UID --source-selector-file spans.json \
+        --condition-text-file condition.txt --bucket payout_conditions \
+        --held-by policy-pipeline --run-id RUN_ID
+
+Repeat `--source-span-uid` in canonical source order for a multi-span
+condition. `spans.json` has `{"source_spans": [...]}` using the same exact
+`{page,start_char,end_char,quote}` objects the condition will carry. These are
+untrusted selectors: the DAO reads the current registered revision, verifies
+each byte range and occurrence, and recomputes every PS UID before invoking the
+configured semantic provider. Never submit a revision hash, quote hash,
+classification, or analysis object as authority.
+
+The command is the **only** policy-polarity path that calls an LLM. It returns
+a `PPR-...` receipt ID from the protected DAO index; place only that ID in the
+condition's `polarity_analysis_receipt_id`. `write-contract` and finalization
+never call a model. They recompute receipt integrity and require the current
+source revision, exact source occurrences, condition bytes, bucket, prompt,
+provider/model, and settings to match. Editing one character, moving the
+condition to another bucket, changing source revision/occurrence, or changing
+the active analyzer profile makes the old receipt stale. Identical inputs hit
+the protected cache without another model call.
+
+Bucket outcomes are fixed: payout/coverage-start require `affirmative`;
+exclusion/reduction require `restrictive_or_negative`. `mixed`, `ambiguous`,
+`meaning_preserved=false`, or `review_required=true` never auto-pass. This
+repository does not yet have an authenticated human-review ledger artifact
+kind for semantic receipt resolution, so those outcomes remain fail-closed;
+do not clear them by changing condition wording, moving buckets, or submitting
+`review_required=false`.
+
 **Scan every policy document for tables, before anything else (P0-8).** Whether
 a document contains tables is a fact about its PDF, not something the pipeline
 infers from whether you wrote a `reference_table`. So each `canonical_v1`

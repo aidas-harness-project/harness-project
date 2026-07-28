@@ -549,7 +549,7 @@ def test_a_fabricated_rt_agreed_by_both_documents_is_still_refused(
 
 
 def test_a_canonically_derived_cross_document_reference_is_accepted(
-        two_documents, isolated_dao, make_args):
+        two_documents, isolated_dao, make_args, issue_semantic_receipts):
     """The refusals above must not have made legitimate references unwritable.
 
     Same shape as every attack in this module, with the one difference that
@@ -568,6 +568,7 @@ def test_a_canonically_derived_cross_document_reference_is_accepted(
         "document_id": "DOC_002",
         "table_uid": real["table_uid"],
         "row_uids": [real["rows"][0]["row_uid"]]})
+    issue_semantic_receipts(data, "CASE_030", "DOC_001")
     assert _write_clauses(isolated_dao, make_args, data) == 0
     assert _clause_file(isolated_dao).exists()
 
@@ -767,7 +768,8 @@ def test_a_new_doc2_revision_makes_the_existing_clause_binding_stale(
 
 
 def test_finalization_rechecks_cross_document_references(
-        two_documents, isolated_dao, make_args, capsys):
+        two_documents, isolated_dao, make_args, capsys,
+        issue_semantic_receipts):
     """A contract that was valid at write time is re-verified at finalization.
 
     Otherwise a legitimate write followed by a DOC_002 revision would leave a
@@ -784,6 +786,7 @@ def test_finalization_rechecks_cross_document_references(
         "document_id": "DOC_002",
         "table_uid": real["table_uid"],
         "row_uids": [real["rows"][0]["row_uid"]]})
+    issue_semantic_receipts(data, "CASE_030", "DOC_001")
     assert _write_clauses(isolated_dao, make_args, data) == 0
     capsys.readouterr()
 
