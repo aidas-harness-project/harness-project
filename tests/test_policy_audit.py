@@ -35,8 +35,8 @@ def _with_snapshot(data, doc_ids=("DOC_001",)):
     return data
 
 
-def _audit(hashes, findings=None):
-    return {
+def _audit(hashes, findings=None, binding=None):
+    data = {
         "case_id": "CASE_030",
         "run_id": "RUN_20260724_001",
         "component": "policy-pipeline",
@@ -54,35 +54,67 @@ def _audit(hashes, findings=None):
         "audited_at": "2026-07-24T10:00:00+09:00",
         "findings": findings or [],
     }
+    if binding is not None:
+        # Part 11J: a canonical_v1 document's policy-layer contract must state
+        # which registered revision it was derived from. Only the canonically
+        # seeded tests need it -- the checker-only ones never reach that gate.
+        data["source_text_revision"] = binding
+    return data
 
 
-def _seed_contracts(isolated_dao):
+# P0-3: any test that reaches a real WRITE path, or that resolves a downstream
+# policy reference, needs DOC_001 to be genuinely canonical_v1 -- a legacy or
+# unregistered document is refused before the audit layer under test is
+# reached. Those tests pass `canonical=(make_args, isolated_dao, canonicalize)`
+# and get UIDs derived from the registered source. The checker-only tests
+# (which call policy_audit.check_policy_audit directly, never the DAO write
+# path) keep the cheap non-canonical seed: they are about the audit's own
+# version binding, and canonicalizing them would test the UID layer twice
+# while making the binding harder to see.
+QUOTE = "제3조(보험금의 지급) 회사는 보험금을 지급합니다."
+TEXT = f"<<<PAGE page=1>>>\n{QUOTE}\n"
+RAW = b"%PDF-1.7 immutable policy source for the audit tests"
+FAKE_UIDS = {
+    "boundary": "PB-1111111111111111",
+    "clause": "PC-1111111111111111",
+    "condition": "CI-1111111111111111",
+}
+
+
+def _derived_uids():
+    """The UIDs the DAO will recompute for the seeded source, from the same
+    production helper it recomputes with."""
+    import policy_uid
+
+    pdf = dao.read_contract_data(
+        "CASE_030", "document_manifest.json")["documents"][0][
+            "source_pdf_sha256"]
+    ps = policy_uid.compute_uid(
+        "span", source_pdf_sha256=pdf, physical_page=1, span_text=QUOTE,
+        ordinal=1)
+    pb = policy_uid.compute_uid(
+        "boundary", source_pdf_sha256=pdf, physical_page=1, span_text=ps,
+        ordinal=1)
+    pc = policy_uid.compute_uid(
+        "clause", source_pdf_sha256=pdf, physical_page=1, span_text=ps,
+        ordinal=1, parent_uid=pb)
+    ci = policy_uid.compute_uid(
+        "condition", source_pdf_sha256=pdf, physical_page=1, span_text=ps,
+        ordinal=1, parent_uid=pc)
+    return {"span": ps, "boundary": pb, "clause": pc, "condition": ci}
+
+
+def _binding():
+    return {"documents": [{
+        "document_id": "DOC_001",
+        "revision_sha256": dao.revision_entry_for(
+            "CASE_030", "DOC_001")["current_revision_sha256"],
+    }]}
+
+
+def _seed_contracts(isolated_dao, canonical=None):
     out = isolated_dao / "outputs" / "CASE_030"
     out.mkdir(parents=True)
-    normalized = {
-        "clauses": [{
-            "clause_uid": "PC-1111111111111111",
-            "source_boundary_uids": ["PB-1111111111111111"],
-            "review_required": False,
-            "payout_conditions": [{
-                "condition_uid": "CI-1111111111111111",
-                "review_required": False,
-            }],
-        }],
-    }
-    inventory = {
-        "boundaries": [{
-            "boundary_uid": "PB-1111111111111111",
-            "disposition": "normalized",
-            "normalized_mappings": [{
-                "clause_uid": "PC-1111111111111111",
-            }],
-        }],
-    }
-    normalized_path = out / "normalized_policy_clause_DOC_001.json"
-    inventory_path = out / "policy_boundary_inventory_DOC_001.json"
-    _write_json(normalized_path, normalized)
-    _write_json(inventory_path, inventory)
     _write_json(out / "document_manifest.json", {
         "case_id": "CASE_030",
         "documents": [{
@@ -94,8 +126,61 @@ def _seed_contracts(isolated_dao):
             "ocr_status": "completed",
             "document_type": "insurance_policy",
             "downstream_disposition": "automated_text_pipeline",
+            "extraction_method": "embedded_text",
         }],
     })
+
+    uids = FAKE_UIDS
+    span = None
+    if canonical is not None:
+        make_args, isolated, canonicalize = canonical
+        raw = isolated / "data" / "raw" / "CASE_030"
+        raw.mkdir(parents=True, exist_ok=True)
+        (raw / "DOC_001.pdf").write_bytes(RAW)
+        canonicalize(make_args, isolated, "CASE_030", "DOC_001", TEXT)
+        uids = _derived_uids()
+        span = {"page": 1, "start_char": 0, "end_char": len(QUOTE),
+                "quote": QUOTE}
+
+    normalized = {
+        "clauses": [{
+            "clause_uid": uids["clause"],
+            "source_boundary_uids": [uids["boundary"]],
+            "evidence_references": [{
+                "document_id": "DOC_001", "page": 1, "quote": QUOTE,
+            }],
+            "review_required": False,
+            "payout_conditions": [{
+                "condition_uid": uids["condition"],
+                "evidence_references": [{
+                    "document_id": "DOC_001", "page": 1, "quote": QUOTE,
+                }],
+                "review_required": False,
+            }],
+        }],
+    }
+    inventory = {
+        "boundaries": [{
+            "boundary_uid": uids["boundary"],
+            "disposition": "normalized",
+            "normalized_mappings": [{
+                "clause_uid": uids["clause"],
+            }],
+        }],
+    }
+    if span is not None:
+        normalized["clauses"][0]["source_span_uids"] = [span]
+        normalized["clauses"][0]["payout_conditions"][0][
+            "source_span_uids"] = [span]
+        inventory["page_spans"] = [{
+            "span_uid": uids["span"], "page": 1, "start_char": 0,
+            "end_char": len(QUOTE), "quote": QUOTE,
+            "disposition": "boundary", "boundary_uid": uids["boundary"],
+        }]
+    normalized_path = out / "normalized_policy_clause_DOC_001.json"
+    inventory_path = out / "policy_boundary_inventory_DOC_001.json"
+    _write_json(normalized_path, normalized)
+    _write_json(inventory_path, inventory)
     # Take the binding digests from the DAO itself rather than recomputing a
     # subset by hand: Part 11F widened the binding to the processed source text,
     # the manifest entry/page_map, and the parent coverage, and a fixture that
@@ -105,7 +190,15 @@ def _seed_contracts(isolated_dao):
         hashes["normalized_sha256"]
     assert hashlib.sha256(inventory_path.read_bytes()).hexdigest() == \
         hashes["inventory_sha256"]
+    _UIDS.clear()
+    _UIDS.update(uids)
     return out, normalized, inventory, hashes
+
+
+# The UIDs the most recent _seed_contracts produced -- fabricated for the
+# checker-only tests, source-derived for the canonical ones. Module-level so
+# the small payload builders below need no extra plumbing; reset on every seed.
+_UIDS: dict = dict(FAKE_UIDS)
 
 
 def _open_finding():
@@ -225,14 +318,20 @@ def test_accepted_risk_requires_human_actor(isolated_dao):
     assert any("human" in error for error in errors)
 
 
-def test_downstream_reference_requires_current_clear_audit(isolated_dao):
-    out, _, _, hashes = _seed_contracts(isolated_dao)
+def test_downstream_reference_requires_current_clear_audit(
+        isolated_dao, make_args, canonicalize):
+    """Canonical seed since P0-3: a downstream reference to a non-canonical
+    document is refused before the audit's own currency is ever consulted, so
+    the clean-resolution assertion at the end would otherwise be asserting the
+    wrong refusal's absence."""
+    out, _, _, hashes = _seed_contracts(
+        isolated_dao, canonical=(make_args, isolated_dao, canonicalize))
     _pass_policy_stage(out)
     data = _with_snapshot({
         "coverages": [{
             "matched_clause_ref": {
                 "document_id": "DOC_001",
-                "clause_uid": "PC-1111111111111111",
+                "clause_uid": _UIDS["clause"],
             },
         }],
     })
@@ -273,10 +372,14 @@ def test_downstream_condition_uid_must_resolve_within_clause(isolated_dao):
 
 
 def test_dao_writes_only_current_version_bound_audit(
-        isolated_dao, make_args):
-    out, _, _, hashes = _seed_contracts(isolated_dao)
+        isolated_dao, make_args, canonicalize):
+    """Canonical seed since P0-3: this is a real write-path test, and a
+    policy-layer write against a non-canonical document is now refused before
+    the version binding under test is reached."""
+    out, _, _, hashes = _seed_contracts(
+        isolated_dao, canonical=(make_args, isolated_dao, canonicalize))
     data_file = isolated_dao / "audit.json"
-    _write_json(data_file, _audit(hashes))
+    _write_json(data_file, _audit(hashes, binding=_binding()))
     args = make_args(
         case_id="CASE_030",
         filename="policy_audit_result_DOC_001.json",
@@ -289,7 +392,7 @@ def test_dao_writes_only_current_version_bound_audit(
     assert dao.cmd_write_contract(args) == 0
     assert (out / "policy_audit_result_DOC_001.json").exists()
 
-    stale = _audit(hashes)
+    stale = _audit(hashes, binding=_binding())
     stale["inventory_sha256"] = "0" * 64
     _write_json(data_file, stale)
     assert dao.cmd_write_contract(args) == 1

@@ -26,28 +26,97 @@ def _write_json(path, data):
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-NORMALIZED = {
-    "clauses": [{
-        "clause_uid": "PC-1111111111111111",
-        "source_boundary_uids": ["PB-1111111111111111"],
-        "review_required": False,
-        "payout_conditions": [{
-            "condition_uid": "CI-1111111111111111",
-            "review_required": False,
-        }],
-    }],
-}
-INVENTORY = {
-    "boundaries": [{
-        "boundary_uid": "PB-1111111111111111",
-        "disposition": "normalized",
-        "normalized_mappings": [{"clause_uid": "PC-1111111111111111"}],
-    }],
-}
+# P0-3 made canonical_v1 mandatory for any document a downstream artifact
+# cites, so this module's fixture can no longer hand-write `PC-1111…` stubs:
+# a legacy or unregistered document is refused before the snapshot layer under
+# test is ever reached. The UIDs below are therefore DERIVED from the
+# registered source, using the same production helper the DAO recomputes with,
+# and the boundary inventory the clause layer is parented on is built too.
+# Nothing about the snapshot/cascade behaviour these tests cover changed --
+# only the precondition that the policy layer they sit on is a real one.
+QUOTE = "제3조(보험금의 지급) 회사는 보험금을 지급합니다."
+TEXT = f"<<<PAGE page=1>>>\n{QUOTE}\n"
+RAW = b"%PDF-1.7 immutable policy source for the snapshot tests"
 
 
-def _audit(hashes):
+def _span():
+    return {"page": 1, "start_char": 0, "end_char": len(QUOTE), "quote": QUOTE}
+
+
+def _uids(pdf_sha256):
+    """Every UID this module's contracts carry, derived from source."""
+    import policy_uid
+
+    ps = policy_uid.compute_uid(
+        "span", source_pdf_sha256=pdf_sha256, physical_page=1,
+        span_text=QUOTE, ordinal=1)
+    pb = policy_uid.compute_uid(
+        "boundary", source_pdf_sha256=pdf_sha256, physical_page=1,
+        span_text=ps, ordinal=1)
+    pc = policy_uid.compute_uid(
+        "clause", source_pdf_sha256=pdf_sha256, physical_page=1,
+        span_text=ps, ordinal=1, parent_uid=pb)
+    ci = policy_uid.compute_uid(
+        "condition", source_pdf_sha256=pdf_sha256, physical_page=1,
+        span_text=ps, ordinal=1, parent_uid=pc)
+    return {"span": ps, "boundary": pb, "clause": pc, "condition": ci}
+
+
+def _normalized(uids):
     return {
+        "clauses": [{
+            "clause_uid": uids["clause"],
+            "source_boundary_uids": [uids["boundary"]],
+            "source_span_uids": [_span()],
+            "evidence_references": [{
+                "document_id": "DOC_001", "page": 1, "quote": QUOTE,
+            }],
+            "review_required": False,
+            "payout_conditions": [{
+                "condition_uid": uids["condition"],
+                "source_span_uids": [_span()],
+                "evidence_references": [{
+                    "document_id": "DOC_001", "page": 1, "quote": QUOTE,
+                }],
+                "review_required": False,
+            }],
+        }],
+    }
+
+
+def _inventory(uids):
+    return {
+        "boundaries": [{
+            "boundary_uid": uids["boundary"],
+            "disposition": "normalized",
+            "normalized_mappings": [{"clause_uid": uids["clause"]}],
+        }],
+        "page_spans": [{
+            "span_uid": uids["span"],
+            "page": 1,
+            "start_char": 0,
+            "end_char": len(QUOTE),
+            "quote": QUOTE,
+            "disposition": "boundary",
+            "boundary_uid": uids["boundary"],
+        }],
+    }
+
+
+def _binding():
+    """The Part 11J source-revision binding a canonical_v1 policy-layer
+    contract must carry. Required here only because P0-3 made the fixture's
+    document genuinely canonical -- under the old legacy fixture the binding
+    was scoped out entirely."""
+    return {"documents": [{
+        "document_id": "DOC_001",
+        "revision_sha256": dao.revision_entry_for(
+            "CASE_030", "DOC_001")["current_revision_sha256"],
+    }]}
+
+
+def _audit(hashes, binding=None):
+    data = {
         "case_id": "CASE_030",
         "run_id": "RUN_20260724_001",
         "component": "policy-pipeline",
@@ -65,14 +134,21 @@ def _audit(hashes):
         "audited_at": "2026-07-24T10:00:00+09:00",
         "findings": [],
     }
+    if binding is not None:
+        data["source_text_revision"] = binding
+    return data
+
+
+@pytest.fixture(autouse=True)
+def _fast_locks(monkeypatch):
+    monkeypatch.setattr(dao, "LOCK_MAX_WAIT_SECONDS", 0)
+    monkeypatch.setattr(dao, "LOCK_POLL_INTERVAL_SECONDS", 0)
 
 
 @pytest.fixture
-def policy_case(isolated_dao):
+def policy_case(isolated_dao, make_args, canonicalize):
     out = isolated_dao / "outputs" / "CASE_030"
     out.mkdir(parents=True)
-    _write_json(out / "normalized_policy_clause_DOC_001.json", NORMALIZED)
-    _write_json(out / "policy_boundary_inventory_DOC_001.json", INVENTORY)
     _write_json(out / "document_manifest.json", {
         "case_id": "CASE_030",
         "documents": [{
@@ -84,10 +160,25 @@ def policy_case(isolated_dao):
             "ocr_status": "completed",
             "document_type": "insurance_policy",
             "downstream_disposition": "automated_text_pipeline",
+            "extraction_method": "embedded_text",
         }],
     })
+    raw = isolated_dao / "data" / "raw" / "CASE_030"
+    raw.mkdir(parents=True)
+    (raw / "DOC_001.pdf").write_bytes(RAW)
+    # The real migration flow, via the shared helper -- so this fixture cannot
+    # reach a state the production path could not produce.
+    canonicalize(make_args, isolated_dao, "CASE_030", "DOC_001", TEXT)
+
+    manifest = dao.read_contract_data("CASE_030", "document_manifest.json")
+    uids = _uids(manifest["documents"][0]["source_pdf_sha256"])
+    _write_json(out / "normalized_policy_clause_DOC_001.json",
+                _normalized(uids))
+    _write_json(out / "policy_boundary_inventory_DOC_001.json",
+                _inventory(uids))
     hashes, _, _, _ = dao._policy_audit_context("CASE_030", "DOC_001")
-    _write_json(out / "policy_audit_result_DOC_001.json", _audit(hashes))
+    _write_json(out / "policy_audit_result_DOC_001.json",
+                _audit(hashes, _binding()))
     _write_json(out / "_run_state.json", {
         "case_id": "CASE_030",
         "run_id": "RUN_20260724_001",
@@ -98,15 +189,23 @@ def policy_case(isolated_dao):
             "backup_path": "outputs/CASE_030/_backups/step_01_policy",
         }],
     })
+    _UIDS.clear()
+    _UIDS.update(uids)
     return out
 
 
-def _coverage(snapshot=None):
+# Module-level so the many small helpers below can reach the derived UIDs
+# without every one of them growing a fixture parameter. Reset by the fixture
+# on every test, so nothing leaks between them.
+_UIDS: dict = {}
+
+
+def _coverage(snapshot=None, clause_uid=None):
     data = {
         "coverages": [{
             "matched_clause_ref": {
                 "document_id": "DOC_001",
-                "clause_uid": "PC-1111111111111111",
+                "clause_uid": clause_uid or _UIDS["clause"],
             },
         }],
     }
@@ -137,7 +236,7 @@ def test_an_artifact_with_no_policy_reference_needs_no_snapshot(policy_case):
 def test_rewriting_the_normalized_contract_makes_the_snapshot_stale(policy_case):
     snapshot = dao.policy_snapshot_for("CASE_030", ["DOC_001"])
     assert _errors(_coverage(snapshot)) == []
-    renormalized = json.loads(json.dumps(NORMALIZED))
+    renormalized = json.loads(json.dumps(_normalized(_UIDS)))
     renormalized["clauses"][0]["payout_conditions"][0]["review_required"] = True
     _write_json(policy_case / "normalized_policy_clause_DOC_001.json",
                 renormalized)
@@ -149,7 +248,7 @@ def test_rewriting_the_boundary_inventory_makes_the_snapshot_stale(policy_case):
     """The clause bytes did not move, but the accounting that justifies them
     did -- and the downstream artifact was derived from both."""
     snapshot = dao.policy_snapshot_for("CASE_030", ["DOC_001"])
-    rewritten = json.loads(json.dumps(INVENTORY))
+    rewritten = json.loads(json.dumps(_inventory(_UIDS)))
     rewritten["boundaries"][0]["disposition"] = "excluded"
     _write_json(policy_case / "policy_boundary_inventory_DOC_001.json",
                 rewritten)
@@ -235,7 +334,7 @@ def test_write_contract_refuses_a_stale_snapshot(policy_case, isolated_dao,
         held_by="claim-analysis", run_id="RUN_20260724_001", stage=None)
     assert dao.cmd_write_contract(args) == 0
 
-    renormalized = json.loads(json.dumps(NORMALIZED))
+    renormalized = json.loads(json.dumps(_normalized(_UIDS)))
     renormalized["clauses"][0]["review_required"] = True
     _write_json(policy_case / "normalized_policy_clause_DOC_001.json",
                 renormalized)
@@ -267,7 +366,10 @@ def _rewrite_audit_args(policy_case, isolated_dao, make_args, **changes):
     cascade, and inventing a hundred lines of clause fixture to reach it would
     only make the cascade harder to see."""
     hashes, _, _, _ = dao._policy_audit_context("CASE_030", "DOC_001")
-    audit = _audit(hashes)
+    # Carries the binding for the same reason the fixture's copy does: the
+    # document is genuinely canonical_v1 now, so a policy-layer write must
+    # state which registered revision it was derived from (Part 11J).
+    audit = _audit(hashes, _binding())
     audit.update(changes)
     data_file = isolated_dao / "audit.json"
     _write_json(data_file, audit)

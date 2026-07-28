@@ -1088,17 +1088,32 @@ def test_an_audit_cannot_launder_a_fake_uid_by_agreeing_with_the_clause_file(
 # 9/10. Legacy isolation, and no side effects
 # =========================================================================
 
-def test_legacy_documents_are_still_not_uid_checked(isolated_dao, make_args):
-    """Legacy artifacts stay readable and are never rewritten by this work."""
+def test_a_non_canonical_document_is_gated_before_recomputation(
+        isolated_dao, make_args):
+    """This test used to assert the opposite -- that a non-canonical document
+    was simply not UID-checked -- which was true and was the P0-3 defect: the
+    recomputation below is scoped to canonical_v1, and a document nobody had
+    activated fell outside that scope, so every gate P0-2 built could be
+    skipped by not running enable-canonical-uids.
+
+    Both halves are asserted, because they are different layers. P0-2's
+    recomputation still declines to run on a non-canonical document -- that
+    scoping is correct, a legacy artifact must stay readable and migratable.
+    What changed is that reaching this function in that state is no longer
+    possible through a write: the P0-3 scheme gate refuses first.
+    """
     out = isolated_dao / "outputs" / "CASE_030"
     out.mkdir(parents=True)
     _write_json(out / "document_manifest.json",
                 {"case_id": "CASE_030", "documents": []})
-    assert dao.uid_scheme_for("CASE_030", "DOC_005") == "legacy"
+    assert dao.uid_scheme_for("CASE_030", "DOC_005") == "unregistered"
     assert dao._canonical_uid_errors(
         "CASE_030", "normalized_policy_clause_DOC_005.json",
         _cross_contract.NORMALIZED_POLICY_CLAUSE_SCHEMA,
         {"clauses": [{"clause_uid": FAKE["clause"]}]}) == []
+    assert dao._policy_write_scheme_blockers(
+        "CASE_030", "normalized_policy_clause_DOC_005.json",
+        {"clauses": [{"clause_uid": FAKE["clause"]}]})
 
 
 def test_uid_verification_runs_no_external_process(canonical, _no_extractors):

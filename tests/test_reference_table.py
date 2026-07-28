@@ -185,8 +185,18 @@ def test_dao_write_runs_reference_table_cross_contract(
         "reference_table_DOC_001.json").exists()
 
 
-def test_dao_write_persists_valid_reference_table(
+def test_dao_write_refuses_a_reference_table_on_a_non_canonical_document(
         isolated_dao, make_args):
+    """This asserted `== 0` until P0-3.
+
+    Everything this module checks about the contract holds -- the cells quote
+    real page text, every declared column is covered exactly once. What did not
+    hold, and was never checked, is that `RT-…`/`RR-…`/`RC-…` identify anything:
+    DOC_001 has no revision entry, so nothing had ever recomputed them from
+    source. Passing on that basis is the defect, so the expectation is
+    inverted rather than the test deleted -- the write path's behaviour on this
+    exact input is what changed.
+    """
     _seed_source_and_manifest(isolated_dao)
     data_file = isolated_dao / "reference.json"
     data_file.write_text(
@@ -200,7 +210,10 @@ def test_dao_write_persists_valid_reference_table(
         run_id="RUN_20260724_001",
         stage="policy_clause_processing",
     )
-    assert dao.cmd_write_contract(args) == 0
+    assert dao.cmd_write_contract(args) == 1
+    assert not (
+        isolated_dao / "outputs" / "CASE_030" /
+        "reference_table_DOC_001.json").exists()
 
 
 def test_clause_link_resolves_table_and_rows_by_stable_uid(isolated_dao):

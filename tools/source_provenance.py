@@ -164,12 +164,80 @@ def page_text_digests(text: str) -> list[dict]:
     return digests
 
 
+# --- uid_scheme states -----------------------------------------------------
+# Three states, and the distinction between the first two is load-bearing
+# (P0-3). Before this, "no revision entry" was reported as `legacy`, so a
+# document the DAO had never heard of was indistinguishable from one it had
+# deliberately recorded as pre-canonical -- and since every canonical check was
+# scoped to `canonical_v1`, both states meant "skip verification". Not calling
+# enable-canonical-uids was therefore a complete bypass of the UID layer.
+UNREGISTERED = "unregistered"   # no revision entry exists for this document
+LEGACY = "legacy"               # recorded, pre-canonical: readable, migratable
+CANONICAL = "canonical_v1"      # UIDs are recomputed from source and must match
+
+# Values a revision entry's uid_scheme may legitimately hold on disk. Anything
+# else (a typo, a hand-edited file, a future value this build does not know) is
+# a blocker, never a silent legacy.
+KNOWN_SCHEMES = frozenset({LEGACY, CANONICAL})
+
+
+def uid_scheme_blockers(scheme: str | None, doc_id: str,
+                        action: str) -> list[str]:
+    """Why `doc_id` may not be the subject of `action` in its current state.
+
+    Empty list = canonical_v1, the only state new policy work is permitted in.
+    Shared by every gate AND by the tests, so a fixture cannot agree with a
+    validator that disagrees with reality.
+
+    The message names the document, its actual state, and the next DAO command,
+    because a refusal a caller cannot act on is how a fail-closed gate gets
+    routed around instead of satisfied.
+    """
+    if scheme == CANONICAL:
+        return []
+    if scheme is None or scheme == UNREGISTERED:
+        return [
+            f"{doc_id} has no registered source-text revision "
+            f"({UNREGISTERED}) -- {action} requires canonical_v1 UID "
+            "verification, which cannot be switched on for a document whose "
+            "source bytes were never registered. Run `dao.py "
+            "write-redacted-text`, then `dao.py record-source-digest`, then "
+            "`dao.py enable-canonical-uids`."
+        ]
+    if scheme == LEGACY:
+        return [
+            f"{doc_id} is uid_scheme={LEGACY} (unverified) -- {action} "
+            "requires canonical_v1. Legacy artifacts stay readable and "
+            "migratable, but new policy work may not be written against "
+            "unverified UIDs. Run `dao.py record-source-digest` then `dao.py "
+            "enable-canonical-uids` for this document, which invalidates the "
+            "policy stage and its downstream so the artifacts get rewritten "
+            "canonically."
+        ]
+    return [
+        f"{doc_id} has an unrecognized uid_scheme {scheme!r} -- refused "
+        f"rather than treated as {LEGACY}, because an unknown state is not a "
+        "verified one. The revision index is DAO-owned; a value outside "
+        f"{sorted(KNOWN_SCHEMES)} means it was written by something other "
+        "than the DAO."
+    ]
+
+
 # --- uid_scheme transitions ------------------------------------------------
 
 def scheme_transition_errors(current: str | None, proposed: str) -> list[str]:
     """canonical_v1 is a one-way door."""
-    if proposed not in ("legacy", "canonical_v1"):
+    if proposed not in KNOWN_SCHEMES:
         return [f"unknown uid_scheme {proposed!r}"]
+    if current not in KNOWN_SCHEMES and current is not None:
+        # A corrupt/unknown current value is not a licence to overwrite it with
+        # a clean one: that would launder a tampered index into a verified
+        # state in a single command.
+        return [
+            f"current uid_scheme {current!r} is not one of "
+            f"{sorted(KNOWN_SCHEMES)} -- the revision index is DAO-owned and "
+            "an unrecognized state must be investigated, not overwritten"
+        ]
     if current == "canonical_v1" and proposed != "canonical_v1":
         return [
             "uid_scheme may not be downgraded from 'canonical_v1' to "

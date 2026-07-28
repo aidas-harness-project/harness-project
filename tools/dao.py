@@ -525,6 +525,66 @@ def _canonical_uid_finalize_blockers(case_id: str, doc_id: str) -> list[str]:
     return blockers
 
 
+def _automated_policy_documents(manifest: dict) -> list[dict]:
+    """The policy documents this pipeline processes automatically.
+
+    One definition, used by both the completion gate and the P0-3 scheme gate,
+    so a document cannot be in scope for one and out of scope for the other.
+    """
+    return [
+        d for d in (manifest or {}).get("documents", [])
+        if (
+            d.get("document_type") == "insurance_policy"
+            and d.get("downstream_disposition") == "automated_text_pipeline"
+        )
+    ]
+
+
+def _policy_layer_document_ids(case_id: str) -> set[str]:
+    """Every document whose UID verification the policy layer stands on.
+
+    The manifest's automated policy documents, plus any further document a
+    parent-coverage contract accounts for pages of. The second part matters
+    because a segmented_parent's coverage can cite an owning segment that the
+    manifest's own filter might not reach the same way -- and a parent whose
+    coverage rests on an unverified segment is not a verified parent.
+    """
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    doc_ids = {
+        d.get("document_id") for d in _automated_policy_documents(manifest)}
+    for doc_id in list(doc_ids):
+        coverage = read_contract_data(
+            case_id, f"policy_parent_coverage_{doc_id}.json")
+        for page in (coverage or {}).get("pages") or []:
+            if not isinstance(page, dict):
+                continue
+            for key in ("owning_document_id", "owner_document_id",
+                        "reference_table_document_id"):
+                if page.get(key):
+                    doc_ids.add(page[key])
+    return {d for d in doc_ids if d}
+
+
+def _policy_layer_scheme_blockers(case_id: str, action: str) -> list[str]:
+    """P0-3: the whole policy layer must be canonical_v1 for `action`.
+
+    Used by policy_clause_processing's completion gate and, transitively, by
+    every stage downstream of it. A manifest with no automated policy document
+    is not silently clear here -- an empty scope would mean "nothing to verify,
+    therefore verified", which is the exact shape of the defect this closes.
+    """
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        return ["document_manifest.json is missing -- the policy documents "
+                f"{action} depends on cannot be enumerated, so their UID "
+                "verification state cannot be established"]
+    doc_ids = _policy_layer_document_ids(case_id)
+    if not doc_ids:
+        return ["no automated insurance_policy document is registered -- "
+                f"{action} cannot rest on a policy layer that does not exist"]
+    return _canonical_state_blockers(case_id, doc_ids, action)
+
+
 def _policy_completion_blockers(case_id: str) -> list[str]:
     """Return every condition that prevents policy_clause_processing finalize.
 
@@ -537,13 +597,7 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
     manifest = read_contract_data(case_id, "document_manifest.json")
     if manifest is None:
         return ["document_manifest.json is missing"]
-    policy_docs = [
-        d for d in manifest.get("documents", [])
-        if (
-            d.get("document_type") == "insurance_policy"
-            and d.get("downstream_disposition") == "automated_text_pipeline"
-        )
-    ]
+    policy_docs = _automated_policy_documents(manifest)
     if not policy_docs:
         return ["no automated insurance_policy document is registered"]
 
@@ -563,6 +617,17 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
         parent_coverage_for=lambda d: read_contract_data(
             case_id, f"policy_parent_coverage_{d}.json"),
     ))
+
+    # P0-3: every automated policy document in the case must be canonical_v1
+    # before the stage may finalize -- not merely the ones that happen to carry
+    # a contract. Driven by the manifest's own document set, so each structural
+    # shape is covered uniformly: a plain clause document, a
+    # reference_table_only segment, a segmented_parent, and the segments a
+    # parent's coverage accounts for. A mixed set (one canonical, one legacy)
+    # fails on the legacy member, so the stage cannot finalize while any part
+    # of the policy layer it publishes is unverified.
+    blockers.extend(_policy_layer_scheme_blockers(
+        case_id, "finalizing 'policy_clause_processing'"))
 
     for doc in policy_docs:
         doc_id = doc.get("document_id")
@@ -1022,9 +1087,21 @@ def _downstream_policy_ref_errors(
     if not refs:
         return []
 
+    # P0-3, checked BEFORE the recorded stage status. A run-state entry saying
+    # `policy_clause_processing: passed` is a historical claim; it may have
+    # been recorded before canonical verification existed, or against documents
+    # that are still legacy today. Trusting it would let the one field a stale
+    # run-state can assert stand in for the verification it was never subject
+    # to -- so the live scheme of the actually-referenced documents is what
+    # decides, and the recorded status is an additional requirement, not a
+    # substitute.
+    errors = _canonical_state_blockers(
+        case_id, [ref.get("document_id") for _, ref in refs],
+        f"writing the policy-referencing contract {schema_name}")
+
     # The whole policy stage must currently hold, not just the individual
     # contracts this artifact happens to cite (Part 11I).
-    errors = list(_policy_stage_passed_errors(case_id))
+    errors.extend(_policy_stage_passed_errors(case_id))
     errors.extend(_upstream_snapshot_errors(
         case_id, data, [ref.get("document_id") for _, ref in refs]))
 
@@ -1704,6 +1781,33 @@ _POLICY_LAYER_SCHEMAS = frozenset({
 })
 
 
+def _policy_write_scheme_blockers(case_id: str, filename: str,
+                                   data: dict) -> list[str]:
+    """Refuse a policy-layer write against any non-canonical document (P0-3).
+
+    Every document the contract is expressed against must be canonical_v1 --
+    including the case where the filename names one document and the body
+    references others (parent coverage over several owning documents). A
+    partially-canonical set is refused whole: a contract whose claims about
+    DOC_A were recomputed and whose claims about DOC_B were not is not half
+    verified, it is unverified with a verified-looking part.
+
+    A contract whose subject document cannot be determined at all is also
+    refused. Being unable to name what is being written about is precisely the
+    state in which no gate below can apply.
+    """
+    doc_ids = _referenced_policy_documents(case_id, filename, data)
+    if not doc_ids:
+        return [
+            f"{filename}: the document this policy-layer contract is expressed "
+            "against could not be determined (no document id in the filename, "
+            "no source_document_id in the body) -- refused, because no UID "
+            "verification can be scoped to an unidentified document"
+        ]
+    return _canonical_state_blockers(
+        case_id, doc_ids, f"writing the policy-layer contract {filename}")
+
+
 def cmd_write_contract(args):
     target = _require_within(case_dir(args.case_id), args.filename)
     existing_lock = acquire_lock_blocking(target, args.held_by, args.run_id, args.purpose or f"write {args.filename}")
@@ -1726,6 +1830,19 @@ def cmd_write_contract(args):
                 print(f"  - {e}")
             return 1
         if schema_name in _POLICY_LAYER_SCHEMAS:
+            # P0-3, and deliberately BEFORE the binding/UID checks: those two
+            # are scoped to canonical_v1 documents and return [] for anything
+            # else, so without this gate an unregistered or legacy document
+            # reached `atomic_write_json` with its UIDs never recomputed. The
+            # scheme gate is what makes the recomputation gate reachable.
+            scheme_blockers = _policy_write_scheme_blockers(
+                args.case_id, args.filename, data)
+            if scheme_blockers:
+                print(f"FAIL: {args.filename} targets documents whose UIDs are "
+                      "not canonically verified -- not written:")
+                for blocker in scheme_blockers:
+                    print(f"  - {blocker}")
+                return 1
             binding_errors = _source_revision_binding_errors(
                 args.case_id, args.filename, data)
             if binding_errors:
@@ -1998,11 +2115,44 @@ def revision_entry_for(case_id: str, doc_id: str):
 
 
 def uid_scheme_for(case_id: str, doc_id: str) -> str:
-    """A document with no registered revision is 'legacy': it predates the
-    revision index entirely, and assuming canonical for an unknown document
-    would claim a verification that never ran."""
+    """The document's UID verification state -- three values, not two (P0-3).
+
+    A document with no revision entry returns `unregistered`, NOT `legacy`.
+    The old conflation is what made canonical verification opt-in: every
+    canonical check was scoped to `uid_scheme == canonical_v1`, and both
+    "recorded as pre-canonical" and "the DAO has never heard of this document"
+    fell out of that scope identically. Simply never calling
+    enable-canonical-uids therefore skipped the entire UID layer.
+
+    An unrecognized on-disk value is returned verbatim so callers refuse it
+    explicitly (source_provenance.uid_scheme_blockers) rather than mapping it
+    onto a known-good state.
+    """
     entry = revision_entry_for(case_id, doc_id)
-    return (entry or {}).get("uid_scheme", "legacy")
+    if entry is None:
+        return source_provenance.UNREGISTERED
+    scheme = entry.get("uid_scheme")
+    if scheme is None:
+        # An entry exists but does not say. Schema-required, so this is a
+        # tampered or partially-written index -- not a legacy document.
+        return "missing"
+    return scheme
+
+
+def _canonical_state_blockers(case_id: str, doc_ids, action: str) -> list[str]:
+    """Every document in `doc_ids` must be canonical_v1 for `action` to proceed.
+
+    The single choke-point behind P0-3's three gates (policy-layer write,
+    policy_clause_processing finalization, downstream policy reference). Sorted
+    and deduplicated so a contract citing one document twice reports once, and
+    so a mixed canonical/legacy set reports every offending document rather
+    than the first one encountered.
+    """
+    blockers: list[str] = []
+    for doc_id in sorted({d for d in doc_ids if d}):
+        blockers.extend(source_provenance.uid_scheme_blockers(
+            uid_scheme_for(case_id, doc_id), doc_id, action))
+    return blockers
 
 
 def registered_source_pdf_sha256(case_id: str, doc_id: str):
@@ -2366,6 +2516,63 @@ def _invalidate_dependents(case_id, upstream_stage, reason, held_by, run_id,
         # owns would leave the rest of its transaction running unprotected.
         if not lock_already_held:
             release_lock(target)
+
+
+def _invalidate_policy_layer(case_id, reason, held_by, run_id):
+    """Invalidate `policy_clause_processing` AND everything downstream of it.
+
+    P0-3's stale cascade for enable-canonical-uids. `_invalidate_dependents`
+    deliberately spares the upstream stage itself (its writes are how that
+    stage does its job); here the policy stage is exactly what must stop
+    standing, because every artifact it published carries UIDs that were never
+    recomputed.
+
+    One locked read-modify-write covering both the stage and its dependents, so
+    there is no window in which the policy stage is demoted while a downstream
+    stage still claims `passed` against it. Raises CascadeFailed on lock
+    contention or a schema-invalid result -- the caller must not report success
+    for a transition whose invalidation did not land.
+    """
+    target = run_state_path(case_id)
+    if not target.exists():
+        return []
+    affected = ({"policy_clause_processing"}
+                | stage_dependencies.dependents_of("policy_clause_processing"))
+    existing_lock = acquire_lock_blocking(
+        target, held_by, run_id or "unknown",
+        "invalidate the policy layer for canonical UID activation")
+    if existing_lock is not None:
+        raise CascadeFailed(
+            "could not invalidate the policy stage and its downstream -- "
+            f"held_by={existing_lock['held_by']} "
+            f"run_id={existing_lock['run_id']}")
+    try:
+        state = load_run_state(case_id)
+        changed = []
+        for entry in state.get("stages", []):
+            if entry.get("stage_name") not in affected:
+                continue
+            # Idempotent: a stage already failed/pending was never claiming a
+            # result derived from unverified UIDs, so re-running activation on
+            # an already-invalidated case changes nothing and still succeeds.
+            if entry.get("status") not in ("passed", "in_progress"):
+                continue
+            entry["status"] = "failed"
+            entry["invalidated_at"] = now_iso()
+            entry["invalidation_reason"] = reason
+            changed.append(entry.get("stage_name"))
+        if not changed:
+            return []
+        state["updated_at"] = now_iso()
+        errors = _schema_check(state, "run_state.schema.json")
+        if errors:
+            raise CascadeFailed(
+                "policy-layer invalidation would make run-state "
+                "schema-invalid: " + "; ".join(errors))
+        save_run_state(case_id, state)
+        return changed
+    finally:
+        release_lock(target)
 
 
 def _write_text_locked(case_id, filename, text_file, held_by, run_id, purpose=None):
@@ -3017,6 +3224,23 @@ def _finalize_stage(case_id, run_id, stage, held_by):
                 for blocker in completion_blockers:
                     print(f"  - {blocker}")
                 return None
+        elif stage in stage_dependencies.dependents_of(
+                "policy_clause_processing"):
+            # P0-3. The dependency check above only asks whether
+            # policy_clause_processing is RECORDED passed; that record can
+            # predate canonical verification entirely. A stage built on top of
+            # a legacy policy layer is a stage built on unverified UIDs, so the
+            # live scheme is re-checked here rather than inferred from a past
+            # status -- the same reasoning as Part 11F re-running source checks
+            # at finalization instead of trusting the write-time pass.
+            scheme_blockers = _policy_layer_scheme_blockers(
+                case_id, f"finalizing {stage!r}")
+            if scheme_blockers:
+                print(f"REFUSED: cannot finalize {stage!r} -- the policy layer "
+                      "it depends on is not canonically verified:")
+                for blocker in scheme_blockers:
+                    print(f"  - {blocker}")
+                return None
 
         state["run_id"] = run_id or state.get("run_id")
         entry = next(
@@ -3337,8 +3561,9 @@ def cmd_enable_canonical_uids(args):
         index = load_revision_index(args.case_id)
         doc_entry = next((d for d in index.get("documents", [])
                           if d.get("document_id") == doc_id), None)
+        previous_scheme = doc_entry.get("uid_scheme")
         errors = source_provenance.scheme_transition_errors(
-            doc_entry.get("uid_scheme"), "canonical_v1")
+            previous_scheme, "canonical_v1")
         if errors:
             for error in errors:
                 print(f"REFUSED: {error}")
@@ -3350,9 +3575,43 @@ def cmd_enable_canonical_uids(args):
             for error in schema_errors:
                 print(f"  - {error}")
             return 1
+
+        # P0-3's stale cascade, run BEFORE the scheme flip so a failure leaves
+        # nothing half-transitioned. Every artifact this document's policy
+        # stage published was written under legacy rules -- its UIDs were never
+        # recomputed -- so the moment canonical verification switches on, the
+        # policy stage and everything downstream of it are claims about
+        # unverified identifiers and must stop standing. They are NOT rewritten
+        # here: migrating an artifact is authoring work, and inventing UIDs on
+        # a caller's behalf is the thing this whole layer exists to prevent.
+        if previous_scheme != "canonical_v1":
+            try:
+                invalidated = _invalidate_policy_layer(
+                    args.case_id,
+                    f"canonical_v1 UID verification enabled for {doc_id}: "
+                    "policy artifacts written under the legacy scheme were "
+                    "never UID-verified and must be rewritten canonically",
+                    args.held_by, args.run_id)
+            except CascadeFailed as exc:
+                print(f"FAIL: {doc_id} was NOT switched to canonical_v1 -- the "
+                      f"policy stage and its downstream could not be "
+                      f"invalidated: {exc}")
+                print("  activating canonical UIDs while a stage still claims "
+                      "'passed' against unverified artifacts would be exactly "
+                      "the fail-open state this gate exists to prevent; "
+                      "resolve the run-state lock and retry")
+                return 1
+        else:
+            invalidated = []
+
         atomic_write_json(target, index)
         print(f"PASS: {doc_id} is now canonical_v1 -- every policy UID on this "
               "document is recomputed and must match. This cannot be undone.")
+        if invalidated:
+            print("INVALIDATED (legacy policy artifacts are no longer "
+                  f"citable): {', '.join(sorted(invalidated))}")
+            print("  rewrite this document's policy contracts with canonically "
+                  "derived UIDs, then re-finalize policy_clause_processing.")
         return 0
     finally:
         release_lock(target)

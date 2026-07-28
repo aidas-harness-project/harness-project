@@ -635,13 +635,28 @@ def _write_contract(isolated_dao, make_args, contract, filename, case_id="CASE_0
     return dao.cmd_write_contract(args)
 
 
-def test_dao_write_contract_valid_persists(isolated_dao, make_args):
+def test_dao_write_contract_valid_but_non_canonical_is_refused(isolated_dao,
+                                                               make_args):
+    """This asserted `rc == 0` until P0-3.
+
+    The contract really is valid in every sense this module tests: its quotes
+    are on the cited page, its document is a registered automated-text source,
+    its shape passes the schema. What it is not is derived from a document
+    whose UIDs were ever verified -- `DOC_001` here has no revision entry at
+    all, so its `PC-…`/`CI-…` identifiers are strings the fixture chose.
+
+    That combination passing was the P0-3 defect, and it is the reason a test
+    named "valid persists" has to become a refusal: under the old code, "valid"
+    did not include "expressed against a document whose identity layer exists".
+    The canonical persist-path is covered in test_canonical_uid_mandatory.py,
+    against real recomputed UIDs.
+    """
     _seed_redacted(isolated_dao)
     rc = _write_contract(isolated_dao, make_args, _contract([_valid_clause()]),
                          "normalized_policy_clause_DOC_001.json")
-    assert rc == 0
+    assert rc == 1
     target = isolated_dao / "outputs" / "CASE_030" / "normalized_policy_clause_DOC_001.json"
-    assert target.exists()
+    assert not target.exists()
 
 
 def test_dao_write_contract_bad_quote_refused_and_not_persisted(isolated_dao, make_args):
@@ -666,11 +681,16 @@ def test_dao_write_contract_source_unavailable_refused(isolated_dao, make_args):
 
 def test_dao_write_contract_failure_does_not_overwrite_existing(isolated_dao, make_args):
     _seed_redacted(isolated_dao)
-    # First: a good write lands.
-    rc = _write_contract(isolated_dao, make_args, _contract([_valid_clause()]),
-                         "normalized_policy_clause_DOC_001.json")
-    assert rc == 0
+    _seed_manifest(isolated_dao, doc_ids=("DOC_001", "DOC_002"))
     target = isolated_dao / "outputs" / "CASE_030" / "normalized_policy_clause_DOC_001.json"
+    # The pre-existing contract is placed directly rather than written through
+    # the DAO: since P0-3 a non-canonical document cannot be written to at all,
+    # and what this test is about is the atomicity of a REFUSED write, not the
+    # provenance of what was there before it. A legacy artifact already on disk
+    # is exactly the situation a migration starts from.
+    target.write_text(
+        json.dumps(_contract([_valid_clause()]), ensure_ascii=False),
+        encoding="utf-8")
     good_bytes = target.read_bytes()
     # Then: a failing write for the same file must not clobber the good one.
     bad = _valid_clause()

@@ -39,6 +39,41 @@ def run_id():
 
 
 @pytest.fixture
+def canonicalize():
+    """Drive a seeded document through the real migration flow to canonical_v1.
+
+    P0-3 makes canonical_v1 the only state new policy work may be written in,
+    so any test that exercises a policy-layer write path needs its document
+    genuinely registered. This runs the actual DAO commands -- register the
+    source text, hash the raw file, activate -- rather than hand-writing a
+    revision index, so a fixture cannot reach a state the production path
+    cannot. The same helper is what P0-3's own tests use, so a fixture and the
+    validator can never agree on a state neither could really produce.
+
+    Requires the case's manifest to already name the document with a
+    `file_path` under `data/raw/`, and that raw file to exist.
+    """
+    from pathlib import Path
+
+    def _canonicalize(make_args, isolated_dao, case_id, doc_id, text,
+                      held_by="document-pipeline", run_id="RUN_20260728_001"):
+        text_file = Path(isolated_dao) / f"_canonicalize_{case_id}_{doc_id}.md"
+        text_file.write_text(text, encoding="utf-8")
+        assert dao.cmd_write_redacted_text(make_args(
+            case_id=case_id, doc_id=doc_id, text_file=str(text_file),
+            held_by=held_by, run_id=run_id)) == 0
+        assert dao.cmd_record_source_digest(make_args(
+            case_id=case_id, doc_id=doc_id, held_by=held_by,
+            run_id=run_id, expect=None)) == 0
+        assert dao.cmd_enable_canonical_uids(make_args(
+            case_id=case_id, doc_id=doc_id, held_by=held_by,
+            run_id=run_id)) == 0
+        assert dao.uid_scheme_for(case_id, doc_id) == "canonical_v1"
+
+    return _canonicalize
+
+
+@pytest.fixture
 def make_args():
     """Builds an argparse.Namespace-like object for calling dao's cmd_*
     functions directly, without shelling out. Pass only the overrides a
