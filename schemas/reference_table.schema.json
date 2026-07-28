@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "reference_table.schema.json",
-  "title": "reference_table_DOC_XXX.json -- structured policy appendices and decision tables v0.2",
-  "description": "Cell-level representation of policy appendices such as disability-rate, fracture, burn, diagnosis-code, and benefit-grade tables. Every title and cell is independently grounded in the processed source. v0.2 adds row/table SOURCE STRUCTURE (row.source_span, table.source_regions, table.header_spans): grounding each cell individually proved insufficient -- transposing values between rows (source 'A 10 / B 20' extracted as 'A 20 / B 10') passed every check because each value did exist on the page. A row must now carry the exact source range of the physical row it came from, every cell value must be found inside that range and in declared column order, and every non-whitespace character of the table's source region must be accounted for by a row or an explicit header span, which is what makes an omitted source row detectable.",
+  "title": "reference_table_DOC_XXX.json -- structured policy appendices and decision tables v0.3",
+  "description": "Cell-level representation of policy appendices such as disability-rate, fracture, burn, diagnosis-code, and benefit-grade tables. Every title and cell is independently grounded in the processed source. v0.2 adds row/table SOURCE STRUCTURE (row.source_span, table.source_regions, table.header_spans): grounding each cell individually proved insufficient -- transposing values between rows (source 'A 10 / B 20' extracted as 'A 20 / B 10') passed every check because each value did exist on the page. A row must now carry the exact source range of the physical row it came from, every cell value must be found inside that range and in declared column order, and every non-whitespace character of the table's source region must be accounted for by a row or an explicit header span, which is what makes an omitted source row detectable. v0.3 adds cell.source_spans and optional row.source_spans/table multi-region support so the RT/RR/RC UIDs can be RECOMPUTED from source rather than merely pattern-matched: before this, cell identity had no offsets at all, so two cells holding the same value in different rows were indistinguishable and any well-formed RC string passed. Both new fields are schema-optional only so legacy v0.2 tables stay readable -- under canonical_v1 the DAO requires cell spans and refuses the write without them.",
   "allOf": [
     {
       "$ref": "common_component_output.schema.json"
@@ -93,7 +93,16 @@
       "properties": {
         "cell_uid": {
           "type": "string",
-          "pattern": "^RC-[a-f0-9]{16,64}$"
+          "pattern": "^RC-[a-f0-9]{16,64}$",
+          "description": "Derived from (parent row UID + this cell's exact source spans + column_key). Under canonical_v1 the DAO recomputes it and refuses a mismatch."
+        },
+        "source_spans": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The exact source range(s) of THIS CELL, inside its own row's source span -- the DAO enforces that containment. Required under canonical_v1 (the DAO refuses the write without it); optional in the schema only so legacy v0.2 tables stay readable. `value` alone is not sufficient identity: a table with 10 in two different rows would give both cells the same inputs, so the two would be indistinguishable. Because the cell's UID also carries its parent row, transposing values between rows changes both cells' identifiers, not just their containment check. A cell wrapped across lines or continued on another page lists a span each.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/canonical_source_span"
+          }
         },
         "column_key": {
           "type": "string",
@@ -128,11 +137,20 @@
       "properties": {
         "row_uid": {
           "type": "string",
-          "pattern": "^RR-[a-f0-9]{16,64}$"
+          "pattern": "^RR-[a-f0-9]{16,64}$",
+          "description": "Derived from (parent table UID + this row's exact source spans). Under canonical_v1 the DAO recomputes it and refuses a mismatch."
         },
         "source_span": {
           "$ref": "#/$defs/source_span",
-          "description": "The exact source range of THIS ROW in the processed page -- the whole physical row line(s), not a per-cell fragment. Every cell value must be found inside this span, which is what makes a row a real row rather than a set of values that merely exist somewhere on the page. Without it, transposing values between rows (source 'A 10 / B 20' extracted as 'A 20 / B 10') is undetectable because each value is individually present."
+          "description": "The exact source range of THIS ROW in the processed page -- the whole physical row line(s), not a per-cell fragment. Every cell value must be found inside this span, which is what makes a row a real row rather than a set of values that merely exist somewhere on the page. Without it, transposing values between rows (source 'A 10 / B 20' extracted as 'A 20 / B 10') is undetectable because each value is individually present. Still required: it is what Part 11E's containment and reverse-coverage checks read. When the row occupies several ranges, this is its FIRST range in source order and source_spans carries all of them."
+        },
+        "source_spans": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Every source range this row occupies, for a row wrapped across lines or continued on the next page. Omit for the ordinary single-range row, where source_span alone is the row's provenance and the DAO computes the identical UID from it -- one code path, so a one-range row's identifier does not depend on which field expressed it.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/canonical_source_span"
+          }
         },
         "cells": {
           "type": "array",

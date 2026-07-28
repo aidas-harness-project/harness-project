@@ -58,6 +58,24 @@ page/document digests, both of which move when unrelated text elsewhere is corre
 and quotes stay in your contracts and are still verified; they establish that a span
 really sits where you say, not what it *is*.
 
+Every UID kind is recomputed, not just page spans, so each element must state the
+exact source spans it was derived FROM — `{page, start_char, end_char, quote}`,
+where the quote equals the page text at those offsets verbatim:
+
+- clause → `source_span_uids` (plus `source_boundary_uids` for its parent)
+- condition → `source_span_uids`
+- table → `source_regions`; row → `source_span` (or `source_spans` when the row
+  occupies several ranges); cell → `source_spans`
+
+A clause, condition, row or cell with no source spans is refused — not warned
+about — because there is nothing to derive its identity from. Normalized wording
+cannot stand in: it is rewritten text, and two identical condition phrases (or two
+cells reading `10`) are distinguishable only by their exact spans. List every span
+of a multi-page clause or table; submission order does not matter, since the DAO
+sorts by source position before deriving. Do not supply `occurrence_ordinal` unless
+you are certain — the DAO derives it from the registered page text and refuses a
+value that disagrees.
+
 Contracts on a `canonical_v1` document must also carry `source_text_revision` —
 the registered revision your offsets, quotes and UIDs were computed against, per
 document (`read-revision-index` prints the current one). A revision recorded before

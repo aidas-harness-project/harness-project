@@ -108,6 +108,7 @@ import stage_dependencies
 import segment_lineage
 import policy_completeness
 import policy_uid
+import policy_uid_resolver
 import policy_audit
 import policy_roles
 import human_review
@@ -489,6 +490,41 @@ def _validate_manifest_lineage(case_id, manifest) -> list:
     return segment_lineage.validate_segment_lineage(manifest, _segment_text_reader(case_id))
 
 
+def _canonical_uid_finalize_blockers(case_id: str, doc_id: str) -> list[str]:
+    """Re-recompute every canonical UID of a document at finalization.
+
+    Same reasoning as Part 11F's re-run of the source checks: a contract whose
+    UIDs verified at write time can be invalidated afterwards by a source-text
+    revision, and finalization is where the stage's claims become citable by
+    downstream stages. Write-time verification proves the UIDs were canonical
+    once; only this proves they still are.
+    """
+    if uid_scheme_for(case_id, doc_id) != "canonical_v1":
+        return []
+    blockers: list[str] = []
+    for filename, schema_name in (
+        (f"policy_boundary_inventory_{doc_id}.json",
+         policy_completeness.INVENTORY_SCHEMA),
+        (f"normalized_policy_clause_{doc_id}.json",
+         _cross_contract.NORMALIZED_POLICY_CLAUSE_SCHEMA),
+        (f"reference_table_{doc_id}.json",
+         _cross_contract.REFERENCE_TABLE_SCHEMA),
+        (f"policy_audit_result_{doc_id}.json", policy_audit.AUDIT_SCHEMA),
+        (f"policy_parent_coverage_{doc_id}.json",
+         policy_completeness.PARENT_COVERAGE_SCHEMA),
+    ):
+        contract = read_contract_data(case_id, filename)
+        if contract is None:
+            # Whether a contract is OWED is decided by policy_roles above; an
+            # absent one is not this check's business.
+            continue
+        blockers.extend(
+            f"canonical UID: {filename}: {error}"
+            for error in _canonical_uid_errors(
+                case_id, filename, schema_name, contract))
+    return blockers
+
+
 def _policy_completion_blockers(case_id: str) -> list[str]:
     """Return every condition that prevents policy_clause_processing finalize.
 
@@ -530,6 +566,9 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
 
     for doc in policy_docs:
         doc_id = doc.get("document_id")
+        blockers.extend(
+            f"{doc_id}: {error}"
+            for error in _canonical_uid_finalize_blockers(case_id, doc_id))
         normalized_name = f"normalized_policy_clause_{doc_id}.json"
         inventory_name = f"policy_boundary_inventory_{doc_id}.json"
         audit_name = f"policy_audit_result_{doc_id}.json"
@@ -1015,6 +1054,18 @@ def _downstream_policy_ref_errors(
                 ))
                 doc_errors.extend(policy_audit.unresolved_findings(audit))
             doc_errors.extend(_parent_coverage_current_errors(case_id, doc_id))
+            # Resolving a downstream reference by string match against the
+            # clause contract only proves the two files agree. Under
+            # canonical_v1 the cited contract's own UIDs are recomputed from
+            # source here, so a fabricated PC/CI written identically into both
+            # the clause contract and the artifact citing it is refused rather
+            # than mutually confirmed (P0-2).
+            doc_errors.extend(
+                f"canonical UID: {error}"
+                for error in _canonical_uid_errors(
+                    case_id, f"normalized_policy_clause_{doc_id}.json",
+                    _cross_contract.NORMALIZED_POLICY_CLAUSE_SCHEMA,
+                    normalized or {}))
             checked_docs[doc_id] = (normalized, doc_errors)
         normalized, doc_errors = checked_docs[doc_id]
         errors.extend(f"{loc}: {error}" for error in doc_errors)
@@ -1347,91 +1398,261 @@ def _physical_page_for(case_id: str, doc_id: str, logical_page: int):
     return None
 
 
-def _canonical_uid_errors(case_id: str, filename: str,
-                           data: dict) -> list[str]:
-    """Recompute every UID whose identity inputs are present, and refuse a
-    submitted value that does not match (Part 11J commit d).
+def _registered_pdf_digest(case_id: str, doc_id: str):
+    """The immutable original's digest for a document, or its parent's.
 
-    Only `page_span` currently carries the full identity set on the contract
-    itself -- page, exact quote, and the offset needed to pick which
-    occurrence is meant. Boundary/clause/condition/table UIDs are derived from
-    spans they reference rather than from fields of their own, so recomputing
-    them requires resolving through those spans; that resolution is not yet
-    built, and inventing a weaker rule for them here would be worse than the
-    honest gap: it would report "verified" for a derivation nobody checked.
-    The gap is recorded in known-gaps.md rather than papered over.
-
-    Scoped to canonical_v1 documents, like the revision binding.
+    A segment's identity is keyed to the PDF it was carved out of, not to the
+    segment file, so the parent is consulted first -- two segments of one
+    policy must not mint different UIDs for the same physical page.
     """
-    doc_id = _cross_contract.doc_id_from_filename(filename)
-    if not doc_id or uid_scheme_for(case_id, doc_id) != "canonical_v1":
-        return []
-    spans = data.get("page_spans")
-    if not spans:
-        return []
-
-    source_pdf = (read_contract_data(case_id, "document_manifest.json") or {})
+    manifest = read_contract_data(case_id, "document_manifest.json") or {}
+    documents = manifest.get("documents", [])
     entry = next(
-        (d for d in source_pdf.get("documents", [])
-         if d.get("document_id") == doc_id), None)
+        (d for d in documents if d.get("document_id") == doc_id), None)
     parent_id = (entry or {}).get("source_document_id") or doc_id
-    pdf_digest = None
     for candidate in (parent_id, doc_id):
         found = next(
-            (d for d in source_pdf.get("documents", [])
-             if d.get("document_id") == candidate), None)
+            (d for d in documents if d.get("document_id") == candidate), None)
         if found and found.get("source_pdf_sha256"):
-            pdf_digest = found["source_pdf_sha256"]
-            break
+            return found["source_pdf_sha256"]
+    return None
+
+
+def _uid_source_context(case_id: str, doc_id: str):
+    """Build the resolver's SourceContext, or explain why it cannot be built.
+
+    Returns `(context, errors)`. A context that cannot be built is always a
+    non-empty error list under canonical_v1 -- never a quiet `(None, [])`,
+    which is precisely the shape of the defect this part closes.
+    """
+    pdf_digest = _registered_pdf_digest(case_id, doc_id)
     if not pdf_digest:
-        return [
+        return None, [
             f"{doc_id} is canonical_v1 but no immutable source digest is "
             "recorded for it or its parent -- UIDs cannot be recomputed, and "
             "an unverifiable UID is not a passing one"
         ]
-
-    text = _redacted_text_for_doc(case_id, doc_id)
+    text = _registered_revision_text(case_id, doc_id)
     if text is None:
-        return [f"{doc_id} is canonical_v1 but has no processed source text; "
-                "UIDs cannot be recomputed"]
+        return None, [
+            f"{doc_id} is canonical_v1 but has no registered source-text "
+            "revision to recompute UIDs against"
+        ]
     try:
         pages = policy_completeness.split_pages(text)
     except Exception as exc:  # noqa: BLE001
-        return [f"{doc_id}: processed source text is unusable for UID "
-                f"recomputation: {exc}"]
+        return None, [
+            f"{doc_id}: registered source text is unusable for UID "
+            f"recomputation: {exc}"
+        ]
+    context = policy_uid_resolver.SourceContext(
+        doc_id, pdf_digest, pages,
+        lambda logical: _physical_page_for(case_id, doc_id, logical))
+    return context, []
 
-    errors = []
-    for index, span in enumerate(spans):
-        logical = span.get("page")
-        page_text = pages.get(logical)
-        if page_text is None:
-            errors.append(
-                f"page_spans[{index}]: page {logical} does not exist in the "
-                "processed source, so its UID cannot be recomputed")
+
+def _registered_revision_text(case_id: str, doc_id: str):
+    """The bytes of the CURRENT registered revision, not whatever is on disk.
+
+    Verifying against `redacted_text.md` directly would re-derive UIDs from
+    text that may have been replaced since the revision pointer was set, which
+    would make a stale contract look canonical. The pointer is the authority;
+    the working file is only a copy of it.
+    """
+    entry = revision_entry_for(case_id, doc_id)
+    current = (entry or {}).get("current_revision_sha256")
+    if not current:
+        return None
+    path = revision_file_path(case_id, doc_id, current)
+    if not path.exists():
+        return None
+    return path.read_text(encoding="utf-8")
+
+
+# Which recomputation each policy-layer schema owes. A schema absent from this
+# map carries no UIDs of its own; one present here is checked in full. Adding a
+# UID-bearing schema without an entry is the failure mode that produced P0-2,
+# so `_canonical_uid_errors` refuses an unmapped policy-layer schema outright
+# rather than treating it as nothing to check.
+_UID_BEARING_SCHEMAS = frozenset({
+    policy_completeness.INVENTORY_SCHEMA,
+    _cross_contract.NORMALIZED_POLICY_CLAUSE_SCHEMA,
+    _cross_contract.REFERENCE_TABLE_SCHEMA,
+})
+
+# Policy-layer schemas that legitimately carry no source-derived UID of their
+# own. They REFERENCE UIDs minted elsewhere (an audit finding cites a clause; a
+# parent-coverage entry cites a table), and those references are resolved
+# against the recomputed originals by `_canonical_uid_reference_errors` --
+# named explicitly so a new schema cannot join this set by omission.
+_UID_REFERENCING_SCHEMAS = frozenset({
+    policy_audit.AUDIT_SCHEMA,
+    policy_completeness.PARENT_COVERAGE_SCHEMA,
+})
+
+
+def _canonical_uid_errors(case_id: str, filename: str, schema_name: str,
+                           data: dict) -> list[str]:
+    """Recompute EVERY canonical UID in a contract from registered source
+    provenance, and refuse any submitted value that does not match (P0-2).
+
+    The predecessor recomputed only `page_spans` and returned `[]` for any
+    contract lacking that key -- which is every contract except the boundary
+    inventory, and even there it left PB/PC/CI unchecked. Six of seven UID
+    kinds were consequently enforced by their format regex alone, so the same
+    fabricated string reused consistently across artifacts passed every gate.
+
+    Under canonical_v1 there is no "nothing to verify" branch: a UID-bearing
+    contract with no resolvable provenance is refused, and a policy-layer
+    schema this function does not know how to check is refused too. Both are
+    fail-closed by construction, since the alternative is reporting success for
+    a derivation nobody performed.
+
+    Scoped to canonical_v1 documents, like the revision binding -- legacy
+    artifacts stay readable and are never rewritten.
+    """
+    doc_id = _cross_contract.doc_id_from_filename(filename)
+    if not doc_id or uid_scheme_for(case_id, doc_id) != "canonical_v1":
+        return []
+
+    if schema_name in _UID_REFERENCING_SCHEMAS:
+        return _canonical_uid_reference_errors(case_id, doc_id, data)
+
+    if schema_name not in _UID_BEARING_SCHEMAS:
+        return [
+            f"{filename}: {schema_name} is a canonical_v1 policy-layer "
+            "contract with no UID recomputation rule -- refusing rather than "
+            "passing it unchecked, which is how the whole UID layer came to be "
+            "unverified (see policy_uid_resolver.py)"
+        ]
+
+    context, errors = _uid_source_context(case_id, doc_id)
+    if errors:
+        return errors
+
+    if schema_name == policy_completeness.INVENTORY_SCHEMA:
+        return policy_uid_resolver.check_boundary_inventory(context, data)
+
+    if schema_name == _cross_contract.REFERENCE_TABLE_SCHEMA:
+        return policy_uid_resolver.check_reference_tables(context, data)
+
+    # normalized_policy_clause: PCs are parented on boundaries defined in the
+    # inventory, so the inventory must exist and its PBs must independently
+    # recompute. A clause cannot mint its own parent.
+    inventory = read_contract_data(
+        case_id, f"policy_boundary_inventory_{doc_id}.json")
+    if inventory is None:
+        return [
+            f"{doc_id}: no policy_boundary_inventory_{doc_id}.json -- clause "
+            "UIDs are derived from their parent boundary, which only the "
+            "inventory defines, so they cannot be recomputed without it"
+        ]
+    boundary_index = policy_uid_resolver.boundary_uid_index(context, inventory)
+    return policy_uid_resolver.check_normalized_clauses(
+        context, data, boundary_index)
+
+
+def _canonical_uid_reference_errors(case_id: str, doc_id: str,
+                                     data: dict) -> list[str]:
+    """Resolve every UID a non-minting policy contract cites.
+
+    An audit finding or a coverage entry does not create identifiers, it points
+    at them. The check is therefore not recomputation but resolution: each
+    cited UID must exist in the contract that owns it, and that owner's own
+    UIDs are recomputed here rather than read, so a fabricated PC cannot be
+    laundered by writing it into both the clause contract and the audit that
+    cites it.
+    """
+    context, errors = _uid_source_context(case_id, doc_id)
+    if errors:
+        return errors
+
+    inventory = read_contract_data(
+        case_id, f"policy_boundary_inventory_{doc_id}.json")
+    normalized = read_contract_data(
+        case_id, f"normalized_policy_clause_{doc_id}.json")
+    tables = read_contract_data(case_id, f"reference_table_{doc_id}.json")
+
+    known_boundaries = set(
+        policy_uid_resolver.boundary_uid_index(context, inventory or {}))
+    known_clauses: set[str] = set()
+    known_conditions: set[str] = set()
+    if normalized is not None:
+        clause_errors = policy_uid_resolver.check_normalized_clauses(
+            context, normalized, {uid: None for uid in known_boundaries}
+            if known_boundaries else {})
+        # Only UIDs from a clause contract that itself recomputes cleanly may
+        # be cited; otherwise a bad clause contract would legitimize the
+        # references pointing at it.
+        if not clause_errors:
+            for clause in normalized.get("clauses") or []:
+                known_clauses.add(clause.get("clause_uid"))
+                for bucket in policy_uid_resolver._CONDITION_BUCKETS:
+                    for condition in clause.get(bucket) or []:
+                        known_conditions.add(condition.get("condition_uid"))
+    known_tables: set[str] = set()
+    known_rows: set[str] = set()
+    if tables is not None and not policy_uid_resolver.check_reference_tables(
+            context, tables):
+        for table in tables.get("tables") or []:
+            known_tables.add(table.get("table_uid"))
+            for row in table.get("rows") or []:
+                known_rows.add(row.get("row_uid"))
+
+    known = {
+        "PB": (known_boundaries, "boundary inventory"),
+        "PC": (known_clauses, "normalized clause contract"),
+        "CI": (known_conditions, "normalized clause contract"),
+        "RT": (known_tables, "reference table contract"),
+        "RR": (known_rows, "reference table contract"),
+    }
+    reference_errors: list[str] = []
+    for location, uid in _iter_uid_references(data):
+        prefix = uid.split("-", 1)[0]
+        if prefix not in known:
+            reference_errors.append(
+                f"{location}: {uid!r} is not a UID kind this contract may "
+                "reference")
             continue
-        physical = _physical_page_for(case_id, doc_id, logical)
-        if physical is None:
-            errors.append(
-                f"page_spans[{index}]: logical page {logical} has no physical "
-                "page mapping -- canonical identity is keyed to the immutable "
-                "parent's physical page and must not fall back to the logical "
-                "number")
-            continue
-        try:
-            ordinal = policy_uid.ordinal_of_span_at(
-                page_text, span.get("quote", ""), span.get("start_char", 0))
-        except policy_uid.UidInputError as exc:
-            errors.append(f"page_spans[{index}]: {exc}")
-            continue
-        errors.extend(
-            f"page_spans[{index}]: {error}"
-            for error in policy_uid.verify_uid(
-                span.get("span_uid", ""), "span",
-                source_pdf_sha256=pdf_digest,
-                physical_page=physical,
-                span_text=span.get("quote", ""),
-                ordinal=ordinal))
-    return errors
+        pool, owner = known[prefix]
+        if uid not in pool:
+            reference_errors.append(
+                f"{location}: {uid!r} does not resolve to a canonically "
+                f"recomputed UID in {doc_id}'s {owner} -- a referenced "
+                "identifier must exist in the artifact that mints it, and that "
+                "artifact's own UIDs must recompute from source")
+    return reference_errors
+
+
+_UID_REFERENCE_KEYS = (
+    "boundary_uid", "clause_uid", "condition_uid", "table_uid", "row_uid",
+    "cell_uid", "span_uid",
+)
+_UID_REFERENCE_LIST_KEYS = ("row_uids", "source_boundary_uids")
+
+
+def _iter_uid_references(node, path="$"):
+    """Every UID-shaped value anywhere in a contract, with its JSON path.
+
+    Walked generically rather than per-schema on purpose: a reference added to
+    a nested object in a future schema revision is then covered the day it
+    appears, instead of silently joining the unchecked set -- the exact way the
+    original gap widened.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            location = f"{path}.{key}"
+            if key in _UID_REFERENCE_KEYS and isinstance(value, str) and value:
+                yield location, value
+            elif key in _UID_REFERENCE_LIST_KEYS and isinstance(value, list):
+                for index, item in enumerate(value):
+                    if isinstance(item, str) and item:
+                        yield f"{location}[{index}]", item
+            else:
+                yield from _iter_uid_references(value, location)
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            yield from _iter_uid_references(item, f"{path}[{index}]")
 
 
 def _protected_manifest_errors(case_id: str, proposed: dict) -> list[str]:
@@ -1514,7 +1735,7 @@ def cmd_write_contract(args):
                     print(f"  - {error}")
                 return 1
             uid_errors = _canonical_uid_errors(
-                args.case_id, args.filename, data)
+                args.case_id, args.filename, schema_name, data)
             if uid_errors:
                 print(f"FAIL: {args.filename} carries non-canonical UIDs -- "
                       "not written:")

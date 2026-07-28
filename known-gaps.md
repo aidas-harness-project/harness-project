@@ -1657,7 +1657,7 @@ check; tests/test_downstream_policy_snapshot.py, 14 minus 2 shared helpers ->
 14 tests). The pre-existing `test_unknown_stage_has_no_prerequisites` asserted
 the OLD permissive behaviour and was inverted, not deleted. 622 -> 649 pass.
 
-## 29. Nothing computed or verified a policy UID (Part 11J -- FIXED, with two scoped residuals)
+## 29. Nothing computed or verified a policy UID (Part 11J -- FIXED; residual 1 closed 2026-07-28 by P0-2, residual 2 open)
 
 The schemas said UIDs were `"derived from immutable source identity ... never
 from array position"`. Nothing enforced it. The only check was the regex
@@ -1695,17 +1695,64 @@ invalidate first, flip the observable pointer last -- so no interruption point
 yields new text beside a stale pass. Recovery blocks rather than resuming an
 interrupted transaction.
 
-### Residual 1: only `span_uid` is recomputed
+### Residual 1: only `span_uid` was recomputed -- CLOSED 2026-07-28 (P0-2)
 
-`page_span` is the only element carrying its full identity set on the contract
-(page, exact quote, and the offset that selects which occurrence is meant).
-Boundary/clause/condition/table/row/cell UIDs derive from spans they reference
-rather than from fields of their own, so recomputing them needs a resolution
-step through those spans that is not built. A weaker rule was deliberately NOT
-invented for them: reporting "verified" for a derivation nobody checked is
-worse than an admitted gap. Their canonical derivation exists and is tested
-(`tools/policy_uid.py`, `tests/test_policy_uid.py`); what is missing is the
-contract-side resolution that feeds it.
+**This residual was worse than it reads above.** `_canonical_uid_errors` opened
+with `spans = data.get("page_spans"); if not spans: return []`, and only the
+boundary inventory has `page_spans` -- so a normalized clause contract, a
+reference table, an audit and a parent-coverage contract were not partially
+checked, they were not checked *at all*, and returned clean. Even inside the
+inventory, the PB on each boundary went untouched. Six of the seven kinds were
+enforced by their format regex alone, so
+
+    PB-1111111111111111  PC-1111111111111111  CI-1111111111111111
+    RT-1111111111111111  RR-1111111111111111  RC-1111111111111111
+
+passed every gate provided the same fabricated string was used consistently
+wherever it was referenced. Cross-contract agreement is a consistency check; a
+fabricated value is perfectly self-consistent.
+
+Closed by `tools/policy_uid_resolver.py`, which recomputes the whole hierarchy
+from the registered source-text revision:
+
+    PS  exact span: (pdf digest, physical page, NFC bytes, occurrence)
+    PB  the canonical PS list of the spans pointing at the boundary
+    PC  parent PB + the clause's own canonical source spans
+    CI  parent PC + the condition's own canonical source spans
+    RT  the canonical PS list of the table's source regions
+    RR  parent RT + the row's exact source span(s)
+    RC  parent RR + the cell's exact source span(s) + column_key
+
+Every level bottoms out at bytes that must exist verbatim in the registered
+revision, so no level can be asserted. Multi-span objects hash their child span
+UIDs in canonical SOURCE order (`physical_page, start, end, uid`) -- never
+submission order, which is extraction order and a forbidden input.
+
+There is no longer a "nothing to verify" branch: absent provenance is a
+refusal, and a canonical policy-layer schema with no recomputation rule is
+refused rather than passed (`_UID_BEARING_SCHEMAS` / `_UID_REFERENCING_SCHEMAS`
+are explicit, so a new UID-bearing schema cannot join the unchecked set by
+omission -- the mechanism that produced this gap). Verification reads the
+revision pointer's bytes rather than `redacted_text.md`, runs no OCR/extractor
+(asserted with an exploding-subprocess fixture), and is wired into
+`write-contract`, `_policy_completion_blockers` (re-derived at finalization,
+since a later revision can invalidate a UID that verified at write time), and
+the downstream `coverage_result`/`requirement_matching_result`/
+`denial_reason_result` reference path.
+
+Schemas: `common_component_output` gains `canonical_source_span`;
+`normalized_policy_clause` v0.4 -> v0.5 (`source_span_uids` on clause and
+condition); `reference_table` v0.2 -> v0.3 (`cell.source_spans`, optional
+`row.source_spans`). All three are schema-OPTIONAL so legacy contracts stay
+readable, and DAO-MANDATORY under canonical_v1 -- the compatibility policy is
+unchanged, and the provenance is not downgraded to optional where it counts.
+
+59 new tests (`tests/test_canonical_uid_hierarchy.py`,
+`tests/test_canonical_uid_vectors.py`). The vector module is a deliberate
+oracle: every other test builds its expected UID with the same
+`compute_uid()` the implementation calls, so a wrong derivation would agree
+with itself. Those constants were produced once by a standalone
+reimplementation and must never be regenerated from production code.
 
 ### Residual 2: extractor sameness is not established
 

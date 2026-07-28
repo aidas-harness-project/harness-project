@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "normalized_policy_clause.schema.json",
-  "title": "normalized_policy_clause.json -- normalized policy clauses for one policy document v0.4",
-  "description": "Produced by policy-pipeline. Stable clause/condition UIDs are the machine addresses; sequential clause_id is display-only. Semantic clause kinds are stored in dedicated buckets so obligations, definitions, procedures, termination, disputes, and coverage-start rules cannot be mistaken for payout conditions.",
+  "title": "normalized_policy_clause.json -- normalized policy clauses for one policy document v0.5",
+  "description": "Produced by policy-pipeline. Stable clause/condition UIDs are the machine addresses; sequential clause_id is display-only. Semantic clause kinds are stored in dedicated buckets so obligations, definitions, procedures, termination, disputes, and coverage-start rules cannot be mistaken for payout conditions. v0.5 adds source_span_uids on clauses and conditions: the normalized text is REWRITTEN wording and can never identify anything, and evidence_references carry no offsets, so before this the PC/CI UIDs were unverifiable and any well-formed string passed. The field is schema-OPTIONAL only so pre-canonical (legacy) contracts stay readable and migratable -- it is MANDATORY under canonical_v1, where the DAO refuses a write whose clause or condition cannot be recomputed from these spans. Absent provenance is a refusal there, never a skipped check.",
   "allOf": [
     {
       "$ref": "common_component_output.schema.json"
@@ -60,7 +60,15 @@
         "condition_uid": {
           "type": "string",
           "pattern": "^CI-[a-f0-9]{16,64}$",
-          "description": "Stable deterministic identifier derived from immutable source identity (document + source boundary/span), never from array position."
+          "description": "Stable deterministic identifier derived from immutable source identity (parent clause UID + the condition's own canonical source spans), never from array position. Under canonical_v1 the DAO recomputes this from source_span_uids and refuses a mismatch."
+        },
+        "source_span_uids": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The exact source span(s) this condition was normalized FROM, in the processed page body. Required under canonical_v1 (the DAO refuses the write without it); optional in the schema only so legacy contracts stay readable. A condition may span several passages or pages -- list each. Submission order is irrelevant: the DAO sorts by (physical page, start, end, span UID) before computing the identifier, so two extractions that list the same spans differently produce the same CI. This is what distinguishes two occurrences of an identical condition phrase on one page, which text/quote alone cannot.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/canonical_source_span"
+          }
         },
         "text": {
           "type": "string",
@@ -150,7 +158,15 @@
         "clause_uid": {
           "type": "string",
           "pattern": "^PC-[a-f0-9]{16,64}$",
-          "description": "Stable deterministic identifier derived from immutable source boundary identity; downstream stages must reference this value."
+          "description": "Stable deterministic identifier derived from immutable source identity (parent boundary UIDs + the clause's own canonical source spans); downstream stages must reference this value. Under canonical_v1 the DAO recomputes it and refuses a mismatch."
+        },
+        "source_span_uids": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The exact source span(s) of THIS CLAUSE in the processed page body. Required under canonical_v1 (the DAO refuses the write without it); optional in the schema only so legacy contracts stay readable. source_boundary_uids says which boundary the clause sits in -- a boundary can hold several clauses, so it cannot identify one; these spans say which bytes the clause IS. A clause crossing two pages lists a span per page; the DAO sorts them into canonical source order before computing the identifier.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/canonical_source_span"
+          }
         },
         "clause_id": {
           "type": "string",

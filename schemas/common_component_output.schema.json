@@ -179,6 +179,19 @@
         "quote": { "type": "string", "pattern": "\\S" }
       },
       "required": ["document_id", "page", "quote"]
+    },
+    "canonical_source_span": {
+      "type": "object",
+      "description": "An exact character range in a processed page body (the text AFTER that page's <<<PAGE page=N>>> marker). This is UID provenance, not evidence: under canonical_v1 the DAO recomputes the element's identifier from (immutable source digest, physical page, NFC-normalized bytes at these offsets, occurrence ordinal), so a quote/value alone -- which cannot distinguish two identical phrases on one page -- is not sufficient. quote must equal the page text at [start_char:end_char] verbatim. start_char/end_char select WHICH occurrence is meant and are then discarded; they never enter the identifier, so unrelated edits elsewhere on the page do not move the UID. occurrence_ordinal is optional and advisory only -- the DAO derives it from the registered page text and refuses a value that disagrees rather than trusting the submitted one.",
+      "properties": {
+        "page": { "type": "integer", "minimum": 1 },
+        "start_char": { "type": "integer", "minimum": 0 },
+        "end_char": { "type": "integer", "minimum": 1 },
+        "quote": { "type": "string", "minLength": 1 },
+        "occurrence_ordinal": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["page", "start_char", "end_char", "quote"],
+      "additionalProperties": false
     }
   }
 }

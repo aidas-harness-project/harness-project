@@ -16,6 +16,7 @@ import json
 import pytest
 
 import dao
+import policy_completeness
 import policy_uid
 
 
@@ -319,20 +320,34 @@ def test_a_fabricated_span_uid_is_recomputed_and_refused(case, isolated_dao,
     _canonical_case(make_args, isolated_dao)
     errors = dao._canonical_uid_errors(
         "CASE_030", "policy_boundary_inventory_DOC_005.json",
+        policy_completeness.INVENTORY_SCHEMA,
         _bound_inventory("PS-1111111111111111"))
     assert any("not the canonical identifier" in e for e in errors), errors
 
 
 def test_the_canonically_derived_span_uid_is_accepted(case, isolated_dao,
                                                       make_args):
+    """A clean pass now requires the PB to derive too (P0-2).
+
+    Before P0-2 this inventory passed with a canonical PS and a fabricated
+    `PB-1111111111111111`, because the boundary layer was never recomputed.
+    Supplying the real PB is what makes this a test of acceptance rather than
+    of the hole.
+    """
     pdf_digest = _canonical_case(make_args, isolated_dao)
     quote = "제3조(보험금의 지급) 회사는 보험금을 지급합니다"
     expected = policy_uid.compute_uid(
         "span", source_pdf_sha256=pdf_digest, physical_page=1,
         span_text=quote, ordinal=1)
+    data = _bound_inventory(expected, quote)
+    boundary_uid = policy_uid.compute_uid(
+        "boundary", source_pdf_sha256=pdf_digest, physical_page=1,
+        span_text=expected, ordinal=1)
+    data["page_spans"][0]["boundary_uid"] = boundary_uid
+    data["boundaries"][0]["boundary_uid"] = boundary_uid
     assert dao._canonical_uid_errors(
         "CASE_030", "policy_boundary_inventory_DOC_005.json",
-        _bound_inventory(expected, quote)) == []
+        policy_completeness.INVENTORY_SCHEMA, data) == []
 
 
 def test_a_span_uid_from_another_document_does_not_transfer(case,
@@ -347,6 +362,7 @@ def test_a_span_uid_from_another_document_does_not_transfer(case,
         span_text=quote, ordinal=1)
     assert dao._canonical_uid_errors(
         "CASE_030", "policy_boundary_inventory_DOC_005.json",
+        policy_completeness.INVENTORY_SCHEMA,
         _bound_inventory(foreign, quote))
 
 
@@ -356,6 +372,7 @@ def test_legacy_documents_are_not_uid_checked(case, isolated_dao, make_args):
     _register_text(make_args, isolated_dao)
     assert dao._canonical_uid_errors(
         "CASE_030", "policy_boundary_inventory_DOC_005.json",
+        policy_completeness.INVENTORY_SCHEMA,
         _bound_inventory("PS-1111111111111111")) == []
 
 
