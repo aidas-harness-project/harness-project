@@ -157,6 +157,171 @@ def test_canonical_v1_is_a_one_way_door(case, isolated_dao, make_args):
     assert dao.uid_scheme_for("CASE_030", "DOC_005") == "canonical_v1"
 
 
+# --- corrupt activation states ---------------------------------------------
+# Activation is the moment a document's UIDs stop being decorative, so it is
+# the moment an attacker most wants the DAO to be lenient about what it finds
+# in `_revision_index.json`. The index is DAO-owned: an entry that exists but
+# carries no readable `uid_scheme` is not a new document, it is a damaged
+# record, and "repair it by writing the strongest possible value" would let a
+# tampered index be laundered into a verified state by one ordinary command.
+# Every case below must therefore refuse AND leave the index untouched.
+
+def _index_documents(isolated_dao):
+    return json.loads(
+        dao.revision_index_path("CASE_030").read_text(encoding="utf-8"))
+
+
+def _corrupt_scheme(isolated_dao, value, *, drop=False):
+    """Write a damaged uid_scheme past the DAO, the way tampering would.
+
+    Deliberately not routed through a DAO write path -- the point is to
+    simulate an index that is ALREADY damaged when activation runs, which is
+    exactly the state a write-path check cannot help with.
+    """
+    path = dao.revision_index_path("CASE_030")
+    index = json.loads(path.read_text(encoding="utf-8"))
+    entry = index["documents"][0]
+    if drop:
+        entry.pop("uid_scheme", None)
+    else:
+        entry["uid_scheme"] = value
+    path.write_text(
+        json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+    return index
+
+
+def test_cannot_enable_when_no_revision_entry_exists(case, make_args, capsys):
+    """`unregistered` is not `legacy`: there is nothing to transition."""
+    assert _record_digest(make_args) == 0
+    assert dao.revision_entry_for("CASE_030", "DOC_005") is None
+    assert _enable(make_args) == 1
+    assert "no source-text revision is registered" in capsys.readouterr().out
+
+
+def test_cannot_enable_an_entry_whose_uid_scheme_field_is_missing(
+        case, isolated_dao, make_args, capsys):
+    """The exact hole: `scheme_transition_errors(None, 'canonical_v1') == []`.
+
+    A missing key read back as `None` was indistinguishable from "brand new",
+    so the one command that turns verification ON would happily write
+    canonical_v1 over a record whose real prior state is unknown.
+    """
+    _register_text(make_args, isolated_dao)
+    assert _record_digest(make_args) == 0
+    before = _corrupt_scheme(isolated_dao, None, drop=True)
+
+    assert _enable(make_args) == 1
+    out = capsys.readouterr().out
+    assert "uid_scheme" in out
+    assert _index_documents(isolated_dao) == before
+
+
+def test_cannot_enable_an_entry_whose_uid_scheme_is_null(
+        case, isolated_dao, make_args, capsys):
+    """An explicit null is the same damaged record as a missing key, and must
+    not be rescued by being spelled differently."""
+    _register_text(make_args, isolated_dao)
+    assert _record_digest(make_args) == 0
+    before = _corrupt_scheme(isolated_dao, None)
+
+    assert _enable(make_args) == 1
+    assert "uid_scheme" in capsys.readouterr().out
+    assert _index_documents(isolated_dao) == before
+
+
+def test_cannot_enable_an_entry_with_an_unrecognized_uid_scheme(
+        case, isolated_dao, make_args, capsys):
+    """`canonical_v0` is shaped like a real answer, which is what makes it
+    dangerous -- refuse anything not explicitly known."""
+    _register_text(make_args, isolated_dao)
+    assert _record_digest(make_args) == 0
+    before = _corrupt_scheme(isolated_dao, "canonical_v0")
+
+    assert _enable(make_args) == 1
+    assert "canonical_v0" in capsys.readouterr().out
+    assert _index_documents(isolated_dao) == before
+
+
+def test_a_legacy_entry_with_every_precondition_still_activates(
+        case, isolated_dao, make_args):
+    """The refusals above must not have closed the legitimate path.
+
+    A rule that blocks corruption by blocking migration would deadlock every
+    pre-canonical document in the repo, so the one transition that is supposed
+    to work is asserted right next to the ones that must not.
+    """
+    _register_text(make_args, isolated_dao)
+    assert _record_digest(make_args) == 0
+    assert dao.uid_scheme_for("CASE_030", "DOC_005") == "legacy"
+    assert _enable(make_args) == 0
+    assert dao.uid_scheme_for("CASE_030", "DOC_005") == "canonical_v1"
+
+
+def test_enabling_twice_is_idempotent_not_a_second_transition(
+        case, isolated_dao, make_args):
+    _register_text(make_args, isolated_dao)
+    assert _record_digest(make_args) == 0
+    assert _enable(make_args) == 0
+    after_first = _index_documents(isolated_dao)
+    assert _enable(make_args) == 0
+    assert _index_documents(isolated_dao) == after_first
+
+
+def test_a_corrupt_scheme_is_refused_by_the_transition_rule_itself(case):
+    """The rule stated directly, so the guarantee does not depend on one
+    command's call order remaining what it is today."""
+    errors = dao.source_provenance.scheme_transition_errors(
+        None, "canonical_v1", entry_exists=True)
+    assert errors, "a damaged entry must not transition"
+    assert dao.source_provenance.scheme_transition_errors(
+        "canonical_v0", "canonical_v1")
+    assert dao.source_provenance.scheme_transition_errors(
+        "canonical_v1", "legacy")
+    assert dao.source_provenance.scheme_transition_errors(
+        "legacy", "canonical_v1") == []
+    assert dao.source_provenance.scheme_transition_errors(
+        "canonical_v1", "canonical_v1") == []
+    # A genuinely new entry has no prior state to protect.
+    assert dao.source_provenance.scheme_transition_errors(
+        None, "legacy", entry_exists=False) == []
+
+
+def test_a_failed_cascade_leaves_a_corrupt_check_order_intact(
+        case, isolated_dao, make_args, monkeypatch, capsys):
+    """Fault injection: the scheme must not flip when invalidation fails.
+
+    P0-3 already ordered the cascade before the flip; this re-asserts it on
+    the corrupt-state path so a future reordering that "fixes" the corrupt
+    check cannot quietly reintroduce a half-transition.
+    """
+    _register_text(make_args, isolated_dao)
+    assert _record_digest(make_args) == 0
+
+    def _boom(*args, **kwargs):
+        raise dao.CascadeFailed("run-state lock held by another run")
+
+    monkeypatch.setattr(dao, "_invalidate_policy_layer", _boom)
+    assert _enable(make_args) == 1
+    assert "was NOT switched to canonical_v1" in capsys.readouterr().out
+    assert dao.uid_scheme_for("CASE_030", "DOC_005") == "legacy"
+
+
+def test_a_held_revision_index_lock_blocks_activation(
+        case, isolated_dao, make_args, capsys):
+    """A real lock, not a monkeypatch: nothing transitions while contended."""
+    _register_text(make_args, isolated_dao)
+    assert _record_digest(make_args) == 0
+    target = dao.revision_index_path("CASE_030")
+    assert dao.acquire_lock_blocking(
+        target, "other-agent", "RUN_OTHER", "holding") is None
+    try:
+        assert _enable(make_args) == 1
+        assert "LOCKED" in capsys.readouterr().out
+        assert dao.uid_scheme_for("CASE_030", "DOC_005") == "legacy"
+    finally:
+        dao.release_lock(target)
+
+
 # --- the contract binding --------------------------------------------------
 
 def _inventory(binding=None):

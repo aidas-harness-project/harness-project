@@ -1872,3 +1872,24 @@ not an edit to what `canonical_v1` computes.
   regions, cells in rows). Nothing independently establishes that the declared
   region is the table's real extent on the page, so a region drawn too
   narrowly still hides rows. Reverse coverage is P0-8.
+
+### Corrupt `uid_scheme` could be laundered into `canonical_v1` -- RESOLVED (P0-3 follow-up)
+
+`scheme_transition_errors(None, "canonical_v1")` returned `[]`, because a
+missing/null `uid_scheme` read back identically to "no entry yet". But
+`_revision_index.json` is DAO-owned and that field is always written, so on an
+entry that *exists*, its absence means a damaged or tampered record. The one
+command that grants verification would have repaired it by writing the
+strongest possible value over an unknown prior state.
+
+The two cases are now distinguished explicitly (`entry_exists=`): creating a
+first entry may start at `legacy`; transitioning an existing entry whose scheme
+is missing, null, or unrecognized is refused, with the revision index and
+run-state left byte-identical. `legacy -> canonical_v1` still works,
+`canonical_v1 -> canonical_v1` is idempotent, and `canonical_v1 -> legacy`
+stays refused.
+
+35 new tests (878 -> 913), including a two-document end-to-end module
+(`tests/test_cross_document_uid.py`) that drives real `cmd_write_contract`
+calls rather than monkeypatched pools, and pins RT/RR/RC to a hand-computed
+SHA so a fixture agreeing with the validator is not what makes it pass.

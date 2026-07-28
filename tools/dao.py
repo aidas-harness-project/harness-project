@@ -3683,9 +3683,20 @@ def cmd_enable_canonical_uids(args):
         index = load_revision_index(args.case_id)
         doc_entry = next((d for d in index.get("documents", [])
                           if d.get("document_id") == doc_id), None)
+        if doc_entry is None:
+            # Re-read under the lock: the precondition pass above ran before
+            # acquiring it, so the entry could have gone between the two.
+            print(f"REFUSED: {doc_id} has no revision entry -- there is no "
+                  "recorded state to transition, and activation may not "
+                  "create one")
+            return 1
+        # Activation ALWAYS mutates a record that already exists, so a missing
+        # uid_scheme here is damage rather than a fresh document. Passing that
+        # distinction explicitly is what stops a corrupt entry being repaired
+        # into canonical_v1 by the very command that grants verification.
         previous_scheme = doc_entry.get("uid_scheme")
         errors = source_provenance.scheme_transition_errors(
-            previous_scheme, "canonical_v1")
+            previous_scheme, "canonical_v1", entry_exists=True)
         if errors:
             for error in errors:
                 print(f"REFUSED: {error}")

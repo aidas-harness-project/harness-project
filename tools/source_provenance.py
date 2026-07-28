@@ -225,10 +225,37 @@ def uid_scheme_blockers(scheme: str | None, doc_id: str,
 
 # --- uid_scheme transitions ------------------------------------------------
 
-def scheme_transition_errors(current: str | None, proposed: str) -> list[str]:
-    """canonical_v1 is a one-way door."""
+def scheme_transition_errors(current: str | None, proposed: str, *,
+                             entry_exists: bool = False) -> list[str]:
+    """canonical_v1 is a one-way door.
+
+    `entry_exists` distinguishes the two situations that both arrive here as
+    `current=None`, and that must NOT be treated alike:
+
+      - creating a document's first revision entry -- there is no prior state,
+        so `legacy` is simply the starting value;
+      - an entry that already exists but whose `uid_scheme` is missing or
+        null. `_revision_index.json` is DAO-owned and the DAO always writes
+        that field, so its absence means the record was damaged or tampered
+        with. Reading that as "brand new" and writing the STRONGEST value over
+        it is precisely backwards: one ordinary `enable-canonical-uids` call
+        would launder an unknown history into a verified state, and every UID
+        the document ever published would inherit a guarantee nothing checked.
+
+    Callers that are transitioning an existing entry must pass
+    `entry_exists=True`; the default is the creation case.
+    """
     if proposed not in KNOWN_SCHEMES:
         return [f"unknown uid_scheme {proposed!r}"]
+    if current is None and entry_exists:
+        return [
+            "the existing revision entry has no uid_scheme -- the revision "
+            "index is DAO-owned and this field is always written, so a "
+            "missing or null value is a damaged record, not a new document. "
+            "It must be investigated, never overwritten with a stronger "
+            "scheme: repairing it by activation would grant canonical_v1 to a "
+            "document whose real prior state is unknown"
+        ]
     if current not in KNOWN_SCHEMES and current is not None:
         # A corrupt/unknown current value is not a licence to overwrite it with
         # a clean one: that would launder a tampered index into a verified
@@ -266,6 +293,10 @@ def revision_history_errors(previous: dict | None,
         errors.append(
             "revision history is append-only; the existing prefix may not be "
             f"rewritten (recorded {before}, proposed {after[:len(before)]})")
+    # `previous is not None` was established above, so this is an existing
+    # record by construction -- a missing uid_scheme on it is damage, and an
+    # update may not silently re-baseline it either.
     errors.extend(scheme_transition_errors(
-        previous.get("uid_scheme"), proposed.get("uid_scheme", "legacy")))
+        previous.get("uid_scheme"), proposed.get("uid_scheme", "legacy"),
+        entry_exists=True))
     return errors
