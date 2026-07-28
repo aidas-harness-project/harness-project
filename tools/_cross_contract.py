@@ -732,26 +732,53 @@ def check_reference_table_structure(
                     "range cannot be distinguished from values that merely "
                     "appear somewhere on the page")
                 continue
-            span = row.get("source_span") or {}
-            span_errors = _span_text_errors(span, pages, f"{rloc}.source_span")
-            errors.extend(span_errors)
-            if span_errors:
-                continue
-            page = span.get("page")
-            start = span.get("start_char")
-            end = span.get("end_char")
-            row_spans.append((page, start, end))
-            row_quote = span.get("quote", "")
+            primary = row.get("source_span") or {}
+            spans = row.get("source_spans") or [primary]
+            valid_spans = []
+            for span_index, span in enumerate(spans):
+                sloc = (
+                    f"{rloc}.source_spans[{span_index}]"
+                    if row.get("source_spans")
+                    else f"{rloc}.source_span")
+                span_errors = _span_text_errors(span, pages, sloc)
+                errors.extend(span_errors)
+                if span_errors:
+                    continue
+                valid_spans.append(span)
 
-            # The row span must sit inside one of the table's source regions.
-            if regions and not any(
-                    region.get("page") == page
-                    and region.get("start_char", 0) <= start
-                    and end <= region.get("end_char", 0)
-                    for region in regions):
+            if not valid_spans:
+                continue
+            valid_spans.sort(key=lambda item: (
+                item.get("page"), item.get("start_char"),
+                item.get("end_char")))
+            first = valid_spans[0]
+            if row.get("source_spans") and any(
+                    primary.get(key) != first.get(key)
+                    for key in ("page", "start_char", "end_char", "quote")):
                 errors.append(
-                    f"{rloc}: source_span is outside every declared "
-                    "source_region of this table")
+                    f"{rloc}: source_span must equal the first source range "
+                    "in source_spans")
+
+            for span in valid_spans:
+                page = span.get("page")
+                start = span.get("start_char")
+                end = span.get("end_char")
+                row_spans.append((page, start, end))
+
+                # Every row range, not only the legacy first range, must sit
+                # inside the table regions. Otherwise Part 11E and the UID
+                # resolver would validate two different rows.
+                if regions and not any(
+                        region.get("page") == page
+                        and region.get("start_char", 0) <= start
+                        and end <= region.get("end_char", 0)
+                        for region in regions):
+                    errors.append(
+                        f"{rloc}: source span [{start}:{end}] on page {page} "
+                        "is outside every declared source_region of this table")
+
+            row_quote = " ".join(
+                span.get("quote", "") for span in valid_spans)
 
             # Every cell value must be present in THIS row's source range, in
             # the order the columns are declared. This is what makes a

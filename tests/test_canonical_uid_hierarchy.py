@@ -178,7 +178,13 @@ def _ps(pdf, span):
 
 
 def _derived(kind, pdf, spans, parent=None, column_key=None):
-    """Mirror of the resolver's canonical ordering, written out longhand."""
+    """Mirror of the resolver's canonical ordering, written out longhand.
+
+    `column_key` is only meaningful for `cell`: canonical_v1 froze it into RC
+    identity, so a cell expectation that omits it computes a different UID
+    than the DAO does. See `test_canonical_uid_vectors.py` for why the frozen
+    rule is preserved rather than simplified.
+    """
     records = sorted(
         ((_ps(pdf, s), s) for s in spans),
         key=lambda pair: (pair[1]["page"], pair[1]["start_char"],
@@ -192,12 +198,19 @@ def _derived(kind, pdf, spans, parent=None, column_key=None):
 
 # --- contract builders ------------------------------------------------------
 
-CLAUSE_SPAN = "제3조(보험금의 지급) 회사는 보험금을 지급합니다."
+# The clause covers the whole article body, so it genuinely contains the two
+# condition lines below its heading. The heading sentence alone is kept as
+# CLAUSE_HEADING for the tests that need a clause NARROWER than its boundary --
+# the shape that lets a condition sit inside the article but outside the
+# clause, which is the containment attack this module reproduces.
+CLAUSE_HEADING = "제3조(보험금의 지급) 회사는 보험금을 지급합니다."
 CONDITION_TEXT = "사고일부터 180일 이내에 사망한 경우"
+BOUNDARY_SPAN = PAGE_1.rstrip("\n")
+CLAUSE_SPAN = BOUNDARY_SPAN
 
 
 def build_inventory(pdf, *, boundary_uid=None, span_uid=None):
-    span = _span(1, CLAUSE_SPAN)
+    span = _span(1, BOUNDARY_SPAN)
     ps = span_uid or _ps(pdf, span)
     pb = boundary_uid or _derived("boundary", pdf, [span])
     return {
@@ -233,6 +246,24 @@ def build_inventory(pdf, *, boundary_uid=None, span_uid=None):
     }
 
 
+def build_inventory_for_boundary_spans(pdf, spans):
+    """Replace the default whole-article boundary with exact supplied spans."""
+    data = build_inventory(pdf)
+    pb = _derived("boundary", pdf, spans)
+    data["boundaries"][0]["boundary_uid"] = pb
+    data["page_spans"] = [{
+        "span_uid": _ps(pdf, span),
+        "page": span["page"],
+        "start_char": span["start_char"],
+        "end_char": span["end_char"],
+        "quote": span["quote"],
+        "disposition": "boundary",
+        "boundary_uid": pb,
+        "exclusion_reason": None,
+    } for span in spans]
+    return data, pb
+
+
 def build_clauses(pdf, *, clause_uid=None, condition_uids=None,
                   parent_boundary=None, clause_spans=None,
                   condition_spans=None):
@@ -241,9 +272,10 @@ def build_clauses(pdf, *, clause_uid=None, condition_uids=None,
     Requirement 4: only the exact span (and therefore the occurrence ordinal)
     tells them apart -- their `text` is the same string.
     """
-    boundary_span = _span(1, CLAUSE_SPAN)
+    boundary_span = _span(1, BOUNDARY_SPAN)
     pb = parent_boundary or _derived("boundary", pdf, [boundary_span])
-    spans = clause_spans if clause_spans is not None else [boundary_span]
+    spans = clause_spans if clause_spans is not None else [
+        _span(1, CLAUSE_SPAN)]
     pc = clause_uid or _derived("clause", pdf, spans, parent=pb)
 
     if condition_spans is None:
@@ -259,8 +291,9 @@ def build_clauses(pdf, *, clause_uid=None, condition_uids=None,
             "source_span_uids": group,
             "text": CONDITION_TEXT,
             "evidence_references": [{
-                "document_id": "DOC_005", "page": 1,
-                "quote": CONDITION_TEXT}],
+                "document_id": "DOC_005", "page": span["page"],
+                "quote": span["quote"]}
+                for span in group],
             "support_level": "direct",
             "support_rationale": "verbatim from the cited page",
             "review_required": False,
@@ -293,7 +326,9 @@ def build_clauses(pdf, *, clause_uid=None, condition_uids=None,
             "reference_table_refs": [],
             "confidence": 0.9,
             "evidence_references": [{
-                "document_id": "DOC_005", "page": 1, "quote": CLAUSE_SPAN}],
+                "document_id": "DOC_005", "page": span["page"],
+                "quote": span["quote"]}
+                for span in spans],
             "review_required": False,
         }],
     }
@@ -327,8 +362,8 @@ def build_tables(pdf, *, table_uid=None, row_uids=None, cell_uids=None,
             rc = None
             if cell_uids:
                 rc = cell_uids[row_index][cell_index]
-            rc = rc or _derived("cell", pdf, [cell_span], parent=rr,
-                                column_key=column_key)
+            rc = rc or _derived(
+                "cell", pdf, [cell_span], parent=rr, column_key=column_key)
             built_cells.append({
                 "cell_uid": rc,
                 "source_spans": [cell_span],
@@ -521,6 +556,17 @@ def test_a_clause_whose_document_has_no_inventory_is_refused(canonical):
     assert any("no policy_boundary_inventory" in e for e in errors), errors
 
 
+def test_a_clause_cannot_inherit_a_boundary_built_over_a_fake_span_uid(
+        canonical):
+    pdf = canonical
+    inventory = build_inventory(pdf)
+    inventory["page_spans"][0]["span_uid"] = "PS-1111111111111111"
+    _persist("policy_boundary_inventory_DOC_005.json", inventory)
+    errors = _check_clauses(build_clauses(pdf))
+    assert any("do not resolve to a canonical boundary" in e
+               for e in errors), errors
+
+
 def test_a_cell_without_source_spans_is_refused(canonical):
     data = build_tables(canonical)
     del data["tables"][0]["rows"][0]["cells"][0]["source_spans"]
@@ -544,6 +590,253 @@ def test_a_boundary_owning_no_span_is_refused(canonical):
     data["page_spans"][0]["exclusion_reason"] = "page furniture"
     errors = _check_inventory(data)
     assert any("owns no page span" in e for e in errors), errors
+
+
+def test_a_clause_cannot_mint_a_uid_from_bytes_outside_its_boundary(canonical):
+    pdf = canonical
+    _persist("policy_boundary_inventory_DOC_005.json", build_inventory(pdf))
+    unrelated = _span(2, "제4조(별표) 장해지급률표")
+    data = build_clauses(pdf, clause_spans=[unrelated])
+    errors = _check_clauses(data)
+    assert any("outside every parent boundary" in e for e in errors), errors
+
+
+def test_a_condition_cannot_mint_a_uid_from_bytes_outside_its_clause(
+        canonical):
+    """Renamed with the rule it checks: the scope is the parent CLAUSE.
+
+    It used to read "parent clause boundary", which was accurate about what
+    the code did and inaccurate about what it should do -- a boundary is the
+    article, and an article holds sibling clauses. The bytes here are on a
+    different page entirely, so this case was caught either way; the cases
+    that were NOT caught are the same-article ones directly above.
+    """
+    pdf = canonical
+    _persist("policy_boundary_inventory_DOC_005.json", build_inventory(pdf))
+    unrelated = [[_span(2, "제4조(별표) 장해지급률표")]]
+    data = build_clauses(pdf, condition_spans=unrelated)
+    errors = _check_clauses(data)
+    assert any("outside every parent clause span" in e
+               for e in errors), errors
+
+
+# -------------------------------------------------------------------------
+# CI provenance binds to the PARENT CLAUSE, not merely to the boundary.
+#
+# The relation the resolver has to enforce is
+#     CI source span  ⊆  parent PC source spans  ⊆  declared PB source spans
+# Checking only the outer containment lets a condition be identified by a real
+# sentence that belongs to a DIFFERENT clause in the same article -- real
+# source bytes, so every quote/evidence check passes, yet the CI describes
+# something its own clause never said.
+# -------------------------------------------------------------------------
+
+def test_a_condition_inside_the_boundary_but_outside_its_clause_is_refused(
+        canonical):
+    """The exact hole: containment held at the boundary and stopped there.
+
+    Both spans are real text from the same article, so nothing about bytes,
+    quotes or evidence is wrong -- only the parentage is. This asserted
+    `== []` in effect before the fix, because `parent_records` was the
+    boundary's spans.
+    """
+    pdf = canonical
+    boundary_spans = [_span(1, BOUNDARY_SPAN)]
+    inventory, pb = build_inventory_for_boundary_spans(pdf, boundary_spans)
+    _persist("policy_boundary_inventory_DOC_005.json", inventory)
+
+    # The clause is ONLY the first sentence of the article.
+    clause_spans = [_span(1, CLAUSE_HEADING)]
+    # The condition points at the "나." line -- inside the article, outside
+    # the clause.
+    outside = [[_span(1, CONDITION_TEXT, occurrence=2)]]
+    data = build_clauses(
+        pdf, parent_boundary=pb, clause_spans=clause_spans,
+        condition_spans=outside)
+
+    # The attack's premise, asserted so a fixture drift cannot make this test
+    # pass for the wrong reason: the span really is inside the boundary.
+    boundary = boundary_spans[0]
+    condition = outside[0][0]
+    assert (boundary["start_char"] <= condition["start_char"]
+            and condition["end_char"] <= boundary["end_char"])
+
+    errors = _check_clauses(data)
+    assert any("outside every parent clause" in e for e in errors), errors
+
+
+def test_a_condition_may_not_borrow_a_real_sentence_from_another_clause(
+        canonical):
+    """Two clauses in one article; clause 1's condition cites clause 2's text.
+
+    This is the realistic shape of the attack -- not a nonsense offset, but a
+    genuine, correctly-quoted policy sentence lifted from the neighbouring
+    clause, which would make the CI's identity describe the wrong obligation.
+    """
+    pdf = canonical
+    boundary_spans = [_span(1, BOUNDARY_SPAN)]
+    inventory, pb = build_inventory_for_boundary_spans(pdf, boundary_spans)
+    _persist("policy_boundary_inventory_DOC_005.json", inventory)
+
+    other_clause_sentence = _span(1, CONDITION_TEXT, occurrence=2)
+    data = build_clauses(
+        pdf, parent_boundary=pb, clause_spans=[_span(1, CLAUSE_HEADING)],
+        condition_spans=[[other_clause_sentence]])
+    errors = _check_clauses(data)
+    assert any("outside every parent clause" in e for e in errors), errors
+
+
+def test_matching_evidence_to_the_borrowed_sentence_does_not_rescue_it(
+        canonical):
+    """Evidence agreement is consistency, not provenance.
+
+    `build_clauses` already derives evidence from the submitted spans, so the
+    contract is internally perfectly consistent: the CI's UID, its spans and
+    its evidence all name the same real sentence. The containment relation is
+    the only thing that can catch it, which is why it must be checked against
+    the clause and not the article.
+    """
+    pdf = canonical
+    boundary_spans = [_span(1, BOUNDARY_SPAN)]
+    inventory, pb = build_inventory_for_boundary_spans(pdf, boundary_spans)
+    _persist("policy_boundary_inventory_DOC_005.json", inventory)
+
+    borrowed = _span(1, CONDITION_TEXT, occurrence=2)
+    data = build_clauses(
+        pdf, parent_boundary=pb, clause_spans=[_span(1, CLAUSE_HEADING)],
+        condition_spans=[[borrowed]])
+    condition = data["clauses"][0]["payout_conditions"][0]
+    condition["text"] = borrowed["quote"]
+    condition["evidence_references"] = [{
+        "document_id": "DOC_005", "page": 1, "quote": borrowed["quote"]}]
+
+    # No evidence complaint is available to catch this -- prove that.
+    errors = _check_clauses(data)
+    assert not any("evidence_reference" in e for e in errors), errors
+    assert any("outside every parent clause" in e for e in errors), errors
+
+
+def test_a_condition_inside_a_multi_page_clause_is_accepted(canonical):
+    """Binding to the clause must not break clauses that span pages.
+
+    A tighter containment rule is only correct if it still admits the legitimate
+    case, so the clause here covers ranges on both pages and the condition sits
+    inside the second one.
+    """
+    pdf = canonical
+    boundary_spans = [_span(1, BOUNDARY_SPAN), _span(2, PAGE_2.rstrip("\n"))]
+    inventory, pb = build_inventory_for_boundary_spans(pdf, boundary_spans)
+    _persist("policy_boundary_inventory_DOC_005.json", inventory)
+
+    clause_spans = [_span(1, CLAUSE_SPAN), _span(2, "제4조(별표) 장해지급률표")]
+    inside_second_page = [[_span(2, "장해지급률표")]]
+    data = build_clauses(
+        pdf, parent_boundary=pb, clause_spans=clause_spans,
+        condition_spans=inside_second_page)
+    assert _check_clauses(data) == []
+
+
+def test_reversing_clause_span_order_does_not_change_the_condition_uid(
+        canonical):
+    """Submission order is not identity -- for the clause OR for what it gates.
+
+    The clause's own UID is already order-independent; this asserts the newly
+    clause-bound condition check inherits that rather than accidentally
+    depending on which span happened to be listed first.
+    """
+    pdf = canonical
+    boundary_spans = [_span(1, BOUNDARY_SPAN), _span(2, PAGE_2.rstrip("\n"))]
+    inventory, pb = build_inventory_for_boundary_spans(pdf, boundary_spans)
+    _persist("policy_boundary_inventory_DOC_005.json", inventory)
+
+    forward = [_span(1, CLAUSE_SPAN), _span(2, "제4조(별표) 장해지급률표")]
+    condition_spans = [[_span(2, "장해지급률표")]]
+    straight = build_clauses(
+        pdf, parent_boundary=pb, clause_spans=forward,
+        condition_spans=condition_spans)
+    reversed_ = build_clauses(
+        pdf, parent_boundary=pb, clause_spans=list(reversed(forward)),
+        condition_spans=condition_spans)
+
+    assert _check_clauses(straight) == []
+    assert _check_clauses(reversed_) == []
+    assert (straight["clauses"][0]["clause_uid"]
+            == reversed_["clauses"][0]["clause_uid"])
+    assert (straight["clauses"][0]["payout_conditions"][0]["condition_uid"]
+            == reversed_["clauses"][0]["payout_conditions"][0]["condition_uid"])
+
+
+def test_only_the_occurrence_actually_inside_the_clause_is_accepted(canonical):
+    """The same phrase twice in one article: containment picks out which one.
+
+    Occurrence 1 sits in the clause's range, occurrence 2 does not. Their
+    quotes are byte-identical, so nothing but the span offsets distinguishes
+    them -- and the two must get different verdicts.
+    """
+    pdf = canonical
+    boundary_spans = [_span(1, BOUNDARY_SPAN)]
+    inventory, pb = build_inventory_for_boundary_spans(pdf, boundary_spans)
+    _persist("policy_boundary_inventory_DOC_005.json", inventory)
+
+    first = _span(1, CONDITION_TEXT, occurrence=1)
+    second = _span(1, CONDITION_TEXT, occurrence=2)
+    assert first["quote"] == second["quote"]
+
+    # A clause covering the article up to and including occurrence 1.
+    clause_span = {
+        "page": 1,
+        "start_char": _span(1, CLAUSE_HEADING)["start_char"],
+        "end_char": first["end_char"],
+        "quote": _page_text(1)[
+            _span(1, CLAUSE_HEADING)["start_char"]:first["end_char"]],
+    }
+    accepted = build_clauses(
+        pdf, parent_boundary=pb, clause_spans=[clause_span],
+        condition_spans=[[first]])
+    assert _check_clauses(accepted) == []
+
+    refused = build_clauses(
+        pdf, parent_boundary=pb, clause_spans=[clause_span],
+        condition_spans=[[second]])
+    errors = _check_clauses(refused)
+    assert any("outside every parent clause" in e for e in errors), errors
+
+
+def test_identity_span_must_match_the_elements_evidence_passage(canonical):
+    pdf = canonical
+    _persist("policy_boundary_inventory_DOC_005.json", build_inventory(pdf))
+    data = build_clauses(pdf)
+    data["clauses"][0]["evidence_references"][0]["quote"] = CONDITION_TEXT
+    errors = _check_clauses(data)
+    assert any("no evidence_reference with the same source passage" in e
+               for e in errors), errors
+
+
+def test_a_cell_uid_cannot_be_derived_from_a_different_value_in_its_row(
+        canonical):
+    pdf = canonical
+    data = build_tables(pdf)
+    row = data["tables"][0]["rows"][0]
+    rate_cell = row["cells"][1]
+    wrong_span = row["cells"][0]["source_spans"][0]
+    rate_cell["source_spans"] = [wrong_span]
+    rate_cell["cell_uid"] = _derived(
+        "cell", pdf, [wrong_span], parent=row["row_uid"], column_key="rate")
+    errors = _check_tables(data)
+    assert any("not cell value" in e for e in errors), errors
+
+
+def test_row_source_span_and_uid_source_spans_cannot_diverge(canonical):
+    pdf = canonical
+    data = build_tables(pdf)
+    row = data["tables"][0]["rows"][0]
+    row["source_spans"] = [_span(2, "B 10")]
+    row["row_uid"] = _derived(
+        "row", pdf, row["source_spans"],
+        parent=data["tables"][0]["table_uid"])
+    errors = _check_tables(data)
+    assert any("source_span must equal the first source range" in e
+               for e in errors), errors
 
 
 def test_an_unmapped_policy_layer_schema_is_refused_not_skipped(canonical):
@@ -671,41 +964,34 @@ def _multi_span_clause(pdf):
 def test_a_multi_span_boundary_recomputes(canonical):
     """A PB built from two page spans, not one."""
     pdf = canonical
-    data = build_inventory(pdf)
     second = _span(1, "가. 사고일부터 180일 이내에 사망한 경우")
     spans = [_span(1, CLAUSE_SPAN), second]
-    pb = _derived("boundary", pdf, spans)
-    data["boundaries"][0]["boundary_uid"] = pb
-    data["page_spans"][0]["boundary_uid"] = pb
-    data["page_spans"].append({
-        "span_uid": _ps(pdf, second),
-        "page": 1,
-        "start_char": second["start_char"],
-        "end_char": second["end_char"],
-        "quote": second["quote"],
-        "disposition": "boundary",
-        "boundary_uid": pb,
-        "exclusion_reason": None,
-    })
+    data, _ = build_inventory_for_boundary_spans(pdf, spans)
     assert _check_inventory(data) == []
 
 
 def test_a_multi_page_clause_recomputes(canonical):
     pdf = canonical
-    _persist("policy_boundary_inventory_DOC_005.json", build_inventory(pdf))
     spans = _multi_span_clause(pdf)
+    inventory, pb = build_inventory_for_boundary_spans(pdf, spans)
+    _persist("policy_boundary_inventory_DOC_005.json", inventory)
     assert {s["page"] for s in spans} == {1, 2}
-    assert _check_clauses(build_clauses(pdf, clause_spans=spans)) == []
+    assert _check_clauses(build_clauses(
+        pdf, clause_spans=spans, parent_boundary=pb,
+        condition_spans=[])) == []
 
 
 def test_a_multi_region_table_and_multi_span_row_recompute(canonical):
     """A table spanning both pages, with a row made of two ranges."""
     pdf = canonical
-    regions = [_span(1, "가. 사고일부터 180일 이내에 사망한 경우"),
+    regions = [_span(1, "나. 사고일부터 180일 이내에 사망한 경우"),
                _span(2, "A 10\nB 10")]
     rt = _derived("table", pdf, regions)
     row_a_spans = [_span(2, "A 10")]
-    row_b_spans = [_span(2, "B 10"), _span(1, "나. 사고일부터 180일 이내에 사망한 경우")]
+    row_b_spans = [
+        _span(1, "나. 사고일부터 180일 이내에 사망한 경우"),
+        _span(2, "B 10"),
+    ]
     data = build_tables(pdf, region_spans=regions)
     table = data["tables"][0]
     table["table_uid"] = rt
@@ -725,10 +1011,14 @@ def test_reversing_the_submitted_span_order_does_not_change_any_uid(canonical):
     """Canonical order is SOURCE order. Extraction order is a forbidden input,
     so listing the same spans backwards must be the same element."""
     pdf = canonical
-    _persist("policy_boundary_inventory_DOC_005.json", build_inventory(pdf))
     spans = _multi_span_clause(pdf)
-    forward = build_clauses(pdf, clause_spans=spans)
-    reversed_ = build_clauses(pdf, clause_spans=list(reversed(spans)))
+    inventory, pb = build_inventory_for_boundary_spans(pdf, spans)
+    _persist("policy_boundary_inventory_DOC_005.json", inventory)
+    forward = build_clauses(
+        pdf, clause_spans=spans, parent_boundary=pb, condition_spans=[])
+    reversed_ = build_clauses(
+        pdf, clause_spans=list(reversed(spans)), parent_boundary=pb,
+        condition_spans=[])
     assert (forward["clauses"][0]["clause_uid"]
             == reversed_["clauses"][0]["clause_uid"])
     assert _check_clauses(reversed_) == []
@@ -840,6 +1130,9 @@ def test_a_uid_from_the_previous_revision_is_refused(canonical, isolated_dao,
     clause["clause_uid"] = stale_pc
     clause["source_boundary_uids"] = [new_pb]
     clause["source_span_uids"] = [span]
+    clause["evidence_references"] = [{
+        "document_id": "DOC_005", "page": 1, "quote": new_quote,
+    }]
     errors = _check_clauses(data)
     assert any("clause UID" in e for e in errors), errors
 
@@ -926,14 +1219,14 @@ def test_transposing_values_between_rows_is_refused(canonical, isolated_dao,
     table["rows"] = [
         {"row_uid": rr_a, "source_span": row_a, "cells": [
             {"cell_uid": _derived("cell", pdf, [span2("A")], parent=rr_a,
-                                  column_key="label"),
+                                     column_key="label"),
              "source_spans": [span2("A")], "column_key": "label",
              "value": "A",
              "evidence_references": [{"document_id": "DOC_005", "page": 2,
                                       "quote": "A 10"}],
              "review_required": False},
             {"cell_uid": _derived("cell", pdf, [stolen], parent=rr_a,
-                                  column_key="rate"),
+                                     column_key="rate"),
              "source_spans": [stolen], "column_key": "rate", "value": "20",
              "evidence_references": [{"document_id": "DOC_005", "page": 2,
                                       "quote": "B 20"}],
@@ -941,14 +1234,14 @@ def test_transposing_values_between_rows_is_refused(canonical, isolated_dao,
         ]},
         {"row_uid": rr_b, "source_span": row_b, "cells": [
             {"cell_uid": _derived("cell", pdf, [span2("B")], parent=rr_b,
-                                  column_key="label"),
+                                     column_key="label"),
              "source_spans": [span2("B")], "column_key": "label",
              "value": "B",
              "evidence_references": [{"document_id": "DOC_005", "page": 2,
                                       "quote": "B 20"}],
              "review_required": False},
             {"cell_uid": _derived("cell", pdf, [span2("10")], parent=rr_b,
-                                  column_key="rate"),
+                                     column_key="rate"),
              "source_spans": [span2("10")], "column_key": "rate",
              "value": "10",
              "evidence_references": [{"document_id": "DOC_005", "page": 2,
@@ -971,9 +1264,9 @@ def test_a_cell_span_from_another_row_is_refused_even_when_uid_matches(
     cell = rows[0]["cells"][0]
     cell["source_spans"] = [foreign]
     cell["value"] = foreign["quote"]
-    cell["cell_uid"] = _derived("cell", pdf, [foreign],
-                                parent=rows[0]["row_uid"],
-                                column_key=cell["column_key"])
+    cell["cell_uid"] = _derived(
+        "cell", pdf, [foreign], parent=rows[0]["row_uid"],
+        column_key=cell["column_key"])
     errors = _check_tables(data)
     assert any("outside its own row" in e for e in errors), errors
 
@@ -1067,6 +1360,44 @@ def test_an_audit_citing_a_real_clause_uid_resolves(canonical):
     assert dao._canonical_uid_errors(
         "CASE_030", "policy_audit_result_DOC_005.json",
         policy_audit.AUDIT_SCHEMA, audit) == []
+
+
+def test_parent_coverage_resolves_table_in_its_declared_owner_document(
+        monkeypatch):
+    calls = []
+
+    def pools(_case_id, doc_id):
+        calls.append(doc_id)
+        return {
+            "RT": {"RT-aaaaaaaaaaaaaaaa"},
+            "RR": set(),
+            "RC": set(),
+            "rows_by_table": {"RT-aaaaaaaaaaaaaaaa": set()},
+        }, []
+
+    monkeypatch.setattr(dao, "_canonical_table_pools", pools)
+    coverage = {"pages": [{
+        "logical_page": 3,
+        "physical_page": 10,
+        "disposition": "reference_table",
+        "owner_document_id": None,
+        "table_uid": "RT-aaaaaaaaaaaaaaaa",
+        "reference_table_document_id": "DOC_007",
+        "reason": None,
+        "evidence_references": [],
+    }]}
+    assert dao._canonical_uid_reference_errors(
+        "CASE_030", "DOC_001", coverage,
+        policy_completeness.PARENT_COVERAGE_SCHEMA) == []
+    assert calls == ["DOC_007"]
+
+
+def test_parent_coverage_binding_includes_reference_table_owner():
+    coverage = {"pages": [{
+        "reference_table_document_id": "DOC_007",
+    }]}
+    assert "DOC_007" in dao._referenced_policy_documents(
+        "CASE_030", "policy_parent_coverage_DOC_001.json", coverage)
 
 
 def test_an_audit_cannot_launder_a_fake_uid_by_agreeing_with_the_clause_file(

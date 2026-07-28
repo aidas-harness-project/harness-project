@@ -1772,10 +1772,13 @@ and (for a segment) a page map. It is **one-way**: an off-switch would make the
 guarantee a bypass, since writing an arbitrary UID would only require
 downgrading first.
 
-Legacy documents stay fully readable and writable. Making canonical
-verification unconditional would strand every pre-11J artifact and destroy the
-audit trail this part exists to build. What legacy documents cannot do is pass
-as canonical work.
+Legacy documents stay fully **readable**, and every migration-prep command
+stays open to them. What they may no longer do, since P0-3, is receive NEW
+policy-layer writes: canonical_v1 is now mandatory for new work, so the earlier
+"fully readable and writable" is out of date. Making verification unconditional
+would still strand every pre-11J artifact, which is why reads and migration are
+deliberately untouched -- but a legacy document cannot pass as canonical work,
+and cannot silently continue accumulating unverified artifacts either.
 
 **CASE_021 / CASE_022 / CASE_030 are all still `legacy`.** Their existing UIDs
 have never been verified against any derivation, and switching a document to
@@ -1785,3 +1788,87 @@ blessing of what is already on disk. No case was migrated automatically.
 
 73 tests across the four commits (10 transaction/fault-injection, 16 provenance
 sealing, 22 derivation, 17 canonical gate, plus fixture updates). 649 -> 714.
+
+## 30. Canonical UIDs were derivable from bytes that were not the element's own -- RESOLVED 2026-07-28 (P0-2 follow-up)
+
+P0-2 made every UID kind recompute from source. What it did not establish is
+that the source it recomputes from is *the element's own*. Real bytes from the
+right document, correctly quoted and correctly evidenced, were enough -- so a
+UID could be stable, verifiable, and about the wrong thing.
+
+Fixed in this pass:
+
+- **PB could sit over a fabricated PS.** `boundary_uid_index` now drops a page
+  span whose submitted `span_uid` does not itself recompute, so a correct
+  boundary cannot launder a fake child.
+- **Clause spans outside their declared boundary.** Refused, and a declared
+  parent that contains none of the clause's spans is refused too -- a
+  non-contributing parent still changes the PC, so it cannot be decorative.
+- **Condition spans bound only to the boundary.** A boundary is an *article*
+  and an article holds sibling clauses, so checking CI containment against it
+  let a condition be identified by a real sentence belonging to the clause next
+  door: correct bytes, correct quote, correct evidence, wrong obligation. The
+  relation now enforced end to end is
+
+      CI source spans  ⊆  parent PC source spans  ⊆  declared PB source spans
+
+- **Cross-document RT/RR were only string-matched.** A clause citing another
+  document's 별표 table, and a parent-coverage page naming a table's owner, are
+  cross-document claims; both now recompute in the document that actually owns
+  the table. Citing a legacy document is refused (canonical status is per
+  document and is not inherited), a fabricated RT agreed on by both files is
+  refused, an RR belonging to a different table is refused, and a genuine table
+  re-labelled with the wrong `reference_table_document_id` is refused. The
+  binding must list every referenced document, so revising the appendix makes
+  the citing clause stale.
+- **Row/cell provenance.** `row.source_span` must equal the first canonical
+  range in `row.source_spans`; every row range must lie inside a declared table
+  region; a cell's spans must identify exactly its normalized value; two cells
+  may not overlap in source; cell source order must follow declared column
+  order.
+- **NFC/CRLF occurrence ordinals.** `start_char` is a RAW offset while the
+  occurrence search runs on normalized text. With an NFD character before two
+  identical phrases the two collapsed onto one ordinal and therefore one PS.
+  The raw boundary is now mapped into normalized coordinates first, and a span
+  that does not align to exactly one normalized occurrence is refused rather
+  than resolved ambiguously.
+
+### canonical_v1's RC rule is frozen, including its `column_key` wart
+
+An intermediate version of this work removed `column_key` from RC identity.
+The reasoning was sound -- a normalized schema label is not source provenance,
+so renaming a column should not move the UID of unchanged bytes -- but the
+change was made **under the same scheme name**, which is not a thing a scheme
+may do. It moved the frozen vector `RC-74563157681aa59f` to
+`RC-6a764ba8c871b71a`, meaning every artifact already written and sealed as
+`uid_scheme: canonical_v1` would have started failing recomputation against
+UIDs the DAO itself had issued.
+
+Restored, deliberately: `canonical_v1` computes RC from
+(parent RR + the cell's exact source spans + `column_key`), and all seven
+frozen vectors are unchanged. `test_canonical_uid_vectors.py` now pins the
+scheme string to the vector set so the same drift cannot recur silently.
+
+**Removing `column_key` is a `canonical_v2` change and cannot happen without
+one.** That means: a new scheme name, a transition path in
+`enable-canonical-uids`, and a migration for existing canonical documents --
+not an edit to what `canonical_v1` computes.
+
+### Still open, deliberately
+
+- **P0-6 -- segment page-map provenance.** A segment's `page_map` is what
+  turns a logical page into the physical page canonical identity is keyed to.
+  It is verified as present and structurally sound, not as *true against the
+  parent PDF*. Out of scope here.
+- **P0-7 -- exact evidence binding.** Identity spans and `evidence_references`
+  are currently matched after collapsing incidental whitespace, because an
+  evidence quote carries no offsets and equality-after-normalization is the
+  strongest deterministic relation available without them. This is **not**
+  exact-span binding, and this pass should not be read as having solved
+  evidence provenance -- it closed the "unrelated bytes" hole, not the
+  "which occurrence, exactly" one. P0-7 is the exact-span-binding work.
+- **P0-8 -- authoritative table-region detection.** A table's
+  `source_regions` are taken as declared and then enforced downwards (rows in
+  regions, cells in rows). Nothing independently establishes that the declared
+  region is the table's real extent on the page, so a region drawn too
+  narrowly still hides rows. Reverse coverage is P0-8.

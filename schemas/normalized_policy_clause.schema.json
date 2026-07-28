@@ -65,7 +65,7 @@
         "source_span_uids": {
           "type": "array",
           "minItems": 1,
-          "description": "The exact source span(s) this condition was normalized FROM, in the processed page body. Required under canonical_v1 (the DAO refuses the write without it); optional in the schema only so legacy contracts stay readable. A condition may span several passages or pages -- list each. Submission order is irrelevant: the DAO sorts by (physical page, start, end, span UID) before computing the identifier, so two extractions that list the same spans differently produce the same CI. This is what distinguishes two occurrences of an identical condition phrase on one page, which text/quote alone cannot.",
+          "description": "The exact source span(s) this condition was normalized FROM, in the processed page body. Required under canonical_v1 (the DAO refuses the write without it); optional in the schema only so legacy contracts stay readable. Every span must lie inside the PARENT CLAUSE's own source spans -- not merely inside the surrounding boundary, which is an article and normally holds sibling clauses -- and must match one of this condition's own evidence passages. A different real phrase from the same article is not valid provenance, however correctly it is quoted. A condition may span several passages or pages -- list each. Submission order is irrelevant: the DAO sorts by (physical page, start, end, span UID) before computing the identifier, so two extractions that list the same spans differently produce the same CI. This is what distinguishes two occurrences of an identical condition phrase on one page, which text/quote alone cannot.",
           "items": {
             "$ref": "common_component_output.schema.json#/$defs/canonical_source_span"
           }
@@ -163,7 +163,7 @@
         "source_span_uids": {
           "type": "array",
           "minItems": 1,
-          "description": "The exact source span(s) of THIS CLAUSE in the processed page body. Required under canonical_v1 (the DAO refuses the write without it); optional in the schema only so legacy contracts stay readable. source_boundary_uids says which boundary the clause sits in -- a boundary can hold several clauses, so it cannot identify one; these spans say which bytes the clause IS. A clause crossing two pages lists a span per page; the DAO sorts them into canonical source order before computing the identifier.",
+          "description": "The exact source span(s) of THIS CLAUSE in the processed page body. Required under canonical_v1 (the DAO refuses the write without it); optional in the schema only so legacy contracts stay readable. Every span must lie inside a declared source boundary and match one of this clause's own evidence passages; unrelated bytes cannot be used merely because they exist in the document. source_boundary_uids says which boundary the clause sits in -- a boundary can hold several clauses, so it cannot identify one; these spans say which bytes the clause IS. A clause crossing two pages lists a span per page; the DAO sorts them into canonical source order before computing the identifier.",
           "items": {
             "$ref": "common_component_output.schema.json#/$defs/canonical_source_span"
           }
@@ -257,7 +257,7 @@
         },
         "reference_table_refs": {
           "type": "array",
-          "description": "Stable links to structured policy appendices required to interpret this clause.",
+          "description": "Stable links to structured policy appendices required to interpret this clause. When `document_id` names another document, the DAO recomputes `table_uid`/`row_uids` IN THAT DOCUMENT against its own registered revision -- the owner must itself be canonical_v1 (canonical status is per document and is never inherited from the citing one), and matching UID strings across the two files establishes nothing on their own. `source_text_revision` must therefore bind every referenced document, so revising a cited appendix makes this clause stale rather than silently re-pointing it.",
           "items": {
             "type": "object",
             "properties": {

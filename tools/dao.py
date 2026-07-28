@@ -1401,8 +1401,20 @@ def _referenced_policy_documents(case_id: str, filename: str,
     if data.get("source_document_id"):
         doc_ids.add(data["source_document_id"])
     for page in data.get("pages") or []:
-        if isinstance(page, dict) and page.get("owning_document_id"):
-            doc_ids.add(page["owning_document_id"])
+        if not isinstance(page, dict):
+            continue
+        for key in (
+                "owning_document_id",  # historical spelling
+                "owner_document_id",
+                "reference_table_document_id"):
+            if page.get(key):
+                doc_ids.add(page[key])
+    for clause in data.get("clauses") or []:
+        if not isinstance(clause, dict):
+            continue
+        for reference in clause.get("reference_table_refs") or []:
+            if isinstance(reference, dict) and reference.get("document_id"):
+                doc_ids.add(reference["document_id"])
     return sorted(doc_ids)
 
 
@@ -1593,7 +1605,8 @@ def _canonical_uid_errors(case_id: str, filename: str, schema_name: str,
         return []
 
     if schema_name in _UID_REFERENCING_SCHEMAS:
-        return _canonical_uid_reference_errors(case_id, doc_id, data)
+        return _canonical_uid_reference_errors(
+            case_id, doc_id, data, schema_name)
 
     if schema_name not in _UID_BEARING_SCHEMAS:
         return [
@@ -1625,12 +1638,15 @@ def _canonical_uid_errors(case_id: str, filename: str, schema_name: str,
             "inventory defines, so they cannot be recomputed without it"
         ]
     boundary_index = policy_uid_resolver.boundary_uid_index(context, inventory)
-    return policy_uid_resolver.check_normalized_clauses(
+    errors = policy_uid_resolver.check_normalized_clauses(
         context, data, boundary_index)
+    errors.extend(_canonical_clause_table_reference_errors(case_id, data))
+    return errors
 
 
 def _canonical_uid_reference_errors(case_id: str, doc_id: str,
-                                     data: dict) -> list[str]:
+                                     data: dict,
+                                     schema_name: str | None = None) -> list[str]:
     """Resolve every UID a non-minting policy contract cites.
 
     An audit finding or a coverage entry does not create identifiers, it points
@@ -1640,6 +1656,9 @@ def _canonical_uid_reference_errors(case_id: str, doc_id: str,
     laundered by writing it into both the clause contract and the audit that
     cites it.
     """
+    if schema_name == policy_completeness.PARENT_COVERAGE_SCHEMA:
+        return _canonical_parent_table_reference_errors(case_id, data)
+
     context, errors = _uid_source_context(case_id, doc_id)
     if errors:
         return errors
@@ -1650,14 +1669,14 @@ def _canonical_uid_reference_errors(case_id: str, doc_id: str,
         case_id, f"normalized_policy_clause_{doc_id}.json")
     tables = read_contract_data(case_id, f"reference_table_{doc_id}.json")
 
-    known_boundaries = set(
-        policy_uid_resolver.boundary_uid_index(context, inventory or {}))
+    boundary_index = policy_uid_resolver.boundary_uid_index(
+        context, inventory or {})
+    known_boundaries = set(boundary_index)
     known_clauses: set[str] = set()
     known_conditions: set[str] = set()
     if normalized is not None:
         clause_errors = policy_uid_resolver.check_normalized_clauses(
-            context, normalized, {uid: None for uid in known_boundaries}
-            if known_boundaries else {})
+            context, normalized, boundary_index)
         # Only UIDs from a clause contract that itself recomputes cleanly may
         # be cited; otherwise a bad clause contract would legitimize the
         # references pointing at it.
@@ -1699,6 +1718,109 @@ def _canonical_uid_reference_errors(case_id: str, doc_id: str,
                 "identifier must exist in the artifact that mints it, and that "
                 "artifact's own UIDs must recompute from source")
     return reference_errors
+
+
+def _canonical_table_pools(case_id: str, doc_id: str) -> tuple[dict, list[str]]:
+    """Recompute one table-owning document and return its canonical UID pools."""
+    empty = {
+        "RT": set(), "RR": set(), "RC": set(), "rows_by_table": {},
+    }
+    if uid_scheme_for(case_id, doc_id) != "canonical_v1":
+        return empty, [
+            f"{doc_id} is not canonical_v1 -- a cross-document table "
+            "reference may not rely on an unverified legacy UID"
+        ]
+    context, errors = _uid_source_context(case_id, doc_id)
+    if errors:
+        return empty, errors
+    tables = read_contract_data(case_id, f"reference_table_{doc_id}.json")
+    if tables is None:
+        return empty, [
+            f"reference_table_{doc_id}.json does not exist"
+        ]
+    table_errors = policy_uid_resolver.check_reference_tables(context, tables)
+    if table_errors:
+        return empty, [
+            f"reference_table_{doc_id}.json: {error}"
+            for error in table_errors
+        ]
+    pools = {
+        "RT": set(), "RR": set(), "RC": set(), "rows_by_table": {},
+    }
+    for table in tables.get("tables") or []:
+        table_uid = table.get("table_uid")
+        pools["RT"].add(table_uid)
+        rows = set()
+        for row in table.get("rows") or []:
+            row_uid = row.get("row_uid")
+            rows.add(row_uid)
+            pools["RR"].add(row_uid)
+            for cell in row.get("cells") or []:
+                pools["RC"].add(cell.get("cell_uid"))
+        pools["rows_by_table"][table_uid] = rows
+    return pools, []
+
+
+def _canonical_parent_table_reference_errors(
+        case_id: str, data: dict) -> list[str]:
+    """Resolve parent-coverage RTs in the document that actually owns them."""
+    errors: list[str] = []
+    cache: dict[str, tuple[dict, list[str]]] = {}
+    for index, page in enumerate(data.get("pages") or []):
+        table_uid = page.get("table_uid")
+        if not table_uid:
+            continue
+        owner = page.get("reference_table_document_id")
+        loc = f"$.pages[{index}]"
+        if not owner:
+            errors.append(
+                f"{loc}: table_uid {table_uid!r} has no "
+                "reference_table_document_id")
+            continue
+        if owner not in cache:
+            cache[owner] = _canonical_table_pools(case_id, owner)
+        pools, owner_errors = cache[owner]
+        errors.extend(f"{loc}: {error}" for error in owner_errors)
+        if not owner_errors and table_uid not in pools["RT"]:
+            errors.append(
+                f"{loc}: {table_uid!r} does not resolve to a canonically "
+                f"recomputed table in reference_table_{owner}.json")
+    return errors
+
+
+def _canonical_clause_table_reference_errors(
+        case_id: str, data: dict) -> list[str]:
+    """Recompute cross-document RT/RR references carried by clauses."""
+    errors: list[str] = []
+    cache: dict[str, tuple[dict, list[str]]] = {}
+    for clause_index, clause in enumerate(data.get("clauses") or []):
+        for ref_index, reference in enumerate(
+                clause.get("reference_table_refs") or []):
+            loc = (
+                f"clauses[{clause_index}].reference_table_refs[{ref_index}]")
+            owner = reference.get("document_id")
+            if not owner:
+                errors.append(f"{loc}: no document_id")
+                continue
+            if owner not in cache:
+                cache[owner] = _canonical_table_pools(case_id, owner)
+            pools, owner_errors = cache[owner]
+            errors.extend(f"{loc}: {error}" for error in owner_errors)
+            if owner_errors:
+                continue
+            table_uid = reference.get("table_uid")
+            if table_uid not in pools["RT"]:
+                errors.append(
+                    f"{loc}: {table_uid!r} does not resolve to a canonically "
+                    f"recomputed table in reference_table_{owner}.json")
+                continue
+            owned_rows = pools["rows_by_table"].get(table_uid, set())
+            for row_uid in reference.get("row_uids") or []:
+                if row_uid not in owned_rows:
+                    errors.append(
+                        f"{loc}: row_uid {row_uid!r} is not a canonical row of "
+                        f"table {table_uid!r} in {owner}")
+    return errors
 
 
 _UID_REFERENCE_KEYS = (

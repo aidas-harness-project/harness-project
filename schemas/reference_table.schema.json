@@ -94,12 +94,12 @@
         "cell_uid": {
           "type": "string",
           "pattern": "^RC-[a-f0-9]{16,64}$",
-          "description": "Derived from (parent row UID + this cell's exact source spans + column_key). Under canonical_v1 the DAO recomputes it and refuses a mismatch."
+          "description": "Derived from (parent row UID + this cell's exact source spans + column_key). Under canonical_v1 the DAO recomputes it and refuses a mismatch. column_key is the one normalized label canonical_v1 admits into identity, which means renaming a column moves the UID of unchanged source bytes -- a known wart frozen into the scheme, removable only in a future canonical_v2 (see known-gaps.md), never by editing what canonical_v1 computes."
         },
         "source_spans": {
           "type": "array",
           "minItems": 1,
-          "description": "The exact source range(s) of THIS CELL, inside its own row's source span -- the DAO enforces that containment. Required under canonical_v1 (the DAO refuses the write without it); optional in the schema only so legacy v0.2 tables stay readable. `value` alone is not sufficient identity: a table with 10 in two different rows would give both cells the same inputs, so the two would be indistinguishable. Because the cell's UID also carries its parent row, transposing values between rows changes both cells' identifiers, not just their containment check. A cell wrapped across lines or continued on another page lists a span each.",
+          "description": "The exact source range(s) of THIS CELL, inside its own row's source span -- the DAO enforces containment and requires the normalized concatenated span text to equal value. Required under canonical_v1 (the DAO refuses the write without it); optional in the schema only so legacy v0.2 tables stay readable. `value` alone is not sufficient identity: a table with 10 in two different rows would give both cells the same inputs, so the two would be indistinguishable. Because the cell's UID also carries its parent row, transposing values between rows changes both cells' identifiers, not just their containment check. Distinct cells may not overlap in source. A cell wrapped across lines or continued on another page lists a span each.",
           "items": {
             "$ref": "common_component_output.schema.json#/$defs/canonical_source_span"
           }

@@ -127,25 +127,46 @@ def ordinal_of_span_at(page_text: str, span_text: str, start_char: int) -> int:
     did you mean", the ordinal answers "which one is it", and only the second
     is stable when unrelated text on the page shifts.
     """
+    if not isinstance(start_char, int) or start_char < 0:
+        raise UidInputError(
+            f"start_char must be a non-negative integer, got {start_char!r}")
+    if page_text[start_char:start_char + len(span_text)] != span_text:
+        raise UidInputError(
+            "span text does not begin at start_char in the source page -- "
+            "the occurrence selector must point at the exact submitted bytes")
+
     haystack = normalize_text(page_text)
     needle = normalize_text(span_text)
     if not needle:
         raise UidInputError("span text is empty; nothing to identify")
+
+    # `start_char` is an offset in the ORIGINAL page.  Comparing it directly
+    # with an index in `haystack` mixes two coordinate systems: NFC can combine
+    # code points and CRLF becomes LF.  With an NFD character before two equal
+    # phrases, both phrases consequently received the second occurrence
+    # ordinal and therefore the same PS UID.  Normalize the prefix to map the
+    # raw boundary into the normalized coordinate system first.
+    normalized_start = len(normalize_text(page_text[:start_char]))
+    if not haystack.startswith(needle, normalized_start):
+        raise UidInputError(
+            "the exact source span does not align to one normalized occurrence "
+            "at start_char -- refusing an ambiguous occurrence ordinal")
+
     ordinal = 0
     cursor = 0
     while True:
         found = haystack.find(needle, cursor)
         if found < 0:
             break
+        if found > normalized_start:
+            break
         ordinal += 1
-        if found >= start_char:
+        if found == normalized_start:
             return ordinal
         cursor = found + 1
-    if ordinal == 0:
-        raise UidInputError(
-            "span text does not occur in the page it claims to come from -- "
-            "a UID may not be issued for text the source does not contain")
-    return ordinal
+    raise UidInputError(
+        "span text does not occur at the normalized source position it claims "
+        "to come from -- a UID may not be issued for an ambiguous span")
 
 
 def compute_uid(kind: str, *, source_pdf_sha256: str, physical_page: int,
@@ -158,6 +179,13 @@ def compute_uid(kind: str, *, source_pdf_sha256: str, physical_page: int,
     index, display id, extraction order, normalized/rewritten wording, page or
     document digests, character offsets -- is excluded by construction, which
     is the enforceable form of the schemas' prose.
+
+    `column_key` is the one caller-defined normalized key that canonical_v1
+    admits, and only for RC. That is arguably the wrong call -- renaming a
+    column would move the UID of unchanged source bytes -- but it is what
+    canonical_v1 froze, and a scheme's identity function may not be edited
+    under its own name. Removing it is a canonical_v2 change; see
+    `known-gaps.md`.
     """
     if kind not in PREFIXES:
         raise UidInputError(f"unknown UID kind {kind!r}")

@@ -176,6 +176,41 @@ def test_the_resolver_composes_the_frozen_rc():
         column_key="rate") == VECTORS["RC_under_that_row"]
 
 
+def test_the_scheme_name_is_bound_to_this_vector_set():
+    """A scheme name is a promise about an identity function.
+
+    These vectors were computed by hand against the documented serialization,
+    not regenerated from the code, so they are the only thing in the repo that
+    can catch the implementation drifting away from what `canonical_v1` means.
+    Changing what the code computes while keeping this name would leave every
+    already-written `uid_scheme: canonical_v1` artifact silently unverifiable
+    -- the DAO would refuse UIDs it had itself issued. A rule change needs a
+    new scheme name and a migration, so pin the name to the vectors here.
+    """
+    assert policy_uid.SCHEME == "canonical_v1"
+    assert VECTORS["RC_under_that_row"] == "RC-74563157681aa59f"
+
+
+def test_column_key_is_still_an_rc_identity_input_under_canonical_v1():
+    """The regression guard for the drift this test file exists to catch.
+
+    RC is the one kind that takes a caller-supplied normalized label. Removing
+    it is a defensible design change and a breaking one, so it may only happen
+    under canonical_v2 -- if this ever passes with the two UIDs equal, the
+    scheme changed under its own name.
+    """
+    row = VECTORS["RR_under_that_table"]
+    span = VECTORS["RC_cell_span"]
+    common = {
+        "source_pdf_sha256": PDF, "physical_page": 7, "span_text": span,
+        "parent_uid": row,
+    }
+    assert policy_uid.compute_uid("cell", **common, column_key="rate") != \
+        policy_uid.compute_uid("cell", **common, column_key="classification")
+    assert policy_uid.compute_uid("cell", **common, column_key="rate") != \
+        policy_uid.compute_uid("cell", **common)
+
+
 def test_every_kind_has_a_frozen_vector():
     """A new UID kind must arrive with an independent vector, or this fails --
     the coverage rule stated executably rather than in a comment."""

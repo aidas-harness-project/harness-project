@@ -79,6 +79,15 @@ def test_a_different_parent_changes_the_uid():
 
 
 def test_a_different_column_changes_a_cell_uid():
+    """canonical_v1 froze column_key into RC identity.
+
+    Arguably it should not have -- a normalized schema label is not source
+    provenance, so renaming a column moves the UID of unchanged bytes. But the
+    scheme is published under a version name, and changing what that name
+    computes is worse than the wart: every artifact already written as
+    `canonical_v1` would silently stop recomputing. Dropping it is a
+    canonical_v2 change (`known-gaps.md`), not an edit to this one.
+    """
     base = {"kind": "cell", "parent_uid": "RR-1111111111111111"}
     assert _uid(**base, column_key="지급률") != _uid(**base, column_key="장해분류")
 
@@ -156,6 +165,22 @@ def test_ordinal_counts_source_order_not_extraction_order():
     second = PAGE.index(SPAN, first + 1)
     assert pu.ordinal_of_span_at(PAGE, SPAN, first) == 1
     assert pu.ordinal_of_span_at(PAGE, SPAN, second) == 2
+
+
+def test_ordinal_maps_raw_offsets_into_normalized_coordinates():
+    """NFC shortening before repeated text must not merge two PS identities."""
+    page = "e\u0301 X X"
+    first = page.index("X")
+    second = page.index("X", first + 1)
+    assert pu.ordinal_of_span_at(page, "X", first) == 1
+    assert pu.ordinal_of_span_at(page, "X", second) == 2
+    assert _uid(kind="span", physical_page=1, span_text="X", ordinal=1) != \
+        _uid(kind="span", physical_page=1, span_text="X", ordinal=2)
+
+
+def test_ordinal_requires_start_char_to_select_the_exact_raw_span():
+    with pytest.raises(pu.UidInputError):
+        pu.ordinal_of_span_at("A X", "X", 0)
 
 
 def test_a_span_absent_from_its_page_cannot_be_identified():

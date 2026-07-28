@@ -39,7 +39,7 @@ empty list.
     CI   parent PC + the condition's own canonical source spans
     RT   the canonical PS of the table's source regions
     RR   parent RT + the row's exact source span
-    RC   parent RR + the cell's exact source span (+ column_key)
+    RC   parent RR + the cell's exact source span + column_key
 
 Two properties fall out of this and are the reason for the shape:
 
@@ -74,6 +74,8 @@ source of truth is the registered source-text revision already on disk, which
 is what makes UID verification cheap enough to run on every write.
 """
 from __future__ import annotations
+
+import re
 
 import policy_uid
 
@@ -240,6 +242,72 @@ def resolve_spans(context: SourceContext, spans: list, loc: str) -> list:
     return records
 
 
+def _is_inside(child: dict, parent: dict) -> bool:
+    return (
+        child["physical_page"] == parent["physical_page"]
+        and parent["start_char"] <= child["start_char"]
+        and child["end_char"] <= parent["end_char"]
+    )
+
+
+def _containment_errors(children: list, parents: list, loc: str,
+                        parent_name: str) -> list[str]:
+    """Every child identity span must be grounded inside its claimed parent."""
+    errors = []
+    for child in children:
+        if not any(_is_inside(child, parent) for parent in parents):
+            errors.append(
+                f"{loc}: source span [{child['start_char']}:"
+                f"{child['end_char']}] on physical page "
+                f"{child['physical_page']} lies outside every {parent_name} "
+                "span -- a caller may not mint a canonical UID from unrelated "
+                "source bytes")
+    return errors
+
+
+def _normalize_ws(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _evidence_binding_errors(context: SourceContext, records: list,
+                             evidence_references: list, loc: str) -> list[str]:
+    """Identity spans and evidence must name the same exact source passages.
+
+    Evidence quotes have no offsets, so equality after incidental-whitespace
+    normalization is the strongest deterministic relation available.  A
+    substring relation would still let a caller identify a condition by a
+    whole unrelated paragraph that merely happens to contain the cited words.
+    """
+    errors = []
+    references = evidence_references or []
+    for record in records:
+        span_quote = _normalize_ws(record["quote"])
+        matching = [
+            ref for ref in references
+            if ref.get("document_id") == context.doc_id
+            and ref.get("page") == record["logical_page"]
+            and _normalize_ws(ref.get("quote") or "") == span_quote
+        ]
+        if not matching:
+            errors.append(
+                f"{loc}: canonical source span on logical page "
+                f"{record['logical_page']} ({record['quote'][:60]!r}) has no "
+                "evidence_reference with the same source passage -- identity "
+                "provenance may not be replaced by unrelated bytes")
+    for index, reference in enumerate(references):
+        ref_quote = _normalize_ws(reference.get("quote") or "")
+        if reference.get("document_id") != context.doc_id:
+            continue
+        if not any(
+                record["logical_page"] == reference.get("page")
+                and _normalize_ws(record["quote"]) == ref_quote
+                for record in records):
+            errors.append(
+                f"{loc}.evidence_references[{index}] does not correspond to "
+                "any canonical source span of this element")
+    return errors
+
+
 def compute_derived_uid(kind: str, context: SourceContext, records: list,
                         parent_uid: str | None = None,
                         column_key: str | None = None) -> str:
@@ -342,6 +410,11 @@ def boundary_uid_index(context: SourceContext, inventory: dict) -> dict:
                 context, span, f"page_spans[{span_index}]")
         except (UidResolutionError, policy_uid.UidInputError):
             continue
+        if span.get("span_uid") != record["uid"]:
+            # A correctly-derived PB must not launder a fabricated PS beneath
+            # it.  Cross-contract consumers call this index directly, so the
+            # inventory's complete PS -> PB chain has to be clean here too.
+            continue
         by_boundary.setdefault(span["boundary_uid"], []).append(record)
     for submitted, records in by_boundary.items():
         try:
@@ -398,6 +471,31 @@ def check_normalized_clauses(context: SourceContext, data: dict,
             clause_records = resolve_spans(
                 context, clause.get("source_span_uids"),
                 f"{cloc}.source_span_uids")
+            parent_records = [
+                record
+                for parent_uid in parents
+                for record in boundary_index[parent_uid]
+            ]
+            containment = _containment_errors(
+                clause_records, parent_records, cloc, "parent boundary")
+            for parent_uid in parents:
+                if not any(
+                        _is_inside(record, boundary_record)
+                        for record in clause_records
+                        for boundary_record in boundary_index[parent_uid]):
+                    containment.append(
+                        f"{cloc}: declared parent boundary {parent_uid!r} "
+                        "contains none of this clause's source spans -- a "
+                        "non-contributing parent may not change the UID")
+            if containment:
+                errors.extend(containment)
+                continue
+            evidence_errors = _evidence_binding_errors(
+                context, clause_records, clause.get("evidence_references"),
+                cloc)
+            if evidence_errors:
+                errors.extend(evidence_errors)
+                continue
             expected_clause = compute_derived_uid(
                 "clause", context, clause_records, parent_uid=parent_key)
         except (UidResolutionError, policy_uid.UidInputError) as exc:
@@ -420,6 +518,27 @@ def check_normalized_clauses(context: SourceContext, data: dict,
                     records = resolve_spans(
                         context, condition.get("source_span_uids"),
                         f"{iloc}.source_span_uids")
+                    # The parent is the CLAUSE, so the clause's own spans are
+                    # the containment scope -- not the boundary's. A boundary
+                    # holds several clauses, so checking against it would let
+                    # a condition be identified by a real sentence belonging
+                    # to a sibling clause: correct bytes, correct quotes,
+                    # correct evidence, wrong obligation. The relation that
+                    # has to hold end to end is
+                    #     CI spans  ⊆  parent PC spans  ⊆  declared PB spans
+                    # and the outer link is already enforced above, so
+                    # checking the inner one here closes the chain.
+                    containment = _containment_errors(
+                        records, clause_records, iloc, "parent clause")
+                    if containment:
+                        errors.extend(containment)
+                        continue
+                    evidence_errors = _evidence_binding_errors(
+                        context, records,
+                        condition.get("evidence_references"), iloc)
+                    if evidence_errors:
+                        errors.extend(evidence_errors)
+                        continue
                     expected = compute_derived_uid(
                         "condition", context, records,
                         parent_uid=expected_clause)
@@ -462,15 +581,33 @@ def check_reference_tables(context: SourceContext, data: dict) -> list:
 
         for row_index, row in enumerate(table.get("rows") or []):
             rloc = f"{tloc}.rows[{row_index}]"
-            row_spans = row.get("source_spans")
-            if not row_spans and row.get("source_span"):
-                # v0.2 single-span rows stay expressible; a multi-region row
-                # uses source_spans. One code path, so the UID of a one-span
-                # row is identical either way.
-                row_spans = [row["source_span"]]
             try:
-                row_records = resolve_spans(
-                    context, row_spans, f"{rloc}.source_span(s)")
+                primary_records = resolve_spans(
+                    context, [row.get("source_span")],
+                    f"{rloc}.source_span")
+                row_spans = row.get("source_spans")
+                if row_spans:
+                    row_records = resolve_spans(
+                        context, row_spans, f"{rloc}.source_spans")
+                    ordered_rows = sorted(row_records, key=_sort_key)
+                    primary = primary_records[0]
+                    first = ordered_rows[0]
+                    if (
+                            primary["physical_page"] != first["physical_page"]
+                            or primary["start_char"] != first["start_char"]
+                            or primary["end_char"] != first["end_char"]
+                            or primary["quote"] != first["quote"]):
+                        raise UidResolutionError(
+                            f"{rloc}: source_span must equal the first source "
+                            "range in source_spans -- the structural row and "
+                            "the UID row may not point at different bytes")
+                else:
+                    row_records = primary_records
+                region_containment = _containment_errors(
+                    row_records, region_records, rloc, "table source region")
+                if region_containment:
+                    errors.extend(region_containment)
+                    continue
                 expected_row = compute_derived_uid(
                     "row", context, row_records, parent_uid=expected_table)
             except (UidResolutionError, policy_uid.UidInputError) as exc:
@@ -482,6 +619,7 @@ def check_reference_tables(context: SourceContext, data: dict) -> list:
             if row_errors:
                 continue
 
+            resolved_cells: list[tuple[int, dict, list]] = []
             for cell_index, cell in enumerate(row.get("cells") or []):
                 cloc = f"{rloc}.cells[{cell_index}]"
                 try:
@@ -496,6 +634,20 @@ def check_reference_tables(context: SourceContext, data: dict) -> list:
                 if containment:
                     errors.extend(containment)
                     continue
+                ordered_cell_records = sorted(cell_records, key=_sort_key)
+                span_with_spaces = _normalize_ws(
+                    " ".join(record["quote"]
+                             for record in ordered_cell_records))
+                span_without_spaces = _normalize_ws(
+                    "".join(record["quote"]
+                            for record in ordered_cell_records))
+                value = _normalize_ws(cell.get("value") or "")
+                if value not in {span_with_spaces, span_without_spaces}:
+                    errors.append(
+                        f"{cloc}: source_spans identify "
+                        f"{span_with_spaces!r}, not cell value {value!r} -- "
+                        "a cell UID must be derived from the exact cell bytes")
+                    continue
                 try:
                     expected_cell = compute_derived_uid(
                         "cell", context, cell_records,
@@ -506,6 +658,47 @@ def check_reference_tables(context: SourceContext, data: dict) -> list:
                     continue
                 errors.extend(verify(
                     "cell", cell.get("cell_uid"), expected_cell, cloc))
+                resolved_cells.append((cell_index, cell, cell_records))
+
+            # Two distinct cells may not claim the same source bytes.  RC does
+            # carry column_key, so two cells over one physical range would
+            # still get distinct UIDs -- which is exactly the problem: the
+            # normalized column label, not the source, would be doing the
+            # distinguishing.  Merged cells need an explicit representation.
+            for left_index, (_, _, left_records) in enumerate(resolved_cells):
+                for _, right_cell, right_records in resolved_cells[
+                        left_index + 1:]:
+                    for left in left_records:
+                        for right in right_records:
+                            if (
+                                    left["physical_page"]
+                                    == right["physical_page"]
+                                    and left["start_char"] < right["end_char"]
+                                    and right["start_char"] < left["end_char"]):
+                                errors.append(
+                                    f"{rloc}: cells overlap in source at "
+                                    f"physical page {left['physical_page']} "
+                                    f"[{max(left['start_char'], right['start_char'])}:"
+                                    f"{min(left['end_char'], right['end_char'])}] "
+                                    f"(including column "
+                                    f"{right_cell.get('column_key')!r})")
+
+            columns = [
+                column.get("column_key")
+                for column in table.get("columns") or []
+            ]
+            source_positions = {}
+            for _, cell, records in resolved_cells:
+                first = sorted(records, key=_sort_key)[0]
+                source_positions[cell.get("column_key")] = _sort_key(first)
+            ordered_positions = [
+                source_positions[key] for key in columns
+                if key in source_positions
+            ]
+            if ordered_positions != sorted(ordered_positions):
+                errors.append(
+                    f"{rloc}: exact cell source spans do not follow the "
+                    "declared column order")
     return errors
 
 

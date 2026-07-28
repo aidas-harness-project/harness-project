@@ -76,11 +76,41 @@ sorts by source position before deriving. Do not supply `occurrence_ordinal` unl
 you are certain — the DAO derives it from the registered page text and refuses a
 value that disagrees.
 
+The span must identify the element itself, not merely any real text on the page.
+Containment is checked against the element's own parent, one level at a time:
+
+    condition spans  ⊆  parent clause spans  ⊆  declared boundary spans
+
+A boundary is an *article*, and an article usually holds several clauses — so a
+condition span that lands in the right article but outside its own clause is
+refused, even though it is real, correctly quoted, and correctly evidenced.
+Every clause/condition span must also match one of that element's own evidence
+passages. Every row range must lie inside the table source regions;
+`row.source_span` must equal the first canonical range in `row.source_spans`;
+each cell span must identify exactly the cell value inside its row; and two
+cells may not overlap in source.
+
+A `reference_table_refs` entry (or a parent-coverage page's
+`reference_table_document_id`) pointing at ANOTHER document is recomputed in
+that document, against its own registered revision. Naming the owner is
+required — the DAO will not search for a table whose owner you left blank — and
+the owner must itself be `canonical_v1`: canonical status is per document and
+is never inherited from the citing one. Agreeing on the same `RT-…` string in
+both files proves nothing.
+
 Contracts on a `canonical_v1` document must also carry `source_text_revision` —
-the registered revision your offsets, quotes and UIDs were computed against, per
-document (`read-revision-index` prints the current one). A revision recorded before
-a re-extraction is stale and the write is refused: re-derive rather than re-stamping.
-Legacy (pre-`canonical_v1`) documents keep working unchanged and need neither.
+the registered revision your offsets, quotes and UIDs were computed against,
+listing **every** document the contract references, not only its own
+(`read-revision-index` prints the current one). A revision recorded before a
+re-extraction is stale and the write is refused: re-derive rather than
+re-stamping — including when the stale document is an appendix you merely cite.
+
+Legacy (pre-`canonical_v1`) documents stay readable, and every migration-prep
+command still works on them, but they may not receive new policy-layer writes:
+run `record-source-digest` then `enable-canonical-uids` first. Activation
+invalidates the policy stage and everything downstream of it, by design — the
+artifacts written under the legacy scheme were never UID-verified, so they must
+be rewritten canonically rather than inherited.
 
 Set `clause_kind` and use only its dedicated semantic bucket: `coverage` → `payout_conditions`/`exclusions`/`reduction_conditions`; `definition` → `definitions`; `obligation` → `obligations`; `procedure` → `claim_requirements`; `termination` → `termination_conditions`; `dispute_resolution` → `dispute_resolution_conditions`; `coverage_start` → `coverage_start_conditions`. Split a source clause into multiple normalized clauses when it contains materially different kinds. Never put disclosure duties, definitions, claim-submission procedures, cancellation rules, dispute procedures, or coverage-start rules in `payout_conditions`. Use `other` only with `review_required: true`. Every bucket is required; an empty list means none found, not an omission. Each item carries its own `evidence_references` (P1) at the granularity downstream matching needs. Any judgment beyond direct restatement gets hedged and flagged per P3.
 
