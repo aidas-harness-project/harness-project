@@ -102,11 +102,13 @@ policy document must carry its own DAO-derived scan:
 This is an obligation of the **document**, not of the extraction: run it even
 when you believe the document has no tables. `policy_clause_processing` refuses
 to finalize while any policy document has no current scan, because "nobody
-scanned it" and "it has no tables" are different states and only the second one
-is a verified result. A scan that finds zero candidates is a real answer and
-clears the gate; a missing scan never does. Re-run it after any source-text
-revision — a revision makes the previous scan stale, and a table the revision
-introduced would sit entirely outside it.
+scanned it" and "it has no tables" are different states. The DAO runs both a
+strict ruled-table detector and a broader text-layout sentinel. Only
+`complete_no_candidates` — neither detector found a table-like structure —
+clears the gate without a `reference_table`. `inconclusive`/`failed` never mean
+"no tables": sentinel-only structures remain `review_required` and block.
+Re-run the scan after any source-text revision — a revision makes the previous
+scan stale, and a table the revision introduced would sit entirely outside it.
 
 **A table's source region is not yours to declare (P0-8).** Before writing a
 `reference_table` for a `canonical_v1` document, register the table's region:
@@ -145,26 +147,27 @@ continuation page, passes completeness checking. For the same reason a
 relabelling a data row `note` or `separator` is the same omission as deleting
 it, and is refused.
 
-**Every table the DAO's scan finds must be extracted.** The scan records a
-candidate inventory for the whole document, sealed by a content-derived
-`scan_id`, and finalization refuses while any detected table is unaccounted for
-— so registering one appendix and quietly ignoring a second one blocks the
-stage rather than passing. There is no "ignore this candidate" field to set,
-and editing the inventory is detected: the seal is recomputed from the whole
-candidate list at every gate.
+**Every table the DAO's scan finds must be extracted.** The scan records strict
+candidates plus high-recall possible-table signals for the whole document.
+Finalization refuses while a strict candidate is unaccounted for or any
+possible-table signal remains unresolved — so registering one appendix and
+quietly ignoring a second one blocks the stage rather than passing. There is no
+agent-writable "ignore this candidate" field. `scan_id` is a deterministic
+whole-body corruption checksum and no-op identity, not an authenticated
+signature; the actual security boundary is that the index is DAO-owned and
+generic agent write paths cannot modify it.
 
 A declared `policy_processing_role` cannot exempt a document from this either.
 If a `clause_segment` turns out to contain a table, redeclare it
 `mixed_clause_and_table` and extract the table — the role is a statement about
 what the document owes, and it has to match what the document actually is.
 
-If the DAO refuses to issue a receipt (no ruled table detected, image-only/OCR
-document, merged cells, ambiguous candidates, an unresolvable continuation onto
-the next page, or processed text that does not correspond exactly to the PDF
-layout), that table is **not** "a page with no table". Leave it
-`review_required: true` and route it for human review — it will block
-`policy_clause_processing` finalization until resolved. Do not work around the
-refusal by narrowing the region, or by re-seeding on a different page, until
+If the strict detector cannot issue a receipt but the sentinel sees a
+whitespace-aligned, partially ruled, or otherwise table-like structure, the
+scan is `inconclusive`, not empty. Image-only/OCR documents, merged cells,
+ambiguous candidates, an unresolvable continuation, or processed text that
+does not correspond to the PDF layout likewise remain blocking review items.
+Do not work around a refusal by narrowing the region or re-seeding until
 detection happens to succeed.
 
 A `reference_table_refs` entry (or a parent-coverage page's

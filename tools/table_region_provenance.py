@@ -69,13 +69,14 @@ derivation is required. All are finalization blockers, not warnings.
 
 Fail-closed support envelope
 ----------------------------
-This solves the embedded-text, ruled-table case and REFUSES everything else,
-rather than approximating:
+This verifies embedded-text, ruled tables with the strict detector. A separate
+text-layout sentinel prevents strict-zero from being mistaken for verified
+absence:
 
   * an image-only / OCR document has no deterministic text layer, and
     verification may not run OCR -> refused (`VERIFIABLE_EXTRACTION_METHODS`)
-  * a whitespace-aligned "table" with no vector ruling is not a layout
-    structure the detector can establish -> no candidate -> refused
+  * a whitespace-aligned "table" with no vector ruling is not authoritative
+    strict geometry -> sentinel possible_table -> inconclusive -> refused
   * two candidates matching one selector -> refused as ambiguous
   * a row band whose text cannot be located EXACTLY and UNIQUELY in the
     registered page text -> refused (`locate_row_text`)
@@ -83,9 +84,8 @@ rather than approximating:
     ambiguous -> refused
 
 A refusal here is `review_required` territory: the table blocks
-`policy_clause_processing` finalization. It is never read as "this page has no
-table, so there is nothing to check" -- that reading is exactly how a
-narrow-region bypass would survive its own fix.
+`policy_clause_processing` finalization. Only `complete_no_candidates`, where
+both strict detector and sentinel found nothing, can establish table-free.
 """
 from __future__ import annotations
 
@@ -97,6 +97,7 @@ RECEIPT_SCHEME = "table_region_v1"
 INDEX_SCHEMA = "table_region_index.schema.json"
 
 DEFAULT_DETECTOR_PROFILE = "pymupdf_find_tables_lines_v1"
+DEFAULT_SENTINEL_PROFILE = "pymupdf_find_tables_text_sentinel_v1"
 
 # Detection settings, pinned per profile. The profile NAME enters the receipt
 # fingerprint, so changing what a profile means requires a new profile name and
@@ -109,6 +110,20 @@ DETECTOR_PROFILES = {
         # module refuses rather than resolves.
         "vertical_strategy": "lines",
         "horizontal_strategy": "lines",
+    },
+}
+
+# High-recall discovery only. A sentinel finding is NEVER authoritative table
+# geometry and can never mint a table_region_v1 receipt. Its only job is to
+# prevent "the strict detector found zero" from being upgraded to "the document
+# contains no tables" when a second, deliberately broader layout reading sees a
+# table-like structure. False positives therefore fail closed as review items.
+SENTINEL_PROFILES = {
+    DEFAULT_SENTINEL_PROFILE: {
+        "vertical_strategy": "text",
+        "horizontal_strategy": "text",
+        "min_words_vertical": 2,
+        "min_words_horizontal": 1,
     },
 }
 
@@ -488,8 +503,24 @@ def compute_candidate_id(*, document_id, source_pdf_sha256,
     return f"TRC-{digest[:32]}"
 
 
+def compute_possible_table_id(*, document_id, source_pdf_sha256,
+                              source_text_revision_sha256, sentinel_profile,
+                              sentinel_config_fingerprint, page,
+                              physical_page, bbox, reason,
+                              page_text_sha256) -> str:
+    """Stable identity for a high-recall signal, not verified table geometry."""
+    fingerprint = (
+        document_id, source_pdf_sha256, source_text_revision_sha256,
+        sentinel_profile, sentinel_config_fingerprint, page, physical_page,
+        tuple(round(float(value), 2) for value in bbox), reason,
+        page_text_sha256,
+    )
+    digest = hashlib.sha256(repr(fingerprint).encode("utf-8")).hexdigest()
+    return f"TRP-{digest[:32]}"
+
+
 def compute_scan_id(inventory: dict) -> str:
-    """Seal a whole candidate inventory to the scan that produced it.
+    """Checksum a whole candidate inventory and identify unchanged re-scans.
 
     Each `candidate_id` already binds one candidate to its own geometry, but
     ids alone say nothing about the SET: dropping an inconvenient entry left
@@ -502,6 +533,11 @@ def compute_scan_id(inventory: dict) -> str:
     Excludes `scanned_at`: re-scanning unchanged bytes must produce the
     identical scan_id, which is what makes a re-scan a recognizable no-op
     instead of a new scan that invalidates downstream work.
+
+    This is deliberately not described as authentication. The function and all
+    inputs are public, so a process with forbidden direct filesystem write
+    access can recompute the checksum. Supported agents cannot write the
+    DAO-owned index; that protected write path is the security boundary.
     """
     fingerprint = (
         inventory.get("scheme"),
@@ -512,6 +548,11 @@ def compute_scan_id(inventory: dict) -> str:
         inventory.get("segment_derivation_receipt_id"),
         inventory.get("detector_profile"),
         inventory.get("detector_config_fingerprint"),
+        inventory.get("detector_library_version"),
+        inventory.get("sentinel_profile"),
+        inventory.get("sentinel_config_fingerprint"),
+        inventory.get("sentinel_library_version"),
+        inventory.get("scan_status"),
         tuple(sorted(int(page) for page in
                      inventory.get("scanned_logical_pages") or ())),
         tuple(sorted(
@@ -524,6 +565,22 @@ def compute_scan_id(inventory: dict) -> str:
             )
             for candidate in inventory.get("candidates") or []
         )),
+        tuple(sorted(
+            (
+                signal.get("signal_id"),
+                signal.get("document_id"),
+                signal.get("page"),
+                signal.get("physical_page"),
+                tuple(round(float(v), 2) for v in signal.get("bbox") or ()),
+                signal.get("reason"),
+                signal.get("status"),
+                signal.get("page_text_sha256"),
+                signal.get("sentinel_profile"),
+                signal.get("sentinel_library_version"),
+            )
+            for signal in inventory.get("possible_tables") or []
+        )),
+        tuple(inventory.get("scan_errors") or ()),
     )
     digest = hashlib.sha256(repr(fingerprint).encode("utf-8")).hexdigest()
     return f"TRS-{digest[:48]}"
@@ -626,6 +683,21 @@ def detector_fingerprint(profile: str) -> str:
     config = DETECTOR_PROFILES.get(profile) or {}
     return hashlib.sha256(
         repr(sorted(config.items())).encode("utf-8")).hexdigest()[:32]
+
+
+def sentinel_fingerprint(profile: str) -> str:
+    config = SENTINEL_PROFILES.get(profile) or {}
+    return hashlib.sha256(
+        repr(sorted(config.items())).encode("utf-8")).hexdigest()[:32]
+
+
+def current_pymupdf_version() -> str | None:
+    """The detector runtime identity without opening or scanning a document."""
+    try:
+        import fitz  # pymupdf
+    except ImportError:
+        return None
+    return getattr(fitz, "VersionBind", None) or None
 
 
 # --- currency --------------------------------------------------------------
@@ -809,7 +881,7 @@ def receipt_currency_errors(*, receipt: dict, current_pdf_sha256: str | None,
 
 # --- binding a contract to its receipt -------------------------------------
 
-SCAN_SCHEME = "table_candidate_scan_v1"
+SCAN_SCHEME = "table_candidate_scan_v2"
 
 
 def inventory_integrity_errors(inventory: dict, document_id: str,
@@ -891,6 +963,115 @@ def inventory_integrity_errors(inventory: dict, document_id: str,
                 f"candidate_id {candidate_id!r}")
             continue
         seen.add(candidate_id)
+        if candidate.get("page") not in set(
+                inventory.get("scanned_logical_pages") or ()):
+            errors.append(
+                f"{prefix}candidate {candidate_id!r} cites logical page "
+                f"{candidate.get('page')}, which the scan does not claim to "
+                "have examined")
+
+    possible_tables = inventory.get("possible_tables")
+    if not isinstance(possible_tables, list):
+        return errors + [
+            f"{prefix}table candidate scan integrity: `possible_tables` is not "
+            "a list"]
+    seen_signals: set = set()
+    for position, signal in enumerate(possible_tables):
+        if not isinstance(signal, dict):
+            errors.append(
+                f"{prefix}table candidate scan integrity: possible-table entry "
+                f"{position} is not an object")
+            continue
+        signal_id = signal.get("signal_id")
+        try:
+            recomputed = compute_possible_table_id(
+                document_id=signal.get("document_id"),
+                source_pdf_sha256=inventory.get("source_pdf_sha256"),
+                source_text_revision_sha256=inventory.get(
+                    "source_text_revision_sha256"),
+                sentinel_profile=signal.get("sentinel_profile"),
+                sentinel_config_fingerprint=inventory.get(
+                    "sentinel_config_fingerprint"),
+                page=signal.get("page"),
+                physical_page=signal.get("physical_page"),
+                bbox=signal.get("bbox") or (),
+                reason=signal.get("reason"),
+                page_text_sha256=signal.get("page_text_sha256"),
+            )
+        except (TypeError, ValueError) as exc:
+            errors.append(
+                f"{prefix}table candidate scan integrity: possible-table "
+                f"{signal_id!r} has unusable provenance: {exc}")
+            continue
+        if signal_id != recomputed:
+            errors.append(
+                f"{prefix}table candidate scan integrity: possible-table "
+                f"{signal_id!r} does not hash to its own provenance "
+                f"(recomputed {recomputed!r})")
+            continue
+        if signal.get("document_id") != document_id:
+            errors.append(
+                f"{prefix}possible-table {signal_id!r} is bound to document "
+                f"{signal.get('document_id')!r}, not {document_id!r}")
+        if signal.get("sentinel_profile") != inventory.get("sentinel_profile"):
+            errors.append(
+                f"{prefix}possible-table {signal_id!r} names sentinel profile "
+                f"{signal.get('sentinel_profile')!r}, but its parent scan names "
+                f"{inventory.get('sentinel_profile')!r}")
+        if signal.get("sentinel_library_version") != inventory.get(
+                "sentinel_library_version"):
+            errors.append(
+                f"{prefix}possible-table {signal_id!r} names PyMuPDF version "
+                f"{signal.get('sentinel_library_version')!r}, but its parent "
+                f"scan names {inventory.get('sentinel_library_version')!r}")
+        if signal.get("page") not in set(
+                inventory.get("scanned_logical_pages") or ()):
+            errors.append(
+                f"{prefix}possible-table {signal_id!r} cites logical page "
+                f"{signal.get('page')}, which the scan does not claim to have "
+                "examined")
+        if signal.get("status") != "review_required":
+            errors.append(
+                f"{prefix}possible-table {signal_id!r} has status "
+                f"{signal.get('status')!r}; sentinel findings are never "
+                "self-verifying and must remain review_required")
+        if signal_id in seen_signals:
+            errors.append(
+                f"{prefix}table candidate scan integrity: duplicate "
+                f"possible-table signal_id {signal_id!r}")
+        seen_signals.add(signal_id)
+
+    status = inventory.get("scan_status")
+    scan_errors = inventory.get("scan_errors")
+    if not isinstance(scan_errors, list):
+        errors.append(
+            f"{prefix}table candidate scan integrity: `scan_errors` is not a "
+            "list")
+        scan_errors = []
+    if status == "complete_no_candidates":
+        if candidates or possible_tables or scan_errors:
+            errors.append(
+                f"{prefix}complete_no_candidates is inconsistent: it requires "
+                "zero strict candidates, zero possible-table signals, and no "
+                "scan errors")
+    elif status == "complete_with_candidates":
+        if not candidates or possible_tables or scan_errors:
+            errors.append(
+                f"{prefix}complete_with_candidates is inconsistent: it "
+                "requires at least one strict candidate, no unresolved "
+                "possible-table signals, and no scan errors")
+    elif status == "inconclusive":
+        if not possible_tables and not scan_errors:
+            errors.append(
+                f"{prefix}inconclusive scan has neither a possible-table "
+                "signal nor an error explaining why it is inconclusive")
+    elif status == "failed":
+        if not scan_errors:
+            errors.append(
+                f"{prefix}failed scan has no recorded scan_errors")
+    else:
+        errors.append(
+            f"{prefix}unknown table candidate scan_status {status!r}")
 
     recomputed_scan = compute_scan_id(inventory)
     if inventory.get("scan_id") != recomputed_scan:
@@ -930,6 +1111,33 @@ def inventory_currency_errors(inventory: dict, *, current_pdf_sha256,
             f"{prefix}detector profile {profile!r} has been reconfigured since "
             "this scan was run -- which tables the detector finds is a "
             "function of its configuration, so the document must be re-scanned")
+
+    sentinel_profile = inventory.get("sentinel_profile")
+    if sentinel_profile not in SENTINEL_PROFILES:
+        errors.append(
+            f"{prefix}the scan used sentinel profile {sentinel_profile!r}, "
+            "which this build does not define -- it must be re-run")
+    elif inventory.get("sentinel_config_fingerprint") != sentinel_fingerprint(
+            sentinel_profile):
+        errors.append(
+            f"{prefix}sentinel profile {sentinel_profile!r} has been "
+            "reconfigured since this scan was run -- a broader detector may "
+            "now find possible tables the old scan missed; re-scan")
+
+    current_library = current_pymupdf_version()
+    if current_library is None:
+        errors.append(
+            f"{prefix}the PyMuPDF detector runtime is unavailable, so neither "
+            "the strict nor sentinel derivation can be confirmed")
+    else:
+        for label, recorded in (
+                ("strict detector", inventory.get("detector_library_version")),
+                ("sentinel", inventory.get("sentinel_library_version"))):
+            if recorded != current_library:
+                errors.append(
+                    f"{prefix}{label} PyMuPDF version changed since the scan "
+                    f"(scan {recorded!r}, current {current_library!r}) -- table "
+                    "detection output is version-dependent; re-scan")
 
     if current_pdf_sha256 is None:
         errors.append(
@@ -975,6 +1183,20 @@ def inventory_currency_errors(inventory: dict, *, current_pdf_sha256,
                 f"{prefix}logical page(s) {unscanned} of this document were "
                 "never covered by the candidate scan -- an unscanned page is "
                 "not a page without a table; re-scan the document")
+        for signal in inventory.get("possible_tables") or []:
+            page = signal.get("page")
+            body = current_pages.get(page)
+            if body is None:
+                errors.append(
+                    f"{prefix}possible-table {signal.get('signal_id')!r} cites "
+                    f"logical page {page}, which is absent from the current "
+                    "registered revision")
+                continue
+            expected = text_sha256(canonical_page_text(body))
+            if signal.get("page_text_sha256") != expected:
+                errors.append(
+                    f"{prefix}possible-table {signal.get('signal_id')!r} is "
+                    f"bound to different text on logical page {page}; re-scan")
     return errors
 
 

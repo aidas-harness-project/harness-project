@@ -117,8 +117,8 @@ Subcommands:
          source_regions must equal the derived extent exactly.)
     scan-table-candidates CASE_ID --doc-id DOC_ID --held-by NAME
         --run-id RUN_ID [--detector-profile NAME]
-        (P0-8 follow-up 2. Records what tables the DAO's own detector finds in
-         a document, sealed by a content-derived scan_id. Separate from
+        (P0-8 follow-up 3. Records strict table candidates plus high-recall
+         possible-table signals in a document, checksummed by scan_id. Separate from
          register-table-region on purpose: while the inventory was a side
          effect of registration, a document nobody registered a table for had
          NO scan, and the finalization gate read that absence as "nothing to
@@ -4644,11 +4644,13 @@ def table_candidate_inventory_for(case_id: str, doc_id: str):
     return None
 
 
-def _build_candidate_inventory(case_id, doc_id, candidates, detector,
-                               pdf_digest, revision_sha, *,
+def _build_candidate_inventory(case_id, doc_id, candidates, possible_tables,
+                               detector, sentinel, pdf_digest, revision_sha, *,
+                               pages,
+                               scan_errors=(),
                                scanned_logical_pages, pdf_owner=None,
                                segment_receipt_id=None):
-    """One inventory entry per detected table, sealed by a content-derived
+    """One inventory entry per detected/possible table, checksummed by
     `scan_id`.
 
     `scanned_logical_pages` is recorded because the inventory's real claim is a
@@ -4683,6 +4685,54 @@ def _build_candidate_inventory(case_id, doc_id, candidates, detector,
             "header_preview": " | ".join(str(name) for name in header)[:200],
         })
     entries.sort(key=lambda entry: (entry["page"], entry["bbox"][1]))
+    possible_entries = []
+    for signal in possible_tables:
+        logical = signal.get("logical_page")
+        body = pages.get(logical)
+        if logical is None or body is None:
+            continue
+        page_digest = table_region_provenance.text_sha256(
+            table_region_provenance.canonical_page_text(body))
+        entry = {
+            "signal_id": None,
+            "document_id": doc_id,
+            "page": logical,
+            "physical_page": signal["physical_page"],
+            "bbox": [float(value) for value in signal["bbox"]],
+            "reason": signal["reason"],
+            "status": "review_required",
+            "page_text_sha256": page_digest,
+            "sentinel_profile": sentinel["profile"],
+            "sentinel_library_version": sentinel["library_version"],
+            "preview": (signal.get("preview") or "")[:200],
+        }
+        entry["signal_id"] = \
+            table_region_provenance.compute_possible_table_id(
+                document_id=doc_id,
+                source_pdf_sha256=pdf_digest,
+                source_text_revision_sha256=revision_sha,
+                sentinel_profile=sentinel["profile"],
+                sentinel_config_fingerprint=sentinel["config_fingerprint"],
+                page=logical,
+                physical_page=signal["physical_page"],
+                bbox=signal["bbox"],
+                reason=signal["reason"],
+                page_text_sha256=page_digest,
+            )
+        possible_entries.append(entry)
+    possible_entries.sort(
+        key=lambda entry: (entry["page"], entry["bbox"][1],
+                           entry["signal_id"]))
+
+    errors = [str(error) for error in scan_errors if str(error)]
+    if errors:
+        scan_status = "failed"
+    elif possible_entries:
+        scan_status = "inconclusive"
+    elif entries:
+        scan_status = "complete_with_candidates"
+    else:
+        scan_status = "complete_no_candidates"
     inventory = {
         "scheme": table_region_provenance.SCAN_SCHEME,
         "document_id": doc_id,
@@ -4692,9 +4742,16 @@ def _build_candidate_inventory(case_id, doc_id, candidates, detector,
         "segment_derivation_receipt_id": segment_receipt_id,
         "detector_profile": detector["profile"],
         "detector_config_fingerprint": detector["config_fingerprint"],
+        "detector_library_version": detector["library_version"],
+        "sentinel_profile": sentinel["profile"],
+        "sentinel_config_fingerprint": sentinel["config_fingerprint"],
+        "sentinel_library_version": sentinel["library_version"],
+        "scan_status": scan_status,
+        "scan_errors": errors,
         "scanned_logical_pages": sorted(int(p) for p in scanned_logical_pages),
         "scanned_at": now_iso(),
         "candidates": entries,
+        "possible_tables": possible_entries,
     }
     inventory["scan_id"] = table_region_provenance.compute_scan_id(inventory)
     return inventory
@@ -4707,20 +4764,21 @@ def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
     else derived: the whole point of the receipt is that the geometry came from
     bytes this process read out of the registered file.
 
-    Returns `(candidates, detector, error)`. A candidate carries its bbox, its
-    row bands (each with cell geometry and text), and the detector's own view
-    of which band is the header.
+    Returns `(candidates, possible_tables, detector, sentinel, error)`.
+    `candidates` come only from the strict line detector and may authorize a
+    receipt. `possible_tables` come from the broader text-layout sentinel (or
+    from ambiguity inside a strict result) and can only block for review.
     """
     settings = table_region_provenance.DETECTOR_PROFILES.get(profile)
     if settings is None:
-        return None, None, (
+        return None, None, None, None, (
             f"unknown detector profile {profile!r} -- a profile must be "
             "declared in table_region_provenance.DETECTOR_PROFILES so its "
             "settings enter the receipt fingerprint")
     try:
         import fitz  # pymupdf
     except ImportError:
-        return None, None, (
+        return None, None, None, None, (
             "pymupdf is not installed -- the DAO cannot open the PDF itself, "
             "and a table extent it did not derive is not one it may issue")
     detector = {
@@ -4732,24 +4790,44 @@ def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
             profile),
         "settings": repr(sorted(settings.items())),
     }
+    sentinel_profile = table_region_provenance.DEFAULT_SENTINEL_PROFILE
+    sentinel_settings = table_region_provenance.SENTINEL_PROFILES[
+        sentinel_profile]
+    sentinel = {
+        "tool": "dao.scan-table-candidates.sentinel",
+        "profile": sentinel_profile,
+        "library": "pymupdf",
+        "library_version": getattr(fitz, "VersionBind", None) or None,
+        "config_fingerprint": table_region_provenance.sentinel_fingerprint(
+            sentinel_profile),
+        "settings": repr(sorted(sentinel_settings.items())),
+    }
     try:
         doc = fitz.open(pdf_path)
     except Exception as exc:  # noqa: BLE001
-        return None, detector, f"the PDF could not be opened: {exc}"
+        return None, None, detector, sentinel, \
+            f"the PDF could not be opened: {exc}"
     try:
         candidates = []
+        possible_tables = []
         for physical in sorted(set(physical_pages)):
             if physical < 1 or physical > doc.page_count:
-                return None, detector, (
+                return None, None, detector, sentinel, (
                     f"physical page {physical} is outside the document's "
                     f"{doc.page_count} pages")
             page = doc[physical - 1]
             try:
                 found = page.find_tables(**settings)
             except Exception as exc:  # noqa: BLE001
-                return None, detector, (
+                return None, None, detector, sentinel, (
                     f"table detection failed on physical page {physical}: "
                     f"{exc}")
+            try:
+                sentinel_found = page.find_tables(**sentinel_settings)
+            except Exception as exc:  # noqa: BLE001
+                return None, None, detector, sentinel, (
+                    f"high-recall table sentinel failed on physical page "
+                    f"{physical}: {exc}")
             # Every word with its own box, in the order the text layer emits
             # them. This is what binds a band to the RIGHT occurrence of its
             # text (see table_region_provenance.align_words_to_text); the
@@ -4823,9 +4901,111 @@ def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
                         and float(table.bbox[1]) <= body_top
                         + table_region_provenance.PAGE_EDGE_TOLERANCE),
                 })
-        return candidates, detector, None
+
+            strict_on_page = [
+                candidate for candidate in candidates
+                if candidate["physical_page"] == physical
+            ]
+            for table in sentinel_found.tables:
+                if not _sentinel_table_is_plausible(table):
+                    continue
+                sentinel_bbox = [float(value) for value in table.bbox]
+                if any(_strict_bbox_accounts_for_sentinel(
+                        candidate["bbox"], sentinel_bbox)
+                       for candidate in strict_on_page):
+                    continue
+                possible_tables.append({
+                    "physical_page": physical,
+                    "bbox": sentinel_bbox,
+                    "reason": (
+                        "high_recall_text_detector_found_table_like_structure_"
+                        "outside_strict_geometry"),
+                    "preview": page.get_textbox(
+                        fitz.Rect(sentinel_bbox)).strip(),
+                })
+
+            # A strict bbox with merged/covered cell slots is a real candidate,
+            # but its row/column relation is not authoritative. Keep the strict
+            # candidate for audit and registration refusal, while also recording
+            # an unresolved signal so the scan itself cannot be called complete.
+            for candidate in strict_on_page:
+                if any(cell is None
+                       for row in candidate.get("rows") or []
+                       for cell in row.get("cells") or []):
+                    possible_tables.append({
+                        "physical_page": physical,
+                        "bbox": candidate["bbox"],
+                        "reason": "strict_candidate_contains_merged_cells",
+                        "preview": page.get_textbox(
+                            fitz.Rect(candidate["bbox"])).strip(),
+                    })
+        return candidates, possible_tables, detector, sentinel, None
     finally:
         doc.close()
+
+
+def _strict_bbox_accounts_for_sentinel(strict_bbox, sentinel_bbox) -> bool:
+    """Whether a broad signal is materially contained in strict geometry.
+
+    The sentinel often adds a few points of whitespace around the same table,
+    so exact bbox equality would create false review signals. Conversely, a
+    partially ruled strict bbox nested inside a materially larger text-layout
+    bbox must remain inconclusive: that is precisely how rows outside the drawn
+    lines would otherwise disappear.
+    """
+    sx0, sy0, sx1, sy1 = (float(value) for value in strict_bbox)
+    bx0, by0, bx1, by1 = (float(value) for value in sentinel_bbox)
+    broad_width = max(0.0, bx1 - bx0)
+    strict_height = max(0.0, sy1 - sy0)
+    if broad_width == 0 or strict_height == 0:
+        return False
+    horizontal_overlap = max(0.0, min(sx1, bx1) - max(sx0, bx0))
+    vertical_overlap = max(0.0, min(sy1, by1) - max(sy0, by0))
+    # The text strategy frequently absorbs a caption immediately ABOVE a ruled
+    # table. That is not an omitted row. Permit top-only expansion, but never
+    # bottom expansion: text rows below the strict bbox are exactly the partial-
+    # ruling omission the sentinel exists to expose.
+    return (
+        horizontal_overlap / broad_width >= 0.85
+        and vertical_overlap / strict_height >= 0.85
+        and by1 <= sy1 + table_region_provenance.PAGE_EDGE_TOLERANCE
+    )
+
+
+def _sentinel_table_is_plausible(table) -> bool:
+    """Reject the common two-line prose false positive, keep high recall.
+
+    PyMuPDF's text strategy can split two ordinary sentences into artificial
+    columns. A real tabular pattern needs at least three populated rows, or two
+    populated rows with repeated numeric columns. This remains a sentinel, not
+    proof: anything admitted here blocks for review and never mints a receipt.
+    """
+    try:
+        extracted = table.extract() or []
+    except Exception:  # noqa: BLE001
+        return True  # unreadable sentinel output is uncertainty, not absence
+    populated = [
+        [str(cell or "").strip() for cell in row]
+        for row in extracted
+        if sum(bool(str(cell or "").strip()) for cell in row) >= 2
+    ]
+    if len(populated) >= 3:
+        return True
+    numeric_rows = sum(
+        any(re.search(r"\d", cell) for cell in row)
+        for row in populated
+    )
+    if len(populated) < 2:
+        return False
+    if numeric_rows >= 1:
+        return True
+    # Two short, consistently multi-cell rows can be a small text-only lookup
+    # table. Long sentence fragments are the prose false positive this branch
+    # excludes. Bias toward review when uncertain.
+    nonempty_cells = [
+        cell for row in populated for cell in row if cell
+    ]
+    return bool(nonempty_cells) and max(map(len, nonempty_cells)) <= 30
 
 
 def _page_body_extent(words, page):
@@ -5207,12 +5387,35 @@ def _table_region_finalize_blockers(case_id: str, doc_id: str) -> list[str]:
     if blockers:
         return blockers
 
+    scan_status = inventory.get("scan_status")
+    if scan_status in ("inconclusive", "failed"):
+        signals = inventory.get("possible_tables") or []
+        pages = sorted({signal.get("page") for signal in signals
+                        if signal.get("page") is not None})
+        reasons = sorted({signal.get("reason") for signal in signals
+                          if signal.get("reason")})
+        detail = reasons or inventory.get("scan_errors") or [
+            "unspecified detector failure"]
+        return [
+            f"{doc_id}: table candidate scan is {scan_status}, not a verified "
+            f"empty/complete result -- possible table-like structure remains "
+            f"on logical page(s) {pages or 'unknown'} ({detail}). "
+            "A high-recall sentinel finding never authorizes 'no tables'; "
+            "resolve it through genuine review or improve strict extraction."
+        ]
+
     detected = inventory.get("candidates") or []
-    if not detected:
+    if scan_status == "complete_no_candidates" and not detected:
         # The one case where no reference_table is owed -- and only because the
-        # DAO looked and found nothing, which is a scanned result, not an
-        # absent one.
+        # strict detector AND the independent high-recall sentinel looked and
+        # found nothing. This is a scanned result, not an absent one.
         return []
+    if scan_status != "complete_with_candidates":
+        return [
+            f"{doc_id}: table candidate scan has inconsistent status "
+            f"{scan_status!r}; finalization refuses rather than treating it as "
+            "an empty document"
+        ]
 
     if tables is None:
         role = policy_roles.declared_role(next(
@@ -5496,16 +5699,27 @@ def _prepare_table_scan(case_id: str, doc_id: str, profile: str | None):
             "the P0-6 derivation receipt, which must be registered first")
 
     profile = profile or table_region_provenance.DEFAULT_DETECTOR_PROFILE
-    candidates, detector, detect_error = _detect_table_candidates(
-        pdf_path, sorted(physical_by_logical.values()), profile)
+    candidates, possible_tables, detector, sentinel, detect_error = \
+        _detect_table_candidates(
+            pdf_path, sorted(physical_by_logical.values()), profile)
     if detect_error:
-        raise _TableScanRefused(detect_error)
+        # Once source identity and page ownership are established, a detector
+        # failure is a meaningful scan result. The explicit scan command
+        # persists it as `failed` so "attempted and failed" is distinguishable
+        # from "never scanned"; register-table-region still refuses below.
+        if detector is None or sentinel is None:
+            raise _TableScanRefused(detect_error)
+        candidates = candidates or []
+        possible_tables = possible_tables or []
 
     logical_by_physical = {physical: logical
                            for logical, physical in physical_by_logical.items()}
     for candidate in candidates:
         candidate["logical_page"] = logical_by_physical.get(
             candidate["physical_page"])
+    for signal in possible_tables:
+        signal["logical_page"] = logical_by_physical.get(
+            signal["physical_page"])
 
     segment_receipt = segment_derivation_receipt_for(case_id, doc_id)
     return {
@@ -5518,7 +5732,10 @@ def _prepare_table_scan(case_id: str, doc_id: str, profile: str | None):
         "pages": pages,
         "physical_by_logical": physical_by_logical,
         "candidates": candidates,
+        "possible_tables": possible_tables,
         "detector": detector,
+        "sentinel": sentinel,
+        "scan_errors": [detect_error] if detect_error else [],
         "segment_receipt_id": (
             _segment_receipt_digest(segment_receipt) if segment_receipt
             else None),
@@ -5526,10 +5743,12 @@ def _prepare_table_scan(case_id: str, doc_id: str, profile: str | None):
 
 
 def _scan_inventory_from(case_id, doc_id, prepared):
-    """Build the sealed inventory from a prepared scan."""
+    """Build the checksummed, DAO-owned inventory from a prepared scan."""
     return _build_candidate_inventory(
-        case_id, doc_id, prepared["candidates"], prepared["detector"],
-        prepared["pdf_digest"], prepared["revision_sha"],
+        case_id, doc_id, prepared["candidates"], prepared["possible_tables"],
+        prepared["detector"], prepared["sentinel"], prepared["pdf_digest"],
+        prepared["revision_sha"], pages=prepared["pages"],
+        scan_errors=prepared.get("scan_errors") or (),
         scanned_logical_pages=sorted(prepared["physical_by_logical"]),
         pdf_owner=prepared["pdf_owner"],
         segment_receipt_id=prepared["segment_receipt_id"],
@@ -5571,26 +5790,39 @@ def cmd_scan_table_candidates(args):
     if existing is not None and existing.get("scan_id") == inventory["scan_id"]:
         # Identical bytes, identical detector, identical findings. Re-scanning
         # must not cost a downstream rerun.
-        print(f"PASS: {doc_id} table candidate scan is unchanged (no-op) -- "
+        label = "BLOCKED" if inventory["scan_status"] == "failed" else "PASS"
+        print(f"{label}: {doc_id} table candidate scan is unchanged (no-op) -- "
               f"{len(inventory['candidates'])} candidate(s) across "
               f"{len(inventory['scanned_logical_pages'])} page(s), scan "
               f"{inventory['scan_id'][:16]}")
-        return 0
+        return 1 if inventory["scan_status"] == "failed" else 0
 
     rc = _commit_table_region(case_id, doc_id, None, inventory,
                               args.held_by, args.run_id)
     if rc == 0:
         print(f"PASS: {doc_id} scanned -- {len(inventory['candidates'])} table "
               f"candidate(s) across {len(inventory['scanned_logical_pages'])} "
-              f"page(s), scan {inventory['scan_id'][:16]}")
+              f"page(s), status {inventory['scan_status']}, scan "
+              f"{inventory['scan_id'][:16]}")
         for candidate in inventory["candidates"]:
             print(f"  {candidate['candidate_id'][:20]} logical page "
                   f"{candidate['page']}: {candidate['row_count']} row band(s), "
                   f"header {candidate['header_preview']!r}")
-        if not inventory["candidates"]:
+        for signal in inventory["possible_tables"]:
+            print(f"  REVIEW_REQUIRED {signal['signal_id'][:20]} logical page "
+                  f"{signal['page']}: {signal['reason']}; "
+                  f"{signal['preview'][:80]!r}")
+        if inventory["scan_status"] == "complete_no_candidates":
             print("  no tables detected -- recorded as a scanned result, which "
                   "is what lets finalization tell 'no tables' from 'never "
                   "looked'")
+        elif inventory["scan_status"] == "inconclusive":
+            print("  scan is inconclusive -- high-recall table-like signals "
+                  "cannot authorize an empty document and block finalization")
+        elif inventory["scan_status"] == "failed":
+            print("  scan failed -- recorded for audit and finalization remains "
+                  f"blocked: {inventory['scan_errors']}")
+            return 1
     return rc
 
 
@@ -5631,6 +5863,10 @@ def cmd_register_table_region(args):
         prepared = _prepare_table_scan(case_id, doc_id, args.detector_profile)
     except _TableScanRefused as refusal:
         print(f"BLOCKED: {refusal}")
+        return 1
+    if prepared.get("scan_errors"):
+        print("BLOCKED: table detection failed; no authoritative region can be "
+              f"issued: {prepared['scan_errors']}")
         return 1
 
     pages = prepared["pages"]

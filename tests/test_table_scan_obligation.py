@@ -20,11 +20,13 @@ Four defects, each with its own attack here.
    to make a table invisible was never to mention it. The scan is now an
    obligation the DOCUMENT carries, not one a contract triggers.
 
-3. **The candidate inventory was unsealed.** Each `candidate_id` verified
+3. **The candidate inventory had no whole-body checksum.** Each `candidate_id` verified
    against its own geometry, but nothing verified the SET, so deleting the
    entry for an unextracted table left every survivor verifying perfectly --
    in the one artifact whose whole job is to answer "were there other
-   tables?". Sealed now by a content-derived `scan_id`.
+   tables?". A content-derived `scan_id` now detects ordinary corruption through
+   the supported DAO path. It is not an authenticated signature: a process with
+   forbidden direct-write access can recompute it, a boundary documented below.
 
 4. **Continuation was decided by resemblance.** Matching column grid + matching
    header + no new heading returned `continues` unconditionally, contradicting
@@ -267,7 +269,7 @@ def test_extracting_the_table_clears_the_gate_for_that_document(
 
 
 # ==========================================================================
-# 3. The candidate inventory is sealed
+# 3. The candidate inventory is checksummed and DAO-owned
 # ==========================================================================
 
 def test_deleting_an_unextracted_candidate_is_detected(
@@ -303,14 +305,13 @@ def test_deleting_an_unextracted_candidate_is_detected(
                for blocker in blockers), blockers
 
 
-def test_recomputing_the_scan_id_after_tampering_is_also_detected(
+def test_recomputing_the_scan_id_is_exposed_by_an_authoritative_rescan(
         case, register_table, isolated_dao, make_args):
     """The same attack by a caller who bothers to recompute `scan_id`.
 
-    `scan_id` is not a checksum a tamperer can simply refresh: it commits to
-    the pages the detector actually examined, so a candidate removed from page
-    2 leaves page 2 scanned-but-empty, and the surviving receipt still names a
-    candidate the list no longer contains.
+    `scan_id` alone is only a public checksum. Re-running the DAO detector over
+    unchanged bytes independently reproduces the authoritative candidate set
+    and therefore exposes a directly edited inventory.
     """
     case(second_table_rows=[("Kind", "Limit"), ("X", "70")])
     assert register_table(anchor="Grade") == 0
@@ -428,7 +429,7 @@ def test_an_unrecognized_scan_scheme_is_refused(case, isolated_dao, make_args):
 
     errors = trp.inventory_integrity_errors(inventory, "DOC_001")
 
-    assert errors and "not 'table_candidate_scan_v1'" in errors[0]
+    assert errors and "not 'table_candidate_scan_v2'" in errors[0]
 
 
 # ==========================================================================
@@ -725,3 +726,256 @@ def test_an_unscannable_document_refuses_rather_than_recording_zero_tables(
     assert rc == 1
     assert _inventory() is None, "a refused scan must persist nothing"
     assert "OCR" in capsys.readouterr().out
+
+
+# ==========================================================================
+# Follow-up 3: strict-zero is not verified-empty
+# ==========================================================================
+
+def _install_layout_pdf(isolated_dao, make_args, canonicalize, draw_page):
+    """Install one synthetic embedded-text policy through the real DAO."""
+    import fitz
+
+    raw = isolated_dao / "data" / "raw" / CASE
+    raw.mkdir(parents=True, exist_ok=True)
+    pdf_path = raw / "DOC_001.pdf"
+    document = fitz.open()
+    page = document.new_page()
+    draw_page(page)
+    document.save(str(pdf_path))
+    document.close()
+    _seed_manifest(isolated_dao, [_manifest_entry(total_pages=1)])
+    canonicalize(
+        make_args, isolated_dao, CASE, "DOC_001",
+        _revision_text(pdf_path, 1), held_by=HELD_BY, run_id=RUN)
+    return pdf_path
+
+
+def _draw_unruled_table(page):
+    page.insert_text((60, 72), "Grade", fontsize=10)
+    page.insert_text((190, 72), "Rate", fontsize=10)
+    page.insert_text((60, 96), "A", fontsize=10)
+    page.insert_text((190, 96), "10", fontsize=10)
+    page.insert_text((60, 120), "B", fontsize=10)
+    page.insert_text((190, 120), "20", fontsize=10)
+
+
+def test_unruled_embedded_table_never_becomes_verified_empty(
+        isolated_dao, make_args, canonicalize):
+    """Attack A: lines=0 while the high-recall layout detector sees a table."""
+    _install_layout_pdf(
+        isolated_dao, make_args, canonicalize, _draw_unruled_table)
+
+    assert _scan(make_args) == 0
+    inventory = _inventory()
+
+    assert inventory["candidates"] == [], (
+        "precondition: the authoritative lines detector must miss the unruled "
+        "table, otherwise this is not the strict-zero attack")
+    assert inventory["scan_status"] == "inconclusive"
+    assert inventory["possible_tables"], (
+        "a strict zero may not become verified-empty while the high-recall "
+        "sentinel sees table-like column structure")
+    assert _table_blockers(), (
+        "an inconclusive scan must block the production completeness gate")
+
+
+def test_unruled_table_blocks_the_real_finalize_stage(
+        isolated_dao, make_args, canonicalize, capsys):
+    """The same attack through the real finalize-stage production path."""
+    _install_layout_pdf(
+        isolated_dao, make_args, canonicalize, _draw_unruled_table)
+    assert _scan(make_args) == 0
+
+    rc = _finalize_policy_stage(isolated_dao, make_args)
+
+    assert rc != 0
+    output = capsys.readouterr().out
+    assert "table candidate scan is inconclusive" in output, output
+    assert "high_recall_text_detector" in output, output
+
+
+def test_partially_ruled_table_is_not_verified_empty(
+        isolated_dao, make_args, canonicalize):
+    """Rows outside the drawn header box must remain a sentinel review item."""
+    def draw(page):
+        _draw_unruled_table(page)
+        # Only the header is boxed. A lines-only detector may see a narrow
+        # candidate or none, but it cannot authorize rows A/B outside the box.
+        for y in (58, 82):
+            page.draw_line((48, y), (240, y))
+        for x in (48, 170, 240):
+            page.draw_line((x, 58), (x, 82))
+
+    _install_layout_pdf(isolated_dao, make_args, canonicalize, draw)
+    assert _scan(make_args) == 0
+
+    inventory = _inventory()
+    assert inventory["scan_status"] == "inconclusive"
+    assert inventory["possible_tables"]
+    assert _table_blockers()
+
+
+def test_merged_header_is_inconclusive_not_verified_complete(
+        isolated_dao, make_args, canonicalize):
+    """A strict candidate with covered cell slots cannot prove row relations."""
+    def draw(page):
+        # Two columns, but the first row intentionally has no middle divider.
+        for y in (60, 85, 110, 135):
+            page.draw_line((50, y), (250, y))
+        for x in (50, 250):
+            page.draw_line((x, 60), (x, 135))
+        page.draw_line((150, 85), (150, 135))
+        page.insert_text((75, 77), "Benefit Schedule", fontsize=10)
+        page.insert_text((65, 102), "Grade", fontsize=10)
+        page.insert_text((165, 102), "Rate", fontsize=10)
+        page.insert_text((65, 127), "A", fontsize=10)
+        page.insert_text((165, 127), "10", fontsize=10)
+
+    _install_layout_pdf(isolated_dao, make_args, canonicalize, draw)
+    assert _scan(make_args) == 0
+
+    inventory = _inventory()
+    assert inventory["scan_status"] == "inconclusive"
+    assert any(signal["reason"] == "strict_candidate_contains_merged_cells"
+               for signal in inventory["possible_tables"])
+    assert _table_blockers()
+
+
+def test_ordinary_prose_can_be_verified_table_free(
+        isolated_dao, make_args, canonicalize):
+    """Positive control: a broad sentinel must not block ordinary paragraphs."""
+    def draw(page):
+        page.insert_text(
+            (72, 72),
+            "This insurance policy describes coverage in ordinary prose.",
+            fontsize=10)
+        page.insert_text(
+            (72, 96),
+            "Benefits are subject to the conditions stated in each article.",
+            fontsize=10)
+
+    _install_layout_pdf(isolated_dao, make_args, canonicalize, draw)
+    assert _scan(make_args) == 0
+
+    inventory = _inventory()
+    assert inventory["scan_status"] == "complete_no_candidates"
+    assert inventory["candidates"] == []
+    assert inventory["possible_tables"] == []
+    assert _table_blockers() == []
+
+
+def test_sentinel_signal_is_never_self_exempting(
+        isolated_dao, make_args, canonicalize):
+    """A possible table remains review_required; no agent status clears it."""
+    _install_layout_pdf(
+        isolated_dao, make_args, canonicalize, _draw_unruled_table)
+    assert _scan(make_args) == 0
+    signal = _inventory()["possible_tables"][0]
+
+    assert signal["status"] == "review_required"
+    forged = dict(_inventory())
+    forged["possible_tables"] = [dict(signal, status="verified")]
+    forged["scan_id"] = trp.compute_scan_id(forged)
+
+    errors = trp.inventory_integrity_errors(forged, "DOC_001")
+    assert any("must remain review_required" in error for error in errors), errors
+
+
+def test_detector_failure_is_recorded_as_failed_not_empty(
+        case, make_args, monkeypatch):
+    """Attempted-and-failed is explicit and can never become verified-empty."""
+    case()
+    version = trp.current_pymupdf_version()
+    detector = {
+        "profile": trp.DEFAULT_DETECTOR_PROFILE,
+        "config_fingerprint": trp.detector_fingerprint(
+            trp.DEFAULT_DETECTOR_PROFILE),
+        "library_version": version,
+    }
+    sentinel = {
+        "profile": trp.DEFAULT_SENTINEL_PROFILE,
+        "config_fingerprint": trp.sentinel_fingerprint(
+            trp.DEFAULT_SENTINEL_PROFILE),
+        "library_version": version,
+    }
+    monkeypatch.setattr(
+        dao, "_detect_table_candidates",
+        lambda *args, **kwargs: (
+            [], [], detector, sentinel,
+            "table detection failed on physical page 1: injected failure"))
+
+    assert _scan(make_args) == 1
+    inventory = _inventory()
+    assert inventory["scan_status"] == "failed"
+    assert inventory["candidates"] == []
+    assert inventory["scan_errors"]
+    assert _table_blockers(), (
+        "a failed scan is not a verified empty scan and must block")
+
+
+def test_scan_identity_changes_with_detector_runtime(
+        case, make_args, monkeypatch):
+    """Strict/sentinel configuration and library version are scan inputs."""
+    case()
+    assert _scan(make_args) == 0
+    inventory = dict(_inventory())
+    original = inventory["scan_id"]
+
+    inventory["sentinel_library_version"] = "different-version"
+    inventory["scan_id"] = trp.compute_scan_id(inventory)
+    assert inventory["scan_id"] != original
+    errors = trp.inventory_currency_errors(
+        inventory,
+        current_pdf_sha256=inventory["source_pdf_sha256"],
+        current_revision_sha256=inventory["source_text_revision_sha256"],
+        current_pages=dao.policy_completeness.split_pages(_registered_text()),
+    )
+    assert any("sentinel PyMuPDF version changed" in error for error in errors)
+
+    monkeypatch.setitem(
+        trp.SENTINEL_PROFILES[trp.DEFAULT_SENTINEL_PROFILE],
+        "min_words_vertical", 99)
+    errors = trp.inventory_currency_errors(
+        _inventory(),
+        current_pdf_sha256=_inventory()["source_pdf_sha256"],
+        current_revision_sha256=_inventory()["source_text_revision_sha256"],
+        current_pages=dao.policy_completeness.split_pages(_registered_text()),
+    )
+    assert any("sentinel profile" in error and "reconfigured" in error
+               for error in errors)
+
+
+def test_recomputed_scan_id_is_checksum_not_authentication(
+        case, register_table, isolated_dao, make_args):
+    """Document the trust boundary required by the specification.
+
+    A process with unsupported direct write access can delete a candidate and
+    recompute the public checksum. The pure finalization gate cannot recover
+    detector output without re-running the detector. Security therefore comes
+    from the DAO-owned/protected write path; scan_id detects corruption where
+    the checksum was not also deliberately refreshed, not an authenticated
+    adversarial rewrite.
+    """
+    case(second_table_rows=[("Kind", "Limit"), ("X", "70")])
+    assert register_table(anchor="Grade") == 0
+    honest = _canonicalize_uids(_contract_from_receipt(_receipt()))
+    assert _write_contract(isolated_dao, make_args, honest) == 0
+    assert _table_blockers(), "precondition: the second table is unhandled"
+
+    index_path = isolated_dao / "outputs" / CASE / "_table_region_index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    inventory = index["candidates"][0]
+    covered = set(_receipt()["covered_candidate_ids"])
+    inventory["candidates"] = [
+        candidate for candidate in inventory["candidates"]
+        if candidate["candidate_id"] in covered]
+    inventory["scan_status"] = "complete_with_candidates"
+    inventory["scan_id"] = trp.compute_scan_id(inventory)
+    index_path.write_text(json.dumps(index, ensure_ascii=False),
+                          encoding="utf-8")
+
+    # Direct finalization, deliberately WITHOUT a re-scan.
+    assert _table_blockers() == [], (
+        "this assertion records the honest limit of a public checksum; do not "
+        "describe scan_id as an authenticated seal")

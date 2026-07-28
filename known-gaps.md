@@ -1936,20 +1936,25 @@ are untouched by this change, the frozen vectors in
 `test_canonical_uid_vectors.py` are unmodified, and
 `test_region_receipts_do_not_enter_any_uid` asserts the invariance directly.
 
-**Honest limits -- pymupdf's detector does NOT find every table.** These are
-fail-closed refusals, not silent passes, and each one leaves the table
-`review_required` and blocking finalization:
+**Honest limits -- PyMuPDF's strict detector does NOT find every table.** The
+original implementation incorrectly claimed all such cases failed closed:
+`lines` actually returned zero for a whitespace-aligned embedded-text table,
+and that zero was issued as a verified-empty scan. P0-8 Follow-up 3 closes this
+known fail-open with a separate high-recall sentinel:
 
-- **Ruled tables only.** The `pymupdf_find_tables_lines_v1` profile uses the
-  `lines` strategy, which needs real vector separators. A whitespace-aligned
-  table -- visually a table, structurally just text -- yields no candidate and
-  is refused. A text-strategy profile would infer structure from whitespace,
-  which is exactly the ambiguity this gate exists to refuse rather than guess.
+- **Strict receipts remain ruled-table only.** The authoritative
+  `pymupdf_find_tables_lines_v1` geometry still requires vector separators.
+  `pymupdf_find_tables_text_sentinel_v1` runs separately at high recall. Its
+  whitespace/layout findings never mint a receipt; they produce
+  `possible_tables` with `review_required` and make the scan `inconclusive`.
+  Only a scan where strict candidates and sentinel signals are both absent is
+  `complete_no_candidates`.
 - **Embedded text only.** An image-only/OCR document has no deterministic text
   layer, and verification may not run OCR, so it can never obtain a receipt and
   can never finalize. Same shape as P0-6's `ocr_segment` refusal.
 - **Merged cells block.** A row band with a merged cell has ambiguous row/column
-  structure and is refused rather than resolved by heuristic.
+  structure, produces an inconclusive signal, and is refused rather than
+  resolved by heuristic.
 - **The PDF layout and the processed text must correspond exactly.** Every band
   is anchored to the registered page text through the PDF's own word geometry;
   a band that cannot be placed uniquely refuses. A redacted or re-flowed
@@ -1962,9 +1967,9 @@ fail-closed refusals, not silent passes, and each one leaves the table
   real data, the existing authenticated human-review provenance path
   (`record-human-review`) is where that decision would be added -- it is not
   reachable from an agent writing a name string or a boolean.
-- **A detector profile change requires a fresh derivation.** The profile name
-  and its config fingerprint enter the receipt, and `detector_currency_errors`
-  compares them against the running build on every write and finalization.
+- **A detector profile/runtime change requires a fresh derivation.** Strict and
+  sentinel profile names, config fingerprints, and PyMuPDF library version enter
+  the scan identity and are compared against the running build.
 
 62 tests (`tests/test_table_region_provenance.py` + `_followup.py`), all
 against real pymupdf-rendered PDFs and the real DAO commands, including the
@@ -2082,22 +2087,27 @@ unreachable. Four defects:
    *extent*, but could still decide whether the document *had* tables.
 
    The obligation now belongs to the **document**. Every `canonical_v1` policy
-   document must carry a current scan; a scan finding zero candidates clears
-   the gate, a missing scan never does. A declared `policy_processing_role`
+   document must carry a current scan; only `complete_no_candidates` (strict
+   detector and sentinel both clear) clears the gate without a table contract,
+   and a missing/inconclusive scan never does. A declared `policy_processing_role`
    cannot exempt it either -- a `clause_segment` containing a table must be
    redeclared `mixed_clause_and_table`, because a role is a statement about
    what a document owes and cannot overrule a fact about its bytes.
 
-3. **The candidate inventory was unsealed.** Each `candidate_id` verified
+3. **The candidate inventory lacked a whole-body corruption checksum.** Each `candidate_id` verified
    against its own geometry, but nothing verified the SET -- so deleting the
    entry for an unextracted table left every survivor verifying perfectly, in
    the one artifact whose entire job is to answer "were there other tables?".
-   `compute_scan_id` now seals the whole scan (document, PDF owner and bytes,
+   `compute_scan_id` now checksums the whole scan (document, PDF owner and bytes,
    revision, page map, detector profile and config, the pages actually
    examined, and the full sorted candidate list), re-derived at every gate by
-   `inventory_integrity_errors`.
+   `inventory_integrity_errors`. This is deliberately described as a
+   deterministic checksum, not authentication: an unsupported direct
+   filesystem writer can recompute it. The supported agent security boundary is
+   the DAO-owned protected index; an authoritative re-scan independently
+   reproduces the real detector output.
 
-   `scanned_logical_pages` is part of that seal because the inventory's real
+   `scanned_logical_pages` is part of that checksum because the inventory's real
    claim is a NEGATIVE one -- "these are all the tables in this document" --
    and it is only as wide as the pages the detector looked at. Without it, a
    scan of pages 1-2 was indistinguishable from a 4-page scan that found
@@ -2128,17 +2138,19 @@ step is reported rather than silently performed. A scan-only commit goes
 through the same locked, journalled, validate-before-write transaction as a
 receipt, and invalidates downstream the same way.
 
-**Known limitation, unchanged from the previous pass:** the human-review escape
+**Known limitation:** the human-review escape
 hatch for an un-extractable candidate is still a seam --
 `human_review_ledger.schema.json`'s `artifact_kind` enum does not admit
 `table_candidate`. Combined with this pass making the scan mandatory, the
 practical consequence is now larger: an embedded-text policy document
-containing a table the detector cannot establish (merged cells, no ruling)
-cannot finalize by any route. That is fail-closed and intended, but it is a
-real operational limit, not a theoretical one.
+containing a strict-unextractable or sentinel-only table (merged cells, partial
+or no ruling) is recorded as `inconclusive` and cannot finalize by any route.
+That is fail-closed and intended, but it is a real operational limit.
 
-28 new tests (`tests/test_table_scan_obligation.py`), including two that drive
-the real `finalize-stage` command end to end. canonical_v1 UID values remain
+Follow-up 3 adds strict/sentinel scan states
+(`complete_no_candidates`, `complete_with_candidates`, `inconclusive`,
+`failed`), exact possible-table provenance, detector/runtime currency, and
+real-finalization tests for unruled tables. canonical_v1 UID values remain
 unchanged.
 
 ### Evidence proved a phrase existed, not which occurrence it was -- RESOLVED (P0-7)

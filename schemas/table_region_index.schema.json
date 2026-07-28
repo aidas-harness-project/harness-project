@@ -153,16 +153,16 @@
     },
     "candidate_inventory": {
       "type": "object",
-      "description": "The DAO's scan of one document: every table the detector found, whether or not anybody registered it. Written only by `dao.py scan-table-candidates` (and by register-table-region, which scans the same way before it can derive anything). Replaced (not accumulated) on each scan, since an inventory listing candidates from an older revision would block on tables that no longer exist. Sealed by `scan_id`: the individual candidate_ids each verify against their own geometry, but ids alone say nothing about the SET, so deleting an inconvenient entry left every survivor verifying perfectly -- in the one artifact whose entire job is to answer 'were there other tables?'.",
+      "description": "The DAO's scan of one document: strict verified candidates plus high-recall possible-table signals, whether or not anybody registered a table. Written only by `dao.py scan-table-candidates` (and by register-table-region, which scans the same way before it can derive anything). Replaced on each scan. `scan_id` is a deterministic whole-body corruption checksum and no-op identity, not an authenticated signature; the security boundary is the DAO-owned protected write path. Direct filesystem writers are outside the supported agent threat model and can recompute a public checksum.",
       "properties": {
         "scheme": {
-          "const": "table_candidate_scan_v1",
+          "const": "table_candidate_scan_v2",
           "description": "The scan contract this inventory was produced under. An unrecognized scheme is refused rather than assumed equivalent."
         },
         "scan_id": {
           "type": "string",
           "pattern": "^TRS-[a-f0-9]{48}$",
-          "description": "Computed by the DAO from the whole scan: document, PDF owner and its bytes, revision, page map, detector profile and config, the pages actually scanned, and the full sorted candidate list. Recomputed and compared at every gate, so removing or editing a candidate is detected. Excludes `scanned_at`, so re-scanning unchanged bytes yields the identical scan_id and is a recognizable no-op."
+          "description": "Deterministic checksum computed by the DAO from the whole scan: source identity, page map, strict and sentinel profiles/config/library versions, scan status, pages, verified candidates, possible-table signals, and errors. Recomputed at every gate to catch corruption that does not also refresh the checksum and to recognize an unchanged re-scan as a no-op. It is not an authenticated signature."
         },
         "document_id": {
           "$ref": "common_component_output.schema.json#/$defs/document_id"
@@ -185,6 +185,23 @@
         },
         "detector_profile": { "type": "string", "minLength": 1 },
         "detector_config_fingerprint": { "type": "string", "minLength": 1 },
+        "detector_library_version": { "type": "string", "minLength": 1 },
+        "sentinel_profile": { "type": "string", "minLength": 1 },
+        "sentinel_config_fingerprint": { "type": "string", "minLength": 1 },
+        "sentinel_library_version": { "type": "string", "minLength": 1 },
+        "scan_status": {
+          "enum": [
+            "complete_no_candidates",
+            "complete_with_candidates",
+            "inconclusive",
+            "failed"
+          ],
+          "description": "Only complete_no_candidates proves a reference_table is not owed. Inconclusive and failed are blockers, never synonyms for an empty document."
+        },
+        "scan_errors": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
         "scanned_logical_pages": {
           "type": "array",
           "description": "Every logical page the detector actually examined. The inventory's real claim is a NEGATIVE one -- 'these are all the tables in this document' -- and that claim is only as wide as the pages it looked at. A page missing here is an UNSCANNED page, never a page established to have no table, and finalization refuses while any page the document currently owns is absent.",
@@ -226,6 +243,53 @@
             ],
             "additionalProperties": false
           }
+        },
+        "possible_tables": {
+          "type": "array",
+          "description": "High-recall sentinel signals not backed by strict geometry. They never authorize a table receipt and remain review_required until a genuine review path resolves them.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "signal_id": {
+                "type": "string",
+                "pattern": "^TRP-[a-f0-9]{32}$"
+              },
+              "document_id": {
+                "$ref": "common_component_output.schema.json#/$defs/document_id"
+              },
+              "page": { "type": "integer", "minimum": 1 },
+              "physical_page": { "type": "integer", "minimum": 1 },
+              "bbox": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": { "type": "number" }
+              },
+              "reason": { "type": "string", "minLength": 1 },
+              "status": { "const": "review_required" },
+              "page_text_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "sentinel_profile": { "type": "string", "minLength": 1 },
+              "sentinel_library_version": { "type": "string", "minLength": 1 },
+              "preview": { "type": "string" }
+            },
+            "required": [
+              "signal_id",
+              "document_id",
+              "page",
+              "physical_page",
+              "bbox",
+              "reason",
+              "status",
+              "page_text_sha256",
+              "sentinel_profile",
+              "sentinel_library_version",
+              "preview"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [
@@ -238,9 +302,16 @@
         "segment_derivation_receipt_id",
         "detector_profile",
         "detector_config_fingerprint",
+        "detector_library_version",
+        "sentinel_profile",
+        "sentinel_config_fingerprint",
+        "sentinel_library_version",
+        "scan_status",
+        "scan_errors",
         "scanned_logical_pages",
         "scanned_at",
-        "candidates"
+        "candidates",
+        "possible_tables"
       ],
       "additionalProperties": false
     },
