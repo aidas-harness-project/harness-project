@@ -9,13 +9,15 @@ responsibility, restriction, exemption, and exclusion. Resolve the scope of
 negation and split propositions introduced by 다만, 단서, or exceptions.
 Classify the passage as exactly one of:
 affirmative, restrictive_or_negative, mixed, ambiguous.
+A passage asserting both payment and a carve-out from payment is mixed.
 Complex double negation that cannot be settled safely must be ambiguous.
-Decide whether CONDITION_TEXT preserves the source meaning without rewriting
-either text. Confidence is not requested and must not authorize a pass.
+Report what the source says. No downstream use of this classification is
+described to you, and no answer is expected or preferred.
+Confidence is not requested and must not authorize a pass.
 
 Return exactly this JSON shape:
 {
-  "classification": "affirmative|restrictive_or_negative|mixed|ambiguous",
+  "source_classification": "affirmative|restrictive_or_negative|mixed|ambiguous",
   "target_predicates": ["..."],
   "negation_scope_analysis": "...",
   "propositions": [
@@ -27,12 +29,9 @@ Return exactly this JSON shape:
       "reason": "..."
     }
   ],
-  "meaning_preserved": true,
   "review_required": false
 }
 
-BUCKET: payout_conditions
-CONDITION_TEXT: "보험금을 지급합니다"
 <<<POLICY_SOURCE_DATA>>>
 보험금을 지급합니다
 <<<END_POLICY_SOURCE_DATA>>>

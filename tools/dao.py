@@ -129,12 +129,21 @@ Subcommands:
     read-table-region-index CASE_ID
     analyze-policy-polarity CASE_ID --doc-id DOC_ID
         --source-span-uid PS_UID [--source-span-uid PS_UID ...]
-        --source-selector-file PATH --condition-text-file PATH
+        --source-selector-json JSON --condition-text TEXT
         --bucket BUCKET --held-by NAME --run-id RUN_ID
-        [--provider PROVIDER] [--model MODEL]
         (the ONLY LLM-calling policy-polarity path; resolves exact spans from
-         the current registered revision and issues a protected semantic
-         receipt. Validators and finalization never call a provider.)
+         the current registered revision and issues a protected two-phase
+         semantic receipt. Validators and finalization never call a provider.
+         The analyzer is deployment-owned -- there is no --provider/--model --
+         and both texts are inline, so no file path reaches a provider. The
+         bucket is never sent to the model; Python compares the source
+         reading against it afterwards.)
+    set-policy-semantic-analyzer CASE_ID --reason TEXT
+        --held-by NAME --run-id RUN_ID
+        (DAO admin. Adopts the deployment-configured analyzer, invalidating
+         policy_clause_processing and every downstream stage BEFORE the new
+         analyzer activates, so a failure can never leave a new analyzer above
+         a passed policy layer.)
     read-policy-polarity-semantic-index CASE_ID
 """
 import argparse
@@ -148,6 +157,7 @@ import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -535,8 +545,73 @@ def _policy_audit_context(case_id: str, doc_id: str):
         "manifest_entry_sha256": _manifest_entry_sha256(case_id, doc_id),
         "parent_coverage_sha256": (
             _contract_sha256(case_id, coverage_name) if coverage_name else None),
+        # The semantic layer this document's conditions actually rest on. A
+        # normalized contract cites receipts; a receipt is a claim by a
+        # specific analyzer about a specific source revision. Without this,
+        # swapping the analyzer or rewriting a cited receipt left every
+        # downstream `upstream_policy_snapshot` looking perfectly current.
+        "semantic_binding_sha256": _semantic_binding_sha256(
+            case_id, doc_id, normalized),
     }
     return hashes, normalized, inventory, reference
+
+
+def _semantic_binding_sha256(case_id: str, doc_id: str,
+                             normalized: dict | None) -> str:
+    """Digest the semantic receipts THIS document's contract actually cites.
+
+    Deliberately not a hash of the whole index: another document's receipt
+    landing in the same case file is not a fact about this document, and
+    hashing the index would stale every document in the case every time any
+    one of them was analyzed.
+
+    Referenced receipts are collected from the normalized contract, sorted by
+    receipt_id for a canonical ordering, and hashed with the active analyzer
+    identity. A cited receipt that does not resolve is recorded as an explicit
+    `unresolved` marker rather than skipped -- "this contract cites a receipt
+    that no longer exists" must not hash the same as "this contract cites
+    nothing".
+    """
+    index = load_policy_polarity_semantic_index(case_id)
+    by_id = {
+        receipt.get("receipt_id"): receipt
+        for receipt in index.get("receipts") or []}
+
+    referenced = set()
+    for clause in (normalized or {}).get("clauses") or []:
+        if not isinstance(clause, dict):
+            continue
+        for items in clause.values():
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if isinstance(item, dict) and item.get(
+                        "polarity_analysis_receipt_id"):
+                    referenced.add(item["polarity_analysis_receipt_id"])
+
+    material = []
+    for receipt_id in sorted(referenced):
+        receipt = by_id.get(receipt_id)
+        material.append({
+            "receipt_id": receipt_id,
+            "receipt_digest": (
+                policy_polarity_semantics.receipt_digest(receipt)
+                if receipt is not None else "unresolved"),
+            "source_receipt_id": (
+                (receipt.get("source_receipt") or {}).get("source_receipt_id")
+                if receipt is not None else None),
+            "source_text_revision_sha256": (
+                receipt.get("source_text_revision_sha256")
+                if receipt is not None else None),
+        })
+    return policy_polarity_semantics.sha256_text(
+        policy_polarity_semantics.canonical_json({
+            "document_id": doc_id,
+            "analyzer_identity_digest":
+                policy_polarity_semantics.analyzer_identity_digest(
+                    index.get("active_analyzer")),
+            "referenced_receipts": material,
+        }))
 
 
 def _segment_text_reader(case_id):
@@ -6406,12 +6481,74 @@ def _semantic_index_errors(index: dict, case_id: str) -> list[str]:
     return errors
 
 
-_SEMANTIC_BUCKET_OUTCOME = {
-    "payout_conditions": "affirmative",
-    "coverage_start_conditions": "affirmative",
-    "exclusions": "restrictive_or_negative",
-    "reduction_conditions": "restrictive_or_negative",
-}
+# The bucket->required-source-outcome contract lives in the semantics module
+# so exactly one table exists, and it is consulted ONLY here, in Python, after
+# the provider has already returned. It is never rendered into a prompt.
+_SEMANTIC_BUCKET_OUTCOME = policy_polarity_semantics.BUCKET_REQUIREMENT
+
+# Providers a production semantic analysis may run under. `fixture` is
+# excluded deliberately: a test double must be injectable in tests and
+# unreachable from the deployed command, so a caller cannot select the
+# provider that returns whatever it is told to.
+PRODUCTION_SEMANTIC_PROVIDERS = frozenset({
+    "claude-cli", "codex-cli", "anthropic-api", "openai-api",
+})
+
+
+class TrustedAnalyzer(NamedTuple):
+    """The analyzer identity, derived from deployment configuration only.
+
+    P1-2 originally let the caller pass `--provider`/`--model`, and
+    `parse_provider_config` ranked caller args ABOVE deployment env, so one
+    ordinary analysis call could re-point the case's `active_analyzer` and
+    strand every receipt already issued -- while `policy_clause_processing`
+    and everything downstream stayed `passed`. The analyzer is now read from
+    the environment, and switching it is a separate, cascading admin command.
+    """
+    provider_name: str
+    model_name: str
+    identity: dict
+
+
+def resolve_trusted_analyzer(env=None) -> TrustedAnalyzer:
+    """Build the analyzer identity from trusted deployment configuration.
+
+    Takes no argparse namespace -- there is no caller input to read. Raises
+    ProviderConfigError if the configuration names a non-production provider
+    or leaves the model unpinned: an analyzer whose exact deployment cannot be
+    named cannot be bound into a receipt, so it fails closed rather than
+    recording a blank.
+    """
+    source_env = env if env is not None else os.environ
+    config = llm_providers.parse_provider_config(
+        None, env=source_env, env_prefix="HARNESS_POLICY_SEMANTIC")
+    if config.provider_name not in PRODUCTION_SEMANTIC_PROVIDERS:
+        raise llm_providers.ProviderConfigError(
+            f"provider {config.provider_name!r} is not permitted for policy "
+            "semantic analysis; production providers are "
+            f"{sorted(PRODUCTION_SEMANTIC_PROVIDERS)} (a fixture provider is "
+            "injectable in tests only, never selectable at deployment)")
+    if not config.model_name:
+        raise llm_providers.ProviderConfigError(
+            "HARNESS_POLICY_SEMANTIC_MODEL is not set; the analyzer's exact "
+            "model/deployment must be pinned so a receipt records which one "
+            "produced it")
+    return TrustedAnalyzer(
+        provider_name=config.provider_name,
+        model_name=config.model_name,
+        identity={
+            "provider": config.provider_name,
+            "model": config.model_name,
+            "source_prompt_version":
+                policy_polarity_semantics.SOURCE_PROMPT_VERSION,
+            "comparison_prompt_version":
+                policy_polarity_semantics.COMPARISON_PROMPT_VERSION,
+            "semantic_schema_version":
+                policy_polarity_semantics.SEMANTIC_SCHEMA_VERSION,
+            "settings_fingerprint":
+                policy_polarity_semantics.settings_fingerprint(),
+        },
+    )
 
 
 def _semantic_receipt_binding_errors(
@@ -6420,9 +6557,11 @@ def _semantic_receipt_binding_errors(
     """Deterministically bind condition -> receipt -> registered source.
 
     This function never builds a provider and never invokes an extractor. The
-    receipt is semantic authority; Python verifies only integrity, currency,
-    exact source occurrence, condition bytes, bucket outcome, and the
-    fail-closed review flags.
+    receipt is authority on what the SOURCE says; Python alone decides whether
+    that reading satisfies the bucket the contract filed the condition under.
+    The receipt carries no bucket at all, so there is nothing here to trust
+    about bucket fitness -- only integrity, currency, exact source occurrence,
+    condition bytes, and the fail-closed review flags.
     """
     expected = _SEMANTIC_BUCKET_OUTCOME.get(bucket)
     if expected is None:
@@ -6478,10 +6617,6 @@ def _semantic_receipt_binding_errors(
                 str(condition.get("text") or "")):
         errors.append(
             f"{location}: condition text changed after semantic analysis")
-    if receipt.get("bucket") != bucket:
-        errors.append(
-            f"{location}: semantic receipt was issued for bucket "
-            f"{receipt.get('bucket')!r}, not {bucket!r}")
 
     active = index.get("active_analyzer")
     if receipt.get("analyzer") != active:
@@ -6531,18 +6666,20 @@ def _semantic_receipt_binding_errors(
         source_quote_hash=quote_hash,
         condition_hash=policy_polarity_semantics.sha256_text(
             str(condition.get("text") or "")),
-        bucket=bucket,
-        provider=analyzer.get("provider", ""),
-        model=analyzer.get("model", ""),
+        analyzer=analyzer,
     )
     if receipt.get("cache_key") != expected_cache_key:
         errors.append(
             f"{location}: semantic receipt cache identity is inconsistent")
 
-    classification = receipt.get("classification")
+    # THE bucket decision. The model reported what the source says; this
+    # comparison -- source reading vs. what this bucket requires -- is made
+    # here and only here, from a table the provider never saw.
+    source_receipt = receipt.get("source_receipt") or {}
+    classification = source_receipt.get("source_classification")
     if classification in {"mixed", "ambiguous"}:
         errors.append(
-            f"{location}: semantic receipt is {classification}; no "
+            f"{location}: source semantic reading is {classification}; no "
             "authenticated human-review artifact exists for this receipt "
             "kind, so it remains fail-closed")
     elif classification != expected:
@@ -6550,10 +6687,21 @@ def _semantic_receipt_binding_errors(
             f"{location}: bucket-condition-evidence mismatch -- {bucket} "
             f"requires {expected}, but the semantic source receipt is "
             f"{classification}")
+    if source_receipt.get("review_required") is True:
+        errors.append(
+            f"{location}: source semantic reading requires unresolved review")
     if receipt.get("meaning_preserved") is not True:
         errors.append(
             f"{location}: semantic receipt says the normalized condition does "
             "not preserve the source meaning")
+    if receipt.get("contradiction_detected") is True:
+        errors.append(
+            f"{location}: the normalized condition contradicts its source")
+    if receipt.get("omitted_propositions") or receipt.get(
+            "added_propositions"):
+        errors.append(
+            f"{location}: the normalized condition drops or adds propositions "
+            "relative to its source")
     if receipt.get("review_required") is True:
         errors.append(
             f"{location}: semantic receipt requires unresolved review")
@@ -6567,12 +6715,18 @@ def _semantic_receipt_validator(case_id: str, doc_id: str):
 
 
 def cmd_analyze_policy_polarity(args):
-    """Issue one semantic receipt from current registered source provenance.
+    """Issue one two-phase semantic receipt from registered source provenance.
 
-    ``source_selector_file`` is deliberately untrusted. It supplies only the
+    ``source_selector_json`` is deliberately untrusted. It supplies only the
     ranges the caller wants analyzed; the DAO resolves every range against the
     current registered revision and recomputes its PS UID. The caller cannot
     submit a revision digest, source quote hash, analyzer identity, or result.
+
+    Both inputs arrive INLINE, as argument values. There is no file-path input
+    on this command: a path parameter meant any readable file -- a protected
+    source case, a ground-truth report, another case's outputs -- could be
+    handed to a provider by naming it, and nothing on the write path would
+    ever see that it had happened.
     """
     if uid_scheme_for(args.case_id, args.doc_id) != "canonical_v1":
         print(
@@ -6580,13 +6734,11 @@ def cmd_analyze_policy_polarity(args):
             "must be bound to a registered immutable source revision")
         return 1
 
+    condition_text = args.condition_text
     try:
-        condition_text = Path(args.condition_text_file).read_text(
-            encoding="utf-8")
-        selector = json.loads(Path(args.source_selector_file).read_text(
-            encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"FAIL: could not read semantic-analysis input: {exc}")
+        selector = json.loads(args.source_selector_json)
+    except (json.JSONDecodeError, TypeError) as exc:
+        print(f"FAIL: --source-selector-json is not valid JSON: {exc}")
         return 1
     if not condition_text:
         print("FAIL: condition text is empty")
@@ -6630,13 +6782,18 @@ def cmd_analyze_policy_polarity(args):
         print(f"BLOCKED: {args.doc_id} has no current registered revision")
         return 1
 
-    config = llm_providers.parse_provider_config(
-        args, env_prefix="HARNESS_POLICY_SEMANTIC")
+    # Analyzer identity comes from deployment configuration, never from args.
     try:
-        provider = llm_providers.build_provider(config, root=ROOT)
+        trusted = resolve_trusted_analyzer()
+        provider = llm_providers.build_provider(
+            llm_providers.ProviderConfig(
+                provider_name=trusted.provider_name,
+                model_name=trusted.model_name),
+            root=ROOT)
     except llm_providers.ProviderConfigError as exc:
         print(f"FAIL: semantic provider configuration: {exc}")
         return 1
+    active_analyzer = trusted.identity
 
     source_passage = policy_polarity_semantics.source_passage(ordered)
     quote_hash = policy_polarity_semantics.source_quote_sha256(ordered)
@@ -6648,17 +6805,8 @@ def cmd_analyze_policy_polarity(args):
         source_span_uids=derived_uids,
         source_quote_hash=quote_hash,
         condition_hash=condition_hash,
-        bucket=args.bucket,
-        provider=provider.provider_name,
-        model=provider.model_name,
+        analyzer=active_analyzer,
     )
-    requested_analyzer = {
-        "provider": provider.provider_name,
-        "model": provider.model_name,
-        "prompt_version": policy_polarity_semantics.PROMPT_VERSION,
-        "settings_fingerprint":
-            policy_polarity_semantics.settings_fingerprint(),
-    }
 
     target = policy_polarity_semantic_index_path(args.case_id)
     existing_lock = acquire_lock_blocking(
@@ -6679,37 +6827,87 @@ def cmd_analyze_policy_polarity(args):
             for error in errors:
                 print(f"  - {error}")
             return 1
+        # An ordinary analysis call may NOT move the active analyzer. Doing so
+        # would strand every receipt issued under the old profile (each goes
+        # `analyzer is stale`) while `policy_clause_processing` and everything
+        # downstream kept their `passed` status -- the exact state P1-2's
+        # approval review rejected. Switching analyzers is
+        # `set-policy-semantic-analyzer`, which cascades first.
+        established = index.get("active_analyzer")
+        if established is not None and established != active_analyzer:
+            print(
+                "BLOCKED: the case's active semantic analyzer is "
+                f"{established!r}, but deployment configuration resolves to "
+                f"{active_analyzer!r}. An analysis call cannot change the "
+                "analyzer -- run `dao.py set-policy-semantic-analyzer`, which "
+                "invalidates the policy stage and all downstream stages first.")
+            return 1
+
         for receipt in index.get("receipts") or []:
             if receipt.get("cache_key") == cache_key:
-                if index.get("active_analyzer") != requested_analyzer:
-                    index["active_analyzer"] = requested_analyzer
-                    index["index_id"] = \
-                        policy_polarity_semantics.index_id(index)
-                    errors = _semantic_index_errors(index, args.case_id)
-                    if errors:
-                        print("FAIL: cached analyzer profile transition failed:")
-                        for error in errors:
-                            print(f"  - {error}")
-                        return 1
-                    atomic_write_json(target, index)
                 print(
                     "PASS: semantic analysis cache hit "
                     f"{receipt['receipt_id']} (provider not called)")
                 return 0
 
-        prompt = policy_polarity_semantics.build_prompt(
-            source_passage, condition_text, args.bucket)
+        # --- Phase A: source classification, with no bucket and no condition.
         try:
-            result = provider.compare_text(
-                prompt, policy_polarity_semantics.PROMPT_VERSION)
-            if result.prompt_version != policy_polarity_semantics.PROMPT_VERSION:
+            source_result = provider.compare_text(
+                policy_polarity_semantics.build_source_prompt(source_passage),
+                policy_polarity_semantics.SOURCE_PROMPT_VERSION)
+            if source_result.prompt_version != \
+                    policy_polarity_semantics.SOURCE_PROMPT_VERSION:
                 raise ValueError(
-                    "provider returned a different prompt version")
-            analysis = policy_polarity_semantics.parse_analysis(
-                result.text, source_passage)
+                    "provider returned a different source prompt version")
+            if (source_result.provider_name != provider.provider_name
+                    or source_result.model_name != provider.model_name):
+                raise ValueError(
+                    "provider result identity differs from the trusted "
+                    "analyzer")
+            source_analysis = policy_polarity_semantics.parse_source_analysis(
+                source_result.text, source_passage)
         except (llm_providers.ProviderExecutionError, ValueError) as exc:
             print(
-                "FAIL: semantic analysis produced no receipt; "
+                "FAIL: source semantic classification produced no receipt; "
+                f"provider/schema error: {exc}")
+            return 1
+
+        source_receipt = {
+            "source_receipt_id": "",
+            "scheme": policy_polarity_semantics.SCHEME,
+            "case_id": args.case_id,
+            "document_id": args.doc_id,
+            "source_text_revision_sha256": revision,
+            "source_span_uid": derived_uids[0],
+            "source_span_uids": derived_uids,
+            "source_quote_sha256": quote_hash,
+            **source_analysis,
+            "analyzer": active_analyzer,
+            "analyzed_at": now_iso(),
+        }
+        source_receipt["source_receipt_id"] = \
+            policy_polarity_semantics.source_receipt_id(source_receipt)
+
+        # --- Phase B: meaning preservation, same passage plus the condition.
+        try:
+            comparison_result = provider.compare_text(
+                policy_polarity_semantics.build_comparison_prompt(
+                    source_passage, condition_text),
+                policy_polarity_semantics.COMPARISON_PROMPT_VERSION)
+            if comparison_result.prompt_version != \
+                    policy_polarity_semantics.COMPARISON_PROMPT_VERSION:
+                raise ValueError(
+                    "provider returned a different comparison prompt version")
+            if (comparison_result.provider_name != provider.provider_name
+                    or comparison_result.model_name != provider.model_name):
+                raise ValueError(
+                    "provider result identity differs from the trusted "
+                    "analyzer")
+            comparison = policy_polarity_semantics.parse_comparison_analysis(
+                comparison_result.text)
+        except (llm_providers.ProviderExecutionError, ValueError) as exc:
+            print(
+                "FAIL: semantic meaning comparison produced no receipt; "
                 f"provider/schema error: {exc}")
             return 1
 
@@ -6724,23 +6922,15 @@ def cmd_analyze_policy_polarity(args):
             "source_span_uids": derived_uids,
             "source_quote_sha256": quote_hash,
             "condition_text_sha256": condition_hash,
-            "bucket": args.bucket,
-            **analysis,
-            "analyzer": requested_analyzer,
+            "source_receipt": source_receipt,
+            **comparison,
+            "analyzer": active_analyzer,
             "analyzed_at": now_iso(),
         }
-        # A provider cannot substitute a different identity than the configured
-        # one used in the cache key.
-        if (result.provider_name != provider.provider_name
-                or result.model_name != provider.model_name):
-            print(
-                "FAIL: provider result identity differs from the configured "
-                "analyzer; no receipt issued")
-            return 1
         receipt["receipt_id"] = policy_polarity_semantics.receipt_id(receipt)
         prospective = {
             "case_id": args.case_id,
-            "active_analyzer": requested_analyzer,
+            "active_analyzer": active_analyzer,
             "receipts": [*(index.get("receipts") or []), receipt],
         }
         prospective["index_id"] = policy_polarity_semantics.index_id(
@@ -6754,8 +6944,102 @@ def cmd_analyze_policy_polarity(args):
         atomic_write_json(target, prospective)
         print(
             f"PASS: issued semantic receipt {receipt['receipt_id']} "
-            f"({receipt['classification']}, "
-            f"review_required={receipt['review_required']})")
+            f"(source={source_receipt['source_classification']}, "
+            f"meaning_preserved={receipt['meaning_preserved']}, "
+            f"review_required={receipt['review_required'] or source_receipt['review_required']})")
+        return 0
+    finally:
+        release_lock(target)
+
+
+def cmd_set_policy_semantic_analyzer(args):
+    """Switch the case's trusted semantic analyzer, fail-closed.
+
+    Changing the analyzer invalidates every receipt in the case: a receipt is
+    a claim that THIS analyzer read THIS source, and a different analyzer has
+    not read anything. So the switch is not a config edit, it is a cascade,
+    and the ordering is what makes it safe:
+
+      1. resolve and validate the prospective analyzer from deployment config
+      2. invalidate `policy_clause_processing`
+      3. invalidate every transitive downstream stage
+      4. only then activate the new analyzer
+
+    Steps 2 and 3 are one locked read-modify-write (`_invalidate_policy_layer`),
+    so there is no window where the policy stage is demoted while a downstream
+    stage still claims `passed` against it. Any failure -- lock contention,
+    schema rejection, journal failure -- aborts before step 4, leaving the OLD
+    analyzer active. The forbidden end state is a new analyzer sitting on top
+    of a still-`passed` policy layer; nothing here can produce it, because
+    activation is strictly last and every earlier failure returns non-zero.
+    """
+    try:
+        trusted = resolve_trusted_analyzer()
+    except llm_providers.ProviderConfigError as exc:
+        print(f"FAIL: prospective analyzer configuration is invalid: {exc}")
+        return 1
+
+    target = policy_polarity_semantic_index_path(args.case_id)
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id,
+        "switch the trusted policy semantic analyzer")
+    if existing_lock is not None:
+        print(
+            f"LOCKED: held_by={existing_lock['held_by']} "
+            f"run_id={existing_lock['run_id']} "
+            f"since={existing_lock['started_at']} "
+            f"purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        index = load_policy_polarity_semantic_index(args.case_id)
+        errors = _semantic_index_errors(index, args.case_id)
+        if errors:
+            print("FAIL: existing semantic index is invalid:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
+        if index.get("active_analyzer") == trusted.identity:
+            print(
+                "PASS: the trusted analyzer is already active; no receipts "
+                "invalidated, no cascade run")
+            return 0
+
+        prospective = {
+            "case_id": args.case_id,
+            "active_analyzer": trusted.identity,
+            "receipts": index.get("receipts") or [],
+        }
+        prospective["index_id"] = policy_polarity_semantics.index_id(
+            prospective)
+        # Validate the prospective state BEFORE invalidating anything: a
+        # switch that could never be persisted must not cost a cascade.
+        errors = _semantic_index_errors(prospective, args.case_id)
+        if errors:
+            print("FAIL: prospective analyzer state is schema-invalid:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
+
+        reason = (
+            "policy semantic analyzer changed to "
+            f"{trusted.provider_name}:{trusted.model_name} -- every semantic "
+            f"receipt was issued by a different analyzer ({args.reason})")
+        try:
+            changed = _invalidate_policy_layer(
+                args.case_id, reason, args.held_by, args.run_id)
+        except CascadeFailed as exc:
+            print(
+                f"FAIL: analyzer switch aborted -- {exc}. The previous "
+                "analyzer remains active; no receipt or stage status changed.")
+            return 1
+
+        atomic_write_json(target, prospective)
+        print(
+            f"PASS: active semantic analyzer is now {trusted.provider_name}:"
+            f"{trusted.model_name}; every existing receipt is stale and must "
+            "be re-analyzed")
+        if changed:
+            print(f"INVALIDATED: {', '.join(sorted(changed))}")
         return 0
     finally:
         release_lock(target)
@@ -6763,7 +7047,9 @@ def cmd_analyze_policy_polarity(args):
 
 # ------------------------------------------------------------------- main --
 
-def main():
+def build_parser():
+    """The CLI surface, separated from main() so tests can assert what the
+    production command does and does not accept without running it."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -7015,8 +7301,12 @@ def main():
 
     p = sub.add_parser(
         "analyze-policy-polarity",
-        help="invoke the configured semantic provider explicitly and issue a "
-             "DAO-owned receipt bound to current registered source spans")
+        help="invoke the deployment-configured semantic analyzer and issue a "
+             "DAO-owned two-phase receipt bound to current registered source "
+             "spans. No --provider/--model: the analyzer is deployment-owned "
+             "(switch it with set-policy-semantic-analyzer). No file-path "
+             "inputs: both texts are inline, so no arbitrary file can be "
+             "routed to a provider by naming it.")
     p.add_argument("case_id")
     p.add_argument("--doc-id", dest="doc_id", required=True)
     p.add_argument(
@@ -7024,21 +7314,38 @@ def main():
         help="expected PS UID in canonical source order; repeat for a "
              "multi-span condition. The DAO recomputes and compares it.")
     p.add_argument(
-        "--source-selector-file", required=True,
-        help="untrusted JSON selector {source_spans:[canonical span objects]}; "
-             "quotes, offsets and occurrence ordinals are re-derived from the "
-             "current registered revision and never accepted as authority")
-    p.add_argument("--condition-text-file", required=True)
+        "--source-selector-json", required=True,
+        help="untrusted INLINE JSON selector {source_spans:[canonical span "
+             "objects]}; quotes, offsets and occurrence ordinals are "
+             "re-derived from the current registered revision and never "
+             "accepted as authority")
+    p.add_argument(
+        "--condition-text", required=True,
+        help="the extracted condition text itself, inline")
     p.add_argument(
         "--bucket", required=True,
+        help="the bucket the caller intends to file this condition under. "
+             "Recorded nowhere in the receipt and never sent to the provider "
+             "-- the DAO compares the source reading against this bucket's "
+             "requirement in Python, after the analysis returns.",
         choices=[
             "payout_conditions", "exclusions", "reduction_conditions",
             "coverage_start_conditions",
         ])
-    llm_providers.add_provider_args(p)
     p.add_argument("--held-by", required=True)
     p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_analyze_policy_polarity)
+
+    p = sub.add_parser(
+        "set-policy-semantic-analyzer",
+        help="DAO admin: adopt the deployment-configured semantic analyzer, "
+             "invalidating policy_clause_processing and every downstream "
+             "stage first (fail-closed; the new analyzer activates last)")
+    p.add_argument("case_id")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--held-by", required=True)
+    p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_set_policy_semantic_analyzer)
 
     p = sub.add_parser("read-policy-polarity-semantic-index")
     p.add_argument("case_id")
@@ -7065,7 +7372,11 @@ def main():
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_record_human_review)
 
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
     sys.exit(args.fn(args))
 
 

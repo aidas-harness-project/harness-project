@@ -87,12 +87,29 @@ def issue_semantic_receipts(isolated_dao, make_args, monkeypatch):
     no test can regain the old self-declared-polarity path.
     """
     counter = 0
-    expected_by_bucket = {
-        "payout_conditions": "affirmative",
-        "coverage_start_conditions": "affirmative",
-        "exclusions": "restrictive_or_negative",
-        "reduction_conditions": "restrictive_or_negative",
-    }
+    # Derived from the production table rather than restated, so a change to
+    # the bucket contract cannot leave these fixtures asserting the old one.
+    expected_by_bucket = policy_polarity_semantics.BUCKET_REQUIREMENT
+
+    def _trusted(provider):
+        def _resolve(env=None):
+            return dao.TrustedAnalyzer(
+                provider_name=provider.provider_name,
+                model_name=provider.model_name,
+                identity={
+                    "provider": provider.provider_name,
+                    "model": provider.model_name,
+                    "source_prompt_version":
+                        policy_polarity_semantics.SOURCE_PROMPT_VERSION,
+                    "comparison_prompt_version":
+                        policy_polarity_semantics.COMPARISON_PROMPT_VERSION,
+                    "semantic_schema_version":
+                        policy_polarity_semantics.SEMANTIC_SCHEMA_VERSION,
+                    "settings_fingerprint":
+                        policy_polarity_semantics.settings_fingerprint(),
+                },
+            )
+        return _resolve
 
     def _issue(contract, case_id, doc_id):
         nonlocal counter
@@ -110,8 +127,8 @@ def issue_semantic_receipts(isolated_dao, make_args, monkeypatch):
                             item["physical_page"], item["start_char"],
                             item["end_char"], item["uid"]))
                     passage = policy_polarity_semantics.source_passage(records)
-                    response = {
-                        "classification": classification,
+                    source_response = {
+                        "source_classification": classification,
                         "target_predicates": ["fixture"],
                         "negation_scope_analysis":
                             "mocked semantic fixture for an unrelated gate",
@@ -122,37 +139,48 @@ def issue_semantic_receipts(isolated_dao, make_args, monkeypatch):
                             "source_end": len(passage),
                             "reason": "fixture classification",
                         }],
-                        "meaning_preserved": True,
                         "review_required": False,
                     }
-                    provider = llm_providers.FixtureProvider(
-                        model_name="semantic-fixture-v1",
-                        responses={
-                            "compare_text": json.dumps(
-                                response, ensure_ascii=False),
-                        })
+                    comparison_response = {
+                        "meaning_preserved": True,
+                        "omitted_propositions": [],
+                        "added_propositions": [],
+                        "contradiction_detected": False,
+                        "review_required": False,
+                    }
+
+                    class _TwoPhase(llm_providers.FixtureProvider):
+                        """Answers Phase A then Phase B off prompt_version."""
+
+                        def compare_text(self, prompt, prompt_version):
+                            payload = (
+                                source_response
+                                if prompt_version == policy_polarity_semantics
+                                .SOURCE_PROMPT_VERSION
+                                else comparison_response)
+                            return self._result(
+                                json.dumps(payload, ensure_ascii=False),
+                                prompt_version, {})
+
+                    provider = _TwoPhase(model_name="semantic-fixture-v1")
                     monkeypatch.setattr(
                         dao.llm_providers, "build_provider",
                         lambda *args, _provider=provider, **kwargs: _provider)
+                    # The analyzer is deployment-owned in production; tests
+                    # inject one, which is the only sanctioned way to reach a
+                    # fixture provider at all.
+                    monkeypatch.setattr(
+                        dao, "resolve_trusted_analyzer", _trusted(provider))
                     counter += 1
-                    selector_file = (
-                        isolated_dao / f"semantic_selector_{counter}.json")
-                    selector_file.write_text(json.dumps(
-                        {"source_spans": condition["source_span_uids"]},
-                        ensure_ascii=False), encoding="utf-8")
-                    condition_file = (
-                        isolated_dao / f"semantic_condition_{counter}.txt")
-                    condition_file.write_text(
-                        condition["text"], encoding="utf-8")
                     args = make_args(
                         case_id=case_id,
                         doc_id=doc_id,
                         source_span_uid=[item["uid"] for item in records],
-                        source_selector_file=str(selector_file),
-                        condition_text_file=str(condition_file),
+                        source_selector_json=json.dumps(
+                            {"source_spans": condition["source_span_uids"]},
+                            ensure_ascii=False),
+                        condition_text=condition["text"],
                         bucket=bucket,
-                        provider="fixture",
-                        model="semantic-fixture-v1",
                         held_by="policy-pipeline",
                         run_id=contract.get("run_id")
                         or "RUN_20260728_001",
@@ -160,12 +188,13 @@ def issue_semantic_receipts(isolated_dao, make_args, monkeypatch):
                     assert dao.cmd_analyze_policy_polarity(args) == 0
                     condition_hash = policy_polarity_semantics.sha256_text(
                         condition["text"])
+                    # No bucket filter: a receipt is not issued for a bucket
+                    # any more. Source spans + condition bytes identify it.
                     receipt = next(
                         item for item in
                         dao.load_policy_polarity_semantic_index(
                             case_id)["receipts"]
                         if item["condition_text_sha256"] == condition_hash
-                        and item["bucket"] == bucket
                         and item["source_span_uids"] == [
                             record["uid"] for record in records])
                     condition["polarity_analysis_receipt_id"] = \
