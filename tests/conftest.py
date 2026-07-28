@@ -74,6 +74,66 @@ def canonicalize():
 
 
 @pytest.fixture
+def segment_pdf():
+    """Build a real PDF whose printed page numbers are genuinely on the pages.
+
+    P0-6's whole point is that the DAO reads the parent PDF itself, so a test
+    that stubs the read proves nothing about the gate. Every P0-6 test therefore
+    runs against an actual pymupdf-rendered file.
+
+    `body_for(logical)` supplies each page's text; the printed marker
+    'N / TOTAL' is appended for the pages that should carry one.
+    `unnumbered` lists logical pages deliberately printed WITHOUT a marker (the
+    "no printed number" case, which must block rather than fall back to the
+    offset).
+    """
+    import fitz
+
+    def _build(path, *, total_logical, offset=7, body_for=None,
+               unnumbered=(), front_matter_body="표지"):
+        """Physical page = logical + offset. The first `offset` physical pages
+        are unnumbered front matter, exactly like CASE_030's real policy PDF."""
+        body_for = body_for or (lambda lp: f"제{lp}조 본문 내용")
+        doc = fitz.open()
+        for _ in range(offset):
+            page = doc.new_page()
+            page.insert_text((72, 72), front_matter_body, fontsize=11)
+        for logical in range(1, total_logical + 1):
+            page = doc.new_page()
+            page.insert_text((72, 72), body_for(logical), fontsize=11)
+            if logical not in unnumbered:
+                page.insert_text(
+                    (72, 700), f"{logical} / {total_logical}", fontsize=9)
+        doc.save(str(path))
+        doc.close()
+        return path
+
+    return _build
+
+
+@pytest.fixture
+def register_derivation():
+    """Run the real `register-segment-derivation` command.
+
+    Tests use this rather than hand-writing a page_map, because hand-writing one
+    is exactly what P0-6 makes impossible -- a fixture that could do it would be
+    testing a path production cannot reach.
+    """
+    def _register(make_args, case_id, doc_id, pages, page_offset,
+                  held_by="document-pipeline", run_id="RUN_20260728_001",
+                  parent_document_id=None, page_map_file=None,
+                  expect_parent_sha256=None):
+        return dao.cmd_register_segment_derivation(make_args(
+            case_id=case_id, doc_id=doc_id, pages=pages,
+            page_offset=page_offset, held_by=held_by, run_id=run_id,
+            parent_document_id=parent_document_id,
+            page_map_file=page_map_file,
+            expect_parent_sha256=expect_parent_sha256))
+
+    return _register
+
+
+@pytest.fixture
 def make_args():
     """Builds an argparse.Namespace-like object for calling dao's cmd_*
     functions directly, without shelling out. Pass only the overrides a
@@ -91,6 +151,10 @@ def make_args():
             reviewer=None, reason=None, doc_path=None,
             topic=None, sources_file=None, conflict_id=None, verdict=None, note=None,
             caller_stage=None, description=None, version=None, fields_file=None,
+            expect=None, pages=None, page_offset=None, page_map_file=None,
+            parent_document_id=None, expect_parent_sha256=None,
+            artifact_kind=None, artifact_id=None, target_key=None,
+            decision=None, document_id=None,
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)

@@ -251,11 +251,66 @@ def test_dao_manifest_write_rejects_bad_lineage(isolated_dao, make_args):
     assert not (isolated_dao / "outputs" / "CASE_030" / "document_manifest.json").exists()
 
 
-def test_dao_manifest_write_accepts_valid_segment(isolated_dao, make_args):
+def test_dao_manifest_write_cannot_introduce_a_page_map(isolated_dao, make_args):
+    """P0-6: `page_map` is DAO-owned, so even a perfectly valid one is refused
+    when it arrives through write-contract.
+
+    This used to be `test_dao_manifest_write_accepts_valid_segment`, asserting
+    that a hand-written page_map with correct lineage was accepted. That
+    acceptance WAS the vulnerability: every value in the map came from the
+    caller, and the checks it passed only compared those values to each other.
+    The mapping now has exactly one writer,
+    `dao.py register-segment-derivation`, which derives it from the parent PDF.
+    """
     _seed_processed(isolated_dao, "DOC_004", DOC004_MARKERS)
     rc = _write_manifest(isolated_dao, make_args, _manifest(_physical(), _segment()))
-    assert rc == 0
-    assert (isolated_dao / "outputs" / "CASE_030" / "document_manifest.json").exists()
+    assert rc == 1
+    assert not (isolated_dao / "outputs" / "CASE_030" / "document_manifest.json").exists()
+
+
+def test_dao_manifest_write_accepts_a_dao_issued_page_map(
+        isolated_dao, make_args, segment_pdf, register_derivation):
+    """The lineage path still works end to end -- but the page_map has to have
+    been issued by the DAO from the real parent PDF first."""
+    raw = isolated_dao / "data" / "raw" / "CASE_030"
+    raw.mkdir(parents=True)
+    segment_pdf(raw / "DOC_001.pdf", total_logical=8, offset=2)
+
+    parent = _physical()
+    parent["source_total_pages"] = 10
+    # Register the parent and the segment with NO page_map: the DAO issues it.
+    seg_text = "<<<PAGE page=1>>>\na\n<<<PAGE page=2>>>\nb\n"
+    _seed_processed(isolated_dao, "DOC_004", seg_text)
+    seg = _segment(ranges=({"start": 1, "end": 2},), logical=(1, 2))
+    seg["derived_text_sha256"] = hashlib.sha256(
+        seg_text.encode("utf-8")).hexdigest()
+    seg.pop("page_map")
+    bootstrap = _manifest(parent, seg)
+    # A segment entry needs a page_map to be schema-valid, so the manifest is
+    # seeded directly here -- a fixture-only shortcut standing in for the
+    # intake/extraction step, NOT a production write path (which is exactly why
+    # write-contract refuses it above).
+    out = isolated_dao / "outputs" / "CASE_030"
+    out.mkdir(parents=True, exist_ok=True)
+    seg["page_map"] = [{"logical_page": 1, "source_physical_page": 3},
+                       {"logical_page": 2, "source_physical_page": 4}]
+    (out / "document_manifest.json").write_text(
+        json.dumps(bootstrap, ensure_ascii=False), encoding="utf-8")
+
+    text_file = isolated_dao / "seg.md"
+    text_file.write_text(seg_text, encoding="utf-8")
+    assert dao.cmd_write_redacted_text(make_args(
+        case_id="CASE_030", doc_id="DOC_004", text_file=str(text_file),
+        held_by="document-pipeline", run_id="RUN_20260723_001")) == 0
+
+    assert register_derivation(
+        make_args, "CASE_030", "DOC_004", "1,2", 2,
+        run_id="RUN_20260723_001") == 0
+
+    manifest = dao.read_contract_data("CASE_030", "document_manifest.json")
+    entry = next(d for d in manifest["documents"] if d["document_id"] == "DOC_004")
+    assert [e["source_physical_page"] for e in entry["page_map"]] == [3, 4]
+    assert all(e["logical_page_evidence"] for e in entry["page_map"])
 
 
 def test_normalized_output_for_unregistered_doc_refused(isolated_dao, make_args):
@@ -339,7 +394,14 @@ def test_partial_manifest_not_written_on_lineage_failure(isolated_dao, make_args
     manifest -- the write is refused whole."""
     _seed_processed(isolated_dao, "DOC_004", DOC004_MARKERS)
     good = _manifest(_physical(), _segment())
-    _write_manifest(isolated_dao, make_args, good)
+    # Seeded directly rather than through write-contract: `page_map` is
+    # DAO-owned since P0-6, so no caller-facing write path can create this
+    # starting state. A fixture shortcut to reach the state under test, not a
+    # production path.
+    out = isolated_dao / "outputs" / "CASE_030"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "document_manifest.json").write_text(
+        json.dumps(good, ensure_ascii=False), encoding="utf-8")
     before = (isolated_dao / "outputs" / "CASE_030" / "document_manifest.json").read_bytes()
 
     # Patch the segment to a self-parent -> lineage failure.

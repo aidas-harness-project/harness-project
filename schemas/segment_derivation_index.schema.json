@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "segment_derivation_index.schema.json",
+  "title": "_segment_derivation_index.json -- DAO-owned segment page-map receipts v0.1",
+  "description": "P0-6. One `segment_page_map_v1` receipt per segment, recording that the DAO itself opened the registered parent PDF, extracted each physical page, hashed the text IT read, and found a printed page number on that page confirming the logical number claimed for it. DAO-OWNED: written only by `dao.py register-segment-derivation`. No agent-facing path (write-contract, patch-manifest-document, the revision index) may create, change, or delete a receipt, and `page_map` is sealed in source_provenance.PROTECTED_MANIFEST_FIELDS so the manifest's copy can only ever be this file's projection. Before this existed, segment_lineage.py compared the manifest's page_map to the segment's own <<<PAGE>>> markers, page ranges, and derived-text digest -- all values produced by the same extracting agent, so a mapping that was wrong in a mutually consistent way (logical 12 declared on physical 20 instead of 19, with the markers and ranges written to match) passed every check. Nothing compared the mapping to the parent PDF. FIELD-NAME NOTE: the receipt calls a page's digest `source_page_text_sha256`, which is what it actually is -- the SHA-256 of the text extracted from that physical page, never of the page's PDF bytes. document_manifest.schema.json keeps the older, less accurate name `physical_page_sha256` for the same value, because CASE_030's data and that schema's page_map_entry (additionalProperties:false) predate the rename; segment_derivation.manifest_page_map_from_receipt owns the translation between them, so the writer and every verifier cannot drift apart. A future manifest schema bump may rename the manifest field to match; until then the receipt is the authoritative spelling.",
+  "type": "object",
+  "properties": {
+    "case_id": {
+      "$ref": "common_component_output.schema.json#/$defs/case_id"
+    },
+    "segments": {
+      "type": "array",
+      "description": "One entry per segment that has a verified page-map derivation. A segment absent from this array has no receipt, which is a finalization blocker -- never a check that is skipped for lack of data.",
+      "items": {
+        "$ref": "#/$defs/derivation_receipt"
+      }
+    }
+  },
+  "required": ["case_id", "segments"],
+  "additionalProperties": false,
+  "$defs": {
+    "derivation_receipt": {
+      "type": "object",
+      "description": "One segment's verified mapping. Valid only for the exact triple it names: these parent bytes, this parent page count, and this segment source-text revision. Any of the three moving makes the receipt a true statement about a state that no longer exists, which is why finalization re-checks all of them against freshly computed values instead of trusting the recorded ones.",
+      "properties": {
+        "scheme": {
+          "const": "segment_page_map_v1",
+          "description": "The verification this receipt was issued under. A value this build does not recognize is refused rather than treated as equivalent -- an unknown scheme is not a verified one."
+        },
+        "document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id",
+          "description": "The segment whose page map this receipt establishes."
+        },
+        "parent_source_document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id",
+          "description": "The registered PHYSICAL parent the DAO opened. Re-checked against the manifest's source_document_id at finalization: a segment re-parented after its receipt was issued no longer has a receipt for the parent it now claims."
+        },
+        "parent_source_pdf_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 of the parent's raw file, computed by the DAO by reading the file at registration time -- never accepted from the caller and never copied out of the manifest. This is what binds the mapping to one specific PDF: a page hash and a printed-page quote taken from a DIFFERENT file with similar text cannot satisfy a receipt whose parent digest does not match."
+        },
+        "parent_source_total_pages": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The parent PDF's real physical page count, read from the container by the DAO."
+        },
+        "segment_source_text_revision_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "The registered source-text revision (see revision_index.schema.json) this mapping produced. Revising the segment's text after the receipt was issued makes the receipt stale: the mapping was confirmed for bytes that are no longer current."
+        },
+        "derivation_method": {
+          "enum": ["embedded_text_segment", "page_extraction"],
+          "description": "Only deterministic decodes of the parent's embedded text layer can be verified here. `ocr_segment` is deliberately absent: confirming an OCR mapping means re-reading the parent's pages with an OCR reader, which UID verification is forbidden to do, so an OCR segment cannot obtain a receipt and therefore cannot finalize. Fail-closed and stated, rather than a weaker check that would look like coverage."
+        },
+        "page_offset_candidate": {
+          "type": "integer",
+          "description": "The offset the caller suggested, recorded for audit only. It selects which physical page the DAO LOOKS at and grants nothing: every page below carries its own printed-number confirmation, and a page whose printed number cannot be read blocks the registration rather than inheriting an offset that worked elsewhere."
+        },
+        "extractor": {
+          "type": "object",
+          "description": "The extraction identity the DAO observed while reading the parent's pages. Recorded so a CHANGE is a single comparison; deliberately not treated as proof of sameness (same asymmetry as revision_index's extractor_profile).",
+          "properties": {
+            "tool": { "type": "string", "minLength": 1 },
+            "library": { "type": ["string", "null"] },
+            "library_version": { "type": ["string", "null"] },
+            "settings": { "type": ["string", "null"] }
+          },
+          "required": ["tool", "library", "library_version", "settings"],
+          "additionalProperties": false
+        },
+        "pages": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Every logical page of the segment, each with its own independently confirmed physical page. No page may rely on another page's confirmation.",
+          "items": { "$ref": "#/$defs/verified_page" }
+        },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "issued_by": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The --held-by of the DAO call. Accountability, not authority: it grants nothing, and in particular it is never a substitute for the per-page evidence."
+        },
+        "run_id": { "type": "string", "pattern": "^RUN_[0-9]{8}_[0-9]+$" }
+      },
+      "required": [
+        "scheme",
+        "document_id",
+        "parent_source_document_id",
+        "parent_source_pdf_sha256",
+        "parent_source_total_pages",
+        "segment_source_text_revision_sha256",
+        "derivation_method",
+        "page_offset_candidate",
+        "extractor",
+        "pages",
+        "issued_at",
+        "issued_by"
+      ],
+      "additionalProperties": false
+    },
+    "verified_page": {
+      "type": "object",
+      "description": "One confirmed logical->physical mapping. Both proofs are required: the digest says WHAT was on the page the DAO read, and the printed marker says that page announces itself as this logical page. A digest alone would let any page of the right document pass; a printed number alone would not detect the page's content having been swapped.",
+      "properties": {
+        "logical_page": { "type": "integer", "minimum": 1 },
+        "source_physical_page": { "type": "integer", "minimum": 1 },
+        "source_page_text_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 of the text the DAO extracted from source_physical_page of the parent PDF. Accurate name for the value the manifest calls physical_page_sha256 (see the top-level description). Computed by the DAO over what it read; a submitted value is only ever compared against it, never stored."
+        },
+        "logical_page_evidence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The verbatim printed page marker the DAO found ON that physical page confirming this logical number (e.g. '12 / 240'). Found by the DAO in the page text it extracted -- a caller cannot supply it. A page with no readable printed number is never mapped on a guessed or 'consistent' offset: registration blocks for review, and there is deliberately no override field, because a writable confirmed-flag would be this gate's off-switch."
+        }
+      },
+      "required": [
+        "logical_page",
+        "source_physical_page",
+        "source_page_text_sha256",
+        "logical_page_evidence"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

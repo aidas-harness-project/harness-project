@@ -45,12 +45,26 @@ import json
 import re
 
 # Manifest fields no agent-facing write path may create, change, or remove.
-# `page_map`'s physical_page_sha256 is provenance the DAO derives in
-# extract_embedded_segment; the rest are UID identity inputs.
+#
+# `page_map` joined this set in P0-6, and it is the field the seal matters most
+# for. The comment that used to sit here said its digests were "provenance the
+# DAO derives in extract_embedded_segment" -- but extract_embedded_segment is a
+# TOOL an agent runs, and the values it produced were then submitted through an
+# ordinary manifest write. Nothing on the write path re-derived them, so the
+# mapping was provenance only in the sense that something had once looked at a
+# PDF; a caller writing the numbers directly was indistinguishable. The DAO now
+# issues the mapping itself (`dao.py register-segment-derivation`) and the
+# manifest's copy is that receipt's projection, which is only true while no
+# other write path can touch it.
+#
+# The rest are UID identity inputs: source_pdf_sha256 is the first input to
+# every canonical UID, and uid_scheme/uid_stability decide whether UIDs are
+# verified at all.
 PROTECTED_MANIFEST_FIELDS = frozenset({
     "source_pdf_sha256",
     "uid_scheme",
     "uid_stability",
+    "page_map",
 })
 
 _SENTINEL = object()
