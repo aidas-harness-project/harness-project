@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "common_component_output.schema.json",
-  "title": "Common component output contract v0.3",
-  "description": "Fields every pipeline component's output JSON includes in common. Judgment-type outputs add the safety fields (source_grounded, hallucination_risk_check, prohibited_language_check). See harness-guardrails (P1) for the rules this schema enforces.",
+  "title": "Common component output contract v0.4",
+  "description": "Fields every pipeline component's output JSON includes in common. Judgment-type outputs add the safety fields (source_grounded, hallucination_risk_check, prohibited_language_check). See harness-guardrails (P1) for the rules this schema enforces. v0.4 (P0-7) gives strict_evidence_reference optional start_char/end_char and adds canonical_evidence_reference: under canonical_v1 the DAO requires those exact offsets on clause/condition evidence and resolves them against the registered source revision, so evidence names one exact occurrence rather than any occurrence of a matching quote. The fields are schema-optional so legacy artifacts stay readable -- enforcement is the DAO's, not the schema's.",
   "type": "object",
   "properties": {
     "case_id": { "$ref": "#/$defs/case_id" },
@@ -171,14 +171,34 @@
     },
     "strict_evidence_reference": {
       "type": "object",
-      "description": "A reference to a source quote where NONE of document_id/page/quote may be omitted -- used where provenance must be independently verifiable and structure must not be relied on to make document/page 'obvious' (see normalized_policy_clause). quote must contain at least one non-whitespace character; cross-contract validation additionally verifies the quote appears verbatim on the cited page of the processed text.",
+      "description": "A reference to a source quote where NONE of document_id/page/quote may be omitted -- used where provenance must be independently verifiable and structure must not be relied on to make document/page 'obvious' (see normalized_policy_clause). quote must contain at least one non-whitespace character; cross-contract validation additionally verifies the quote appears verbatim on the cited page of the processed text. start_char/end_char are schema-OPTIONAL here so pre-P0-7 (legacy) contracts stay readable and migratable -- they are MANDATORY under canonical_v1, where the DAO refuses a normalized-clause write or a policy_clause_processing finalization whose clause/condition evidence carries no exact range (see canonical_evidence_reference). A quote alone cannot say WHICH occurrence of a repeated phrase it means, so quote equality -- even whitespace-normalized quote equality -- is no longer the canonical evidence-binding relation.",
       "properties": {
         "document_id": { "$ref": "#/$defs/document_id" },
         "document_type": { "$ref": "#/$defs/document_type" },
         "page": { "type": "integer", "minimum": 1 },
-        "quote": { "type": "string", "pattern": "\\S" }
+        "quote": { "type": "string", "pattern": "\\S" },
+        "start_char": { "type": "integer", "minimum": 0 },
+        "end_char": { "type": "integer", "minimum": 1 }
       },
-      "required": ["document_id", "page", "quote"]
+      "required": ["document_id", "page", "quote"],
+      "dependentRequired": {
+        "start_char": ["end_char"],
+        "end_char": ["start_char"]
+      }
+    },
+    "canonical_evidence_reference": {
+      "$comment": "Not $ref'd by any contract property: canonical_v1 enforcement lives in the DAO (policy_uid_resolver.resolve_exact_evidence_reference), because a legacy artifact must stay READABLE while a new canonical write must be REFUSED -- one JSON Schema cannot express both for the same field. This def is the normative statement of the shape the DAO requires, kept beside strict_evidence_reference so the two cannot drift.",
+      "description": "A strict_evidence_reference that additionally pins the EXACT source range the cited passage occupies. Offsets use the same coordinate system as canonical_source_span: Python string indices into the processed page body (the text AFTER that page's <<<PAGE page=N>>> marker) of the source_text_revision this contract is bound to. quote must equal page_text[start_char:end_char] verbatim -- no strip, no whitespace collapse, no Unicode substitution. The offsets are a PROVENANCE SELECTOR, not identity: they say which occurrence of a repeated phrase this evidence is, and they never enter a UID hash, so canonical_v1 UID values are unchanged by their presence.",
+      "type": "object",
+      "properties": {
+        "document_id": { "$ref": "#/$defs/document_id" },
+        "document_type": { "$ref": "#/$defs/document_type" },
+        "page": { "type": "integer", "minimum": 1 },
+        "quote": { "type": "string", "pattern": "\\S" },
+        "start_char": { "type": "integer", "minimum": 0 },
+        "end_char": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["document_id", "page", "quote", "start_char", "end_char"]
     },
     "canonical_source_span": {
       "type": "object",

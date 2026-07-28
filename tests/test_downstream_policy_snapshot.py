@@ -43,6 +43,12 @@ def _span():
     return {"page": 1, "start_char": 0, "end_char": len(QUOTE), "quote": QUOTE}
 
 
+def _evidence():
+    """Canonical evidence for `_span()` (P0-7): the same exact source range."""
+    return {"document_id": "DOC_001", "page": 1, "start_char": 0,
+            "end_char": len(QUOTE), "quote": QUOTE}
+
+
 def _uids(pdf_sha256):
     """Every UID this module's contracts carry, derived from source."""
     import policy_uid
@@ -68,16 +74,12 @@ def _normalized(uids):
             "clause_uid": uids["clause"],
             "source_boundary_uids": [uids["boundary"]],
             "source_span_uids": [_span()],
-            "evidence_references": [{
-                "document_id": "DOC_001", "page": 1, "quote": QUOTE,
-            }],
+            "evidence_references": [_evidence()],
             "review_required": False,
             "payout_conditions": [{
                 "condition_uid": uids["condition"],
                 "source_span_uids": [_span()],
-                "evidence_references": [{
-                    "document_id": "DOC_001", "page": 1, "quote": QUOTE,
-                }],
+                "evidence_references": [_evidence()],
                 "review_required": False,
             }],
         }],

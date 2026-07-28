@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "normalized_policy_clause.schema.json",
-  "title": "normalized_policy_clause.json -- normalized policy clauses for one policy document v0.5",
-  "description": "Produced by policy-pipeline. Stable clause/condition UIDs are the machine addresses; sequential clause_id is display-only. Semantic clause kinds are stored in dedicated buckets so obligations, definitions, procedures, termination, disputes, and coverage-start rules cannot be mistaken for payout conditions. v0.5 adds source_span_uids on clauses and conditions: the normalized text is REWRITTEN wording and can never identify anything, and evidence_references carry no offsets, so before this the PC/CI UIDs were unverifiable and any well-formed string passed. The field is schema-OPTIONAL only so pre-canonical (legacy) contracts stay readable and migratable -- it is MANDATORY under canonical_v1, where the DAO refuses a write whose clause or condition cannot be recomputed from these spans. Absent provenance is a refusal there, never a skipped check.",
+  "title": "normalized_policy_clause.json -- normalized policy clauses for one policy document v0.6",
+  "description": "Produced by policy-pipeline. Stable clause/condition UIDs are the machine addresses; sequential clause_id is display-only. Semantic clause kinds are stored in dedicated buckets so obligations, definitions, procedures, termination, disputes, and coverage-start rules cannot be mistaken for payout conditions. v0.5 adds source_span_uids on clauses and conditions: the normalized text is REWRITTEN wording and can never identify anything, so before this the PC/CI UIDs were unverifiable and any well-formed string passed. The field is schema-OPTIONAL only so pre-canonical (legacy) contracts stay readable and migratable -- it is MANDATORY under canonical_v1, where the DAO refuses a write whose clause or condition cannot be recomputed from these spans. Absent provenance is a refusal there, never a skipped check. v0.6 (P0-7) does the same for the other side of the binding: evidence_references gain optional start_char/end_char, MANDATORY under canonical_v1, and identity spans and evidence must resolve to the SAME exact ranges in the registered source revision. Quote equality -- including whitespace-normalized quote equality, which was the previous rule -- no longer binds canonical evidence, because it cannot distinguish two occurrences of a repeated passage. The offsets are a provenance selector only: they never enter a UID hash, so canonical_v1 UID values are unchanged.",
   "allOf": [
     {
       "$ref": "common_component_output.schema.json"
@@ -77,7 +77,7 @@
         "evidence_references": {
           "type": "array",
           "minItems": 1,
-          "description": "Every condition carries its OWN source location -- document_id/page/quote all required (strict_evidence_reference). A condition may not inherit its provenance from the clause or from structural context; cross-contract validation additionally verifies each quote appears verbatim on the cited page.",
+          "description": "Every condition carries its OWN source location -- document_id/page/quote all required (strict_evidence_reference). A condition may not inherit its provenance from the clause or from structural context; cross-contract validation additionally verifies each quote appears verbatim on the cited page. Under canonical_v1 each reference must ALSO carry start_char/end_char (P0-7): the DAO resolves them against the registered source revision and requires the element's identity spans and its evidence to be the same exact ranges, so the second occurrence of a repeated phrase can no longer be evidenced by the first. Optional in the schema only so legacy contracts stay readable -- the DAO refuses a canonical write or finalization without them.",
           "items": {
             "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
           }
@@ -295,7 +295,7 @@
         "evidence_references": {
           "type": "array",
           "minItems": 1,
-          "description": "Clause-level source location (e.g. the clause heading/quote), independent of the per-condition references above -- document_id/page/quote all required (strict_evidence_reference), verified verbatim against the processed text by cross-contract validation.",
+          "description": "Clause-level source location (e.g. the clause heading/quote), independent of the per-condition references above -- document_id/page/quote all required (strict_evidence_reference), verified verbatim against the processed text by cross-contract validation. Under canonical_v1 each reference must ALSO carry start_char/end_char (P0-7), resolved against the registered source revision and required to be the same exact ranges as the clause's source_span_uids.",
           "items": {
             "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
           }

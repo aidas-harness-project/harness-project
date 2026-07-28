@@ -172,6 +172,14 @@ def _seed_contracts(isolated_dao, canonical=None):
         normalized["clauses"][0]["source_span_uids"] = [span]
         normalized["clauses"][0]["payout_conditions"][0][
             "source_span_uids"] = [span]
+        # P0-7: under canonical_v1 evidence must pin the same exact range as
+        # the identity span. The legacy branch deliberately leaves the
+        # offset-free evidence above alone -- that shape stays readable.
+        evidence = dict(span)
+        evidence["document_id"] = "DOC_001"
+        normalized["clauses"][0]["evidence_references"] = [evidence]
+        normalized["clauses"][0]["payout_conditions"][0][
+            "evidence_references"] = [dict(evidence)]
         inventory["page_spans"] = [{
             "span_uid": uids["span"], "page": 1, "start_char": 0,
             "end_char": len(QUOTE), "quote": QUOTE,

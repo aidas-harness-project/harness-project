@@ -162,6 +162,13 @@ def _span(doc_id, page, needle):
             "end_char": start + len(needle), "quote": needle}
 
 
+def _evidence(doc_id, span):
+    """Canonical evidence for an identity span (P0-7): the same exact range."""
+    return {"document_id": doc_id, "page": span["page"],
+            "start_char": span["start_char"], "end_char": span["end_char"],
+            "quote": span["quote"]}
+
+
 def _ps(pdf, doc_id, span):
     return policy_uid.compute_uid(
         "span", source_pdf_sha256=pdf, physical_page=span["page"],
@@ -301,8 +308,7 @@ def build_clauses(pdf1, *, table_ref, binding_docs=("DOC_001", "DOC_002")):
             "condition", pdf1, "DOC_001", [cond_span], parent=pc),
         "source_span_uids": [cond_span],
         "text": cond_span["quote"],
-        "evidence_references": [{
-            "document_id": "DOC_001", "page": 1, "quote": cond_span["quote"]}],
+        "evidence_references": [_evidence("DOC_001", cond_span)],
         "support_level": "direct",
         "support_rationale": "verbatim from the cited page",
         "review_required": False,
@@ -332,8 +338,7 @@ def build_clauses(pdf1, *, table_ref, binding_docs=("DOC_001", "DOC_002")):
             "coverage_start_conditions": [],
             "reference_table_refs": [table_ref],
             "confidence": 0.9,
-            "evidence_references": [{
-                "document_id": "DOC_001", "page": 1, "quote": span["quote"]}],
+            "evidence_references": [_evidence("DOC_001", span)],
             "review_required": False,
         }],
     }

@@ -67,11 +67,37 @@ same clause in a different sequence must produce the same UID. `start_char` is
 used only to ORDER and to select occurrences; it never enters a hash, so the
 same span list at shifted offsets still yields the same UID.
 
+## Evidence binding (P0-7)
+
+A UID says which source bytes an element IS. `evidence_references` say which
+source passage the element is SUPPORTED BY, and for a canonical clause or
+condition those must be the same passage -- otherwise the contract proves a
+phrase exists in the document rather than that this element came from it.
+
+Until P0-7 the two sides were compared as quotes after collapsing incidental
+whitespace, because an evidence reference carried no offsets. Same document,
+same page, equal-after-normalization quote was the strongest relation
+available, and it is not exact: a policy that repeats a sentence across two
+sub-items of one article satisfies it with identity on one occurrence and
+evidence on the other.
+
+Canonical evidence therefore carries `start_char`/`end_char` in the same
+coordinate system as `canonical_source_span`, and both sides are resolved
+independently against the registered revision, then compared as
+(physical page, start, end, verbatim quote) -- a bijection, so a missing,
+extra, duplicated or differently-occurring evidence range is each refused with
+its own message.
+
+**Offsets are a provenance selector, never identity.** They choose the
+occurrence and verify the citation; they do not enter any hash. canonical_v1
+UID values are exactly what they were before this pass -- see
+`test_canonical_uid_vectors.py`, whose frozen vectors are unchanged.
+
 ## What this module never does
 
 It never runs OCR, re-extracts a PDF, or calls any external tool. Its only
 source of truth is the registered source-text revision already on disk, which
-is what makes UID verification cheap enough to run on every write.
+is what makes UID and evidence verification cheap enough to run on every write.
 """
 from __future__ import annotations
 
@@ -269,42 +295,201 @@ def _normalize_ws(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def resolve_exact_evidence_reference(context: SourceContext, reference,
+                                     loc: str) -> dict:
+    """Resolve one evidence_reference against the registered source revision.
+
+    P0-7. The predecessor compared an evidence quote to an identity span's
+    quote after collapsing incidental whitespace, because an evidence reference
+    carried no offsets. That proves the cited words occur SOMEWHERE on the
+    page; it cannot prove they are the occurrence the element was built from.
+    Where a policy repeats a sentence -- which real policy documents do
+    constantly, across sub-items of one article -- identity could point at the
+    second occurrence while its evidence pointed at the first, and every check
+    passed: same document, same page, same quote.
+
+    So evidence is now resolved exactly like an identity span: located by
+    offset in the registered page text and required to say verbatim what it
+    claims. Returns the record other checks compare, and raises rather than
+    returning a partial one -- evidence that cannot be placed in the source is
+    not weaker evidence, it is not evidence.
+
+    Deliberately absent: whitespace collapse, strip(), and any Unicode
+    substitution. A quote that differs from the source by so much as one space
+    is a different string, and the whole point of this pass is that "close
+    enough" was the hole. Deliberately absent too: any re-extraction. This
+    reads only the already-registered revision, which is what keeps evidence
+    verification cheap enough to run on every write and every finalization.
+
+    Also never trusted: a caller-supplied occurrence ordinal. The ordinal is
+    re-derived here from the verified offset, so submitting one cannot select
+    an occurrence the bytes do not support.
+    """
+    if not isinstance(reference, dict):
+        raise UidResolutionError(
+            f"{loc}: evidence_reference must be an object, got {reference!r}")
+    document_id = reference.get("document_id")
+    if document_id != context.doc_id:
+        raise UidResolutionError(
+            f"{loc}: evidence document_id {document_id!r} is not this "
+            f"contract's source document {context.doc_id!r} -- evidence for a "
+            "canonical element must be resolvable in the revision its identity "
+            "is bound to")
+    page = reference.get("page")
+    quote = reference.get("quote")
+    start = reference.get("start_char")
+    end = reference.get("end_char")
+    if quote is None or quote == "":
+        raise UidResolutionError(
+            f"{loc}: evidence_reference has no quote")
+    if start is None or end is None:
+        raise UidResolutionError(
+            f"{loc}: evidence_reference has no start_char/end_char -- under "
+            "canonical_v1 evidence must name the EXACT source range it cites, "
+            "because a quote alone cannot say which occurrence of a repeated "
+            "passage is meant (missing exact offsets)")
+    # `bool` is an int subclass; True would otherwise index as 1.
+    if (isinstance(start, bool) or isinstance(end, bool)
+            or not isinstance(start, int) or not isinstance(end, int)):
+        raise UidResolutionError(
+            f"{loc}: evidence start_char/end_char must be integers, got "
+            f"{start!r}/{end!r} (missing exact offsets)")
+    page_text = context.pages.get(page)
+    if page_text is None:
+        raise UidResolutionError(
+            f"{loc}: evidence cites page {page!r}, which does not exist in the "
+            "registered source revision")
+    if start < 0 or end > len(page_text) or start >= end:
+        raise UidResolutionError(
+            f"{loc}: evidence offsets [{start}:{end}] are not a valid range in "
+            f"page {page} (length {len(page_text)}) (invalid range)")
+    if page_text[start:end] != quote:
+        raise UidResolutionError(
+            f"{loc}: evidence quote does not equal the registered page {page} "
+            f"text at [{start}:{end}] -- verbatim equality is required, and "
+            "whitespace-normalized equality is not a substitute "
+            "(quote/slice mismatch)")
+    physical = context.physical_page(page)
+    if physical is None:
+        raise UidResolutionError(
+            f"{loc}: evidence logical page {page} has no physical page "
+            "mapping in the registered source, so the cited range cannot be "
+            "placed in the immutable parent")
+    ordinal = policy_uid.ordinal_of_span_at(page_text, quote, start)
+    submitted_ordinal = reference.get("occurrence_ordinal")
+    if submitted_ordinal is not None and submitted_ordinal != ordinal:
+        raise UidResolutionError(
+            f"{loc}: evidence occurrence_ordinal {submitted_ordinal!r} "
+            f"disagrees with the registered source, where this range is "
+            f"occurrence {ordinal} of its text on the page")
+    return {
+        "physical_page": physical,
+        "logical_page": page,
+        "start_char": start,
+        "end_char": end,
+        "quote": quote,
+        "ordinal": ordinal,
+    }
+
+
+def _exact_key(record: dict) -> tuple:
+    """The relation both sides are compared on.
+
+    (document is already fixed by the caller, physical page, exact range,
+    verbatim quote). The physical page rather than the logical one, so a
+    segment whose logical numbering was remapped cannot make two different
+    parent pages look like one.
+    """
+    return (record["physical_page"], record["start_char"],
+            record["end_char"], record["quote"])
+
+
 def _evidence_binding_errors(context: SourceContext, records: list,
                              evidence_references: list, loc: str) -> list[str]:
-    """Identity spans and evidence must name the same exact source passages.
+    """Identity spans and evidence must resolve to the SAME exact ranges.
 
-    Evidence quotes have no offsets, so equality after incidental-whitespace
-    normalization is the strongest deterministic relation available.  A
-    substring relation would still let a caller identify a condition by a
-    whole unrelated paragraph that merely happens to contain the cited words.
+    A bijection, checked in both directions on `_exact_key`:
+
+      * every canonical source span has an evidence_reference resolving to its
+        exact range -- an identity span with no evidence is unsupported;
+      * every evidence_reference in this document resolves to one of the
+        element's identity spans -- extra evidence would let a caller attach
+        provenance the identity never claimed;
+      * no two evidence references resolve to the same range -- otherwise a
+        duplicate could pad the count and satisfy the first rule for a span
+        it does not belong to.
+
+    Submission order carries no meaning: both sides are reduced to a set of
+    exact ranges before comparison, so reversing either array is a no-op. A
+    multi-span clause or composite condition is therefore supported unchanged
+    -- it simply has several ranges to match, on however many pages.
+
+    Evidence in ANOTHER document is passed over rather than refused: a
+    cross-document citation is a different relation, and this function's
+    subject is the binding between an element's identity and the evidence for
+    that identity, both of which live in this contract's own source document.
     """
-    errors = []
+    errors: list[str] = []
     references = evidence_references or []
-    for record in records:
-        span_quote = _normalize_ws(record["quote"])
-        matching = [
-            ref for ref in references
-            if ref.get("document_id") == context.doc_id
-            and ref.get("page") == record["logical_page"]
-            and _normalize_ws(ref.get("quote") or "") == span_quote
-        ]
-        if not matching:
-            errors.append(
-                f"{loc}: canonical source span on logical page "
-                f"{record['logical_page']} ({record['quote'][:60]!r}) has no "
-                "evidence_reference with the same source passage -- identity "
-                "provenance may not be replaced by unrelated bytes")
+
+    resolved: dict = {}
     for index, reference in enumerate(references):
-        ref_quote = _normalize_ws(reference.get("quote") or "")
-        if reference.get("document_id") != context.doc_id:
+        rloc = f"{loc}.evidence_references[{index}]"
+        if isinstance(reference, dict) and \
+                reference.get("document_id") != context.doc_id:
             continue
-        if not any(
-                record["logical_page"] == reference.get("page")
-                and _normalize_ws(record["quote"]) == ref_quote
-                for record in records):
+        try:
+            record = resolve_exact_evidence_reference(context, reference, rloc)
+        except (UidResolutionError, policy_uid.UidInputError) as exc:
+            errors.append(str(exc))
+            continue
+        key = _exact_key(record)
+        if key in resolved:
             errors.append(
-                f"{loc}.evidence_references[{index}] does not correspond to "
-                "any canonical source span of this element")
+                f"{rloc}: duplicate evidence range -- physical page "
+                f"{record['physical_page']} [{record['start_char']}:"
+                f"{record['end_char']}] is already cited by "
+                f"{loc}.evidence_references[{resolved[key]}]; repeating one "
+                "range may not stand in for evidence of a different source "
+                "span (duplicate evidence range)")
+            continue
+        resolved[key] = index
+
+    if errors:
+        # Reporting coverage against a partially-resolved evidence set would
+        # add derivative complaints about spans whose evidence failed for a
+        # reason already stated.
+        return errors
+
+    identity_keys = {_exact_key(record): record for record in records}
+    for key, record in identity_keys.items():
+        if key in resolved:
+            continue
+        same_text = [
+            index for other, index in resolved.items()
+            if other[3] == record["quote"] and other[0] == record["physical_page"]
+        ]
+        detail = ""
+        if same_text:
+            detail = (
+                " -- evidence cites the same text at a DIFFERENT range on this "
+                "page, which is a different occurrence of it (wrong "
+                "occurrence)")
+        errors.append(
+            f"{loc}: canonical source span on logical page "
+            f"{record['logical_page']} at [{record['start_char']}:"
+            f"{record['end_char']}] ({record['quote'][:60]!r}) has no "
+            "evidence_reference resolving to that exact source range"
+            f"{detail} (missing evidence for identity span)")
+
+    for key, index in resolved.items():
+        if key in identity_keys:
+            continue
+        errors.append(
+            f"{loc}.evidence_references[{index}] resolves to physical page "
+            f"{key[0]} [{key[1]}:{key[2]}], which is not a canonical source "
+            "span of this element -- evidence may not name a passage the "
+            "identity does not (evidence not belonging to identity span)")
     return errors
 
 

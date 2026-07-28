@@ -151,6 +151,18 @@ def _span(page, text, occurrence=1, page_text=None):
             "end_char": start + len(text), "quote": text}
 
 
+def _evidence(span, document_id="DOC_005"):
+    """The canonical evidence reference for an identity span (P0-7).
+
+    Evidence now carries the same exact range as the span it supports, so a
+    fixture cannot accidentally construct the pre-P0-7 shape where identity and
+    evidence merely shared a quote.
+    """
+    return {"document_id": document_id, "page": span["page"],
+            "start_char": span["start_char"], "end_char": span["end_char"],
+            "quote": span["quote"]}
+
+
 # --- expected-UID helpers ---------------------------------------------------
 # These DO use the production helper: their job is to express "what the DAO
 # should compute", and the independent oracle lives in the frozen-vector module.
@@ -272,8 +284,12 @@ def build_clauses(pdf, *, clause_uid=None, condition_uids=None,
     Requirement 4: only the exact span (and therefore the occurrence ordinal)
     tells them apart -- their `text` is the same string.
     """
-    boundary_span = _span(1, BOUNDARY_SPAN)
-    pb = parent_boundary or _derived("boundary", pdf, [boundary_span])
+    # Derived lazily: a caller supplying `parent_boundary` may be working
+    # against a revision whose page 1 no longer contains BOUNDARY_SPAN at all
+    # (see test_exact_evidence_binding's whitespace fixture), and computing the
+    # default anyway would fail on text the test never asked for.
+    pb = parent_boundary or _derived(
+        "boundary", pdf, [_span(1, BOUNDARY_SPAN)])
     spans = clause_spans if clause_spans is not None else [
         _span(1, CLAUSE_SPAN)]
     pc = clause_uid or _derived("clause", pdf, spans, parent=pb)
@@ -290,10 +306,7 @@ def build_clauses(pdf, *, clause_uid=None, condition_uids=None,
             "condition_uid": uid,
             "source_span_uids": group,
             "text": CONDITION_TEXT,
-            "evidence_references": [{
-                "document_id": "DOC_005", "page": span["page"],
-                "quote": span["quote"]}
-                for span in group],
+            "evidence_references": [_evidence(span) for span in group],
             "support_level": "direct",
             "support_rationale": "verbatim from the cited page",
             "review_required": False,
@@ -325,10 +338,7 @@ def build_clauses(pdf, *, clause_uid=None, condition_uids=None,
             "coverage_start_conditions": [],
             "reference_table_refs": [],
             "confidence": 0.9,
-            "evidence_references": [{
-                "document_id": "DOC_005", "page": span["page"],
-                "quote": span["quote"]}
-                for span in spans],
+            "evidence_references": [_evidence(span) for span in spans],
             "review_required": False,
         }],
     }
@@ -707,8 +717,7 @@ def test_matching_evidence_to_the_borrowed_sentence_does_not_rescue_it(
         condition_spans=[[borrowed]])
     condition = data["clauses"][0]["payout_conditions"][0]
     condition["text"] = borrowed["quote"]
-    condition["evidence_references"] = [{
-        "document_id": "DOC_005", "page": 1, "quote": borrowed["quote"]}]
+    condition["evidence_references"] = [_evidence(borrowed)]
 
     # No evidence complaint is available to catch this -- prove that.
     errors = _check_clauses(data)
@@ -803,12 +812,35 @@ def test_only_the_occurrence_actually_inside_the_clause_is_accepted(canonical):
 
 
 def test_identity_span_must_match_the_elements_evidence_passage(canonical):
+    """Evidence naming a different passage than the identity span is refused.
+
+    Since P0-7 the evidence also carries offsets, so swapping only the quote
+    now fails at the earlier, sharper check: the quote no longer equals the
+    registered page text at the range the evidence itself declares.
+    """
     pdf = canonical
     _persist("policy_boundary_inventory_DOC_005.json", build_inventory(pdf))
     data = build_clauses(pdf)
     data["clauses"][0]["evidence_references"][0]["quote"] = CONDITION_TEXT
     errors = _check_clauses(data)
-    assert any("no evidence_reference with the same source passage" in e
+    assert any("quote/slice mismatch" in e for e in errors), errors
+
+
+def test_evidence_pointing_at_a_different_real_passage_is_refused(canonical):
+    """The same attack done properly: a real, exactly-located OTHER passage.
+
+    The evidence is internally perfect -- its offsets resolve, its quote is the
+    verbatim page text there. It simply is not the passage the clause's
+    identity is made of, which is the only thing that makes it wrong.
+    """
+    pdf = canonical
+    _persist("policy_boundary_inventory_DOC_005.json", build_inventory(pdf))
+    data = build_clauses(pdf)
+    elsewhere = _span(1, CONDITION_TEXT, occurrence=2)
+    data["clauses"][0]["evidence_references"] = [_evidence(elsewhere)]
+    errors = _check_clauses(data)
+    assert any("missing evidence for identity span" in e for e in errors), errors
+    assert any("evidence not belonging to identity span" in e
                for e in errors), errors
 
 
@@ -918,14 +950,21 @@ def test_an_offset_shift_that_preserves_page_text_and_occurrence_keeps_uids(
     # the same bytes at their new offsets, which is exactly what a source edit
     # elsewhere on the page does to a real contract.
     after = json.loads(json.dumps(before))
+
+    def _shift(ranges):
+        for item in ranges:
+            item["start_char"] += offset
+            item["end_char"] += offset
+
     for clause in after["clauses"]:
-        for span in clause["source_span_uids"]:
-            span["start_char"] += offset
-            span["end_char"] += offset
+        _shift(clause["source_span_uids"])
+        # P0-7: evidence offsets are coordinates in the CURRENT revision, so
+        # they move with the text exactly as identity spans do -- and, exactly
+        # as identity spans do, moving them leaves the UIDs alone.
+        _shift(clause["evidence_references"])
         for condition in clause["payout_conditions"]:
-            for span in condition["source_span_uids"]:
-                span["start_char"] += offset
-                span["end_char"] += offset
+            _shift(condition["source_span_uids"])
+            _shift(condition["evidence_references"])
     after_uids = [after["clauses"][0]["clause_uid"]] + [
         c["condition_uid"] for c in after["clauses"][0]["payout_conditions"]]
     assert after_uids == before_uids
@@ -1130,9 +1169,7 @@ def test_a_uid_from_the_previous_revision_is_refused(canonical, isolated_dao,
     clause["clause_uid"] = stale_pc
     clause["source_boundary_uids"] = [new_pb]
     clause["source_span_uids"] = [span]
-    clause["evidence_references"] = [{
-        "document_id": "DOC_005", "page": 1, "quote": new_quote,
-    }]
+    clause["evidence_references"] = [_evidence(span)]
     errors = _check_clauses(data)
     assert any("clause UID" in e for e in errors), errors
 

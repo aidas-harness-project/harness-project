@@ -1856,18 +1856,97 @@ not an edit to what `canonical_v1` computes.
 
 ### Still open after P0-6
 
-- **P0-7 -- exact evidence binding.** Identity spans and `evidence_references`
-  are currently matched after collapsing incidental whitespace, because an
-  evidence quote carries no offsets and equality-after-normalization is the
-  strongest deterministic relation available without them. This is **not**
-  exact-span binding, and this pass should not be read as having solved
-  evidence provenance -- it closed the "unrelated bytes" hole, not the
-  "which occurrence, exactly" one. P0-7 is the exact-span-binding work.
+- ~~**P0-7 -- exact evidence binding.**~~ RESOLVED 2026-07-28; see the section
+  below.
 - **P0-8 -- authoritative table-region detection.** A table's
   `source_regions` are taken as declared and then enforced downwards (rows in
   regions, cells in rows). Nothing independently establishes that the declared
   region is the table's real extent on the page, so a region drawn too
-  narrowly still hides rows. Reverse coverage is P0-8.
+  narrowly still hides rows. Reverse coverage is P0-8. **Still open** -- P0-7
+  changed nothing about it: reverse coverage is about whether a declared
+  region is the table's real extent, which no amount of exactness *within* a
+  declared range can establish.
+
+### Evidence proved a phrase existed, not which occurrence it was -- RESOLVED (P0-7)
+
+`policy_uid_resolver._evidence_binding_errors` related an element's identity
+spans to its `evidence_references` on
+(document_id, logical page, whitespace-collapsed quote). Evidence carried no
+offsets, so that was the strongest deterministic relation available -- and it
+is satisfied by **any** occurrence of the quoted text on the cited page.
+
+Real Korean policy documents repeat sentences constantly across the sub-items
+of one article. Where a phrase appeared twice on a page, this was accepted:
+
+    condition.source_span_uids   -> occurrence 2
+    condition.evidence_references -> occurrence 1
+
+Same document, same page, byte-identical quote, UIDs recomputing correctly
+from a genuine identity span. Every gate in the repo passed. What the contract
+established was "this phrase exists in the document"; what it claimed was
+"this condition was normalized from THAT passage". Those are different
+statements and only the second is provenance.
+
+Whitespace collapse widened it further: a source reading `보험금을  지급` and a
+quote reading `보험금을 지급` compared equal.
+
+**What changed.** `strict_evidence_reference` gains optional
+`start_char`/`end_char` (with `dependentRequired`, so one endpoint alone is
+malformed), and a normative `canonical_evidence_reference` def states the shape
+the DAO requires. Offsets use exactly `canonical_source_span`'s coordinate
+system: Python string indices into the processed page body after the
+`<<<PAGE page=N>>>` marker, in the `source_text_revision` the contract is bound
+to.
+
+`resolve_exact_evidence_reference()` resolves one reference against the
+registered revision: object shape, this contract's `document_id`, a page that
+exists, integer offsets (`bool` refused explicitly -- it is an `int` subclass
+and would index as 1), `0 <= start < end <= len(page_text)`,
+`page_text[start:end] == quote` **verbatim**, a resolvable physical page, and
+an occurrence ordinal re-derived from the verified offset rather than read from
+a caller-supplied `occurrence_ordinal`. No strip, no whitespace collapse, no
+Unicode substitution, and no re-extraction -- it reads the registered revision
+and nothing else.
+
+`_evidence_binding_errors` then compares both sides as a **bijection** on
+(physical page, start, end, verbatim quote): every identity span needs an
+evidence range, every evidence range needs an identity span, and no range may
+be cited twice. Each failure mode has its own message -- `missing exact
+offsets`, `invalid range`, `quote/slice mismatch`, `wrong occurrence`,
+`missing evidence for identity span`, `evidence not belonging to identity
+span`, `duplicate evidence range`. Nothing is auto-corrected: a failing
+contract is refused and left for review or re-extraction.
+
+Because both sides reduce to a set of ranges, submission order is meaningless
+and multi-page clauses / composite conditions are unaffected.
+
+**Enforced on the real paths**, all of which already funnel through
+`_canonical_uid_errors` / `_canonical_uid_finalize_blockers`: the
+`normalized_policy_clause` `write-contract` gate, canonical UID recomputation,
+`policy_clause_processing` finalization, and the live revalidation a downstream
+policy reference triggers.
+
+**Legacy stays readable.** The offsets are schema-optional, so a pre-P0-7
+artifact still validates and can be migrated; enforcement is the DAO's, on
+canonical_v1 writes and finalizations. `tests/test_exact_evidence_binding.py`
+asserts both halves of that split on one payload -- schema-VALID, DAO-REFUSED
+-- so "legacy" cannot be used as a write bypass.
+
+**canonical_v1 UID values are unchanged.** Evidence offsets are a provenance
+selector: they choose an occurrence and verify a citation, and never enter a
+hash. The frozen vectors in `test_canonical_uid_vectors.py` are untouched, and
+`test_evidence_offsets_do_not_enter_any_uid` asserts the invariance directly.
+
+51 new tests (`tests/test_exact_evidence_binding.py`), including both
+directions of the occurrence swap through the real `cmd_write_contract` path;
+two payloads differing *only* in which occurrence the evidence selects, one
+written and one refused; four whitespace-bypass variants plus tab/newline/
+double-space cases; the offset attacks (negative start, end past the page,
+empty and inverted ranges, string and boolean offsets, offsets of occurrence 1
+under a quote copied from occurrence 2); bidirectional coverage including the
+duplicate-padding attack; order independence; and a REV-A -> REV-B revision
+change where the stale offsets are refused with the extractor guard proving
+nothing was re-run.
 
 ### Segment page maps were self-consistent but not source-derived -- RESOLVED (P0-6 + follow-up)
 
