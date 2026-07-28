@@ -91,6 +91,35 @@ passages. Every row range must lie inside the table source regions;
 each cell span must identify exactly the cell value inside its row; and two
 cells may not overlap in source.
 
+**A table's source region is not yours to declare (P0-8).** Before writing a
+`reference_table` for a `canonical_v1` document, register the table's region:
+
+    python tools/dao.py register-table-region CASE_ID --doc-id DOC_ID \
+        --page 12 --anchor "장해분류" --held-by policy-pipeline --run-id RUN_ID
+
+The DAO opens the registered PDF, detects the table itself, and issues a
+`table_region_v1` receipt naming the table's real extent and its row/header
+bands. Put the returned `receipt_id` in the table's `table_region_receipt_id`,
+set `source_regions` to exactly the receipt's extent, and extract exactly one
+row per `data_row` band. `--page`/`--anchor` only SELECT among candidates the
+DAO found; they cannot define an extent, and an anchor matching two tables (or
+none) issues no receipt.
+
+This exists because every other check on a table runs *downwards* from
+`source_regions`: declare the region narrowly and the rows outside it are never
+examined, so an extraction that silently drops the last rows, or a whole
+continuation page, passes completeness checking. For the same reason a
+`header_span` may only cover a band the receipt classified as non-data —
+relabelling a data row `note` or `separator` is the same omission as deleting
+it, and is refused.
+
+If the DAO refuses to issue a receipt (no ruled table detected, image-only/OCR
+document, merged cells, ambiguous candidates, or processed text that does not
+correspond exactly to the PDF layout), that table is **not** "a page with no
+table". Leave it `review_required: true` and route it for human review — it
+will block `policy_clause_processing` finalization until resolved. Do not
+work around the refusal by narrowing the region until detection succeeds.
+
 A `reference_table_refs` entry (or a parent-coverage page's
 `reference_table_document_id`) pointing at ANOTHER document is recomputed in
 that document, against its own registered revision. Naming the owner is

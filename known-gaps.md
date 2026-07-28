@@ -1858,14 +1858,123 @@ not an edit to what `canonical_v1` computes.
 
 - ~~**P0-7 -- exact evidence binding.**~~ RESOLVED 2026-07-28; see the section
   below.
-- **P0-8 -- authoritative table-region detection.** A table's
-  `source_regions` are taken as declared and then enforced downwards (rows in
-  regions, cells in rows). Nothing independently establishes that the declared
-  region is the table's real extent on the page, so a region drawn too
-  narrowly still hides rows. Reverse coverage is P0-8. **Still open** -- P0-7
-  changed nothing about it: reverse coverage is about whether a declared
-  region is the table's real extent, which no amount of exactness *within* a
-  declared range can establish.
+- ~~**P0-8 -- authoritative table-region detection.**~~ RESOLVED 2026-07-28;
+  see the section below.
+
+### The declared table region was never the table's real extent -- RESOLVED (P0-8)
+
+`_cross_contract.check_reference_table_structure` enforced a table downwards
+from `table.source_regions`: every row span inside a region, every cell inside
+its row, and every non-whitespace character of the region accounted for by a
+row or a declared header span. That last check is real -- it is what makes an
+omitted row visible -- but it was asked only about the region the extracting
+agent declared.
+
+So the bypass was not to defeat a check. It was to declare a smaller table:
+
+    source:     장해분류 지급률 / A 10 / B 20 / C 30
+    submitted:  source_regions = header..B      rows = A, B
+
+`C 30` lay outside every declared region, so reverse coverage never examined
+it. The extraction was complete with respect to what it claimed the table was,
+and that was the only question anything asked. The same shape dropped a whole
+continuation page: declare page 1, treat page 2 as "not part of the table", and
+be internally perfect.
+
+`header_spans` was the second half of the same hole. Reverse coverage was
+satisfied by a character being covered by *either* a row or a header span, and
+`kind` was a free choice, so relabelling a data row `note` or `separator`
+removed it from the extraction while keeping coverage complete.
+
+**What changed.** `dao.py register-table-region` opens the registered raw PDF
+itself, runs pymupdf's `find_tables()` over the named logical page(s), derives
+the table's extent and its row/header bands from the layout, maps each band to
+exact offsets in the registered source-text revision, and records all of it in
+a `table_region_v1` receipt in `_table_region_index.json`
+(`schemas/table_region_index.schema.json`). `reference_table` gains
+`table_region_receipt_id`, and `table_region_provenance.contract_binding_errors`
+enforces, all exactly rather than "compatibly":
+
+1. `source_regions` equals the receipt's derived extent, set for set
+2. every extracted row corresponds to a receipt `data_row`
+3. every receipt `data_row` corresponds to exactly one extracted row (2+3 are a
+   bijection, so missing / duplicated / invented rows each get their own
+   message)
+4. a `header_span` may only cover a band the receipt classified NON-data
+5. an `ambiguous` band forces `review_required`; it is never an exemption
+
+**The caller cannot define an extent.** `--anchor` and `--page` are a SELECTOR:
+they choose among candidates the DAO found. Matching two candidates, or none,
+issues no receipt at all -- picking the first would be a coin flip recorded as
+provenance. `receipt_id` is computed from source provenance and detector output
+only, deliberately NOT from `table_uid`: RT is derived FROM `source_regions`,
+so keying the receipt on it would make the region authorize the receipt that
+authorizes the region.
+
+**Enforced on the real paths**, all of which funnel through
+`_canonical_uid_errors` / `_canonical_uid_finalize_blockers`: the
+`reference_table` `write-contract` gate, canonical UID recomputation,
+`policy_clause_processing` finalization, and the live revalidation a downstream
+policy reference triggers. Staleness (raw PDF re-hashed, source text revised,
+page bytes changed, P0-6 page map re-derived, detector profile changed) makes a
+receipt refuse at all of them, reusing the existing revision/stale cascade.
+`_table_region_index.json` is sealed in `dao._PROTECTED_CONTRACT_FILES`, so
+`write-contract` cannot mint a receipt for a contract to then cite.
+
+**Legacy stays readable.** `table_region_receipt_id` is schema-optional, so a
+pre-P0-8 artifact still validates and can be migrated; enforcement is the
+DAO's, on canonical_v1 writes and finalizations.
+`test_legacy_contract_without_receipt_field_still_validates` asserts both
+halves on one payload -- schema-VALID, DAO-REFUSED -- so "legacy" cannot be
+used as a write bypass.
+
+**canonical_v1 UID values are unchanged.** The receipt is a provenance
+selector; it never enters a hash. `policy_uid.py` and `policy_uid_resolver.py`
+are untouched by this change, the frozen vectors in
+`test_canonical_uid_vectors.py` are unmodified, and
+`test_region_receipts_do_not_enter_any_uid` asserts the invariance directly.
+
+**Honest limits -- pymupdf's detector does NOT find every table.** These are
+fail-closed refusals, not silent passes, and each one leaves the table
+`review_required` and blocking finalization:
+
+- **Ruled tables only.** The `pymupdf_find_tables_lines_v1` profile uses the
+  `lines` strategy, which needs real vector separators. A whitespace-aligned
+  table -- visually a table, structurally just text -- yields no candidate and
+  is refused. A text-strategy profile would infer structure from whitespace,
+  which is exactly the ambiguity this gate exists to refuse rather than guess.
+- **Embedded text only.** An image-only/OCR document has no deterministic text
+  layer, and verification may not run OCR, so it can never obtain a receipt and
+  can never finalize. Same shape as P0-6's `ocr_segment` refusal.
+- **Merged cells block.** A row band with a merged cell has ambiguous row/column
+  structure and is refused rather than resolved by heuristic.
+- **The PDF layout and the processed text must correspond exactly.** Every band
+  is located in the registered page text by exact, ordered search; a band that
+  cannot be placed uniquely refuses. A redacted or re-flowed processed text will
+  therefore block -- correctly, since offsets derived against different bytes
+  are not provenance.
+- **Ambiguous candidates need a human.** Two same-header tables on one page
+  refuse. There is deliberately no agent-writable override: a full
+  human-region-approval path is NOT implemented in this pass, so an
+  unsupported or ambiguous table simply stays blocked. If one is encountered on
+  real data, the existing authenticated human-review provenance path
+  (`record-human-review`) is where that decision would be added -- it is not
+  reachable from an agent writing a name string or a boolean.
+- **A detector profile change requires a fresh derivation.** The profile name
+  and its config fingerprint enter the receipt, so retuning detection under a
+  stable name cannot silently re-authorize an old extent.
+
+39 new tests (`tests/test_table_region_provenance.py`), all against real
+pymupdf-rendered PDFs and the real DAO commands, including the narrow-region
+attack through `cmd_write_contract`, a companion test asserting the SAME
+narrowed contract still returns `[]` from the pre-P0-8 reverse-coverage
+checker (so the fix is shown to close a real hole rather than duplicate an
+existing one), the continuation-page drop, data-row-as-`note`/`separator`
+relabelling in both directions, over-wide regions and the note-excuse
+follow-up, four fabricated/foreign-receipt variants, ambiguous and
+undetectable layouts, OCR refusal, staleness at write and finalization, and
+transaction fault injection (lock contention, pending journal, schema failure,
+write failure with rollback, and rollback failure leaving a blocking journal).
 
 ### Evidence proved a phrase existed, not which occurrence it was -- RESOLVED (P0-7)
 

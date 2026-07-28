@@ -356,9 +356,84 @@ def _write(isolated_dao, make_args, filename, schema_name, data,
         stage=stage))
 
 
+def _seed_table_region_receipt(data, doc_id="DOC_002"):
+    """Give this module's synthetic table a P0-8 region receipt.
+
+    P0-8 requires a reference table's `source_regions` to equal an extent the
+    DAO derived by running a table detector over the registered PDF. This
+    module's raw "PDFs" are deliberately fake bytes (`DOC2_RAW`) -- it is about
+    cross-document UID IDENTITY, and its RT/RR values are pinned to
+    hand-computed hashes, so giving it a real rendered PDF would change what it
+    tests and invalidate those pins.
+
+    So the receipt is seeded directly, built from the contract's own spans via
+    `table_region_provenance.build_receipt` (the real constructor, so the
+    receipt_id is genuinely derived rather than invented). Writing the index
+    directly is not a production path -- it is sealed -- and that is precisely
+    why a test may use it to say "assume the region WAS derived; now check the
+    cross-document UID logic".
+
+    P0-8's own gate is tested for real, against real PDFs and the real
+    detector, in `test_table_region_provenance.py`.
+    """
+    import table_region_provenance as trp
+
+    table = data["tables"][0]
+    revision = dao.revision_entry_for("CASE_030", doc_id)[
+        "current_revision_sha256"]
+    pdf_sha = dao.registered_source_pdf_sha256("CASE_030", doc_id)
+    text = dao._registered_revision_text("CASE_030", doc_id)
+    pages = dao.policy_completeness.split_pages(text)
+
+    def _region(span, kind):
+        body = pages[span["page"]]
+        return {
+            "page": span["page"],
+            "physical_page": span["page"],
+            "kind": kind,
+            "start_char": span["start_char"],
+            "end_char": span["end_char"],
+            "quote": span["quote"],
+            "page_text_sha256": trp.text_sha256(
+                trp.canonical_page_text(body)),
+            "bbox": [0.0, 0.0, 1.0, 1.0],
+        }
+
+    regions = [_region(header["span"], header["kind"])
+               for header in table.get("header_spans") or []]
+    regions += [_region(row["source_span"], trp.DATA_ROW_KIND)
+                for row in table.get("rows") or []]
+    receipt = trp.build_receipt(
+        document_id=doc_id, case_id="CASE_030", source_pdf_sha256=pdf_sha,
+        source_text_revision_sha256=revision,
+        detector={"tool": "test-seed", "profile": trp.DEFAULT_DETECTOR_PROFILE,
+                  "library": "pymupdf", "library_version": "test",
+                  "config_fingerprint": trp.detector_fingerprint(
+                      trp.DEFAULT_DETECTOR_PROFILE),
+                  "settings": "seeded"},
+        extent=[_region(region, "table_extent")
+                for region in table["source_regions"]],
+        regions=regions,
+        selector={"anchor": None, "logical_pages": sorted(
+            {region["page"] for region in table["source_regions"]})},
+        segment_derivation_receipt_id=None,
+        issued_at="2026-07-28T00:00:00+09:00",
+        issued_by="test-seed", run_id=RUN)
+
+    index_path = dao.table_region_index_path("CASE_030")
+    index = dao.load_table_region_index("CASE_030")
+    index["tables"] = [t for t in index.get("tables", [])
+                       if t.get("receipt_id") != receipt["receipt_id"]]
+    index["tables"].append(receipt)
+    _write_json(index_path, index)
+    table["table_region_receipt_id"] = receipt["receipt_id"]
+    return data
+
+
 def _write_tables(isolated_dao, make_args, data):
     return _write(isolated_dao, make_args, "reference_table_DOC_002.json",
-                  _cross_contract.REFERENCE_TABLE_SCHEMA, data)
+                  _cross_contract.REFERENCE_TABLE_SCHEMA,
+                  _seed_table_region_receipt(data))
 
 
 def _write_clauses(isolated_dao, make_args, data):

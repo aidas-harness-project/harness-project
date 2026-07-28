@@ -98,6 +98,19 @@ Subcommands:
          segment_page_map_v2 receipt into _segment_derivation_index.json and
          projects it into the manifest as one fail-closed transaction.)
     read-segment-derivation-index CASE_ID
+    register-table-region CASE_ID --doc-id DOC_ID --page SPEC --anchor TEXT
+        --held-by NAME --run-id RUN_ID [--detector-profile NAME]
+        (P0-8, the ONLY issuer of a table's authoritative source region. The
+         DAO opens the registered PDF itself, runs a real table detector over
+         the named logical page(s), derives the table's full extent and its
+         row/header bands from the layout, and maps each band to exact offsets
+         in the registered source-text revision. --anchor selects among the
+         candidates the DAO found and defines nothing: matching two candidates,
+         or none, issues no receipt. Issues a table_region_v1 receipt into
+         _table_region_index.json as one fail-closed transaction; a
+         reference_table then cites it by table_region_receipt_id, and its
+         source_regions must equal the derived extent exactly.)
+    read-table-region-index CASE_ID
 """
 import argparse
 import json
@@ -120,6 +133,7 @@ import source_provenance
 import stage_dependencies
 import segment_lineage
 import segment_derivation
+import table_region_provenance
 import policy_completeness
 import policy_uid
 import policy_uid_resolver
@@ -1655,7 +1669,13 @@ def _canonical_uid_errors(case_id: str, filename: str, schema_name: str,
         return policy_uid_resolver.check_boundary_inventory(context, data)
 
     if schema_name == _cross_contract.REFERENCE_TABLE_SCHEMA:
-        return policy_uid_resolver.check_reference_tables(context, data)
+        # P0-8 runs FIRST and independently: `check_reference_tables` derives
+        # RT from `source_regions`, so a UID recomputed from a narrowed region
+        # recomputes perfectly -- it is a real hash of real bytes, of the wrong
+        # extent. Only the receipt can say whether that extent is the table's.
+        errors = _table_region_binding_blockers(case_id, doc_id, data)
+        errors.extend(policy_uid_resolver.check_reference_tables(context, data))
+        return errors
 
     # normalized_policy_clause: PCs are parented on boundaries defined in the
     # inventory, so the inventory must exist and its PBs must independently
@@ -1961,7 +1981,28 @@ def _policy_write_scheme_blockers(case_id: str, filename: str,
         case_id, doc_ids, f"writing the policy-layer contract {filename}")
 
 
+# Case files the DAO issues itself. `write-contract` accepts an arbitrary
+# filename, so without this a caller could mint a receipt index directly and
+# then cite it -- the receipt would be exactly as authoritative as a real one,
+# since the citing contract only asks whether the id resolves. P0-6's index is
+# listed too: it was protected only by a forged receipt failing its currency
+# checks, which is a second line of defence, not a seal.
+_PROTECTED_CONTRACT_FILES = frozenset({
+    "_table_region_index.json",
+    "_segment_derivation_index.json",
+    "_revision_index.json",
+    "_run_state.json",
+    "_transaction_journal.json",
+})
+
+
 def cmd_write_contract(args):
+    if Path(args.filename).name in _PROTECTED_CONTRACT_FILES:
+        print(f"FAIL: {args.filename} is DAO-owned and has no write-contract "
+              "path -- it is issued only by the DAO command that derives it, "
+              "so that a citing contract's reference cannot be satisfied by a "
+              "receipt the caller wrote for itself")
+        return 1
     target = _require_within(case_dir(args.case_id), args.filename)
     existing_lock = acquire_lock_blocking(target, args.held_by, args.run_id, args.purpose or f"write {args.filename}")
     if existing_lock is not None:
@@ -2671,8 +2712,16 @@ def _invalidate_dependents(case_id, upstream_stage, reason, held_by, run_id,
             release_lock(target)
 
 
-def _invalidate_policy_layer(case_id, reason, held_by, run_id):
+def _invalidate_policy_layer(case_id, reason, held_by, run_id,
+                             lock_already_held=False):
     """Invalidate `policy_clause_processing` AND everything downstream of it.
+
+    `lock_already_held` is for a caller running inside a larger transaction
+    that already owns the run-state lock (P0-8's table-region commit). Same
+    parameter and same reason as `_invalidate_dependents`: re-acquiring a lock
+    this process already holds is a self-deadlock, and the alternative --
+    releasing it around the cascade -- would open exactly the window the
+    transaction exists to close.
 
     P0-3's stale cascade for enable-canonical-uids. `_invalidate_dependents`
     deliberately spares the upstream stage itself (its writes are how that
@@ -2691,14 +2740,15 @@ def _invalidate_policy_layer(case_id, reason, held_by, run_id):
         return []
     affected = ({"policy_clause_processing"}
                 | stage_dependencies.dependents_of("policy_clause_processing"))
-    existing_lock = acquire_lock_blocking(
-        target, held_by, run_id or "unknown",
-        "invalidate the policy layer for canonical UID activation")
-    if existing_lock is not None:
-        raise CascadeFailed(
-            "could not invalidate the policy stage and its downstream -- "
-            f"held_by={existing_lock['held_by']} "
-            f"run_id={existing_lock['run_id']}")
+    if not lock_already_held:
+        existing_lock = acquire_lock_blocking(
+            target, held_by, run_id or "unknown",
+            "invalidate the policy layer for canonical UID activation")
+        if existing_lock is not None:
+            raise CascadeFailed(
+                "could not invalidate the policy stage and its downstream -- "
+                f"held_by={existing_lock['held_by']} "
+                f"run_id={existing_lock['run_id']}")
     try:
         state = load_run_state(case_id)
         changed = []
@@ -2725,7 +2775,8 @@ def _invalidate_policy_layer(case_id, reason, held_by, run_id):
         save_run_state(case_id, state)
         return changed
     finally:
-        release_lock(target)
+        if not lock_already_held:
+            release_lock(target)
 
 
 def _write_text_locked(case_id, filename, text_file, held_by, run_id, purpose=None):
@@ -4527,6 +4578,723 @@ def cmd_read_segment_derivation_index(args):
     return 0
 
 
+# ------------------------------------------- table region receipts (P0-8) --
+# A reference table's `source_regions` were the extracting agent's own
+# declaration. Everything downstream enforced completeness WITHIN them, so a
+# region drawn narrowly hid every row outside it. See
+# table_region_provenance.py's module docstring for the exact bypass.
+
+def table_region_index_path(case_id: str) -> Path:
+    return case_dir(case_id) / "_table_region_index.json"
+
+
+def load_table_region_index(case_id: str) -> dict:
+    data = load_json(table_region_index_path(case_id))
+    if data is None:
+        return {"case_id": case_id, "tables": []}
+    return data
+
+
+def table_region_receipts_for(case_id: str, doc_id: str) -> list:
+    """Every receipt issued for one document, in issue order."""
+    return [receipt for receipt in load_table_region_index(case_id).get(
+        "tables", []) if receipt.get("document_id") == doc_id]
+
+
+def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
+    """Table candidates read directly out of the registered PDF by the DAO.
+
+    The DAO runs the detector itself rather than accepting an extent someone
+    else derived: the whole point of the receipt is that the geometry came from
+    bytes this process read out of the registered file.
+
+    Returns `(candidates, detector, error)`. A candidate carries its bbox, its
+    row bands (each with cell geometry and text), and the detector's own view
+    of which band is the header.
+    """
+    settings = table_region_provenance.DETECTOR_PROFILES.get(profile)
+    if settings is None:
+        return None, None, (
+            f"unknown detector profile {profile!r} -- a profile must be "
+            "declared in table_region_provenance.DETECTOR_PROFILES so its "
+            "settings enter the receipt fingerprint")
+    try:
+        import fitz  # pymupdf
+    except ImportError:
+        return None, None, (
+            "pymupdf is not installed -- the DAO cannot open the PDF itself, "
+            "and a table extent it did not derive is not one it may issue")
+    detector = {
+        "tool": "dao.register-table-region",
+        "profile": profile,
+        "library": "pymupdf",
+        "library_version": getattr(fitz, "VersionBind", None) or None,
+        "config_fingerprint": table_region_provenance.detector_fingerprint(
+            profile),
+        "settings": repr(sorted(settings.items())),
+    }
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as exc:  # noqa: BLE001
+        return None, detector, f"the PDF could not be opened: {exc}"
+    try:
+        candidates = []
+        for physical in sorted(set(physical_pages)):
+            if physical < 1 or physical > doc.page_count:
+                return None, detector, (
+                    f"physical page {physical} is outside the document's "
+                    f"{doc.page_count} pages")
+            page = doc[physical - 1]
+            try:
+                found = page.find_tables(**settings)
+            except Exception as exc:  # noqa: BLE001
+                return None, detector, (
+                    f"table detection failed on physical page {physical}: "
+                    f"{exc}")
+            for order, table in enumerate(found.tables):
+                rows = []
+                for row in table.rows:
+                    cells = []
+                    for cell_bbox in row.cells:
+                        if cell_bbox is None:
+                            # A merged cell reports None for the covered
+                            # positions. Recorded as such so the ambiguity is
+                            # visible rather than silently collapsed.
+                            cells.append(None)
+                            continue
+                        cells.append({
+                            "bbox": [float(v) for v in cell_bbox],
+                            "text": page.get_textbox(fitz.Rect(cell_bbox)),
+                        })
+                    rows.append({
+                        "bbox": [float(v) for v in row.bbox],
+                        "cells": cells,
+                    })
+                header_names = []
+                header_external = False
+                if table.header is not None:
+                    header_names = list(table.header.names or [])
+                    header_external = bool(table.header.external)
+                candidates.append({
+                    "physical_page": physical,
+                    "order": order,
+                    "bbox": [float(v) for v in table.bbox],
+                    "rows": rows,
+                    "header_names": header_names,
+                    "header_external": header_external,
+                })
+        return candidates, detector, None
+    finally:
+        doc.close()
+
+
+def _candidate_matches_anchor(candidate: dict, anchor: str) -> bool:
+    """Whether a selector picks this candidate.
+
+    The anchor is matched against the candidate's HEADER text only, not its
+    whole body: matching anywhere in the table would let a value that happens
+    to appear in one data row select the table, which is a selector that
+    changes meaning when the data changes.
+    """
+    if not anchor:
+        return True
+    needle = anchor.strip()
+    if not needle:
+        return True
+    header_text = " ".join(str(name or "") for name in
+                           candidate.get("header_names") or [])
+    if needle in header_text:
+        return True
+    # Fall back to the candidate's first row, which is the header band for a
+    # table whose header the detector did not name separately.
+    rows = candidate.get("rows") or []
+    if rows:
+        first = " ".join(
+            str((cell or {}).get("text") or "") for cell in rows[0]["cells"])
+        return needle in first
+    return False
+
+
+def _derive_table_regions(candidates_by_page, pages, physical_for, profile):
+    """Turn detected candidates into receipt regions bound to exact offsets.
+
+    Two coordinate systems have to agree here: the detector works in PDF
+    geometry, the contract's spans are offsets into the registered processed
+    text. This maps one onto the other and REFUSES whenever the mapping is not
+    exact and unique -- an approximate offset is indistinguishable from a
+    correct one downstream, which is the whole failure class P0-8 exists to
+    close.
+
+    Returns `(extent, regions, errors)`.
+    """
+    extent: list = []
+    regions: list = []
+    errors: list[str] = []
+
+    for logical in sorted(candidates_by_page):
+        candidate = candidates_by_page[logical]
+        page_text = pages.get(logical)
+        if page_text is None:
+            errors.append(
+                f"logical page {logical} does not exist in the registered "
+                "source-text revision, so the detected table cannot be bound "
+                "to any processed text")
+            continue
+        canonical = table_region_provenance.canonical_page_text(page_text)
+        page_digest = table_region_provenance.text_sha256(canonical)
+        physical = physical_for(logical)
+        if physical is None:
+            errors.append(
+                f"logical page {logical} has no physical page mapping -- a "
+                "table region must name the physical page its geometry came "
+                "from, and must not fall back to the logical number")
+            continue
+
+        rows = candidate.get("rows") or []
+        if not rows:
+            errors.append(
+                f"logical page {logical}: the detected table has no row bands")
+            continue
+
+        # Header identification: the detector's own, never inferred from
+        # position alone. `external` means the header sits outside the table
+        # body, in which case the first body row is data, not a header.
+        header_indexes = set()
+        if candidate.get("header_names") and not candidate.get(
+                "header_external"):
+            header_indexes.add(0)
+
+        page_regions = []
+        cursor = 0
+        for index, row in enumerate(rows):
+            if any(cell is None for cell in row["cells"]):
+                errors.append(
+                    f"logical page {logical}: row band {index} contains merged "
+                    "cells, so its row/column structure is ambiguous -- an "
+                    "ambiguous table is refused rather than resolved by "
+                    "heuristic; resolve it by review")
+                continue
+            texts = [str((cell or {}).get("text") or "")
+                     for cell in row["cells"]]
+            start, end, locate_error = table_region_provenance.locate_row_text(
+                canonical, texts, cursor)
+            if locate_error:
+                errors.append(f"logical page {logical}, row band {index}: "
+                              f"{locate_error}")
+                continue
+            cursor = end
+
+            cell_records = []
+            cell_cursor = start
+            for cell in row["cells"]:
+                text = str((cell or {}).get("text") or "").strip()
+                if not text:
+                    continue
+                needle = text.split("\n")[0].strip()
+                position = canonical.find(needle, cell_cursor)
+                if position == -1 or position + len(needle) > end:
+                    errors.append(
+                        f"logical page {logical}, row band {index}: cell text "
+                        f"{needle!r} could not be located inside its own row's "
+                        "derived range")
+                    continue
+                cell_records.append({
+                    "page": logical,
+                    "start_char": position,
+                    "end_char": position + len(needle),
+                    "quote": canonical[position:position + len(needle)],
+                    "text": needle,
+                    "bbox": [float(v) for v in cell["bbox"]],
+                })
+                cell_cursor = position + len(needle)
+
+            page_regions.append({
+                "page": logical,
+                "physical_page": physical,
+                "kind": (
+                    table_region_provenance.DATA_ROW_KIND
+                    if index not in header_indexes
+                    else ("column_header" if not extent else "repeated_header")
+                ),
+                "start_char": start,
+                "end_char": end,
+                "quote": canonical[start:end],
+                "page_text_sha256": page_digest,
+                "bbox": [float(v) for v in row["bbox"]],
+                "cells": cell_records,
+            })
+
+        if errors:
+            continue
+        if not page_regions:
+            errors.append(
+                f"logical page {logical}: no row band could be bound to the "
+                "registered text")
+            continue
+
+        # The extent is the union of the bands actually derived, not the
+        # detector's raw bbox: the receipt's extent has to be expressible in the
+        # same offsets a contract's source_regions use, or the two could never
+        # be compared exactly.
+        page_start = min(region["start_char"] for region in page_regions)
+        page_end = max(region["end_char"] for region in page_regions)
+        extent.append({
+            "page": logical,
+            "physical_page": physical,
+            "kind": "table_extent",
+            "start_char": page_start,
+            "end_char": page_end,
+            "quote": canonical[page_start:page_end],
+            "page_text_sha256": page_digest,
+            "bbox": [float(v) for v in candidate["bbox"]],
+        })
+        regions.extend(page_regions)
+
+    if errors:
+        return [], [], errors
+    return extent, regions, []
+
+
+def _table_region_finalize_blockers(case_id: str, doc_id: str) -> list[str]:
+    """P0-8 gate: every table cited by this document's reference_table contract
+    must still rest on a receipt that describes the world as it is now.
+
+    A table with no receipt is a BLOCKER, never a skipped check: "the proof
+    field is absent, so there is nothing to verify" is the exact reasoning that
+    let a narrowly-declared region look complete.
+    """
+    tables = read_contract_data(case_id, f"reference_table_{doc_id}.json")
+    if tables is None:
+        return []
+    if uid_scheme_for(case_id, doc_id) != "canonical_v1":
+        return []
+    return _table_region_binding_blockers(case_id, doc_id, tables)
+
+
+def _table_region_binding_blockers(case_id: str, doc_id: str,
+                                    tables: dict) -> list[str]:
+    """Bind a reference_table contract to its receipts, freshly re-checked.
+
+    Used by BOTH the write gate and finalization, so a table cannot be written
+    against a current receipt and then finalize after the world moved -- the
+    identical comparison runs at both moments against freshly read state.
+    """
+    receipts = table_region_receipts_for(case_id, doc_id)
+    text = _registered_revision_text(case_id, doc_id)
+    if text is None:
+        return [
+            f"{doc_id}: no registered source-text revision -- a table region "
+            "receipt's offsets cannot be re-checked against anything"
+        ]
+    try:
+        pages = policy_completeness.split_pages(text)
+    except Exception as exc:  # noqa: BLE001
+        return [f"{doc_id}: registered source text is unusable: {exc}"]
+
+    current_pdf = registered_source_pdf_sha256(
+        case_id, _table_region_pdf_owner(case_id, doc_id))
+    current_revision = (revision_entry_for(case_id, doc_id) or {}).get(
+        "current_revision_sha256")
+    segment_receipt = segment_derivation_receipt_for(case_id, doc_id)
+    segment_receipt_id = (
+        _segment_receipt_digest(segment_receipt) if segment_receipt else None)
+
+    blockers: list[str] = []
+    # A receipt that is no longer current cannot authorize anything, so
+    # staleness is checked before the structural comparison rather than after.
+    fresh: list = []
+    for receipt in receipts:
+        currency = table_region_provenance.receipt_currency_errors(
+            receipt=receipt,
+            current_pdf_sha256=current_pdf,
+            current_revision_sha256=current_revision,
+            current_pages=pages,
+            segment_receipt_id=segment_receipt_id,
+            location=f"reference_table_{doc_id}.json receipt "
+                     f"{receipt.get('receipt_id')}",
+        )
+        if currency:
+            blockers.extend(currency)
+            continue
+        fresh.append(receipt)
+
+    blockers.extend(table_region_provenance.contract_binding_errors(
+        tables, fresh, pages, "tables"))
+    return blockers
+
+
+def _table_region_pdf_owner(case_id: str, doc_id: str) -> str:
+    """Which document's raw PDF a table's regions are derived from.
+
+    A segment's table geometry comes from the PARENT's pages, matching the
+    canonical UID rule that identity is keyed to the immutable original.
+    """
+    manifest = read_contract_data(case_id, "document_manifest.json") or {}
+    entry = next((d for d in manifest.get("documents", [])
+                  if d.get("document_id") == doc_id), None)
+    if entry and entry.get("document_role") == "segment":
+        return entry.get("source_document_id") or doc_id
+    return doc_id
+
+
+def _segment_receipt_digest(receipt: dict) -> str:
+    """A stable digest of a P0-6 receipt, used to detect it being re-derived."""
+    return hashlib.sha256(
+        repr(segment_derivation.receipt_fingerprint(receipt)
+             ).encode("utf-8")).hexdigest()
+
+
+def cmd_register_table_region(args):
+    """Derive a table's authoritative region and issue a table_region_v1
+    receipt.
+
+    Nothing the caller submits defines the table: the extent, the row bands and
+    their classification all come from running a real detector over the
+    registered PDF in this process. `--anchor` and `--page` are a SELECTOR --
+    they choose among candidates the DAO found, and a selector matching two
+    candidates or none issues no receipt at all.
+
+    Ordering follows dao_transaction's rule -- everything that can fail runs
+    before anything irreversible:
+
+      1. resolve + verify the document (registered, canonical, digest)
+      2. detect table candidates in the PDF ourselves
+      3. resolve the selector to EXACTLY one candidate per page
+      4. bind every band to exact offsets in the registered revision
+      5. build the receipt; an identical one already on file is a NO-OP
+      6. validate the prospective index
+      7. journal, then write, then clear
+    """
+    case_id, doc_id = args.case_id, args.doc_id
+    case_directory = case_dir(case_id)
+
+    blockers = dao_transaction.pending_journal_errors(case_directory)
+    if blockers:
+        for blocker in blockers:
+            print(f"BLOCKED: {blocker}")
+        return 1
+
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        print("BLOCKED: document_manifest.json does not exist -- no registered "
+              "source can be resolved, so no PDF may be opened")
+        return 1
+    entry = next((d for d in manifest.get("documents", [])
+                  if d.get("document_id") == doc_id), None)
+    if entry is None:
+        print(f"BLOCKED: {doc_id} is not registered in document_manifest.json")
+        return 1
+
+    method = entry.get("extraction_method")
+    if method not in table_region_provenance.VERIFIABLE_EXTRACTION_METHODS:
+        print(f"BLOCKED: extraction_method {method!r} has no deterministic "
+              "text layer to derive a table region from. Confirming a table's "
+              "extent on an image-only page means running OCR, which UID "
+              "verification may not do, so no receipt can be issued and the "
+              "table cannot finalize. This is a stated P0-8 limitation, not a "
+              "state to work around -- resolve it by human review.")
+        return 1
+
+    # --- 1. the source, verified by reading it -----------------------------
+    pdf_owner = _table_region_pdf_owner(case_id, doc_id)
+    pdf_path = _raw_source_path(case_id, pdf_owner)
+    if pdf_path is None:
+        print(f"BLOCKED: {pdf_owner} has no readable registered raw file -- "
+              "there is no immutable source to derive a region from")
+        return 1
+    actual_pdf_digest = registered_source_pdf_sha256(case_id, pdf_owner)
+    if actual_pdf_digest is None:
+        print(f"BLOCKED: {pdf_owner}'s raw source could not be hashed")
+        return 1
+    recorded_digest = next(
+        (d.get("source_pdf_sha256") for d in manifest.get("documents", [])
+         if d.get("document_id") == pdf_owner), None)
+    if recorded_digest and recorded_digest != actual_pdf_digest:
+        print(f"REFUSED: {pdf_owner} records source_pdf_sha256 "
+              f"{recorded_digest!r} but the registered file now hashes to "
+              f"{actual_pdf_digest!r} -- the raw source changed; a region "
+              "derived from it cannot be trusted")
+        return 1
+
+    revision_sha = (revision_entry_for(case_id, doc_id) or {}).get(
+        "current_revision_sha256")
+    if not revision_sha:
+        print(f"BLOCKED: {doc_id} has no registered source-text revision -- a "
+              "table region must be bound to the exact processed bytes its "
+              "offsets index into, or a later rewrite would silently inherit "
+              "this derivation's verification.")
+        return 1
+    text = _registered_revision_text(case_id, doc_id)
+    if text is None:
+        print(f"BLOCKED: {doc_id}'s registered revision text could not be read")
+        return 1
+    try:
+        pages = policy_completeness.split_pages(text)
+    except Exception as exc:  # noqa: BLE001
+        print(f"BLOCKED: {doc_id}'s registered source text is unusable: {exc}")
+        return 1
+
+    logical_pages = _parse_logical_pages(str(args.page))
+    if not logical_pages:
+        print("BLOCKED: --page resolved to no logical pages")
+        return 1
+    missing = [page for page in logical_pages if page not in pages]
+    if missing:
+        print(f"BLOCKED: logical page(s) {missing} are not in {doc_id}'s "
+              "registered source-text revision")
+        return 1
+
+    physical_for = (lambda logical: _physical_page_for(
+        case_id, doc_id, logical))
+    physical_pages = []
+    for logical in logical_pages:
+        physical = physical_for(logical)
+        if physical is None:
+            print(f"BLOCKED: logical page {logical} has no physical page "
+                  "mapping -- for a segment this comes from the P0-6 "
+                  "derivation receipt, which must be registered first")
+            return 1
+        physical_pages.append(physical)
+
+    # --- 2. detect candidates ourselves ------------------------------------
+    profile = args.detector_profile or \
+        table_region_provenance.DEFAULT_DETECTOR_PROFILE
+    candidates, detector, detect_error = _detect_table_candidates(
+        pdf_path, physical_pages, profile)
+    if detect_error:
+        print(f"BLOCKED: {detect_error}")
+        return 1
+
+    # --- 3. the selector must resolve to exactly one candidate per page ----
+    anchor = args.anchor
+    by_page: dict[int, dict] = {}
+    for logical, physical in zip(logical_pages, physical_pages):
+        page_candidates = [c for c in candidates
+                           if c["physical_page"] == physical]
+        matching = [c for c in page_candidates
+                    if _candidate_matches_anchor(c, anchor)]
+        if not matching:
+            print(f"BLOCKED: no detected table on logical page {logical} "
+                  f"(physical {physical}) matches anchor {anchor!r}. "
+                  f"{len(page_candidates)} table candidate(s) were detected "
+                  "there. A page whose table cannot be established by the "
+                  "layout detector is NOT a page without a table -- it is an "
+                  "unverified one, and it stays review_required.")
+            return 1
+        if len(matching) > 1:
+            print(f"REFUSED: anchor {anchor!r} matches more than one detected "
+                  f"table on logical page {logical} (physical {physical}) -- "
+                  f"{len(matching)} candidates. Selecting the first would be a "
+                  "coin flip recorded as provenance; narrow the anchor or "
+                  "resolve the table by review.")
+            return 1
+        by_page[logical] = matching[0]
+
+    # --- 4. bind every band to exact offsets -------------------------------
+    extent, regions, bind_errors = _derive_table_regions(
+        by_page, pages, physical_for, profile)
+    if bind_errors:
+        print(f"BLOCKED: the table region for {doc_id} could not be bound to "
+              "the registered source text; NOTHING was written:")
+        for error in bind_errors:
+            print(f"  - {error}")
+        print("  an exact, unique mapping between the PDF's layout and the "
+              "processed text is required -- an approximate region is "
+              "indistinguishable from a correct one downstream. Resolve by "
+              "review.")
+        return 1
+
+    review_reasons = table_region_provenance.classification_review_reasons(
+        regions)
+    if review_reasons:
+        print(f"BLOCKED: the derived region for {doc_id} contains bands the "
+              "detector could not classify; NOTHING was written:")
+        for reason in review_reasons:
+            print(f"  - {reason}")
+        return 1
+
+    # --- 5. build the receipt; an identical one is a no-op -----------------
+    segment_receipt = segment_derivation_receipt_for(case_id, doc_id)
+    receipt = table_region_provenance.build_receipt(
+        document_id=doc_id,
+        case_id=case_id,
+        source_pdf_sha256=actual_pdf_digest,
+        source_text_revision_sha256=revision_sha,
+        detector=detector,
+        extent=extent,
+        regions=regions,
+        selector={"anchor": anchor, "logical_pages": logical_pages},
+        segment_derivation_receipt_id=(
+            _segment_receipt_digest(segment_receipt)
+            if segment_receipt else None),
+        issued_at=now_iso(),
+        issued_by=args.held_by,
+        run_id=args.run_id,
+    )
+
+    existing = next(
+        (r for r in table_region_receipts_for(case_id, doc_id)
+         if r.get("receipt_id") == receipt.get("receipt_id")), None)
+    if existing is not None:
+        # Same PDF bytes, same revision, same detector output. Nothing changed,
+        # so nothing downstream may be invalidated -- re-running a registration
+        # must not cost a rerun.
+        print(f"PASS: {doc_id} table region receipt is unchanged (no-op) -- "
+              f"{len(extent)} page(s), "
+              f"{len([r for r in regions if r['kind'] == 'data_row'])} data "
+              f"rows, receipt {receipt['receipt_id'][:16]}")
+        return 0
+
+    return _commit_table_region(case_id, doc_id, receipt, args.held_by,
+                                args.run_id)
+
+
+def _commit_table_region(case_id, doc_id, receipt, held_by, run_id):
+    """Write the receipt and the downstream invalidation as one fail-closed
+    transaction.
+
+    Locks are taken in dao_transaction.LOCK_ORDER and asserted rather than
+    assumed. The prospective index is schema-validated BEFORE anything is
+    written, so a schema failure cannot leave a partial receipt behind.
+    """
+    lock_kinds = ("run_state", "revision_index")
+    order_errors = dao_transaction.check_lock_order(lock_kinds)
+    if order_errors:
+        for error in order_errors:
+            print(f"FAIL: {error}")
+        return 1
+
+    case_directory = case_dir(case_id)
+    state_target = run_state_path(case_id)
+    index_target = table_region_index_path(case_id)
+    index_preimage: bytes | None = None
+
+    held: list[Path] = []
+    try:
+        for target, purpose in (
+            (state_target, f"register table region for {doc_id}"),
+            (index_target, f"issue table region receipt for {doc_id}"),
+        ):
+            existing_lock = acquire_lock_blocking(
+                target, held_by, run_id or "unknown", purpose)
+            if existing_lock is not None:
+                print(f"LOCKED: held_by={existing_lock['held_by']} "
+                      f"run_id={existing_lock['run_id']} on {target.name} -- "
+                      "the receipt and the downstream invalidation must land "
+                      "together, so a contended lock aborts the whole "
+                      "registration rather than writing part of it")
+                return 1
+            held.append(target)
+
+        # First guaranteed-fresh reads: everything above ran before the locks.
+        fresh_revision = (revision_entry_for(case_id, doc_id) or {}).get(
+            "current_revision_sha256")
+        if fresh_revision != receipt.get("source_text_revision_sha256"):
+            print(f"FAIL: {doc_id} source-text revision changed while its "
+                  "table region was being derived; rerun from fresh state")
+            return 1
+        fresh_pdf = registered_source_pdf_sha256(
+            case_id, _table_region_pdf_owner(case_id, doc_id))
+        if fresh_pdf != receipt.get("source_pdf_sha256"):
+            print(f"FAIL: {doc_id}'s raw source bytes changed while its table "
+                  "region was being derived; rerun from fresh state")
+            return 1
+
+        index = load_table_region_index(case_id)
+        tables = [t for t in index.get("tables", [])
+                  if t.get("receipt_id") != receipt.get("receipt_id")]
+        tables.append(receipt)
+        tables.sort(key=lambda t: (t.get("document_id") or "",
+                                   t.get("receipt_id") or ""))
+        index["tables"] = tables
+        index["case_id"] = case_id
+
+        # Step 6: validate before anything lands.
+        index_errors = _schema_check(index, table_region_provenance.INDEX_SCHEMA)
+        if index_errors:
+            print("FAIL: the table region receipt would be schema-invalid -- "
+                  "nothing written:")
+            for error in index_errors:
+                print(f"  - {error}")
+            return 1
+
+        index_preimage = (
+            index_target.read_bytes() if index_target.exists() else None)
+
+        # Step 7: journal, then invalidate. Nothing irreversible yet.
+        dao_transaction.write_journal(case_directory, {
+            "operation": "register_table_region",
+            "case_id": case_id,
+            "document_id": doc_id,
+            "receipt_id": receipt.get("receipt_id"),
+            "status": "invalidating",
+            "started_at": now_iso(),
+        })
+        try:
+            _invalidate_policy_layer(
+                case_id,
+                f"table region re-derived for {doc_id}: a reference table's "
+                "source regions must be re-bound to the new receipt",
+                held_by, run_id, lock_already_held=True)
+        except CascadeFailed as exc:
+            dao_transaction.clear_journal(case_directory)
+            print(f"FAIL: {doc_id} table region NOT registered -- {exc}")
+            print("  the existing receipt index is unchanged")
+            return 1
+
+        try:
+            atomic_write_json(index_target, index)
+        except Exception as exc:  # noqa: BLE001
+            rollback_error = None
+            try:
+                _restore_file_preimage(index_target, index_preimage)
+                dao_transaction.clear_journal(case_directory)
+            except Exception as restore_exc:  # noqa: BLE001
+                rollback_error = restore_exc
+            print(f"FAIL: table region persistence failed: {exc}")
+            if rollback_error is None:
+                print("  the receipt index was restored to its exact "
+                      "pre-transaction bytes; downstream remains "
+                      "conservatively invalidated")
+            else:
+                print("  ROLLBACK INCOMPLETE: the transaction journal remains "
+                      f"pending and blocks further work: {rollback_error}")
+            return 1
+
+        try:
+            dao_transaction.clear_journal(case_directory)
+        except Exception as exc:  # noqa: BLE001
+            print("FAIL: the table region receipt was committed and downstream "
+                  "was invalidated, but the transaction journal could not be "
+                  f"cleared: {exc}")
+            print("  the pending journal intentionally blocks further work; "
+                  "do not delete it without inspecting the index")
+            return 1
+
+        data_rows = [r for r in receipt["regions"]
+                     if r["kind"] == table_region_provenance.DATA_ROW_KIND]
+        print(f"PASS: issued {table_region_provenance.RECEIPT_SCHEME} receipt "
+              f"{receipt['receipt_id'][:16]} for {doc_id} -- "
+              f"{len(receipt['extent'])} page(s), {len(data_rows)} data rows "
+              f"derived from {receipt['source_pdf_sha256'][:12]}")
+        for region in receipt["extent"]:
+            print(f"  logical page {region['page']} (physical "
+                  f"{region['physical_page']}): extent "
+                  f"[{region['start_char']}:{region['end_char']}]")
+        print(f"  bound to source revision "
+              f"{receipt['source_text_revision_sha256'][:12]}")
+        return 0
+    finally:
+        for target in reversed(held):
+            release_lock(target)
+
+
+def cmd_read_table_region_index(args):
+    print(json.dumps(load_table_region_index(args.case_id),
+                     ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_read_revision_index(args):
     print(json.dumps(load_revision_index(args.case_id),
                      ensure_ascii=False, indent=2))
@@ -4878,6 +5646,35 @@ def main():
     p = sub.add_parser("read-segment-derivation-index")
     p.add_argument("case_id")
     p.set_defaults(fn=cmd_read_segment_derivation_index)
+
+    p = sub.add_parser(
+        "register-table-region",
+        help="derive a table's authoritative source region from the "
+             "registered PDF's own layout (the ONLY issuer of a "
+             "table_region_v1 receipt)")
+    p.add_argument("case_id")
+    p.add_argument("--doc-id", dest="doc_id", required=True,
+                   help="the document whose table region is being derived")
+    p.add_argument("--page", required=True,
+                   help="logical page spec the table occupies, e.g. '12' or "
+                        "'12,13' for a table continued on the next page")
+    p.add_argument("--anchor", default=None,
+                   help="SELECTOR only: text that must appear in the "
+                        "candidate table's header. It chooses among candidates "
+                        "the DAO detected and never defines an extent; "
+                        "matching two candidates, or none, issues no receipt")
+    p.add_argument("--detector-profile", dest="detector_profile", default=None,
+                   help=f"detection profile (default: "
+                        f"{table_region_provenance.DEFAULT_DETECTOR_PROFILE}). "
+                        "The profile name enters the receipt fingerprint, so "
+                        "changing it requires a fresh derivation")
+    p.add_argument("--held-by", dest="held_by", required=True)
+    p.add_argument("--run-id", dest="run_id", required=True)
+    p.set_defaults(fn=cmd_register_table_region)
+
+    p = sub.add_parser("read-table-region-index")
+    p.add_argument("case_id")
+    p.set_defaults(fn=cmd_read_table_region_index)
 
     p = sub.add_parser("policy-snapshot")
     p.add_argument("case_id")

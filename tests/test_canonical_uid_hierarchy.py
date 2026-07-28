@@ -428,9 +428,49 @@ def _check_clauses(data):
                   _cross_contract.NORMALIZED_POLICY_CLAUSE_SCHEMA, data)
 
 
+# P0-8's region-provenance findings, which `_canonical_uid_errors` returns
+# alongside the UID findings. This file is about UID RECOMPUTATION, and its
+# fixtures are synthetic page text with no real PDF table behind them, so they
+# cannot carry a table_region_v1 receipt. Filtering keeps each test asserting
+# the one thing it is about -- and
+# `test_the_p08_region_gate_is_still_wired_into_this_path` below asserts the
+# filtered finding really is produced, so this cannot quietly become a way to
+# hide a P0-8 regression.
+_P08_MARKERS = (
+    "table_region_receipt_id",
+    "derived extent",
+    "extent the detector derived",
+    "data_row",
+    "detector",
+)
+
+
+def _p08_finding(error: str) -> bool:
+    return any(marker in error for marker in _P08_MARKERS)
+
+
 def _check_tables(data):
+    return [error for error in _check(
+        "reference_table_DOC_005.json",
+        _cross_contract.REFERENCE_TABLE_SCHEMA, data)
+        if not _p08_finding(error)]
+
+
+def _check_tables_unfiltered(data):
     return _check("reference_table_DOC_005.json",
                   _cross_contract.REFERENCE_TABLE_SCHEMA, data)
+
+
+def test_the_p08_region_gate_is_still_wired_into_this_path(canonical):
+    """The filter above must never be load-bearing.
+
+    A reference table with no DAO-issued region receipt is refused on this
+    exact code path (P0-8). If this ever stops firing, `_check_tables`'s filter
+    would be silently removing nothing while the gate is gone.
+    """
+    errors = _check_tables_unfiltered(build_tables(canonical))
+
+    assert any("table_region_receipt_id" in error for error in errors), errors
 
 
 def _persist(name, data):
@@ -1344,15 +1384,29 @@ def test_write_contract_refuses_every_fabricated_uid_kind(
     assert "non-canonical UIDs" in capsys.readouterr().out
 
 
-def test_write_contract_accepts_a_canonically_derived_reference_table(
+def test_a_canonically_derived_table_still_needs_its_region_receipt(
         canonical, isolated_dao, make_args, capsys):
-    """The positive end-to-end case: a table whose whole RT/RR/RC hierarchy
-    derives from source is written."""
-    assert _write(
+    """A whole RT/RR/RC hierarchy deriving from source is no longer sufficient.
+
+    This test previously asserted the write SUCCEEDED. P0-8 changed that
+    deliberately: every UID here recomputes correctly, because a UID derived
+    from a narrowed region is a real hash of real bytes -- of the wrong extent.
+    Only a DAO-issued region receipt can establish that the declared extent is
+    the table's, so a canonical hierarchy alone no longer passes.
+
+    The positive end-to-end case now lives in
+    `test_table_region_provenance.py::test_honest_contract_is_actually_written_by_the_dao`,
+    where the table is backed by a real PDF and a real receipt.
+    """
+    rc = _write(
         isolated_dao, make_args, "reference_table_DOC_005.json",
         _cross_contract.REFERENCE_TABLE_SCHEMA,
-        build_tables(canonical)) == 0
-    assert (dao.case_dir("CASE_030") / "reference_table_DOC_005.json").exists()
+        build_tables(canonical))
+
+    assert rc == 1
+    assert "table_region_receipt_id" in capsys.readouterr().out
+    assert not (dao.case_dir("CASE_030")
+                / "reference_table_DOC_005.json").exists()
 
 
 def test_finalization_recomputes_uids_of_already_written_contracts(canonical):
@@ -1366,11 +1420,21 @@ def test_finalization_recomputes_uids_of_already_written_contracts(canonical):
 
 
 def test_finalization_is_clean_when_every_uid_derives(canonical):
+    """Every UID recomputing is the clean state for the UID LAYER.
+
+    The reference table additionally owes a P0-8 region receipt, which these
+    synthetic fixtures have no real PDF to obtain, so that one blocker is
+    expected here and asserted explicitly rather than filtered away.
+    """
     pdf = canonical
     _persist("policy_boundary_inventory_DOC_005.json", build_inventory(pdf))
     _persist("normalized_policy_clause_DOC_005.json", build_clauses(pdf))
     _persist("reference_table_DOC_005.json", build_tables(pdf))
-    assert dao._canonical_uid_finalize_blockers("CASE_030", "DOC_005") == []
+
+    blockers = dao._canonical_uid_finalize_blockers("CASE_030", "DOC_005")
+
+    assert [b for b in blockers if "table_region_receipt_id" not in b] == []
+    assert any("table_region_receipt_id" in b for b in blockers), blockers
 
 
 def test_an_audit_citing_a_fabricated_clause_uid_is_refused(canonical):
