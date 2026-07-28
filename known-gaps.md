@@ -1295,11 +1295,28 @@ negating predicate, but NOT the reverse: a positive payout condition ("회사는
 floor is polarity-blind. Polarity is outcome-determinative in policy language, so
 this could invert a benefit's meaning while every other check stayed green.
 
-Fix (`tools/_cross_contract.py`): polarity is now BIDIRECTIONAL and runs before
-the lexical floor. A negation marker set (않/아니/없/제외/면책/부지급/불가/제한/
-배제/금한/인정하지 않/…) classifies each quote's polarity. (a) a negative
-condition grounded only in positive evidence, and (b) a positive/coverage
-condition grounded only in negative evidence, are both polarity contradictions.
+Initial fix (`tools/_cross_contract.py`): polarity became BIDIRECTIONAL and ran
+before the lexical floor. However, it still classified polarity from a substring
+marker set (않/아니/없/제외/면책/부지급/불가/제한/…). That made
+`제한 없이 보험금을 지급합니다` negative: the validator saw both `제한` and `없`
+but not that they negate the restriction rather than the payout. It also reduced
+double negation and a positive-plus-exception sentence to one boolean.
+
+P1-2 follow-up: a deterministic predicate/scope analyzer now returns
+`affirmative`, `restrictive_or_negative`, `mixed`, or `ambiguous`, together with
+the target predicate, negation scope, exact matched character span/pattern, and
+reason. Directly negating 지급/보상/보장 is restrictive; asserting
+제한/제외/면책/감액 is restrictive; negating those restriction predicates is
+affirmative. Double negation and nested scope are review blockers instead of
+being guessed, and passages that assert both outcomes are `mixed`. No LLM,
+external CLI, or extractor runs in validation. A normalized condition may use
+its semantic bucket only as a fallback when it stores a trigger without
+repeating the outcome; source evidence gets no fallback and must state the
+operative proposition itself.
+
+(a) a negative condition grounded only in positive evidence, and (b) a
+positive/coverage condition grounded only in negative evidence, remain polarity
+contradictions.
 A quote that names the operative predicate but stops before resolving it
 ("보험금을 지급하는 경우") is rejected as an unresolved predicate -- not complete
 direct evidence of either outcome. A composite whose passages disagree on
@@ -1307,10 +1324,11 @@ polarity must be routed to review_required, never merged into one condition. The
 fix message is explicit that the remedy is to correct the extraction or route to
 review, NOT to reword the condition to dodge the check.
 
-6 regression tests (tests/test_cross_contract.py): positive condition / negative
-evidence rejected; negative condition / positive evidence rejected; truncated
-'지급하는 경우' rejected; normal positive payout passes; normal exclusion passes;
-composite mixed-polarity requires review. 557 tests pass.
+Regression tests (`tests/test_cross_contract.py`) cover the original six cases
+plus unrestricted payment, negated restriction, direct payout negation,
+impossibility, responsibility, reduction, double negation, nested scope,
+mixed propositions inside one quote, bidirectional end-to-end contradiction,
+determinism, and proof that validation never rewrites the condition.
 
 ## 22. Boundary anchors missed Korean item markers; clause evidence was never bound to its own source range -- RESOLVED 2026-07-27 (Part 11C)
 

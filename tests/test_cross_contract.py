@@ -11,6 +11,7 @@ Every filesystem test runs against the isolated_dao tmp_path fixture, never the
 real outputs/ or data/. schemas/ is the project's real schema set (conftest).
 """
 import json
+import copy
 from pathlib import Path
 
 import pytest
@@ -536,6 +537,141 @@ def test_composite_mixed_polarity_requires_review():
         _contract([clause]), "normalized_policy_clause_DOC_001.json",
         POLARITY_TEXT)
     assert any("mixes positive and negative polarity" in e for e in errors), errors
+
+
+# --------------------------------------------------------------------------
+# P1-2: predicate/scope-aware Korean policy polarity.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text, expected", [
+    ("보험금을 지급합니다", "affirmative"),
+    ("제한 없이 보험금을 지급합니다", "affirmative"),
+    ("보험금 지급을 제한하지 않습니다", "affirmative"),
+    ("회사는 이 사유로 면책하지 않습니다", "affirmative"),
+    ("보험금 지급 제한이 없습니다", "affirmative"),
+    ("보험금을 지급하지 않습니다", "restrictive_or_negative"),
+    ("보험금을 지급할 수 없습니다", "restrictive_or_negative"),
+    ("보장 대상에서 제외합니다", "restrictive_or_negative"),
+    ("회사는 책임을 지지 않습니다", "restrictive_or_negative"),
+    ("보험금 지급을 제한합니다", "restrictive_or_negative"),
+    ("제한이 없는 경우에도 보험금을 지급하지 않습니다",
+     "restrictive_or_negative"),
+    ("지급하지 않는 경우를 제한합니다", "ambiguous"),
+    ("보험금을 지급하지 않는 것은 아닙니다", "ambiguous"),
+    ("보장하지 않는 사항이 없습니다", "ambiguous"),
+    ("보험금을 지급하지 않습니다. 다만 특정 수술은 지급합니다",
+     "mixed"),
+    ("보험금을 지급하되 고의 사고는 제외합니다", "mixed"),
+])
+def test_korean_policy_polarity_uses_predicate_and_negation_scope(
+        text, expected):
+    analysis = _cross_contract._analyze_policy_polarity(text)
+
+    assert analysis.classification == expected
+    assert analysis.reason
+    assert analysis.matches
+    for match in analysis.matches:
+        assert match.target_predicate
+        assert match.negation_scope
+        assert match.start_char >= 0
+        assert match.end_char > match.start_char
+        assert text[match.start_char:match.end_char] == match.matched_text
+
+
+def test_scope_analysis_distinguishes_restriction_from_unrestricted_payment():
+    restricted = _cross_contract._analyze_policy_polarity(
+        "보험금 지급을 제한합니다")
+    unrestricted = _cross_contract._analyze_policy_polarity(
+        "제한 없이 보험금을 지급합니다")
+
+    assert restricted.classification == "restrictive_or_negative"
+    assert unrestricted.classification == "affirmative"
+    assert any(match.target_predicate == "제한"
+               and match.negation_scope == "restriction_negated"
+               for match in unrestricted.matches)
+
+
+def test_polarity_analyzer_is_deterministic_and_does_not_rewrite_input():
+    text = "  제한 없이 보험금을 지급합니다  "
+    before = text
+
+    first = _cross_contract._analyze_policy_polarity(text)
+    second = _cross_contract._analyze_policy_polarity(text)
+
+    assert first == second
+    assert text == before
+
+
+P1_2_POLARITY_TEXT = (
+    "<<<PAGE page=1>>>\n"
+    "제3조(보험금의 지급사유)\n"
+    "회사는 제한 없이 보험금을 지급합니다.\n"
+    "회사는 보험금을 지급하지 않습니다. 다만 특정 수술은 지급합니다.\n"
+)
+
+
+def test_unrestricted_payment_condition_and_evidence_pass_end_to_end():
+    clause = _polarity_clause()
+    item = clause["payout_conditions"][0]
+    item["text"] = "제한 없이 보험금을 지급합니다"
+    item["evidence_references"][0]["quote"] = \
+        "회사는 제한 없이 보험금을 지급합니다"
+
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        P1_2_POLARITY_TEXT)
+
+    assert not any("polarity" in error for error in errors), errors
+
+
+def test_mixed_polarity_inside_one_evidence_quote_is_a_blocker():
+    clause = _polarity_clause()
+    item = clause["payout_conditions"][0]
+    item["text"] = "특정 수술은 보험금을 지급합니다"
+    item["evidence_references"][0]["quote"] = (
+        "회사는 보험금을 지급하지 않습니다. 다만 특정 수술은 지급합니다")
+
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json",
+        P1_2_POLARITY_TEXT)
+
+    assert any("mixed" in error and "polarity" in error
+               for error in errors), errors
+
+
+def test_ambiguous_double_negation_evidence_is_a_blocker():
+    text = (
+        "<<<PAGE page=1>>>\n"
+        "제3조(보험금의 지급사유)\n"
+        "회사가 보험금을 지급하지 않는 것은 아닙니다.\n"
+    )
+    clause = _polarity_clause()
+    item = clause["payout_conditions"][0]
+    item["text"] = "보험금을 지급합니다"
+    item["evidence_references"][0]["quote"] = \
+        "회사가 보험금을 지급하지 않는 것은 아닙니다"
+
+    errors = check_normalized_policy_clause(
+        _contract([clause]), "normalized_policy_clause_DOC_001.json", text)
+
+    assert any("ambiguous" in error and "polarity" in error
+               for error in errors), errors
+
+
+def test_polarity_validation_never_mutates_normalized_condition():
+    clause = _polarity_clause()
+    item = clause["payout_conditions"][0]
+    item["text"] = "제한 없이 보험금을 지급합니다"
+    item["evidence_references"][0]["quote"] = \
+        "회사는 제한 없이 보험금을 지급합니다"
+    contract = _contract([clause])
+    before = copy.deepcopy(contract)
+
+    check_normalized_policy_clause(
+        contract, "normalized_policy_clause_DOC_001.json",
+        P1_2_POLARITY_TEXT)
+
+    assert contract == before
 
 
 def test_reference_table_review_flags_are_finalize_blockers():

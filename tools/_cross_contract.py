@@ -47,6 +47,7 @@ class of outcome: not "the contract is wrong" but "I cannot verify this
 contract at all", which must never resolve to PASS.
 """
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 # The one contract family dispatched today. Keyed by the schema name the DAO
@@ -70,18 +71,258 @@ _DIRECT_QUOTE_TERMINAL_RE = re.compile(
     r"(?:[.!?。]|[)”’\"])?$"
 )
 
-# --- Polarity (Part 11B) --------------------------------------------------
-# Negation/exclusion markers. A text carrying any of these expresses a
-# negative/exclusionary proposition ("회사는 지급하지 않습니다"), the opposite
-# outcome from a positive payout proposition ("회사는 지급합니다"). Polarity is
-# outcome-determinative in policy language, so it is checked BEFORE the lexical
-# floor -- a condition and its evidence sharing tokens but disagreeing on
-# polarity is a contradiction, not weak support.
-_NEGATION_MARKERS = (
-    "않", "아니", "없", "제외", "면책", "부지급", "불가",
-    "제한", "배제", "금한", "금합니다", "금지",
-    "인정하지 않", "인정되지 않", "해당하지 않", "지급하지 아니",
+# --- Polarity (Part 11B / P1-2) -------------------------------------------
+# Policy polarity is the outcome of an operative predicate, not the presence of
+# a negative-looking substring.  In particular, `제한 없이 지급합니다` negates
+# the RESTRICTION and is affirmative, while `지급을 제한합니다` asserts the
+# restriction and is negative.  The old `_NEGATION_MARKERS` implementation
+# collapsed both to "negative", and also silently treated mixed and double-
+# negative propositions as if they had one settled meaning.
+#
+# The analyzer below is deliberately deterministic and local.  Validators must
+# be pure: no LLM, tokenizer service, subprocess, or extractor is invoked.
+
+AFFIRMATIVE = "affirmative"
+RESTRICTIVE_OR_NEGATIVE = "restrictive_or_negative"
+MIXED = "mixed"
+AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True)
+class PolarityMatch:
+    """One operative predicate and the scope that determines its outcome."""
+
+    target_predicate: str
+    outcome: str
+    negation_scope: str
+    start_char: int
+    end_char: int
+    matched_text: str
+    pattern: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class PolarityAnalysis:
+    """Deterministic classification plus audit-ready predicate diagnostics."""
+
+    classification: str
+    matches: tuple[PolarityMatch, ...]
+    reason: str
+
+
+_AMBIGUOUS_POLARITY_PATTERNS = (
+    (
+        re.compile(
+            r"(?P<predicate>지급|보상|보장)\s*(?:하|되)?지\s*않는\s*"
+            r"(?:것|사항)\s*(?:은|는|이|가)?\s*(?:아니|아닙|아닌|없)"
+        ),
+        "double_or_complex_negation",
+        "a payout/coverage negation is itself negated; deterministic rules "
+        "cannot safely collapse the resulting scope",
+    ),
+    (
+        re.compile(
+            r"(?P<predicate>지급|보상|보장)\s*(?:하|되)?지\s*않는\s*"
+            r"경우\s*(?:를|을)\s*(?:제한|제외|배제)"
+        ),
+        "nested_predicate_scope",
+        "a negative payout phrase is embedded as the object of a restriction; "
+        "it does not state one unambiguous payout outcome",
+    ),
 )
+
+_NEGATIVE_PAYOUT_PATTERNS = (
+    (
+        re.compile(
+            r"(?P<predicate>지급|보상|보장)\s*(?:하|되)?지\s*(?:않|아니)"
+        ),
+        "target_negated",
+        "the payout/coverage predicate is directly negated",
+    ),
+    (
+        re.compile(
+            r"(?P<predicate>지급|보상|보장)\s*(?:할|될)\s*수\s*없"
+        ),
+        "target_impossible",
+        "the payout/coverage predicate is stated to be impossible",
+    ),
+    (
+        re.compile(r"(?P<predicate>책임)\s*(?:을)?\s*지지\s*(?:않|아니)"),
+        "target_negated",
+        "the insurer's responsibility predicate is directly negated",
+    ),
+    (
+        re.compile(r"(?P<predicate>책임)(?:이|은|는)?\s*없"),
+        "target_absent",
+        "the insurer's responsibility is stated to be absent",
+    ),
+)
+
+_NEGATED_RESTRICTION_PATTERNS = (
+    (
+        re.compile(r"(?P<predicate>제한)\s*없이"),
+        "restriction_negated",
+        "the restriction is negated by `없이`, so it does not negate payout",
+    ),
+    (
+        re.compile(
+            r"(?P<predicate>제한|면책|제외|배제)\s*(?:하)?지\s*(?:않|아니)"
+        ),
+        "restriction_negated",
+        "a restriction/exclusion predicate is directly negated",
+    ),
+    (
+        re.compile(r"(?P<predicate>제한|면책|제외|배제)(?:이|가)?\s*없"),
+        "restriction_absent",
+        "a restriction/exclusion is stated to be absent",
+    ),
+)
+
+_RESTRICTIVE_PREDICATE_RE = re.compile(
+    r"(?P<predicate>제외|배제|면책|부지급|제한|감액|삭감|차감|금지)"
+    r"(?=(?:합니다|한다|됩니다|된다|하여|하고|함|이|을|를|$|[.!?。]))"
+)
+
+_AFFIRMATIVE_PAYOUT_RE = re.compile(
+    r"(?P<predicate>지급|보상|보장)"
+    r"(?=(?:합니다|한다|됩니다|된다|하여|하고|하되|함|"
+    r"할\s*수\s*있|$|[.!?。]))"
+)
+
+_REDUCTION_THEN_PAYMENT_RE = re.compile(
+    r"(?:감액|삭감|차감|제한)하여\s*$"
+)
+
+
+def _match_overlaps(match, occupied: list[tuple[int, int]]) -> bool:
+    return any(match.start() < end and start < match.end()
+               for start, end in occupied)
+
+
+def _polarity_match(match, outcome: str, scope: str,
+                    reason: str) -> PolarityMatch:
+    return PolarityMatch(
+        target_predicate=match.groupdict().get("predicate")
+        or match.group(0),
+        outcome=outcome,
+        negation_scope=scope,
+        start_char=match.start(),
+        end_char=match.end(),
+        matched_text=match.group(0),
+        pattern=match.re.pattern,
+        reason=reason,
+    )
+
+
+def _analyze_policy_polarity(
+        text: str, assumed_outcome: str | None = None) -> PolarityAnalysis:
+    """Classify Korean policy language by predicate and negation scope.
+
+    `assumed_outcome` is used only for normalized condition objects whose
+    schema bucket intentionally stores a trigger without repeating the outcome
+    (e.g. an exclusion condition text of `고의로 자신을 해친 경우`).  Evidence
+    quotes never receive this fallback: they must state the operative predicate
+    themselves, so the bucket cannot manufacture meaning absent from source.
+    """
+    source = str(text or "")
+
+    # Double negation and nested scope are not reduced by counting markers.
+    # Return immediately: even if another token looks affirmative, the passage
+    # still contains an unresolved proposition that must reach review.
+    ambiguous_matches = []
+    for pattern, scope, reason in _AMBIGUOUS_POLARITY_PATTERNS:
+        ambiguous_matches.extend(
+            _polarity_match(match, AMBIGUOUS, scope, reason)
+            for match in pattern.finditer(source)
+        )
+    if ambiguous_matches:
+        return PolarityAnalysis(
+            AMBIGUOUS,
+            tuple(sorted(ambiguous_matches,
+                         key=lambda item: (item.start_char, item.end_char))),
+            "the text contains double negation or nested predicate scope; "
+            "automatic polarity would overstate what the sentence establishes",
+        )
+
+    matches: list[PolarityMatch] = []
+    occupied: list[tuple[int, int]] = []
+
+    for pattern, scope, reason in _NEGATIVE_PAYOUT_PATTERNS:
+        for match in pattern.finditer(source):
+            if _match_overlaps(match, occupied):
+                continue
+            matches.append(_polarity_match(
+                match, RESTRICTIVE_OR_NEGATIVE, scope, reason))
+            occupied.append((match.start(), match.end()))
+
+    for pattern, scope, reason in _NEGATED_RESTRICTION_PATTERNS:
+        for match in pattern.finditer(source):
+            if _match_overlaps(match, occupied):
+                continue
+            # `제한이 없는 경우에도 ... 지급하지 않습니다` uses absence of
+            # restriction as a subordinate condition.  It is not a second,
+            # affirmative outcome competing with the directly-negated payout.
+            if re.match(r"\s*(?:는|은)?\s*경우", source[match.end():]):
+                continue
+            matches.append(_polarity_match(
+                match, AFFIRMATIVE, scope, reason))
+            occupied.append((match.start(), match.end()))
+
+    for match in _RESTRICTIVE_PREDICATE_RE.finditer(source):
+        if _match_overlaps(match, occupied):
+            continue
+        matches.append(_polarity_match(
+            match, RESTRICTIVE_OR_NEGATIVE, "restriction_asserted",
+            "a restriction, exclusion, or reduction predicate is asserted"))
+        occupied.append((match.start(), match.end()))
+
+    for match in _AFFIRMATIVE_PAYOUT_RE.finditer(source):
+        if _match_overlaps(match, occupied):
+            continue
+        # `50% 감액하여 지급합니다` is one restrictive proposition, not a
+        # positive promise plus a separate reduction.  Conversely
+        # `지급하되 ... 제외합니다` retains both matches and becomes mixed.
+        if _REDUCTION_THEN_PAYMENT_RE.search(source[:match.start()]):
+            continue
+        matches.append(_polarity_match(
+            match, AFFIRMATIVE, "target_asserted",
+            "the payout/coverage predicate is affirmatively asserted"))
+        occupied.append((match.start(), match.end()))
+
+    matches.sort(key=lambda item: (item.start_char, item.end_char))
+    outcomes = {match.outcome for match in matches}
+    if AFFIRMATIVE in outcomes and RESTRICTIVE_OR_NEGATIVE in outcomes:
+        return PolarityAnalysis(
+            MIXED, tuple(matches),
+            "the text asserts both affirmative and restrictive outcomes; "
+            "they must be split or reviewed, not collapsed into one condition",
+        )
+    if RESTRICTIVE_OR_NEGATIVE in outcomes:
+        return PolarityAnalysis(
+            RESTRICTIVE_OR_NEGATIVE, tuple(matches),
+            "the operative payout, responsibility, exclusion, or restriction "
+            "predicate yields a restrictive outcome",
+        )
+    if AFFIRMATIVE in outcomes:
+        return PolarityAnalysis(
+            AFFIRMATIVE, tuple(matches),
+            "the operative payout/coverage promise is asserted, or a "
+            "restriction/exclusion is negated",
+        )
+
+    if assumed_outcome in (AFFIRMATIVE, RESTRICTIVE_OR_NEGATIVE):
+        return PolarityAnalysis(
+            assumed_outcome, (),
+            "the normalized condition stores only the trigger; its schema "
+            "bucket supplies the intended outcome while source evidence must "
+            "still state that outcome explicitly",
+        )
+    return PolarityAnalysis(
+        AMBIGUOUS, (),
+        "no operative payout, coverage, responsibility, restriction, "
+        "exclusion, or reduction predicate was found",
+    )
 # Predicate stems whose *positive* form is the operative promise of a payout
 # clause. Used to detect a truncated quote that stops before the predicate is
 # resolved one way or the other ("보험금을 지급하는 경우" -- the sentence has
@@ -103,30 +344,27 @@ _NEGATIVE_BUCKETS = frozenset({
 })
 
 
-def _has_negation(text: str) -> bool:
-    return any(marker in text for marker in _NEGATION_MARKERS)
-
-
 def _quote_polarity(quote: str) -> str:
-    """'negative' if the quote carries a negation/exclusion marker, else
-    'positive'. A quote with no operative predicate at all is still classed
-    'positive' here; the truncated-predicate check handles the incomplete
-    case separately so the two failure modes report distinctly."""
-    return "negative" if _has_negation(_normalize_ws(quote)) else "positive"
+    """Backward-compatible scalar view of the structured analysis."""
+    return _analyze_policy_polarity(quote).classification
 
 
 def _is_truncated_predicate(quote: str) -> bool:
     """True if the quote ends on an unresolved payout/coverage predicate --
     it names the operative verb but stops before saying paid vs not-paid.
-    A quote that already carries a negation marker is NOT truncated (its
-    polarity is resolved)."""
+    A quote that already resolves the payout predicate as negative is NOT
+    truncated."""
     normalized = _normalize_ws(quote)
-    if _has_negation(normalized):
+    analysis = _analyze_policy_polarity(normalized)
+    if analysis.classification == RESTRICTIVE_OR_NEGATIVE and any(
+            match.target_predicate in ("지급", "보상", "보장")
+            for match in analysis.matches):
         return False
     return bool(_TRUNCATED_PREDICATE_RE.search(normalized))
 _BUCKET_EVIDENCE_MARKERS = {
     "payout_conditions": ("지급", "보상", "보험금"),
-    "exclusions": ("않", "아니", "제외", "면책", "부지급"),
+    "exclusions": (
+        "않", "아니", "제외", "배제", "면책", "부지급", "책임", "불가"),
     "reduction_conditions": ("감액", "삭감", "비율", "한도", "차감"),
     "definitions": ("정의", "말합니다", "뜻합니다", "의미합니다"),
     "obligations": ("의무", "해야", "하여야", "알려야", "제출하여야"),
@@ -405,53 +643,84 @@ def check_condition_support(clauses: list[dict]) -> list[str]:
                         f"{sorted(missing_numbers)}")
 
                 # Polarity is outcome-determinative in policy language, checked
-                # BIDIRECTIONALLY (Part 11B). A condition and its evidence that
-                # share tokens but disagree on paid-vs-not-paid is a
-                # contradiction, not weak support -- and must not be "fixed" by
-                # rewording the condition; route it to review or correct the
-                # extraction instead.
-                condition_has_negation = _has_negation(condition_text)
-                quote_polarities = {_quote_polarity(q) for q in quotes}
-                quote_has_negation = "negative" in quote_polarities
-                quote_has_positive = "positive" in quote_polarities
+                # BIDIRECTIONALLY (Part 11B / P1-2).  Classification is based on
+                # the operative predicate and the scope of its negation -- never
+                # on marker presence or lexical overlap.  A normalized condition
+                # may store only its trigger, so its bucket supplies a fallback
+                # outcome; evidence receives no such fallback and must state the
+                # operative proposition in source.
+                expected_condition_outcome = None
+                if bucket in _POSITIVE_BUCKETS:
+                    expected_condition_outcome = AFFIRMATIVE
+                elif bucket in _NEGATIVE_BUCKETS or \
+                        bucket == "reduction_conditions":
+                    expected_condition_outcome = RESTRICTIVE_OR_NEGATIVE
 
-                # (a) negative condition inferred from purely positive evidence.
-                if condition_has_negation and quotes and not quote_has_negation:
-                    errors.append(
-                        f"{loc}: normalized condition asserts negation/exclusion "
-                        "but every cited quote is positive/affirmative -- polarity "
-                        "contradiction; the evidence does not support a negation")
+                polarity_sensitive = expected_condition_outcome is not None
+                if polarity_sensitive:
+                    condition_analysis = _analyze_policy_polarity(
+                        condition_text, expected_condition_outcome)
+                    quote_analyses = [
+                        _analyze_policy_polarity(quote) for quote in quotes]
 
-                # (b) positive condition inferred from purely negative evidence.
-                #     Applies to an inherently-positive bucket, OR to any
-                #     non-exclusion bucket whose condition text carries no
-                #     negation of its own (so the condition reads as an
-                #     affirmative proposition) while its evidence is entirely
-                #     exclusionary.
-                inherently_positive = bucket in _POSITIVE_BUCKETS
-                reads_positive = (
-                    not condition_has_negation and bucket not in _NEGATIVE_BUCKETS)
-                if (inherently_positive or reads_positive) and quotes \
-                        and quote_has_negation and not quote_has_positive:
-                    errors.append(
-                        f"{loc}: normalized condition reads as a positive "
-                        f"payout/coverage proposition but every cited quote is "
-                        "negative/exclusionary -- polarity contradiction; a "
-                        "'지급' condition may not be grounded solely in a "
-                        "'지급하지 않는다' quote")
-
-                # (c) composite evidence whose passages disagree on polarity is
-                #     not silently accepted just because review_required is set:
-                #     a mixed-polarity composite is a genuine ambiguity that a
-                #     human must resolve, reported as its own blocker.
-                if level == "composite" and quote_has_negation and \
-                        quote_has_positive:
-                    if item.get("review_required") is not True:
+                    if condition_analysis.classification in (MIXED, AMBIGUOUS):
                         errors.append(
-                            f"{loc}: composite evidence mixes positive and "
-                            "negative polarity passages -- this ambiguity must be "
-                            "routed to review_required, not merged into one "
-                            "condition")
+                            f"{loc}: normalized condition has "
+                            f"{condition_analysis.classification} polarity -- "
+                            f"{condition_analysis.reason}; preserve the source "
+                            "wording and route it to review_required or split "
+                            "the propositions, rather than rewriting it to pass")
+
+                    unsettled_quotes = [
+                        analysis for analysis in quote_analyses
+                        if analysis.classification in (MIXED, AMBIGUOUS)
+                    ]
+                    for analysis in unsettled_quotes:
+                        errors.append(
+                            f"{loc}: cited evidence has "
+                            f"{analysis.classification} polarity -- "
+                            f"{analysis.reason}; lexical overlap cannot resolve "
+                            "predicate scope, so a polarity contradiction cannot "
+                            "be ruled out; cite a settled proposition or route "
+                            "it to review_required")
+
+                    settled_quote_polarities = {
+                        analysis.classification for analysis in quote_analyses
+                        if analysis.classification in (
+                            AFFIRMATIVE, RESTRICTIVE_OR_NEGATIVE)
+                    }
+                    if settled_quote_polarities == {
+                            AFFIRMATIVE, RESTRICTIVE_OR_NEGATIVE}:
+                        errors.append(
+                            f"{loc}: cited evidence mixes positive and negative "
+                            "polarity passages -- this ambiguity must be routed "
+                            "to review_required or split into separate "
+                            "conditions, not merged because tokens overlap")
+
+                    condition_polarity = condition_analysis.classification
+                    if not unsettled_quotes and len(
+                            settled_quote_polarities) == 1 and \
+                            condition_polarity in (
+                                AFFIRMATIVE, RESTRICTIVE_OR_NEGATIVE):
+                        evidence_polarity = next(iter(
+                            settled_quote_polarities))
+                        if condition_polarity != evidence_polarity:
+                            if condition_polarity == AFFIRMATIVE:
+                                errors.append(
+                                    f"{loc}: normalized condition reads as a "
+                                    "positive payout/coverage proposition but "
+                                    "every cited quote is "
+                                    "negative/exclusionary -- polarity "
+                                    "contradiction; a '지급' condition may not "
+                                    "be grounded solely in a '지급하지 않는다' "
+                                    "quote")
+                            else:
+                                errors.append(
+                                    f"{loc}: normalized condition asserts a "
+                                    "negative/restrictive outcome but every "
+                                    "cited quote is positive/affirmative -- "
+                                    "polarity contradiction; the evidence does "
+                                    "not support the restriction")
 
                 if condition_tokens:
                     supported = {
