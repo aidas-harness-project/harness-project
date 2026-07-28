@@ -127,6 +127,15 @@ Subcommands:
          policy_clause_processing may finalize, and finalization VERIFIES the
          scan rather than running one, so it stays a pure gate.)
     read-table-region-index CASE_ID
+    analyze-policy-polarity CASE_ID --doc-id DOC_ID
+        --source-span-uid PS_UID [--source-span-uid PS_UID ...]
+        --source-selector-file PATH --condition-text-file PATH
+        --bucket BUCKET --held-by NAME --run-id RUN_ID
+        [--provider PROVIDER] [--model MODEL]
+        (the ONLY LLM-calling policy-polarity path; resolves exact spans from
+         the current registered revision and issues a protected semantic
+         receipt. Validators and finalization never call a provider.)
+    read-policy-polarity-semantic-index CASE_ID
 """
 import argparse
 import json
@@ -153,9 +162,11 @@ import table_region_provenance
 import policy_completeness
 import policy_uid
 import policy_uid_resolver
+import policy_polarity_semantics
 import policy_audit
 import policy_roles
 import human_review
+import llm_providers
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
@@ -2018,6 +2029,7 @@ def _policy_write_scheme_blockers(case_id: str, filename: str,
 # checks, which is a second line of defence, not a seal.
 _PROTECTED_CONTRACT_FILES = frozenset({
     "_table_region_index.json",
+    "_policy_polarity_semantic_index.json",
     "_segment_derivation_index.json",
     "_revision_index.json",
     "_run_state.json",
@@ -6344,6 +6356,236 @@ def cmd_record_human_review(args):
     return 0
 
 
+# ----------------------------------------- policy polarity semantic receipts --
+
+def policy_polarity_semantic_index_path(case_id: str) -> Path:
+    return case_dir(case_id) / "_policy_polarity_semantic_index.json"
+
+
+def load_policy_polarity_semantic_index(case_id: str) -> dict:
+    data = load_json(policy_polarity_semantic_index_path(case_id))
+    if data is None:
+        data = {"case_id": case_id, "receipts": []}
+        data["index_id"] = policy_polarity_semantics.index_id(data)
+    return data
+
+
+def policy_polarity_receipt_for(case_id: str, receipt_id: str):
+    for receipt in load_policy_polarity_semantic_index(
+            case_id).get("receipts") or []:
+        if receipt.get("receipt_id") == receipt_id:
+            return receipt
+    return None
+
+
+def cmd_read_policy_polarity_semantic_index(args):
+    print(json.dumps(
+        load_policy_polarity_semantic_index(args.case_id),
+        ensure_ascii=False, indent=2))
+    return 0
+
+
+def _semantic_index_errors(index: dict, case_id: str) -> list[str]:
+    schemas, registry = load_registry()
+    errors = validate_instance(
+        index, policy_polarity_semantics.INDEX_SCHEMA, schemas, registry)
+    errors.extend(policy_polarity_semantics.index_integrity_errors(
+        index, case_id))
+    return errors
+
+
+def cmd_analyze_policy_polarity(args):
+    """Issue one semantic receipt from current registered source provenance.
+
+    ``source_selector_file`` is deliberately untrusted. It supplies only the
+    ranges the caller wants analyzed; the DAO resolves every range against the
+    current registered revision and recomputes its PS UID. The caller cannot
+    submit a revision digest, source quote hash, analyzer identity, or result.
+    """
+    if uid_scheme_for(args.case_id, args.doc_id) != "canonical_v1":
+        print(
+            f"BLOCKED: {args.doc_id} is not canonical_v1 -- semantic analysis "
+            "must be bound to a registered immutable source revision")
+        return 1
+
+    try:
+        condition_text = Path(args.condition_text_file).read_text(
+            encoding="utf-8")
+        selector = json.loads(Path(args.source_selector_file).read_text(
+            encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"FAIL: could not read semantic-analysis input: {exc}")
+        return 1
+    if not condition_text:
+        print("FAIL: condition text is empty")
+        return 1
+    if not isinstance(selector, dict) or set(selector) != {"source_spans"}:
+        print("FAIL: source selector must contain exactly source_spans")
+        return 1
+
+    context, context_errors = _uid_source_context(
+        args.case_id, args.doc_id)
+    if context_errors:
+        for error in context_errors:
+            print(f"BLOCKED: {error}")
+        return 1
+    try:
+        records = policy_uid_resolver.resolve_spans(
+            context, selector.get("source_spans"),
+            "semantic analysis source_spans")
+    except (policy_uid_resolver.UidResolutionError,
+            policy_uid.UidInputError) as exc:
+        print(f"FAIL: source selector is not registered provenance: {exc}")
+        return 1
+    ordered = sorted(
+        records,
+        key=lambda item: (
+            item["physical_page"], item["start_char"], item["end_char"],
+            item["uid"]),
+    )
+    derived_uids = [item["uid"] for item in ordered]
+    selector_uids = [
+        item.get("span_uid")
+        for item in selector.get("source_spans") or []]
+    if (not all(isinstance(item, str) for item in selector_uids)
+            or sorted(selector_uids) != sorted(derived_uids)):
+        print(
+            "FAIL: selector span_uid values do not match the exact occurrence "
+            f"UIDs recomputed by the DAO (submitted={selector_uids}, "
+            f"derived={derived_uids})")
+        return 1
+    submitted_uids = list(args.source_span_uid or [])
+    if submitted_uids != derived_uids:
+        print(
+            "FAIL: --source-span-uid does not equal the DAO-recomputed exact "
+            f"occurrence UID list (submitted={submitted_uids}, "
+            f"derived={derived_uids})")
+        return 1
+
+    revision = (revision_entry_for(
+        args.case_id, args.doc_id) or {}).get("current_revision_sha256")
+    if not revision:
+        print(f"BLOCKED: {args.doc_id} has no current registered revision")
+        return 1
+
+    config = llm_providers.parse_provider_config(
+        args, env_prefix="HARNESS_POLICY_SEMANTIC")
+    try:
+        provider = llm_providers.build_provider(config, root=ROOT)
+    except llm_providers.ProviderConfigError as exc:
+        print(f"FAIL: semantic provider configuration: {exc}")
+        return 1
+
+    source_passage = policy_polarity_semantics.source_passage(ordered)
+    quote_hash = policy_polarity_semantics.source_quote_sha256(ordered)
+    condition_hash = policy_polarity_semantics.sha256_text(condition_text)
+    cache_key = policy_polarity_semantics.analysis_cache_key(
+        case_id=args.case_id,
+        document_id=args.doc_id,
+        source_revision=revision,
+        source_span_uids=derived_uids,
+        source_quote_hash=quote_hash,
+        condition_hash=condition_hash,
+        bucket=args.bucket,
+        provider=provider.provider_name,
+        model=provider.model_name,
+    )
+
+    target = policy_polarity_semantic_index_path(args.case_id)
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id,
+        f"analyze policy polarity for {args.doc_id}")
+    if existing_lock is not None:
+        print(
+            f"LOCKED: held_by={existing_lock['held_by']} "
+            f"run_id={existing_lock['run_id']} "
+            f"since={existing_lock['started_at']} "
+            f"purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        index = load_policy_polarity_semantic_index(args.case_id)
+        errors = _semantic_index_errors(index, args.case_id)
+        if errors:
+            print("FAIL: existing semantic index is invalid:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
+        for receipt in index.get("receipts") or []:
+            if receipt.get("cache_key") == cache_key:
+                print(
+                    "PASS: semantic analysis cache hit "
+                    f"{receipt['receipt_id']} (provider not called)")
+                return 0
+
+        prompt = policy_polarity_semantics.build_prompt(
+            source_passage, condition_text, args.bucket)
+        try:
+            result = provider.compare_text(
+                prompt, policy_polarity_semantics.PROMPT_VERSION)
+            if result.prompt_version != policy_polarity_semantics.PROMPT_VERSION:
+                raise ValueError(
+                    "provider returned a different prompt version")
+            analysis = policy_polarity_semantics.parse_analysis(
+                result.text, len(source_passage))
+        except (llm_providers.ProviderExecutionError, ValueError) as exc:
+            print(
+                "FAIL: semantic analysis produced no receipt; "
+                f"provider/schema error: {exc}")
+            return 1
+
+        receipt = {
+            "receipt_id": "",
+            "cache_key": cache_key,
+            "scheme": policy_polarity_semantics.SCHEME,
+            "case_id": args.case_id,
+            "document_id": args.doc_id,
+            "source_text_revision_sha256": revision,
+            "source_span_uid": derived_uids[0],
+            "source_span_uids": derived_uids,
+            "source_quote_sha256": quote_hash,
+            "condition_text_sha256": condition_hash,
+            "bucket": args.bucket,
+            **analysis,
+            "analyzer": {
+                "provider": result.provider_name,
+                "model": result.model_name,
+                "prompt_version": result.prompt_version,
+                "settings_fingerprint":
+                    policy_polarity_semantics.settings_fingerprint(),
+            },
+            "analyzed_at": now_iso(),
+        }
+        # A provider cannot substitute a different identity than the configured
+        # one used in the cache key.
+        if (receipt["analyzer"]["provider"] != provider.provider_name
+                or receipt["analyzer"]["model"] != provider.model_name):
+            print(
+                "FAIL: provider result identity differs from the configured "
+                "analyzer; no receipt issued")
+            return 1
+        receipt["receipt_id"] = policy_polarity_semantics.receipt_id(receipt)
+        prospective = {
+            "case_id": args.case_id,
+            "receipts": [*(index.get("receipts") or []), receipt],
+        }
+        prospective["index_id"] = policy_polarity_semantics.index_id(
+            prospective)
+        errors = _semantic_index_errors(prospective, args.case_id)
+        if errors:
+            print("FAIL: semantic receipt/index schema validation failed:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
+        atomic_write_json(target, prospective)
+        print(
+            f"PASS: issued semantic receipt {receipt['receipt_id']} "
+            f"({receipt['classification']}, "
+            f"review_required={receipt['review_required']})")
+        return 0
+    finally:
+        release_lock(target)
+
+
 # ------------------------------------------------------------------- main --
 
 def main():
@@ -6595,6 +6837,37 @@ def main():
     p = sub.add_parser("read-table-region-index")
     p.add_argument("case_id")
     p.set_defaults(fn=cmd_read_table_region_index)
+
+    p = sub.add_parser(
+        "analyze-policy-polarity",
+        help="invoke the configured semantic provider explicitly and issue a "
+             "DAO-owned receipt bound to current registered source spans")
+    p.add_argument("case_id")
+    p.add_argument("--doc-id", dest="doc_id", required=True)
+    p.add_argument(
+        "--source-span-uid", action="append", required=True,
+        help="expected PS UID in canonical source order; repeat for a "
+             "multi-span condition. The DAO recomputes and compares it.")
+    p.add_argument(
+        "--source-selector-file", required=True,
+        help="untrusted JSON selector {source_spans:[canonical span objects]}; "
+             "quotes, offsets and occurrence ordinals are re-derived from the "
+             "current registered revision and never accepted as authority")
+    p.add_argument("--condition-text-file", required=True)
+    p.add_argument(
+        "--bucket", required=True,
+        choices=[
+            "payout_conditions", "exclusions", "reduction_conditions",
+            "coverage_start_conditions",
+        ])
+    llm_providers.add_provider_args(p)
+    p.add_argument("--held-by", required=True)
+    p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_analyze_policy_polarity)
+
+    p = sub.add_parser("read-policy-polarity-semantic-index")
+    p.add_argument("case_id")
+    p.set_defaults(fn=cmd_read_policy_polarity_semantic_index)
 
     p = sub.add_parser("policy-snapshot")
     p.add_argument("case_id")

@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "policy_polarity_semantic_index.schema.json",
+  "title": "DAO-owned policy polarity semantic receipt index v1",
+  "type": "object",
+  "properties": {
+    "case_id": {
+      "type": "string",
+      "pattern": "^CASE_[0-9]+$"
+    },
+    "index_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "receipts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/receipt"
+      }
+    }
+  },
+  "required": ["case_id", "index_id", "receipts"],
+  "additionalProperties": false,
+  "$defs": {
+    "classification": {
+      "enum": [
+        "affirmative",
+        "restrictive_or_negative",
+        "mixed",
+        "ambiguous"
+      ]
+    },
+    "proposition": {
+      "type": "object",
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "classification": {"$ref": "#/$defs/classification"},
+        "source_start": {"type": "integer", "minimum": 0},
+        "source_end": {"type": "integer", "minimum": 1},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "required": [
+        "text",
+        "classification",
+        "source_start",
+        "source_end",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "receipt": {
+      "type": "object",
+      "properties": {
+        "receipt_id": {
+          "type": "string",
+          "pattern": "^PPR-[a-f0-9]{32}$"
+        },
+        "cache_key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "scheme": {"const": "policy_polarity_semantic_v1"},
+        "case_id": {
+          "type": "string",
+          "pattern": "^CASE_[0-9]+$"
+        },
+        "document_id": {
+          "type": "string",
+          "pattern": "^DOC_[0-9]+$"
+        },
+        "source_text_revision_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_span_uid": {
+          "type": "string",
+          "pattern": "^PS-[a-f0-9]{16,64}$"
+        },
+        "source_span_uids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^PS-[a-f0-9]{16,64}$"
+          }
+        },
+        "source_quote_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "condition_text_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "bucket": {
+          "enum": [
+            "payout_conditions",
+            "exclusions",
+            "reduction_conditions",
+            "coverage_start_conditions"
+          ]
+        },
+        "classification": {"$ref": "#/$defs/classification"},
+        "target_predicates": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "negation_scope_analysis": {
+          "type": "string",
+          "minLength": 1
+        },
+        "propositions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/proposition"}
+        },
+        "meaning_preserved": {"type": "boolean"},
+        "review_required": {"type": "boolean"},
+        "analyzer": {
+          "type": "object",
+          "properties": {
+            "provider": {"type": "string", "minLength": 1},
+            "model": {"type": "string", "minLength": 1},
+            "prompt_version": {
+              "const": "policy_polarity_semantic_v1"
+            },
+            "settings_fingerprint": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "provider",
+            "model",
+            "prompt_version",
+            "settings_fingerprint"
+          ],
+          "additionalProperties": false
+        },
+        "analyzed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "receipt_id",
+        "cache_key",
+        "scheme",
+        "case_id",
+        "document_id",
+        "source_text_revision_sha256",
+        "source_span_uid",
+        "source_span_uids",
+        "source_quote_sha256",
+        "condition_text_sha256",
+        "bucket",
+        "classification",
+        "target_predicates",
+        "negation_scope_analysis",
+        "propositions",
+        "meaning_preserved",
+        "review_required",
+        "analyzer",
+        "analyzed_at"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
