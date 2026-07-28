@@ -98,15 +98,20 @@ Subcommands:
          segment_page_map_v2 receipt into _segment_derivation_index.json and
          projects it into the manifest as one fail-closed transaction.)
     read-segment-derivation-index CASE_ID
-    register-table-region CASE_ID --doc-id DOC_ID --page SPEC --anchor TEXT
+    register-table-region CASE_ID --doc-id DOC_ID --page SEED --anchor TEXT
         --held-by NAME --run-id RUN_ID [--detector-profile NAME]
         (P0-8, the ONLY issuer of a table's authoritative source region. The
          DAO opens the registered PDF itself, runs a real table detector over
-         the named logical page(s), derives the table's full extent and its
-         row/header bands from the layout, and maps each band to exact offsets
-         in the registered source-text revision. --anchor selects among the
-         candidates the DAO found and defines nothing: matching two candidates,
-         or none, issues no receipt. Issues a table_region_v1 receipt into
+         the whole document, derives the table's full extent -- FOLLOWING
+         continuations onto later pages itself -- and its row/header bands from
+         the layout, then maps each band to exact offsets in the registered
+         source-text revision via the PDF's own word geometry. --page is a SEED
+         and --anchor a SELECTOR: they choose which detected candidate to start
+         from and define nothing, so a caller cannot hide a continuation page
+         by naming fewer pages, and an unresolvable continuation refuses rather
+         than issuing a partial extent. Also records a candidate inventory of
+         every table the scan found, so a detected table nobody extracted
+         blocks finalization. Issues a table_region_v1 receipt into
          _table_region_index.json as one fail-closed transaction; a
          reference_table then cites it by table_region_receipt_id, and its
          source_regions must equal the derived extent exactly.)
@@ -4601,6 +4606,59 @@ def table_region_receipts_for(case_id: str, doc_id: str) -> list:
         "tables", []) if receipt.get("document_id") == doc_id]
 
 
+def table_candidate_inventory_for(case_id: str, doc_id: str):
+    """The DAO's scan of every table candidate in one document, or None.
+
+    Recorded in the same DAO-owned index as the receipts. Verifying only the
+    receipts a contract cites answers "is this table complete?" but never
+    "were there other tables?" -- so a document with two appendices could have
+    one extracted and the other never mentioned, with every check passing.
+    """
+    for inventory in load_table_region_index(case_id).get("candidates", []):
+        if inventory.get("document_id") == doc_id:
+            return inventory
+    return None
+
+
+def _build_candidate_inventory(case_id, doc_id, candidates, detector,
+                               pdf_digest, revision_sha):
+    """One inventory entry per detected table, with a stable candidate_id."""
+    entries = []
+    for candidate in candidates:
+        logical = candidate.get("logical_page")
+        if logical is None:
+            continue
+        rows = candidate.get("rows") or []
+        header = table_region_provenance._header_texts(candidate) or ()
+        entries.append({
+            "candidate_id": table_region_provenance.compute_candidate_id(
+                document_id=doc_id,
+                source_pdf_sha256=pdf_digest,
+                source_text_revision_sha256=revision_sha,
+                detector_profile=detector["profile"],
+                config_fingerprint=detector["config_fingerprint"],
+                pages_geometry=(
+                    logical, candidate["physical_page"],
+                    tuple(round(float(v), 2) for v in candidate["bbox"])),
+            ),
+            "page": logical,
+            "physical_page": candidate["physical_page"],
+            "bbox": [float(v) for v in candidate["bbox"]],
+            "row_count": len(rows),
+            "header_preview": " | ".join(str(name) for name in header)[:200],
+        })
+    entries.sort(key=lambda entry: (entry["page"], entry["bbox"][1]))
+    return {
+        "document_id": doc_id,
+        "source_pdf_sha256": pdf_digest,
+        "source_text_revision_sha256": revision_sha,
+        "detector_profile": detector["profile"],
+        "detector_config_fingerprint": detector["config_fingerprint"],
+        "scanned_at": now_iso(),
+        "candidates": entries,
+    }
+
+
 def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
     """Table candidates read directly out of the registered PDF by the DAO.
 
@@ -4651,6 +4709,11 @@ def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
                 return None, detector, (
                     f"table detection failed on physical page {physical}: "
                     f"{exc}")
+            # Every word with its own box, in the order the text layer emits
+            # them. This is what binds a band to the RIGHT occurrence of its
+            # text (see table_region_provenance.align_words_to_text); the
+            # detector's geometry decides, not a substring search.
+            words = list(page.get_text("words"))
             for order, table in enumerate(found.tables):
                 rows = []
                 for row in table.rows:
@@ -4682,10 +4745,46 @@ def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
                     "rows": rows,
                     "header_names": header_names,
                     "header_external": header_external,
+                    "words": words,
+                    "page_width": float(page.rect.width),
+                    "page_height": float(page.rect.height),
+                    # Text printed above this table and below any earlier
+                    # table: a continuation does not reintroduce a heading, so
+                    # a new one is evidence of a NEW table rather than a
+                    # continuation (continuation_decision reads this).
+                    "preceding_heading": _preceding_heading(
+                        page, table.bbox, found.tables, order),
                 })
         return candidates, detector, None
     finally:
         doc.close()
+
+
+def _preceding_heading(page, table_bbox, tables, order) -> str:
+    """The nearest text printed above a table and below the previous one.
+
+    Deliberately narrow: only lines that sit between this table's top and the
+    bottom of whatever precedes it on the page. A heading further up the page
+    belongs to an earlier table, and picking it up would make two sibling
+    appendices look like one.
+    """
+    top = float(table_bbox[1])
+    floor = 0.0
+    for other in tables[:order]:
+        floor = max(floor, float(other.bbox[3]))
+    lines = []
+    for block in page.get_text("blocks"):
+        if len(block) < 5:
+            continue
+        y0, y1 = float(block[1]), float(block[3])
+        if y1 <= top and y0 >= floor:
+            text = str(block[4]).strip()
+            if text:
+                lines.append((y0, text))
+    if not lines:
+        return ""
+    lines.sort()
+    return lines[-1][1]
 
 
 def _candidate_matches_anchor(candidate: dict, anchor: str) -> bool:
@@ -4713,6 +4812,54 @@ def _candidate_matches_anchor(candidate: dict, anchor: str) -> bool:
             str((cell or {}).get("text") or "") for cell in rows[0]["cells"])
         return needle in first
     return False
+
+
+def _derive_table_scope(seed, candidates):
+    """Follow a table across pages using the DAO's own scan.
+
+    P0-8's first pass detected only the pages the CALLER named, so `--page 1`
+    on a table running 1->2 produced a *verified* page-1-only receipt and the
+    matching contract passed every check. The table's extent has to be derived
+    like everything else in this module.
+
+    Starting from the selected candidate, this walks forward one page at a
+    time. Each step consults `continuation_decision`, which uses column
+    geometry, the reprinted header and any new heading -- never the caller's
+    page spec. The walk stops at the first `separate`, and REFUSES on
+    `ambiguous`: an unresolvable continuation must not silently become a
+    partial extent, which is the exact bug being fixed.
+
+    Returns `(candidates_by_logical_page, error)`.
+    """
+    by_page = {seed["logical_page"]: seed}
+    on_page = {}
+    for candidate in candidates:
+        on_page.setdefault(candidate.get("logical_page"), []).append(candidate)
+
+    current = seed
+    while True:
+        following = current["logical_page"] + 1
+        siblings = on_page.get(following) or []
+        if not siblings:
+            return by_page, None
+        # A continuation is the FIRST table on the next page: a table starting
+        # below another one cannot be the continuation of the previous page.
+        siblings = sorted(siblings, key=lambda c: (c["bbox"][1], c["order"]))
+        head_of_page = siblings[0]
+        verdict, reason = table_region_provenance.continuation_decision(
+            current, head_of_page)
+        if verdict == "separate":
+            return by_page, None
+        if verdict == "ambiguous":
+            return None, (
+                f"logical page {following} carries a table that cannot be "
+                f"distinguished from a continuation of page "
+                f"{current['logical_page']}: {reason}")
+        if following in by_page:
+            return None, (
+                f"continuation search revisited logical page {following}")
+        by_page[following] = head_of_page
+        current = head_of_page
 
 
 def _derive_table_regions(candidates_by_page, pages, physical_for, profile):
@@ -4756,6 +4903,16 @@ def _derive_table_regions(candidates_by_page, pages, physical_for, profile):
                 f"logical page {logical}: the detected table has no row bands")
             continue
 
+        # Anchor every word on the page to its OWN offset. This is what makes
+        # the geometry decide the binding: the second `Grade` on a page
+        # resolves to the second `Grade` in the text, so prose repeating a
+        # row's wording above the table cannot capture the receipt.
+        anchors, anchor_error = table_region_provenance.align_words_to_text(
+            candidate.get("words") or [], canonical)
+        if anchor_error:
+            errors.append(f"logical page {logical}: {anchor_error}")
+            continue
+
         # Header identification: the detector's own, never inferred from
         # position alone. `external` means the header sits outside the table
         # body, in which case the first body row is data, not a header.
@@ -4765,7 +4922,6 @@ def _derive_table_regions(candidates_by_page, pages, physical_for, profile):
             header_indexes.add(0)
 
         page_regions = []
-        cursor = 0
         for index, row in enumerate(rows):
             if any(cell is None for cell in row["cells"]):
                 errors.append(
@@ -4774,39 +4930,59 @@ def _derive_table_regions(candidates_by_page, pages, physical_for, profile):
                     "ambiguous table is refused rather than resolved by "
                     "heuristic; resolve it by review")
                 continue
-            texts = [str((cell or {}).get("text") or "")
-                     for cell in row["cells"]]
-            start, end, locate_error = table_region_provenance.locate_row_text(
-                canonical, texts, cursor)
-            if locate_error:
-                errors.append(f"logical page {logical}, row band {index}: "
-                              f"{locate_error}")
+
+            band_words = table_region_provenance.words_in_bbox(
+                anchors, row["bbox"])
+            contiguity = table_region_provenance.contiguity_error(
+                band_words, anchors,
+                f"logical page {logical}, row band {index}")
+            if contiguity:
+                errors.append(contiguity)
                 continue
-            cursor = end
+            start, end, span_error = \
+                table_region_provenance.span_from_anchors(band_words)
+            if span_error:
+                errors.append(f"logical page {logical}, row band {index}: "
+                              f"{span_error}")
+                continue
 
             cell_records = []
-            cell_cursor = start
             for cell in row["cells"]:
-                text = str((cell or {}).get("text") or "").strip()
-                if not text:
+                # EVERY word of the cell, not just its first line. A cell
+                # reading "보험금 지급 / 단 동일 사고는 1회로 제한" carries its
+                # limitation on the second line; binding only the first line
+                # left that text outside the receipt AND outside reverse
+                # coverage, so it could be dropped unnoticed.
+                cell_words = table_region_provenance.words_in_bbox(
+                    anchors, cell["bbox"])
+                if not cell_words:
                     continue
-                needle = text.split("\n")[0].strip()
-                position = canonical.find(needle, cell_cursor)
-                if position == -1 or position + len(needle) > end:
+                cell_contiguity = table_region_provenance.contiguity_error(
+                    cell_words, anchors,
+                    f"logical page {logical}, row band {index}, cell")
+                if cell_contiguity:
+                    errors.append(cell_contiguity)
+                    continue
+                cell_start, cell_end, cell_error = \
+                    table_region_provenance.span_from_anchors(cell_words)
+                if cell_error:
                     errors.append(
-                        f"logical page {logical}, row band {index}: cell text "
-                        f"{needle!r} could not be located inside its own row's "
-                        "derived range")
+                        f"logical page {logical}, row band {index}: "
+                        f"{cell_error}")
+                    continue
+                if cell_start < start or cell_end > end:
+                    errors.append(
+                        f"logical page {logical}, row band {index}: a cell's "
+                        "derived range falls outside its own row band")
                     continue
                 cell_records.append({
                     "page": logical,
-                    "start_char": position,
-                    "end_char": position + len(needle),
-                    "quote": canonical[position:position + len(needle)],
-                    "text": needle,
+                    "start_char": cell_start,
+                    "end_char": cell_end,
+                    "quote": canonical[cell_start:cell_end],
+                    "text": canonical[cell_start:cell_end],
                     "bbox": [float(v) for v in cell["bbox"]],
                 })
-                cell_cursor = position + len(needle)
 
             page_regions.append({
                 "page": logical,
@@ -4868,17 +5044,52 @@ def _table_region_finalize_blockers(case_id: str, doc_id: str) -> list[str]:
         return []
     if uid_scheme_for(case_id, doc_id) != "canonical_v1":
         return []
-    return _table_region_binding_blockers(case_id, doc_id, tables)
+    # Candidate coverage is a FINALIZATION question, not a write-time one: a
+    # document is built up one table at a time, so demanding every candidate be
+    # extracted on the first write would make an incremental extraction
+    # impossible. By finalization there is no later write to wait for.
+    return _table_region_binding_blockers(
+        case_id, doc_id, tables, check_candidate_coverage=True)
 
 
-def _table_region_binding_blockers(case_id: str, doc_id: str,
-                                    tables: dict) -> list[str]:
+def _table_region_binding_blockers(case_id: str, doc_id: str, tables: dict,
+                                    check_candidate_coverage: bool = False
+                                    ) -> list[str]:
     """Bind a reference_table contract to its receipts, freshly re-checked.
 
     Used by BOTH the write gate and finalization, so a table cannot be written
     against a current receipt and then finalize after the world moved -- the
     identical comparison runs at both moments against freshly read state.
+
+    Two things the first P0-8 pass got wrong here:
+
+    * **Currency was checked over EVERY receipt on the document.** After a
+      legitimate source revision and a fresh re-registration, the superseded
+      receipt still failed its currency check and blocked the document
+      permanently, with no recovery path. Currency now applies to the receipts
+      the contract actually CITES; superseded ones stay in the index as audit
+      history. Citing a stale receipt is of course still refused -- that is the
+      same check, just correctly scoped.
+    * **The index was read and trusted.** `receipt_id` was compared as a
+      string, so a receipt body edited in place still resolved. The index's own
+      integrity is now re-derived first, and a corrupt index blocks rather than
+      degrading to "no receipts exist".
     """
+    index = load_table_region_index(case_id)
+    integrity = table_region_provenance.index_integrity_errors(
+        index, case_id, f"reference_table_{doc_id}.json")
+    if integrity:
+        # Fail closed on the whole index: with the receipt bodies unverified,
+        # nothing built on top of them can be trusted either.
+        return integrity
+    schema_errors = _schema_check(index, table_region_provenance.INDEX_SCHEMA)
+    if schema_errors:
+        return [
+            f"reference_table_{doc_id}.json: the table region index is "
+            f"schema-invalid, so no receipt in it may be relied on: {error}"
+            for error in schema_errors
+        ]
+
     receipts = table_region_receipts_for(case_id, doc_id)
     text = _registered_revision_text(case_id, doc_id)
     if text is None:
@@ -4899,11 +5110,16 @@ def _table_region_binding_blockers(case_id: str, doc_id: str,
     segment_receipt_id = (
         _segment_receipt_digest(segment_receipt) if segment_receipt else None)
 
+    cited = {table.get("table_region_receipt_id")
+             for table in tables.get("tables") or []}
+
     blockers: list[str] = []
     # A receipt that is no longer current cannot authorize anything, so
     # staleness is checked before the structural comparison rather than after.
     fresh: list = []
     for receipt in receipts:
+        if receipt.get("receipt_id") not in cited:
+            continue  # audit history, not a current authority
         currency = table_region_provenance.receipt_currency_errors(
             receipt=receipt,
             current_pdf_sha256=current_pdf,
@@ -4920,7 +5136,39 @@ def _table_region_binding_blockers(case_id: str, doc_id: str,
 
     blockers.extend(table_region_provenance.contract_binding_errors(
         tables, fresh, pages, "tables"))
+
+    if check_candidate_coverage and not blockers:
+        # Only meaningful once the cited tables themselves verify: reporting
+        # "another candidate is unaccounted for" on top of a broken table would
+        # bury the finding that matters.
+        blockers.extend(table_region_provenance.candidate_coverage_errors(
+            table_candidate_inventory_for(case_id, doc_id),
+            receipts,
+            {receipt.get("receipt_id") for receipt in fresh},
+            _table_candidate_human_reviews(case_id, doc_id),
+            f"reference_table_{doc_id}.json",
+        ))
     return blockers
+
+
+def _table_candidate_human_reviews(case_id: str, doc_id: str) -> set:
+    """Candidate ids a genuine human review has recorded a decision on.
+
+    Read from the DAO-owned human-review ledger, which is the existing
+    authenticated path (`dao.py record-human-review`). Deliberately not a field
+    an agent can set on the candidate itself: a self-declared "not a table" is
+    the same shape as the self-declared region P0-8 exists to remove.
+    """
+    ledger = load_human_review_ledger(case_id) or {}
+    reviewed = set()
+    for entry in ledger.get("reviews", []):
+        if entry.get("artifact_kind") != "table_candidate":
+            continue
+        if entry.get("artifact_id") != doc_id:
+            continue
+        if entry.get("decision") in ("accepted_risk", "verified"):
+            reviewed.add(entry.get("target_key"))
+    return reviewed
 
 
 def _table_region_pdf_owner(case_id: str, doc_id: str) -> str:
@@ -5034,61 +5282,90 @@ def cmd_register_table_region(args):
         print(f"BLOCKED: {doc_id}'s registered source text is unusable: {exc}")
         return 1
 
-    logical_pages = _parse_logical_pages(str(args.page))
-    if not logical_pages:
-        print("BLOCKED: --page resolved to no logical pages")
+    # `--page` is a SEED, not the scope. The whole document's logical pages are
+    # available to the DAO, and the table's real extent is derived below by
+    # following continuations -- a caller naming page 1 of a two-page table
+    # must not be able to obtain a verified page-1-only receipt.
+    seed_pages = _parse_logical_pages(str(args.page))
+    if not seed_pages:
+        print("BLOCKED: --page resolved to no seed page")
         return 1
-    missing = [page for page in logical_pages if page not in pages]
+    missing = [page for page in seed_pages if page not in pages]
     if missing:
-        print(f"BLOCKED: logical page(s) {missing} are not in {doc_id}'s "
+        print(f"BLOCKED: seed page(s) {missing} are not in {doc_id}'s "
               "registered source-text revision")
         return 1
 
     physical_for = (lambda logical: _physical_page_for(
         case_id, doc_id, logical))
-    physical_pages = []
-    for logical in logical_pages:
+    all_logical = sorted(pages)
+    physical_by_logical = {}
+    for logical in all_logical:
         physical = physical_for(logical)
         if physical is None:
-            print(f"BLOCKED: logical page {logical} has no physical page "
-                  "mapping -- for a segment this comes from the P0-6 "
-                  "derivation receipt, which must be registered first")
-            return 1
-        physical_pages.append(physical)
+            if logical in seed_pages:
+                print(f"BLOCKED: logical page {logical} has no physical page "
+                      "mapping -- for a segment this comes from the P0-6 "
+                      "derivation receipt, which must be registered first")
+                return 1
+            continue
+        physical_by_logical[logical] = physical
 
-    # --- 2. detect candidates ourselves ------------------------------------
+    # --- 2. scan the WHOLE document, not just the seed ---------------------
+    # The scan is what makes both the continuation search and the candidate
+    # inventory possible: neither can be answered from pages the caller chose.
     profile = args.detector_profile or \
         table_region_provenance.DEFAULT_DETECTOR_PROFILE
     candidates, detector, detect_error = _detect_table_candidates(
-        pdf_path, physical_pages, profile)
+        pdf_path, sorted(physical_by_logical.values()), profile)
     if detect_error:
         print(f"BLOCKED: {detect_error}")
         return 1
+    logical_by_physical = {physical: logical
+                           for logical, physical in physical_by_logical.items()}
+    for candidate in candidates:
+        candidate["logical_page"] = logical_by_physical.get(
+            candidate["physical_page"])
 
-    # --- 3. the selector must resolve to exactly one candidate per page ----
+    # --- 3. the selector picks ONE starting candidate ----------------------
     anchor = args.anchor
-    by_page: dict[int, dict] = {}
-    for logical, physical in zip(logical_pages, physical_pages):
-        page_candidates = [c for c in candidates
-                           if c["physical_page"] == physical]
-        matching = [c for c in page_candidates
-                    if _candidate_matches_anchor(c, anchor)]
-        if not matching:
-            print(f"BLOCKED: no detected table on logical page {logical} "
-                  f"(physical {physical}) matches anchor {anchor!r}. "
-                  f"{len(page_candidates)} table candidate(s) were detected "
-                  "there. A page whose table cannot be established by the "
-                  "layout detector is NOT a page without a table -- it is an "
-                  "unverified one, and it stays review_required.")
-            return 1
-        if len(matching) > 1:
-            print(f"REFUSED: anchor {anchor!r} matches more than one detected "
-                  f"table on logical page {logical} (physical {physical}) -- "
-                  f"{len(matching)} candidates. Selecting the first would be a "
-                  "coin flip recorded as provenance; narrow the anchor or "
-                  "resolve the table by review.")
-            return 1
-        by_page[logical] = matching[0]
+    seed_candidates = [
+        candidate for candidate in candidates
+        if candidate.get("logical_page") in seed_pages
+        and _candidate_matches_anchor(candidate, anchor)
+    ]
+    if not seed_candidates:
+        detected_here = [c for c in candidates
+                         if c.get("logical_page") in seed_pages]
+        print(f"BLOCKED: no detected table on logical page(s) {seed_pages} "
+              f"matches anchor {anchor!r}. {len(detected_here)} table "
+              "candidate(s) were detected there. A page whose table cannot be "
+              "established by the layout detector is NOT a page without a "
+              "table -- it is an unverified one, and it stays "
+              "review_required.")
+        return 1
+    if len(seed_candidates) > 1:
+        print(f"REFUSED: anchor {anchor!r} matches more than one detected "
+              f"table on logical page(s) {seed_pages} -- "
+              f"{len(seed_candidates)} candidates. Selecting the first would "
+              "be a coin flip recorded as provenance; narrow the anchor or "
+              "resolve the table by review.")
+        return 1
+
+    # --- 3b. the DAO decides where the table ENDS --------------------------
+    by_page, scope_error = _derive_table_scope(
+        seed_candidates[0], candidates)
+    if scope_error:
+        print(f"BLOCKED: the extent of the table on logical page "
+              f"{seed_candidates[0].get('logical_page')} could not be "
+              "established; NOTHING was written:")
+        print(f"  - {scope_error}")
+        print("  a table whose continuation cannot be resolved is refused "
+              "rather than issued as a partial extent -- a page-1-only "
+              "receipt for a table that continues would hide every row on the "
+              "following page. Resolve by review.")
+        return 1
+    logical_pages = sorted(by_page)
 
     # --- 4. bind every band to exact offsets -------------------------------
     extent, regions, bind_errors = _derive_table_regions(
@@ -5114,10 +5391,35 @@ def cmd_register_table_region(args):
         return 1
 
     # --- 5. build the receipt; an identical one is a no-op -----------------
+    inventory = _build_candidate_inventory(
+        case_id, doc_id, candidates, detector, actual_pdf_digest, revision_sha)
+
+    def _candidate_id_of(candidate):
+        return table_region_provenance.compute_candidate_id(
+            document_id=doc_id,
+            source_pdf_sha256=actual_pdf_digest,
+            source_text_revision_sha256=revision_sha,
+            detector_profile=detector["profile"],
+            config_fingerprint=detector["config_fingerprint"],
+            pages_geometry=(
+                candidate["logical_page"], candidate["physical_page"],
+                tuple(round(float(v), 2) for v in candidate["bbox"])),
+        )
+
+    # A multi-page table is ONE receipt but appears in the inventory once per
+    # page it occupies. All of them are recorded as consumed, or coverage
+    # would block on the continuation pages of every legitimate multi-page
+    # table -- a false positive as harmful as the omission it looks for.
+    covered_candidate_ids = sorted(
+        _candidate_id_of(by_page[logical]) for logical in sorted(by_page))
+    candidate_id = _candidate_id_of(by_page[min(by_page)])
+
     segment_receipt = segment_derivation_receipt_for(case_id, doc_id)
     receipt = table_region_provenance.build_receipt(
         document_id=doc_id,
         case_id=case_id,
+        candidate_id=candidate_id,
+        covered_candidate_ids=covered_candidate_ids,
         source_pdf_sha256=actual_pdf_digest,
         source_text_revision_sha256=revision_sha,
         detector=detector,
@@ -5135,21 +5437,24 @@ def cmd_register_table_region(args):
     existing = next(
         (r for r in table_region_receipts_for(case_id, doc_id)
          if r.get("receipt_id") == receipt.get("receipt_id")), None)
-    if existing is not None:
-        # Same PDF bytes, same revision, same detector output. Nothing changed,
-        # so nothing downstream may be invalidated -- re-running a registration
-        # must not cost a rerun.
+    if existing is not None and table_candidate_inventory_for(
+            case_id, doc_id) == inventory | {
+                "scanned_at": (table_candidate_inventory_for(case_id, doc_id)
+                               or {}).get("scanned_at")}:
+        # Same PDF bytes, same revision, same detector output, same scan.
+        # Nothing changed, so nothing downstream may be invalidated --
+        # re-running a registration must not cost a rerun.
         print(f"PASS: {doc_id} table region receipt is unchanged (no-op) -- "
               f"{len(extent)} page(s), "
               f"{len([r for r in regions if r['kind'] == 'data_row'])} data "
               f"rows, receipt {receipt['receipt_id'][:16]}")
         return 0
 
-    return _commit_table_region(case_id, doc_id, receipt, args.held_by,
-                                args.run_id)
+    return _commit_table_region(case_id, doc_id, receipt, inventory,
+                                args.held_by, args.run_id)
 
 
-def _commit_table_region(case_id, doc_id, receipt, held_by, run_id):
+def _commit_table_region(case_id, doc_id, receipt, inventory, held_by, run_id):
     """Write the receipt and the downstream invalidation as one fail-closed
     transaction.
 
@@ -5203,10 +5508,21 @@ def _commit_table_region(case_id, doc_id, receipt, held_by, run_id):
         index = load_table_region_index(case_id)
         tables = [t for t in index.get("tables", [])
                   if t.get("receipt_id") != receipt.get("receipt_id")]
+        # Superseded receipts are KEPT: they are the audit record of what was
+        # once derived, and P0-8's follow-up scopes currency checking to the
+        # receipts a contract actually cites, so history no longer blocks.
         tables.append(receipt)
         tables.sort(key=lambda t: (t.get("document_id") or "",
                                    t.get("receipt_id") or ""))
         index["tables"] = tables
+        # The inventory is a scan of the document as it is NOW, so it replaces
+        # rather than accumulates -- an inventory listing candidates from an
+        # older revision would block on tables that no longer exist.
+        inventories = [i for i in index.get("candidates", [])
+                       if i.get("document_id") != doc_id]
+        inventories.append(inventory)
+        inventories.sort(key=lambda i: i.get("document_id") or "")
+        index["candidates"] = inventories
         index["case_id"] = case_id
 
         # Step 6: validate before anything lands.
@@ -5656,8 +5972,12 @@ def main():
     p.add_argument("--doc-id", dest="doc_id", required=True,
                    help="the document whose table region is being derived")
     p.add_argument("--page", required=True,
-                   help="logical page spec the table occupies, e.g. '12' or "
-                        "'12,13' for a table continued on the next page")
+                   help="SEED only: the logical page where the table STARTS, "
+                        "e.g. '12'. It does NOT define the scope -- the DAO "
+                        "scans the document and follows continuations itself, "
+                        "so a table spanning 12-13 is seeded with '12' and "
+                        "comes back covering both. A caller cannot hide a "
+                        "continuation page by naming fewer pages")
     p.add_argument("--anchor", default=None,
                    help="SELECTOR only: text that must appear in the "
                         "candidate table's header. It chooses among candidates "

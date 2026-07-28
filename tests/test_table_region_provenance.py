@@ -62,16 +62,30 @@ def _draw_table(page, *, top, rows, x0=60, xmid=190, x1=300, row_height=25):
     A table drawn with whitespace alone is the ambiguous case, and P0-8 refuses
     it rather than guessing (see the whitespace-only test).
     """
-    ys = [top + index * row_height for index in range(len(rows) + 1)]
+    # A cell given as a tuple/list of strings is drawn as several lines inside
+    # one cell -- the multi-line cell case, where a limiting clause on the
+    # second line is exactly the content that must not be droppable.
+    heights = [
+        row_height * max(len(_lines(left)), len(_lines(right)))
+        for left, right in rows
+    ]
+    ys = [top]
+    for height in heights:
+        ys.append(ys[-1] + height)
     for y in ys:
         page.draw_line((x0, y), (x1, y))
     for x in (x0, xmid, x1):
         page.draw_line((x, ys[0]), (x, ys[-1]))
     for index, (left, right) in enumerate(rows):
-        baseline = ys[index] + 18
-        page.insert_text((x0 + 12, baseline), left, fontsize=10)
-        page.insert_text((xmid + 10, baseline), right, fontsize=10)
+        for column, value in ((x0 + 12, left), (xmid + 10, right)):
+            for line_index, line in enumerate(_lines(value)):
+                page.insert_text((column, ys[index] + 18 + line_index * 18),
+                                 line, fontsize=10)
     return ys[-1]
+
+
+def _lines(value):
+    return list(value) if isinstance(value, (list, tuple)) else [value]
 
 
 @pytest.fixture
@@ -79,28 +93,38 @@ def table_pdf():
     """A one-page policy PDF carrying one ruled 3-data-row table."""
     import fitz
 
+    def _page(doc, spec, default_title):
+        page = doc.new_page()
+        top = 100
+        if spec.get("title") is not None:
+            page.insert_text((72, 72), spec.get("title", default_title),
+                             fontsize=12)
+        # Prose drawn ABOVE the table, deliberately allowed to repeat the
+        # table's own strings -- the wrong-occurrence attack.
+        for offset, line in enumerate(spec.get("leading_prose") or []):
+            page.insert_text((72, 78 + offset * 18), line, fontsize=10)
+            top = 78 + offset * 18 + 40
+        bottom = _draw_table(page, top=top, rows=list(spec["rows"]))
+        if spec.get("second_table_rows"):
+            bottom = _draw_table(page, top=bottom + 40,
+                                 rows=list(spec["second_table_rows"]))
+        if spec.get("trailing_body"):
+            page.insert_text((72, bottom + 30), spec["trailing_body"],
+                             fontsize=10)
+        return page
+
     def _build(path, *, rows=(("Grade", "Rate"), ("A", "10"), ("B", "20"),
                               ("C", "30")),
                title="Disability Table", trailing_body=None,
-               second_table_rows=None, pages=None):
+               second_table_rows=None, leading_prose=None, pages=None):
         doc = fitz.open()
-        if pages is not None:
-            for spec in pages:
-                page = doc.new_page()
-                page.insert_text((72, 72), spec.get("title", title), fontsize=12)
-                bottom = _draw_table(page, top=100, rows=spec["rows"])
-                if spec.get("trailing_body"):
-                    page.insert_text((72, bottom + 30), spec["trailing_body"],
-                                     fontsize=10)
-        else:
-            page = doc.new_page()
-            page.insert_text((72, 72), title, fontsize=12)
-            bottom = _draw_table(page, top=100, rows=list(rows))
-            if second_table_rows:
-                _draw_table(page, top=bottom + 40, rows=list(second_table_rows))
-                bottom = bottom + 40 + 25 * len(second_table_rows)
-            if trailing_body:
-                page.insert_text((72, bottom + 30), trailing_body, fontsize=10)
+        specs = pages if pages is not None else [{
+            "rows": rows, "title": title, "trailing_body": trailing_body,
+            "second_table_rows": second_table_rows,
+            "leading_prose": leading_prose,
+        }]
+        for spec in specs:
+            _page(doc, spec, title)
         doc.save(str(path))
         doc.close()
         return path
@@ -642,7 +666,7 @@ def test_multi_page_table_registers_both_pages(
     registering the anchor on each page it occupies."""
     two_page_case()
     assert dao.cmd_register_table_region(make_args(
-        case_id=CASE, doc_id="DOC_001", page="1,2", anchor="Grade",
+        case_id=CASE, doc_id="DOC_001", page="1", anchor="Grade",
         anchor_page=None, detector_profile=None,
         held_by=HELD_BY, run_id=RUN)) == 0
 
@@ -666,7 +690,7 @@ def test_dropping_a_continuation_page_is_refused(
     """
     two_page_case()
     assert dao.cmd_register_table_region(make_args(
-        case_id=CASE, doc_id="DOC_001", page="1,2", anchor="Grade",
+        case_id=CASE, doc_id="DOC_001", page="1", anchor="Grade",
         anchor_page=None, detector_profile=None,
         held_by=HELD_BY, run_id=RUN)) == 0
     receipt = _receipt()
@@ -691,7 +715,7 @@ def test_full_multi_page_table_passes_the_region_gate(
     repeated header declared. The P0-8 gate must report nothing."""
     two_page_case()
     assert dao.cmd_register_table_region(make_args(
-        case_id=CASE, doc_id="DOC_001", page="1,2", anchor="Grade",
+        case_id=CASE, doc_id="DOC_001", page="1", anchor="Grade",
         anchor_page=None, detector_profile=None,
         held_by=HELD_BY, run_id=RUN)) == 0
     receipt = _receipt()
@@ -743,7 +767,7 @@ def test_multi_page_honest_contract_is_written_by_the_dao(
     """Attack K end to end, through the real write path."""
     two_page_case()
     assert dao.cmd_register_table_region(make_args(
-        case_id=CASE, doc_id="DOC_001", page="1,2", anchor="Grade",
+        case_id=CASE, doc_id="DOC_001", page="1", anchor="Grade",
         anchor_page=None, detector_profile=None,
         held_by=HELD_BY, run_id=RUN)) == 0
     honest = _canonicalize_uids(_contract_from_receipt(_receipt()))
@@ -1049,20 +1073,22 @@ def test_stale_receipt_blocks_policy_finalization(
         "the honest contract must land, or staleness has nothing to invalidate"
     assert dao._table_region_finalize_blockers(CASE, "DOC_001") == []
 
-    # Now make the receipt stale. Editing the index directly is not a
-    # production path -- it is sealed -- but it is how a test asks "if the
-    # receipt no longer described the registered file, would finalization
-    # still pass?"
-    index_path = dao.table_region_index_path(CASE)
-    index = json.loads(index_path.read_text(encoding="utf-8"))
-    index["tables"][0]["source_pdf_sha256"] = "0" * 64
-    index_path.write_text(json.dumps(index, ensure_ascii=False),
-                          encoding="utf-8")
+    # Make the receipt genuinely stale through the real revision path: revise
+    # the document's source text after the contract was written. Editing the
+    # receipt's recorded digest in place would instead trip the P0-8-follow-up
+    # INTEGRITY check (the body no longer hashes to its id), which is a
+    # different -- and separately tested -- refusal.
+    revised = _registered_text() + "추가 조항.\n"
+    path = isolated_dao / "_stale_revision.md"
+    path.write_text(revised, encoding="utf-8")
+    assert dao.cmd_write_redacted_text(make_args(
+        case_id=CASE, doc_id="DOC_001", text_file=str(path),
+        held_by=HELD_BY, run_id=RUN)) == 0
 
     blockers = dao._table_region_finalize_blockers(CASE, "DOC_001")
 
     assert blockers, "a stale receipt must block finalization"
-    assert any("raw source changed" in b for b in blockers), blockers
+    assert any("revised" in blocker for blocker in blockers), blockers
 
 
 def test_reregistering_identical_bytes_is_idempotent(

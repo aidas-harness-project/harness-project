@@ -1949,10 +1949,10 @@ fail-closed refusals, not silent passes, and each one leaves the table
 - **Merged cells block.** A row band with a merged cell has ambiguous row/column
   structure and is refused rather than resolved by heuristic.
 - **The PDF layout and the processed text must correspond exactly.** Every band
-  is located in the registered page text by exact, ordered search; a band that
-  cannot be placed uniquely refuses. A redacted or re-flowed processed text will
-  therefore block -- correctly, since offsets derived against different bytes
-  are not provenance.
+  is anchored to the registered page text through the PDF's own word geometry;
+  a band that cannot be placed uniquely refuses. A redacted or re-flowed
+  processed text will therefore block -- correctly, since offsets derived
+  against different bytes are not provenance.
 - **Ambiguous candidates need a human.** Two same-header tables on one page
   refuse. There is deliberately no agent-writable override: a full
   human-region-approval path is NOT implemented in this pass, so an
@@ -1961,20 +1961,97 @@ fail-closed refusals, not silent passes, and each one leaves the table
   (`record-human-review`) is where that decision would be added -- it is not
   reachable from an agent writing a name string or a boolean.
 - **A detector profile change requires a fresh derivation.** The profile name
-  and its config fingerprint enter the receipt, so retuning detection under a
-  stable name cannot silently re-authorize an old extent.
+  and its config fingerprint enter the receipt, and `detector_currency_errors`
+  compares them against the running build on every write and finalization.
 
-39 new tests (`tests/test_table_region_provenance.py`), all against real
-pymupdf-rendered PDFs and the real DAO commands, including the narrow-region
-attack through `cmd_write_contract`, a companion test asserting the SAME
-narrowed contract still returns `[]` from the pre-P0-8 reverse-coverage
-checker (so the fix is shown to close a real hole rather than duplicate an
-existing one), the continuation-page drop, data-row-as-`note`/`separator`
-relabelling in both directions, over-wide regions and the note-excuse
-follow-up, four fabricated/foreign-receipt variants, ambiguous and
+62 tests (`tests/test_table_region_provenance.py` + `_followup.py`), all
+against real pymupdf-rendered PDFs and the real DAO commands, including the
+narrow-region attack through `cmd_write_contract`, a companion test asserting
+the SAME narrowed contract still returns `[]` from the pre-P0-8
+reverse-coverage checker (so the fix is shown to close a real hole rather than
+duplicate an existing one), the continuation-page drop, data-row-as-`note`/
+`separator` relabelling in both directions, over-wide regions and the
+note-excuse follow-up, four fabricated/foreign-receipt variants, ambiguous and
 undetectable layouts, OCR refusal, staleness at write and finalization, and
 transaction fault injection (lock contention, pending journal, schema failure,
 write failure with rollback, and rollback failure leaving a blocking journal).
+
+### The receipt-ISSUANCE stage was still attackable -- RESOLVED (P0-8 follow-up)
+
+Independent review of the first P0-8 commit (`1dd06a6`) returned RED LIGHT. The
+contract-side attack was genuinely closed, but the attack had simply moved one
+step upstream, into how a receipt gets issued. Five defects, plus two integrity
+gaps:
+
+1. **`--page` WAS the detection scope.** `cmd_register_table_region` fed the
+   caller's page spec straight to the detector, so a table running page 1->2
+   registered with `--page 1` produced a *verified* page-1-only receipt -- and
+   a contract matching it passed every check, with the whole of page 2 gone.
+   The existing `test_dropping_a_continuation_page_is_refused` did not catch
+   this: it issues an honest two-page receipt first and then edits the
+   contract, which is the weaker attack.
+
+   `--page` is now a **seed**. The DAO scans the document and
+   `_derive_table_scope` walks forward page by page, consulting
+   `continuation_decision` -- column-edge geometry, the reprinted header, and
+   any new heading above the next table. `separate` stops the walk;
+   **`ambiguous` refuses the registration outright**, because an unresolvable
+   continuation must not silently become a partial extent. An adjacent table
+   sharing a header is *not* merged on that basis alone.
+
+2. **No document-wide candidate inventory.** Only tables somebody chose to
+   register got a receipt, so a second appendix could be omitted from the
+   extraction entirely and nothing would ever ask about it. The DAO now records
+   a `candidates` inventory -- every table its scan found, each with a stable
+   `TRC-` id -- and finalization refuses while any candidate is neither
+   extracted nor human-reviewed. A multi-page table records every candidate it
+   consumes (`covered_candidate_ids`), so its own continuation pages do not
+   block it.
+
+3. **Row text was bound by first substring match.** `locate_row_text` used
+   `page_text.find(needle, cursor)` while its docstring claimed an exact and
+   unique mapping, so prose repeating a row's wording above the table captured
+   the binding and bbox was decorative. `align_words_to_text` now anchors every
+   word the PDF reports to its own offset, and bands select words by
+   **geometry** (`words_in_bbox`); a band whose words are not contiguous in the
+   flat text refuses (`contiguity_error`). The pymupdf word-order assumption is
+   verified rather than trusted -- if the words cannot be consumed in order, no
+   receipt is issued.
+
+4. **Multi-line cells lost every line but the first** (`value.split("\n")[0]`),
+   so a limitation on a cell's second line fell outside the receipt *and*
+   outside reverse coverage. Cells now bind all of their words.
+
+5. **A superseded receipt blocked forever.** Currency was checked over *every*
+   receipt on the document, so a legitimate revision plus re-registration left
+   the old receipt permanently failing with no recovery path. Currency is now
+   scoped to the receipts a contract actually **cites**; superseded receipts
+   stay in the index as audit history. Citing a stale receipt is still refused.
+
+6. **The detector fingerprint was recorded but never compared** -- the first
+   commit's report claimed profile changes made receipts stale and the code did
+   not implement it. `detector_currency_errors` now checks the profile still
+   exists and its config fingerprint still matches, from metadata only (no
+   re-run of `find_tables`).
+
+7. **The index was read and trusted.** `receipt_id` was only ever compared as a
+   string, so a receipt body could be edited in place and still resolve.
+   `index_integrity_errors` re-derives every `receipt_id` from its own body and
+   also refuses duplicate ids, id collisions with differing bodies, and
+   receipts bound to another case. A corrupt index blocks explicitly rather
+   than degrading to "this document has no receipts".
+
+**Known limitation carried forward:** the human-review escape hatch for an
+un-extractable candidate is a **seam, not a finished feature** --
+`human_review_ledger.schema.json`'s `artifact_kind` enum does not admit
+`table_candidate`, so today no such record can be written and the only way past
+the coverage gate is to extract the table. Fail-closed and stated; adding the
+kind is a schema + CLI change, not something an agent can reach by writing a
+field.
+
+23 new tests (`tests/test_table_region_followup.py`). canonical_v1 UID values
+remain unchanged -- `policy_uid.py`/`policy_uid_resolver.py` are untouched by
+this pass and the frozen vectors still pass unmodified.
 
 ### Evidence proved a phrase existed, not which occurrence it was -- RESOLVED (P0-7)
 

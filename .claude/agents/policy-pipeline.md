@@ -101,9 +101,16 @@ The DAO opens the registered PDF, detects the table itself, and issues a
 `table_region_v1` receipt naming the table's real extent and its row/header
 bands. Put the returned `receipt_id` in the table's `table_region_receipt_id`,
 set `source_regions` to exactly the receipt's extent, and extract exactly one
-row per `data_row` band. `--page`/`--anchor` only SELECT among candidates the
-DAO found; they cannot define an extent, and an anchor matching two tables (or
-none) issues no receipt.
+row per `data_row` band.
+
+`--page` is a **seed, not a range**: give it the page where the table STARTS.
+The DAO decides where the table ends by following continuations itself (column
+geometry, the reprinted header, any new heading), so a table running pages
+12-13 is registered with `--page 12` and comes back with both pages. Do not
+pass a page list hoping to widen or narrow the extent -- you cannot, and naming
+several pages that each hold a candidate is refused as an ambiguous selector.
+`--anchor` likewise only SELECTS among candidates the DAO found; an anchor
+matching two tables, or none, issues no receipt.
 
 This exists because every other check on a table runs *downwards* from
 `source_regions`: declare the region narrowly and the rows outside it are never
@@ -113,12 +120,20 @@ continuation page, passes completeness checking. For the same reason a
 relabelling a data row `note` or `separator` is the same omission as deleting
 it, and is refused.
 
+**Every table the DAO's scan finds must be extracted.** The scan records a
+candidate inventory for the whole document, and finalization refuses while any
+detected table is unaccounted for — so registering one appendix and quietly
+ignoring a second one blocks the stage rather than passing. There is no
+"ignore this candidate" field to set.
+
 If the DAO refuses to issue a receipt (no ruled table detected, image-only/OCR
-document, merged cells, ambiguous candidates, or processed text that does not
-correspond exactly to the PDF layout), that table is **not** "a page with no
-table". Leave it `review_required: true` and route it for human review — it
-will block `policy_clause_processing` finalization until resolved. Do not
-work around the refusal by narrowing the region until detection succeeds.
+document, merged cells, ambiguous candidates, an unresolvable continuation onto
+the next page, or processed text that does not correspond exactly to the PDF
+layout), that table is **not** "a page with no table". Leave it
+`review_required: true` and route it for human review — it will block
+`policy_clause_processing` finalization until resolved. Do not work around the
+refusal by narrowing the region, or by re-seeding on a different page, until
+detection happens to succeed.
 
 A `reference_table_refs` entry (or a parent-coverage page's
 `reference_table_document_id`) pointing at ANOTHER document is recomputed in

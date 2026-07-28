@@ -10,9 +10,16 @@
     },
     "tables": {
       "type": "array",
-      "description": "One entry per derived table region. A table absent from this array has no receipt, which blocks a canonical_v1 write and policy_clause_processing finalization -- never a check that is skipped for lack of data.",
+      "description": "One entry per derived table region. A table absent from this array has no receipt, which blocks a canonical_v1 write and policy_clause_processing finalization -- never a check that is skipped for lack of data. Superseded receipts are RETAINED as audit history: currency is checked against the receipts a contract actually cites, so an old receipt records what was once derived without permanently blocking the document.",
       "items": {
         "$ref": "#/$defs/table_region_receipt"
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "description": "One DAO-derived scan per document, listing EVERY table the detector found in it -- not only the ones somebody chose to register. Verifying the receipts a contract cites answers 'is this table complete?' but never 'were there other tables?', so without this a document with two appendices could have one extracted and the other never mentioned by anyone, with every check passing. At finalization each candidate must be either extracted as a verified table or recorded in the authenticated human-review ledger; there is deliberately no agent-writable 'ignore this candidate' field.",
+      "items": {
+        "$ref": "#/$defs/candidate_inventory"
       }
     }
   },
@@ -38,6 +45,19 @@
         "document_id": {
           "$ref": "common_component_output.schema.json#/$defs/document_id",
           "description": "The document whose table this receipt establishes. A reference table citing a receipt issued for a different document is refused: a real receipt for the wrong document is still not provenance for this one."
+        },
+        "candidate_id": {
+          "type": ["string", "null"],
+          "pattern": "^TRC-[a-f0-9]{32}$",
+          "description": "Which entry of the document's candidate inventory this receipt derives from (the table's FIRST page), so finalization can tell an extracted candidate from one nothing ever handled. Null only on receipts issued before the inventory existed."
+        },
+        "covered_candidate_ids": {
+          "type": "array",
+          "description": "Every inventory candidate this one receipt accounts for. A table continued across pages is detected once per page but extracted once, so coverage must credit all of its pages -- otherwise every legitimate multi-page table would block finalization on its own continuation pages.",
+          "items": {
+            "type": "string",
+            "pattern": "^TRC-[a-f0-9]{32}$"
+          }
         },
         "source_pdf_sha256": {
           "type": "string",
@@ -116,6 +136,8 @@
         "scheme",
         "case_id",
         "document_id",
+        "candidate_id",
+        "covered_candidate_ids",
         "source_pdf_sha256",
         "source_text_revision_sha256",
         "segment_derivation_receipt_id",
@@ -126,6 +148,72 @@
         "issued_at",
         "issued_by",
         "verification_status"
+      ],
+      "additionalProperties": false
+    },
+    "candidate_inventory": {
+      "type": "object",
+      "description": "The DAO's scan of one document: every table the detector found, whether or not anybody registered it. Replaced (not accumulated) on each scan, since an inventory listing candidates from an older revision would block on tables that no longer exist.",
+      "properties": {
+        "document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id"
+        },
+        "source_pdf_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_text_revision_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "detector_profile": { "type": "string", "minLength": 1 },
+        "detector_config_fingerprint": { "type": "string", "minLength": 1 },
+        "scanned_at": { "type": "string", "format": "date-time" },
+        "candidates": {
+          "type": "array",
+          "description": "Every detected table. An empty array means the detector found none -- which is only ever recorded for a document the DAO actually scanned, never inferred from the absence of a scan.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "candidate_id": {
+                "type": "string",
+                "pattern": "^TRC-[a-f0-9]{32}$",
+                "description": "Derived from the document's source identity plus this candidate's own geometry, so re-scanning unchanged bytes yields the same id. Never from a caller-supplied value and never from a table_uid."
+              },
+              "page": { "type": "integer", "minimum": 1 },
+              "physical_page": { "type": "integer", "minimum": 1 },
+              "bbox": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": { "type": "number" }
+              },
+              "row_count": { "type": "integer", "minimum": 0 },
+              "header_preview": {
+                "type": "string",
+                "description": "The candidate's header text, for a human reading a blocker message. Diagnostic only -- nothing is decided from it."
+              }
+            },
+            "required": [
+              "candidate_id",
+              "page",
+              "physical_page",
+              "bbox",
+              "row_count",
+              "header_preview"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "document_id",
+        "source_pdf_sha256",
+        "source_text_revision_sha256",
+        "detector_profile",
+        "detector_config_fingerprint",
+        "scanned_at",
+        "candidates"
       ],
       "additionalProperties": false
     },

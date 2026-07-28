@@ -151,53 +151,110 @@ def canonical_page_text(text: str) -> str:
 
 # --- locating a detected band in the registered text -----------------------
 
-def locate_row_text(page_text: str, cell_texts, search_from: int = 0):
-    """Map one detected band to an EXACT, UNIQUE range in the registered text.
+def align_words_to_text(words, page_text: str):
+    """Anchor every word the PDF reports to one exact offset in the page text.
 
-    `find_tables()` gives geometry and cell strings; the contract's offsets
-    index into the processed page body. Nothing guarantees those two describe
-    the same bytes -- the processed text may be redacted, re-flowed, or simply
-    a different extraction -- so this refuses whenever the correspondence is
-    not exact.
+    This is the load-bearing piece of the whole module, and the first P0-8 pass
+    got it wrong. It used `page_text.find(cell_text, cursor)` -- FIRST match
+    from a rolling cursor -- while claiming an exact and unique mapping. Where
+    a page carried prose repeating a table's own strings above the table, the
+    receipt bound to the prose, and the geometry the detector had actually
+    found never entered the decision at all. The bbox was recorded and then
+    ignored.
 
-    The band's cells must appear in the page text in order, each found from the
-    previous one's end. The returned range runs from the first cell's start to
-    the last cell's end, which is the row as the flat text expresses it.
+    The fix is to make the mapping come FROM the geometry. `get_text("words")`
+    returns every word with its bbox in the same order `get_text()` lays them
+    out, so consuming the word list strictly left to right through the page
+    text assigns each word the offset of its OWN occurrence -- the second
+    `Grade` on the page resolves to the second `Grade` in the text, whether or
+    not the first one belongs to a table.
 
-    Returns `(start, end, error)`. A band that cannot be placed yields
-    `(None, None, reason)` -- never a best guess, because a best-guess offset
-    is indistinguishable from a correct one downstream.
+    That ordering correspondence is an assumption about pymupdf, so it is
+    VERIFIED rather than trusted: if the words cannot be consumed in order, or
+    any word is missing, this returns an error and no receipt is issued.
+
+    Returns `(anchors, error)` where `anchors` is one dict per word with its
+    bbox and its exact `[start, end]`.
     """
-    values = [str(text or "").strip() for text in cell_texts]
-    values = [value for value in values if value]
-    if not values:
-        return None, None, "the detected band carries no cell text"
-
-    cursor = search_from
-    first_start = None
-    last_end = None
-    for value in values:
-        # Collapse the detector's internal newlines: a wrapped cell reads as
-        # "A\nB" in the layout and "A B" (or "A\nB") in the flat text. Only the
-        # cell's own leading token is used as the anchor, and the whole span is
-        # verified afterwards, so this widens the SEARCH, never the claim.
-        needle = value.split("\n")[0].strip()
-        if not needle:
+    anchors: list[dict] = []
+    cursor = 0
+    for word in words:
+        text = str(word[4])
+        if not text.strip():
             continue
-        position = page_text.find(needle, cursor)
+        position = page_text.find(text, cursor)
         if position == -1:
-            return None, None, (
-                f"cell text {needle!r} could not be located in the registered "
-                "page text at or after offset "
-                f"{cursor} -- the PDF layout and the processed text do not "
-                "describe the same bytes, so no exact region can be derived")
-        if first_start is None:
-            first_start = position
-        last_end = position + len(needle)
-        cursor = last_end
-    if first_start is None or last_end is None:
-        return None, None, "the detected band carries no locatable cell text"
-    return first_start, last_end, None
+            return None, (
+                f"word {text!r} from the PDF's layout could not be located in "
+                f"the registered page text at or after offset {cursor} -- the "
+                "layout and the processed text do not describe the same bytes "
+                "in the same order, so no exact region can be derived from the "
+                "geometry")
+        anchors.append({
+            "bbox": [float(word[0]), float(word[1]),
+                     float(word[2]), float(word[3])],
+            "text": text,
+            "start_char": position,
+            "end_char": position + len(text),
+        })
+        cursor = position + len(text)
+    if not anchors:
+        return None, "the page carries no words to anchor"
+    return anchors, None
+
+
+def _bbox_contains(outer, inner, tolerance: float = 1.0) -> bool:
+    """Whether a word's box sits inside a detector band's box.
+
+    A small tolerance absorbs the sub-point differences between the ruling
+    coordinates the detector reports and the glyph boxes the text layer
+    reports; it is far below the height of a text line, so it cannot pull in a
+    word from an adjacent row.
+    """
+    return (inner[0] >= outer[0] - tolerance
+            and inner[1] >= outer[1] - tolerance
+            and inner[2] <= outer[2] + tolerance
+            and inner[3] <= outer[3] + tolerance)
+
+
+def words_in_bbox(anchors, bbox):
+    """Every anchored word whose geometry falls inside `bbox`, in text order."""
+    return [anchor for anchor in anchors
+            if _bbox_contains(bbox, anchor["bbox"])]
+
+
+def span_from_anchors(selected):
+    """The exact contiguous range covering a set of anchored words.
+
+    Requires the selection to be CONTIGUOUS in the page text: the words between
+    the first and last must all belong to the same band. A gap means the flat
+    text interleaves this band with something else, in which case a single
+    `[start, end]` range would silently claim text the band does not own.
+    """
+    if not selected:
+        return None, None, "no words fall inside this region's geometry"
+    ordered = sorted(selected, key=lambda anchor: anchor["start_char"])
+    return ordered[0]["start_char"], ordered[-1]["end_char"], None
+
+
+def contiguity_error(selected, anchors, location: str = ""):
+    """Refuse a band whose words are not consecutive in the page text."""
+    if not selected:
+        return f"{location}: no words fall inside this region's geometry"
+    ordered = sorted(selected, key=lambda anchor: anchor["start_char"])
+    start, end = ordered[0]["start_char"], ordered[-1]["end_char"]
+    intruders = [
+        anchor for anchor in anchors
+        if anchor["start_char"] >= start and anchor["end_char"] <= end
+        and anchor not in selected
+    ]
+    if intruders:
+        return (
+            f"{location}: the text between this region's first and last word "
+            f"also contains {intruders[0]['text']!r}, which the detector "
+            "places outside the region -- the flat text interleaves this band "
+            "with other content, so a single exact range cannot describe it")
+    return None
 
 
 def classify_bands(bands, header_row_indexes, page_first_index):
@@ -226,6 +283,96 @@ def classify_bands(bands, header_row_indexes, page_first_index):
     return kinds
 
 
+def _column_signature(candidate, tolerance: float = 4.0):
+    """A candidate's column geometry, rounded to a comparison tolerance.
+
+    Column x-positions are the strongest layout evidence that two page-spanning
+    bands are one table: a continuation reprints the same column grid, an
+    unrelated appendix generally does not.
+    """
+    rows = candidate.get("rows") or []
+    if not rows:
+        return None
+    first = rows[0]
+    edges = []
+    for cell in first["cells"]:
+        if cell is None:
+            return None
+        edges.append(round(float(cell["bbox"][0]) / tolerance))
+        edges.append(round(float(cell["bbox"][2]) / tolerance))
+    return tuple(edges)
+
+
+def _header_texts(candidate):
+    names = [str(name or "").strip()
+             for name in candidate.get("header_names") or []]
+    if any(names):
+        return tuple(names)
+    rows = candidate.get("rows") or []
+    if not rows or any(cell is None for cell in rows[0]["cells"]):
+        return None
+    return tuple(str((cell or {}).get("text") or "").strip()
+                 for cell in rows[0]["cells"])
+
+
+def continuation_decision(head, following):
+    """Whether `following` continues `head`, on independent layout evidence.
+
+    P0-8's first pass let the CALLER decide this by choosing `--page`, which
+    meant a table running 1->2 could be registered as page 1 only and every
+    downstream check would agree it was complete. The scope has to be derived,
+    not received.
+
+    The evidence used, all of it structural:
+
+      * identical column geometry (same column count and edge positions)
+      * an identical column header reprinted at the top of the next page
+      * page adjacency (already guaranteed by the caller of this function)
+
+    Returns `("continues", None)`, `("separate", reason)`, or
+    `("ambiguous", reason)`. **Ambiguous is not a merge and not a split** -- it
+    refuses the registration, because an adjacent table sharing a header is
+    equally consistent with "one table continued" and "a different appendix
+    that happens to use the same columns", and guessing either way fabricates
+    provenance. Two independent tables must not be welded into one, and a real
+    continuation must not be silently dropped.
+    """
+    head_columns = _column_signature(head)
+    next_columns = _column_signature(following)
+    if head_columns is None or next_columns is None:
+        return "ambiguous", (
+            "column geometry could not be established on both pages (merged "
+            "cells), so continuation cannot be decided from the layout")
+    if head_columns != next_columns:
+        return "separate", (
+            "the next page's table uses a different column grid, so it is a "
+            "different table")
+
+    head_header = _header_texts(head)
+    next_header = _header_texts(following)
+    if head_header is None or next_header is None:
+        return "ambiguous", (
+            "the column header could not be read on both pages, so a repeated "
+            "header cannot be distinguished from a new table")
+    if head_header != next_header:
+        return "separate", (
+            "the next page's table has a different column header, so it is a "
+            "different table")
+
+    # Same grid AND same header. That is what a continuation looks like -- and
+    # also what two same-shaped sibling appendices look like. A title printed
+    # above the next page's table is the discriminator: a continuation does not
+    # introduce a new one.
+    following_title = (following.get("preceding_heading") or "").strip()
+    head_title = (head.get("preceding_heading") or "").strip()
+    if following_title and following_title != head_title:
+        return "separate", (
+            f"the next page's table is introduced by its own heading "
+            f"{following_title!r}, so it is a different table rather than a "
+            "continuation")
+    return "continues", None
+
+
 def classification_review_reasons(regions) -> list[str]:
     """Why a derived classification cannot be auto-verified.
 
@@ -247,10 +394,29 @@ def classification_review_reasons(regions) -> list[str]:
 
 # --- receipt construction --------------------------------------------------
 
+def compute_candidate_id(*, document_id, source_pdf_sha256,
+                         source_text_revision_sha256, detector_profile,
+                         config_fingerprint, pages_geometry) -> str:
+    """A stable identifier for one table the detector found in a document.
+
+    Derived from the document's source identity plus the candidate's own
+    geometry, so re-scanning unchanged bytes yields the same id and the
+    inventory can be compared across runs. Never from anything a caller
+    supplied, and never from a table_uid.
+    """
+    fingerprint = (
+        document_id, source_pdf_sha256, source_text_revision_sha256,
+        detector_profile, config_fingerprint, tuple(pages_geometry),
+    )
+    digest = hashlib.sha256(repr(fingerprint).encode("utf-8")).hexdigest()
+    return f"TRC-{digest[:32]}"
+
+
 def build_receipt(*, document_id, case_id, source_pdf_sha256,
                   source_text_revision_sha256, detector, extent, regions,
                   selector, segment_derivation_receipt_id, issued_at,
-                  issued_by, run_id):
+                  issued_by, run_id, candidate_id=None,
+                  covered_candidate_ids=None):
     """The receipt as it will be stored.
 
     Every field is something the DAO observed or computed. `selector` is
@@ -261,6 +427,14 @@ def build_receipt(*, document_id, case_id, source_pdf_sha256,
         "scheme": RECEIPT_SCHEME,
         "case_id": case_id,
         "document_id": document_id,
+        "candidate_id": candidate_id,
+        # Every inventory candidate this one receipt accounts for. A multi-page
+        # table is detected once per page but extracted once, so coverage has
+        # to know about all of them.
+        "covered_candidate_ids": list(covered_candidate_ids
+                                      if covered_candidate_ids is not None
+                                      else ([candidate_id] if candidate_id
+                                            else [])),
         "source_pdf_sha256": source_pdf_sha256,
         "source_text_revision_sha256": source_text_revision_sha256,
         "segment_derivation_receipt_id": segment_derivation_receipt_id,
@@ -298,6 +472,8 @@ def _receipt_fingerprint(receipt: dict) -> tuple:
         receipt.get("scheme"),
         receipt.get("case_id"),
         receipt.get("document_id"),
+        receipt.get("candidate_id"),
+        tuple(receipt.get("covered_candidate_ids") or ()),
         receipt.get("source_pdf_sha256"),
         receipt.get("source_text_revision_sha256"),
         receipt.get("segment_derivation_receipt_id"),
@@ -337,6 +513,98 @@ def detector_fingerprint(profile: str) -> str:
 
 # --- currency --------------------------------------------------------------
 
+def index_integrity_errors(index: dict, case_id: str,
+                           location: str = "") -> list[str]:
+    """Re-derive the index's own claims before any receipt in it is trusted.
+
+    The first P0-8 pass read the index with `json.loads` and used it. Every
+    later check then compared a receipt's recorded fields against the world --
+    but nothing checked the receipt against ITSELF, so `receipt_id` was only
+    ever a string that matched. Editing a receipt's extent in place, keeping
+    its id, produced a receipt that resolved and passed.
+
+    `receipt_id` is a hash of exactly the fields that define the derivation, so
+    recomputing it is a complete integrity check for the receipt body. Anything
+    that fails here is a corrupt index, reported as such -- deliberately NOT
+    degraded to "this document has no receipts", which would read as an
+    ordinary missing-receipt error and invite re-issuing over a damaged file.
+    """
+    prefix = f"{location}: " if location else ""
+    errors: list[str] = []
+    receipts = index.get("tables")
+    if not isinstance(receipts, list):
+        return [f"{prefix}table region index integrity: `tables` is not a list"]
+
+    seen: dict[str, dict] = {}
+    for position, receipt in enumerate(receipts):
+        if not isinstance(receipt, dict):
+            errors.append(
+                f"{prefix}table region index integrity: entry {position} is "
+                "not an object")
+            continue
+        receipt_id = receipt.get("receipt_id")
+        recomputed = compute_receipt_id(receipt)
+        if receipt_id != recomputed:
+            errors.append(
+                f"{prefix}table region index integrity: receipt "
+                f"{receipt_id!r} does not hash to its own contents "
+                f"(recomputed {recomputed!r}) -- the receipt body was changed "
+                "after issuance, so the id no longer identifies the derivation "
+                "it names")
+            continue
+        if receipt_id in seen:
+            if seen[receipt_id] != receipt:
+                errors.append(
+                    f"{prefix}table region index integrity: receipt_id "
+                    f"{receipt_id!r} appears twice with different contents")
+            else:
+                errors.append(
+                    f"{prefix}table region index integrity: duplicate "
+                    f"receipt_id {receipt_id!r}")
+            continue
+        seen[receipt_id] = receipt
+        if receipt.get("case_id") != case_id:
+            errors.append(
+                f"{prefix}table region index integrity: receipt {receipt_id!r} "
+                f"is bound to case {receipt.get('case_id')!r}, but sits in "
+                f"{case_id}'s index")
+    return errors
+
+
+def detector_currency_errors(receipt: dict, location: str = "") -> list[str]:
+    """Whether the receipt's detector is still the detector this build runs.
+
+    P0-8's first pass recorded a detector fingerprint in every receipt and then
+    never compared it -- the completion report claimed a profile change made a
+    receipt stale, and the code did not implement that. An extent is a function
+    of the detector that produced it, so retuning detection under a stable
+    profile name silently re-authorized every previously-derived extent.
+
+    Compared here, from metadata only: verification never re-runs
+    `find_tables()`, which keeps this cheap enough for every write.
+    """
+    prefix = f"{location}: " if location else ""
+    detector = receipt.get("detector") or {}
+    profile = detector.get("profile")
+    if profile not in DETECTOR_PROFILES:
+        return [
+            f"{prefix}the receipt was derived with detector profile "
+            f"{profile!r}, which this build does not define -- a profile that "
+            "no longer exists cannot be confirmed to produce this extent, so "
+            "the derivation must be re-run"
+        ]
+    expected = detector_fingerprint(profile)
+    recorded = detector.get("config_fingerprint")
+    if recorded != expected:
+        return [
+            f"{prefix}detector profile {profile!r} has been reconfigured since "
+            f"this receipt was issued (receipt {recorded!r}, current "
+            f"{expected!r}) -- the table's extent is a function of the "
+            "detector that derived it, so it must be re-derived"
+        ]
+    return []
+
+
 def receipt_currency_errors(*, receipt: dict, current_pdf_sha256: str | None,
                             current_revision_sha256: str | None,
                             current_pages: dict | None,
@@ -360,6 +628,8 @@ def receipt_currency_errors(*, receipt: dict, current_pdf_sha256: str | None,
             f"not {RECEIPT_SCHEME!r} -- an unrecognized scheme is refused "
             "rather than assumed equivalent"
         ]
+
+    errors.extend(detector_currency_errors(receipt, location))
 
     recorded_pdf = receipt.get("source_pdf_sha256")
     if current_pdf_sha256 is None:
@@ -421,6 +691,65 @@ def receipt_currency_errors(*, receipt: dict, current_pdf_sha256: str | None,
 
 
 # --- binding a contract to its receipt -------------------------------------
+
+def candidate_coverage_errors(inventory: dict | None, receipts,
+                              extracted_receipt_ids, human_reviewed_ids=(),
+                              location: str = "") -> list[str]:
+    """Every table the detector found must have a disposition.
+
+    Verifying the receipts a contract happens to cite answers "is this table
+    complete?" but never "were there other tables?". A document with two
+    appendices could have one extracted and the other never mentioned by
+    anyone, and every check would pass -- the same omission P0-8 closed at row
+    level, one level up.
+
+    A candidate is accounted for when it was extracted as a verified table, or
+    when a genuine human review recorded a decision about it. There is
+    deliberately NO third option and no agent-writable "not a table" field: a
+    self-declared exemption is exactly the self-declaration this module exists
+    to remove.
+
+    **The human-review escape hatch is a SEAM, not a finished feature.**
+    `human_review_ledger.schema.json`'s `artifact_kind` enum does not yet admit
+    `table_candidate`, so today no such record can actually be written and the
+    only way past this gate is to extract the table. That is deliberate for
+    this pass -- fail-closed and stated -- and adding the kind is a schema +
+    CLI change, not something an agent can reach by writing a field. See
+    known-gaps.md.
+    """
+    prefix = f"{location}: " if location else ""
+    if inventory is None:
+        return [
+            f"{prefix}no DAO-derived table candidate inventory exists -- "
+            "without a scan of the whole document, a table the detector would "
+            "have found but nobody extracted is invisible. Run `dao.py "
+            "register-table-region` (which scans as it registers) or "
+            "`dao.py scan-table-candidates`"
+        ]
+    extracted = set(extracted_receipt_ids or ())
+    reviewed = set(human_reviewed_ids or ())
+    covered = set()
+    for receipt in receipts or []:
+        if receipt.get("receipt_id") not in extracted:
+            continue
+        covered.update(receipt.get("covered_candidate_ids")
+                       or [receipt.get("candidate_id")])
+    errors: list[str] = []
+    for candidate in inventory.get("candidates") or []:
+        candidate_id = candidate.get("candidate_id")
+        if candidate_id in covered or candidate_id in reviewed:
+            continue
+        errors.append(
+            f"{prefix}table candidate {candidate_id} (logical page "
+            f"{candidate.get('page')}, {candidate.get('row_count')} row bands, "
+            f"header {candidate.get('header_preview')!r}) was detected in the "
+            "registered PDF but no reference_table extracts it -- a detected "
+            "table with no disposition blocks finalization; its absence from "
+            "the extraction is not evidence that it is unimportant. Register "
+            "and extract it, or (not yet implemented -- see known-gaps.md) "
+            "record an authenticated human review of it")
+    return errors
+
 
 def _span_key(span: dict) -> tuple:
     return (span.get("page"), span.get("start_char"), span.get("end_char"))
