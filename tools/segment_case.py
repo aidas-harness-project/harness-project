@@ -246,7 +246,12 @@ def _coerce_page_list(value, sheet_pages: set[int], field: str) -> tuple[list[in
     return sorted(set(pages)), None
 
 
-def parse_segmentation_response(raw: str, sheet_pages: list[int]) -> dict:
+def parse_segmentation_response(
+    raw: str,
+    sheet_pages: list[int],
+    *,
+    require_output_contract: bool = False,
+) -> dict:
     """Parses one sheet's model response. NEVER raises.
 
     Two precedents in this repo disagree on failure handling:
@@ -275,6 +280,14 @@ def parse_segmentation_response(raw: str, sheet_pages: list[int]) -> dict:
     parsed, error = _scan_for_json_object(raw)
     if parsed is None:
         return failed(f"{error}: {raw[:200]!r}")
+    if require_output_contract:
+        required = ("boundaries", "continuations", "needs_full_page")
+        missing = [field for field in required if field not in parsed]
+        if missing:
+            return failed(
+                "structured output omitted required field(s): "
+                + ", ".join(missing)
+            )
 
     raw_boundaries = parsed.get("boundaries", [])
     if not isinstance(raw_boundaries, list):
@@ -636,7 +649,38 @@ DEFAULT_SEPARATOR_PX = 4
 DEFAULT_FALLBACK_DPI = 110
 
 
-SEGMENT_PROMPT_VERSION = "segment_contact_sheet_v0.1"
+SEGMENT_PROMPT_VERSION = "segment_contact_sheet_v0.2"
+SEGMENT_OUTPUT_SCHEMA_VERSION = "segment_contact_sheet_output_v0.1"
+
+# Provider-neutral output contract. Claude CLI enforces this natively with
+# --json-schema; providers without native structured output still return through
+# the same caller-side parser and one-correction gate. Keeping this contract in
+# Stage 1 (rather than embedding Claude flags here) lets a future local vision
+# model implement the provider method without changing segmentation logic.
+SEGMENT_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "boundaries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "page": {"type": "integer"},
+                    "type_guess": {"type": ["string", "null"]},
+                    "type_label": {"type": ["string", "null"]},
+                    "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+                    "evidence": {"type": ["string", "null"]},
+                },
+                "required": ["page"],
+                "additionalProperties": False,
+            },
+        },
+        "continuations": {"type": "array", "items": {"type": "integer"}},
+        "needs_full_page": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": ["boundaries", "continuations", "needs_full_page"],
+    "additionalProperties": False,
+}
 
 # Verified against a real 4x4 sheet (p65-80 of the 110p bundle, 9 rotated cells):
 # every rotated cell was read and the p74 boundary found at 0.92 confidence.
@@ -693,6 +737,43 @@ def build_segment_prompt(sheet_pages: list[int], geometry: dict) -> str:
         rows=geometry["rows"],
         blank_note=blank_note,
         types=", ".join(sorted(DOCUMENT_TYPES)),
+    )
+
+
+def _call_structured_image(provider, image_path: Path, prompt: str):
+    """Use the provider-neutral structured-image contract when available.
+
+    Duck-typed test providers and older third-party providers can still expose
+    only transcribe_image; Stage 1 then applies the same parser and correction
+    gate to their text. Production providers should implement the structured
+    method whenever their backend supports native schema enforcement.
+    """
+    analyze = getattr(provider, "analyze_image_structured", None)
+    if callable(analyze):
+        return analyze(
+            image_path,
+            prompt,
+            SEGMENT_PROMPT_VERSION,
+            SEGMENT_OUTPUT_SCHEMA,
+        )
+    return provider.transcribe_image(image_path, prompt, SEGMENT_PROMPT_VERSION)
+
+
+def _result_text_for_parsing(result) -> str:
+    structured = getattr(result, "structured_output", None)
+    if isinstance(structured, dict):
+        return json.dumps(structured, ensure_ascii=False)
+    return result.text
+
+
+def _correction_prompt(prompt: str, validation_error: str | None) -> str:
+    """Exactly one caller-owned P4 correction prompt for a failed sheet."""
+    detail = validation_error or "the response did not match the required output contract"
+    return (
+        f"{prompt}\n\n"
+        "Your previous response could not be used because it failed the output "
+        f"contract: {detail}. Re-evaluate the same image and return the required "
+        "structured fields. Do not omit any of the three top-level arrays."
     )
 
 
@@ -1024,6 +1105,13 @@ def propose_boundaries(
 
     cache_dir = _resume_dir(case_id, doc_id)
     fingerprint = geometry_fingerprint(geometry, page_count=page_count)
+    cache_contract = {
+        "geometry_fingerprint": fingerprint,
+        "prompt_version": SEGMENT_PROMPT_VERSION,
+        "output_schema_version": SEGMENT_OUTPUT_SCHEMA_VERSION,
+        "provider_name": getattr(provider, "provider_name", None),
+        "model_name": getattr(provider, "model_name", None),
+    }
 
     per_sheet: list[dict] = []
     contact_sheets: list[dict] = []
@@ -1032,10 +1120,14 @@ def propose_boundaries(
     for index, pages in enumerate(batches):
         sheet_path = sheet_paths[index] if sheet_paths else None
         cached = _load_cached_sheet(cache_dir, index) if resume else None
-        # Invalidate a cache entry rendered under a different geometry: reusing
-        # it would compare a run against sheets it never actually saw -- the
-        # nasty, near-invisible bug geometry_fingerprint exists to prevent.
-        if cached is not None and cached.get("fingerprint") != fingerprint:
+        # A cached verdict is reusable only under the exact image/prompt/schema/
+        # provider contract that produced it, and only if it parsed successfully.
+        # Older caches had only a geometry fingerprint and cached parse failures;
+        # both must be re-called after this fix.
+        if cached is not None and (
+            cached.get("cache_contract") != cache_contract
+            or not (cached.get("parsed") or {}).get("ok")
+        ):
             cached = None
 
         if cached is not None:
@@ -1046,16 +1138,55 @@ def propose_boundaries(
                 progress(f"sheet {index} (p{pages[0]}-{pages[-1]}) (cached)")
         else:
             prompt = build_segment_prompt(pages, geometry)
-            result = provider.transcribe_image(
-                Path(sheet_path), prompt, SEGMENT_PROMPT_VERSION
-            )
-            parsed = parse_segmentation_response(result.text, pages)
-            provider_metadata = result.metadata()
+            result = None
+            parsed = None
+            raw_responses: list[str] = []
+            provider_errors: list[str] = []
+
+            # P4 at the per-sheet output boundary: initial attempt plus exactly
+            # one self-correction. A second failure is preserved as an
+            # unassigned-page halt; it is never upgraded to a usable proposal.
+            for attempt in range(2):
+                attempt_prompt = prompt if attempt == 0 else _correction_prompt(
+                    prompt, parsed.get("warning") if parsed else provider_errors[-1]
+                )
+                try:
+                    result = _call_structured_image(
+                        provider, Path(sheet_path), attempt_prompt
+                    )
+                except Exception as exc:
+                    # Provider failures are stage failures, but one bad sheet
+                    # must not discard already-paid successful sheets.
+                    provider_errors.append(f"{type(exc).__name__}: {exc}")
+                    parsed = {
+                        "ok": False,
+                        "boundaries": [],
+                        "continuations": [],
+                        "needs_full_page": [],
+                        "warning": f"provider call failed: {exc}",
+                    }
+                else:
+                    raw = _result_text_for_parsing(result)
+                    raw_responses.append(raw)
+                    parsed = parse_segmentation_response(
+                        raw, pages, require_output_contract=True
+                    )
+                    provider_metadata = result.metadata()
+                if parsed["ok"]:
+                    break
+
+            assert parsed is not None
+            if not parsed["ok"]:
+                parsed["warning"] = (
+                    f"{parsed.get('warning')}; failed after exactly one "
+                    "structured-output correction attempt"
+                )
             if resume:
                 _save_cached_sheet(cache_dir, index, {
-                    "fingerprint": fingerprint,
+                    "cache_contract": cache_contract,
                     "parsed": parsed,
-                    "raw_response": result.text,
+                    "raw_responses": raw_responses,
+                    "provider_errors": provider_errors,
                     "provider_metadata": provider_metadata,
                 })
             if progress:
@@ -1983,11 +2114,14 @@ def _cmd_propose(args):
         created_at=now_iso(),
     )
     target = _write_proposal(args.case_id, args.doc_id, proposal, args.held_by, args.run_id)
+    failed_sheets = sum(1 for sheet in result["per_sheet"] if not sheet.get("ok"))
+    partial = bool(failed_sheets or proposal["unassigned_pages"])
     out = {
-        "status": "proposed",
+        "status": "partial" if partial else "proposed",
         "proposal_path": str(target),
         "segment_count": len(proposal["segments"]),
         "unassigned_pages": proposal["unassigned_pages"],
+        "failed_sheets": failed_sheets,
         "needs_full_page": result["needs_full_page"],
         "fallback_triggered": proposal["method"]["full_page_fallback"]["triggered"],
         "fallback_saturated": proposal["method"]["full_page_fallback"]["saturated"],
@@ -2007,6 +2141,12 @@ def _cmd_propose(args):
             "vision_calls": result["refinement"]["calls"],
         }
     print(json.dumps(out, ensure_ascii=False, indent=2))
+    if partial:
+        _stderr(
+            "Stage 1 halted with a partial proposal; unassigned pages or failed "
+            "sheets must be resolved before downstream processing."
+        )
+        return 2
     return 0
 
 

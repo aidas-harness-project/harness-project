@@ -2572,7 +2572,7 @@ half-way:
 
 Tracked as PARTIAL, not RESOLVED, deliberately.
 
-## 33. Stage 1 segmentation reasoning succeeds but full-prompt JSON serialization fails -- OPEN 2026-07-29 (CASE_111)
+## 33. Stage 1 segmentation reasoning succeeds but full-prompt JSON serialization fails -- RESOLVED 2026-07-29 (CASE_111)
 
 `tools/segment_case.py propose` can correctly read the contact sheets and
 reason about document boundaries while returning no parseable JSON. The
@@ -2643,19 +2643,23 @@ had not executed at all. Verify a proposal exists via `segment_case.py show`
 - DOC_003/004/005 remain subject to the normal human segmentation gate. No
   machine prose is treated as a human decision.
 
-**Unverified remedies.**
+**Resolution.**
 
-1. Move the output contract to the front and/or simplify the production
-   prompt, then compare repeated runs rather than treating one success as
-   proof.
-2. Use a direct API provider with structured-output support, while recording
-   the provider difference and accepting that cross-case comparability changes.
-3. Add a deterministic second-pass serializer over the successful prose
-   reasoning. This would be a design change and must preserve the human
-   segmentation gate rather than silently upgrading prose to an approved
-   proposal.
+Stage 1 now calls the provider-neutral `analyze_image_structured()` contract.
+`claude-cli` enforces the contact-sheet schema natively with
+`--output-format json --json-schema` and returns only the validated
+`structured_output` payload. Providers without native enforcement, including a
+future local vision provider, still pass through the same required-field parser
+and validation gate.
 
-No production prompt or parser change has been made. The agreed decision rule
-is to measure whether the intentionally unsplit DOC_002 materially corrupts
-later stages; if it does, fix and validate segmentation before rerunning from a
-clean stage boundary.
+A failed response receives exactly one caller-owned correction. If the second
+response also fails, its pages remain unassigned and `propose` returns
+`status: partial` with a non-zero exit rather than presenting the run as
+successful. Resume reuse is bound to geometry, prompt version, output-schema
+version, provider, and model; failed cache entries remain diagnostic-only and
+are never reused.
+
+Focused provider/segmentation coverage passes 170 tests. The non-frontend suite
+passes apart from a pre-existing Windows DAO lock timing test that passed
+immediately when rerun alone. The existing human segmentation gate remains
+unchanged: structured output creates a proposal, never a human approval.
