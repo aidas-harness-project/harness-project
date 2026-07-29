@@ -77,13 +77,23 @@ from ocr_extract import build_ocr_providers, run_ocr
 
 ROOT = Path(__file__).resolve().parent.parent
 
-DOCUMENT_TYPES = ["insurance_certificate", "insurance_policy", "diagnosis_certificate",
-                   "medical_record", "imaging_report", "receipt", "insurer_response", "other"]
-CLASSIFICATION_PROMPT_VERSION = "classification_v0.1"
+DOCUMENT_TYPES = ["insurance_certificate", "insurance_policy", "application_form",
+                   "diagnosis_certificate", "medical_record", "imaging_report",
+                   "receipt", "insurer_response", "other"]
+CLASSIFICATION_PROMPT_VERSION = "classification_v0.2"
 
+# The three easily-confused Korean insurance forms all carry policy-like
+# language, so a bare type list collapses them into insurance_policy (CASE_030:
+# a 증권 and a 청약 both misclassified that way). This guidance names the
+# distinguishing signal for each so the model separates them.
 CLASSIFY_PROMPT_TEMPLATE = """You are classifying an insurance claim document by its type, from its
 already-transcribed text (not the raw image). Choose exactly one of these types:
 {types}
+
+These three Korean forms look similar -- distinguish them by their defining marker:
+- insurance_policy (보험약관): the full contract terms/clauses -- articles like 제N조, 지급사유, 면책, a table of contents of 특별약관. It is the rulebook, not a record of one contract.
+- insurance_certificate (증권서류): a "보험증권" issued as proof of ONE concluded contract -- a 계약번호/증권번호, 보험기간, 보장내용 with 가입금액 per coverage, 총보험료. It references the 약관 but is not the 약관 itself.
+- application_form (청약서류): a "청약서"/가입 신청서 the applicant fills in and signs to APPLY -- 청약일, applicant/피보험자 자필서명, 계약전 알릴의무 질문서, 상품설명서 cover pages. It precedes the contract; it is not the contract terms and not the issued certificate.
 
 Reply with ONLY a JSON object, no other text, in exactly this shape:
 {{"predicted_document_type": "<one of the types above>", "document_type_label": "<Korean display label>",
@@ -211,7 +221,8 @@ def _classification_model_info(provider_metadata: dict) -> dict:
     return info
 
 
-def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
+def _assemble_ocr_result(
+        case_id, doc_id, run_id, ocr_data, source_total_pages=None):
     providers = ocr_data.get("providers", {})
     reader_a_label = _provider_label(providers.get("reader_a"))
     reader_b_label = _provider_label(providers.get("reader_b"))
@@ -249,6 +260,7 @@ def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
         "vision_model_name": f"{reader_b_label}; comparator={comparator_label}",
         "uncertain_confidence_threshold": 1.0,
         "extraction_method": extraction_method, "ocr_status": "completed", "pages": pages_out,
+        "source_total_pages": source_total_pages,
         "encoding_detected": ocr_data.get("encoding_detected"),
         "document_mean_confidence": None,
         # Embedded text is a lossless decode, not a probabilistic read -- its
@@ -275,6 +287,17 @@ def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
     return result
 
 
+def source_pdf_page_count(pdf_path: Path) -> int:
+    """Read immutable physical page count before any page-range extraction."""
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(str(pdf_path)).pages)
+    except Exception as exc:
+        raise RuntimeError(
+            f"cannot determine immutable source PDF page count for "
+            f"{pdf_path}: {exc}") from exc
+
+
 def _reset_manifest_for_blocked_ocr(case_id, doc_id, ocr_result, held_by, run_id):
     """Called only on the blocked_disagreement path -- clears every field
     checkpoint 1 owns back to 'not validly known right now' rather than
@@ -286,6 +309,7 @@ def _reset_manifest_for_blocked_ocr(case_id, doc_id, ocr_result, held_by, run_id
     not a local read-then-_write_contract -- see known-gaps.md item 7."""
     fields = {
         "pages": len(ocr_result["pages"]),
+        "source_total_pages": ocr_result.get("source_total_pages"),
         "ocr_status": "failed",
         "ocr_text_path": None,
         "ocr_quality": None,
@@ -408,6 +432,7 @@ def run_checkpoint1(
         }
 
     pdf_path = Path(pdf_path)
+    source_total_pages = source_pdf_page_count(pdf_path)
     if reader_a is None or reader_b is None or comparator is None:
         providers = build_ocr_providers(
             reader_a_name=reader_a_name,
@@ -442,7 +467,9 @@ def run_checkpoint1(
         if p["agreement"] == "agreed":
             _write_page_text(case_id, doc_id, p["page"], p["reading_a"], held_by, run_id)
 
-    ocr_result = _assemble_ocr_result(case_id, doc_id, run_id, ocr_data)
+    ocr_result = _assemble_ocr_result(
+        case_id, doc_id, run_id, ocr_data,
+        source_total_pages=source_total_pages)
     _write_contract(case_id, f"ocr_result_{doc_id}.json", ocr_result, "ocr_result.schema.json", held_by, run_id)
 
     any_disagreement = ocr_result["review_required"]
@@ -495,6 +522,7 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
 
     fields = {
         "pages": len(ocr_result["pages"]),
+        "source_total_pages": ocr_result.get("source_total_pages"),
         "ocr_status": "completed",
         "ocr_quality": ocr_result["ocr_quality"],
         "uncertain_region_count": 0,

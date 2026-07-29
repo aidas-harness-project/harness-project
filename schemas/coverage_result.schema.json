@@ -1,19 +1,61 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "coverage_result.schema.json",
-  "title": "coverage_result.json -- identified coverage(s) for the claim v0.1",
-  "description": "Produced by claim-analysis's checkpoint 2 (Coverage Identification). Matches claim fields against normalized policy clauses. A claim can trigger more than one coverage at once (e.g. a diagnosis benefit and a surgery benefit both applying) -- coverages is an array, not a single value, for that reason.",
+  "title": "coverage_result.json -- identified coverage(s) for the claim v0.2",
+  "description": "Produced by claim-analysis's checkpoint 2 (Coverage Identification). Matches claim fields against normalized policy clauses. A claim can trigger more than one coverage at once (e.g. a diagnosis benefit and a surgery benefit both applying) -- coverages is an array, not a single value, for that reason. v0.2: carries upstream_policy_snapshot -- the policy-layer digest set this result was derived from. Optional in the schema because an artifact that references no policy clause has nothing to bind to; the DAO makes it mandatory the moment a clause reference exists, and refuses a stale one.",
   "allOf": [
-    { "$ref": "common_component_output.schema.json" },
+    {
+      "$ref": "common_component_output.schema.json"
+    },
     {
       "type": "object",
       "properties": {
         "coverages": {
           "type": "array",
-          "items": { "$ref": "#/$defs/coverage" }
+          "items": {
+            "$ref": "#/$defs/coverage"
+          }
+        },
+        "upstream_policy_snapshot": {
+          "type": "object",
+          "description": "The policy-layer snapshot this artifact was derived from (Part 11I). Required whenever the artifact carries at least one policy reference: a downstream result is an assertion about what the policy layer said when it was written, so it records which bytes it read. The DAO recomputes this at write time and refuses a mismatch; `dao.py policy-snapshot` prints the current value. Per-document digests cover the normalized contract, boundary inventory, reference tables, processed source text, manifest entry (page_map included) and governing parent coverage -- the same set the document's audit binds to.",
+          "properties": {
+            "documents": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "document_id": {
+                    "$ref": "common_component_output.schema.json#/$defs/document_id"
+                  },
+                  "digest_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "document_id",
+                  "digest_sha256"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "snapshot_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "documents",
+            "snapshot_sha256"
+          ],
+          "additionalProperties": false
         }
       },
-      "required": ["coverages"]
+      "required": [
+        "coverages"
+      ]
     }
   ],
   "$defs": {
@@ -33,24 +75,55 @@
           "description": "Whether this coverage's conditions are met by the claim's facts, per the matched clause -- not whether the claim mentions the coverage."
         },
         "matched_clause_ref": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "description": "Pointer into policy-pipeline's normalized_policy_clause.json. null if no clause could be matched (record why in warnings).",
           "properties": {
-            "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
-            "clause_id": { "type": "string" }
+            "document_id": {
+              "$ref": "common_component_output.schema.json#/$defs/document_id"
+            },
+            "clause_uid": {
+              "type": "string",
+              "pattern": "^PC-[a-f0-9]{16,64}$"
+            },
+            "display_clause_id": {
+              "type": "string",
+              "pattern": "^C-[0-9]+$"
+            }
           },
-          "required": ["document_id", "clause_id"]
+          "required": [
+            "document_id",
+            "clause_uid"
+          ],
+          "additionalProperties": false
         },
-        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "confidence": {
+          "$ref": "common_component_output.schema.json#/$defs/confidence"
+        },
         "evidence_references": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/evidence_reference"
+          }
         },
-        "review_required": { "type": "boolean" },
-        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+        "review_required": {
+          "type": "boolean"
+        },
+        "reviewer_role": {
+          "$ref": "common_component_output.schema.json#/$defs/reviewer_role"
+        }
       },
-      "required": ["coverage_name", "standardized_coverage_name", "applicable", "confidence", "evidence_references", "review_required"]
+      "required": [
+        "coverage_name",
+        "standardized_coverage_name",
+        "applicable",
+        "confidence",
+        "evidence_references",
+        "review_required"
+      ]
     }
   }
 }

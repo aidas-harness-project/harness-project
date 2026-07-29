@@ -126,7 +126,11 @@ def test_patch_waits_for_lock_then_reads_data_fresh_as_of_release(isolated_dao, 
         "must have read the manifest AFTER the lock was released, not a stale copy from before the wait"
 
 
-def test_patch_with_stage_updates_run_state_to_passed(isolated_dao):
+def test_patch_with_stage_marks_run_state_in_progress_not_passed(isolated_dao):
+    """A single manifest patch is progress within document_processing, not the
+    whole stage finalizing. It marks the stage in_progress -- passing a stage
+    is a deliberate finalize-stage call (snapshot + passed, atomic), never a
+    side effect of one field write. (Part 1: atomic passed-with-snapshot.)"""
     _seed_manifest(isolated_dao)
 
     ok, message = dao.patch_manifest_document(
@@ -135,7 +139,9 @@ def test_patch_with_stage_updates_run_state_to_passed(isolated_dao):
     assert ok, message
     state = dao.load_run_state("CASE_009")
     assert state["stages"][0]["stage_name"] == "document_processing"
-    assert state["stages"][0]["status"] == "passed"
+    assert state["stages"][0]["status"] == "in_progress", \
+        "a single patch must not finalize the stage -- passing is finalize-stage's job"
+    assert state["stages"][0]["backup_path"] is None
 
 
 def test_cli_wrapper_reads_fields_from_file(isolated_dao, make_args, tmp_path):

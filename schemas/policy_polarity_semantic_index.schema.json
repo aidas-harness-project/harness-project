@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "policy_polarity_semantic_index.schema.json",
+  "title": "DAO-owned policy polarity semantic receipt index v2",
+  "description": "Two-phase semantic receipts. Phase A (source_receipt) classifies the registered source passage with no knowledge of the caller's bucket or the extracted condition; Phase B compares the condition against the same passage, also without the bucket. The bucket comparison is performed by the DAO in Python and appears nowhere in this index, by design -- a receipt records what the source says, not whether it passed.",
+  "type": "object",
+  "properties": {
+    "case_id": {
+      "type": "string",
+      "pattern": "^CASE_[0-9]+$"
+    },
+    "index_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "active_analyzer": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/analyzer"}
+      ]
+    },
+    "receipts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/receipt"
+      }
+    }
+  },
+  "required": ["case_id", "index_id", "active_analyzer", "receipts"],
+  "additionalProperties": false,
+  "$defs": {
+    "classification": {
+      "enum": [
+        "affirmative",
+        "restrictive_or_negative",
+        "mixed",
+        "ambiguous"
+      ]
+    },
+    "analyzer": {
+      "type": "object",
+      "description": "The trusted analyzer identity, derived from deployment configuration. A caller cannot supply or influence any field here.",
+      "properties": {
+        "provider": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "source_prompt_version": {
+          "const": "policy_polarity_source_v1"
+        },
+        "comparison_prompt_version": {
+          "const": "policy_polarity_comparison_v1"
+        },
+        "semantic_schema_version": {
+          "const": "policy_polarity_semantic_v2"
+        },
+        "settings_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "source_prompt_version",
+        "comparison_prompt_version",
+        "semantic_schema_version",
+        "settings_fingerprint"
+      ],
+      "additionalProperties": false
+    },
+    "proposition": {
+      "type": "object",
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "classification": {"$ref": "#/$defs/classification"},
+        "source_start": {"type": "integer", "minimum": 0},
+        "source_end": {"type": "integer", "minimum": 1},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "required": [
+        "text",
+        "classification",
+        "source_start",
+        "source_end",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "source_receipt": {
+      "type": "object",
+      "description": "Phase A. Bound to the immutable source revision, the exact span UIDs, the source quote hash, and the trusted analyzer identity. Carries no condition text and no bucket.",
+      "properties": {
+        "source_receipt_id": {
+          "type": "string",
+          "pattern": "^PPA-[a-f0-9]{32}$"
+        },
+        "scheme": {"const": "policy_polarity_semantic_v2"},
+        "case_id": {
+          "type": "string",
+          "pattern": "^CASE_[0-9]+$"
+        },
+        "document_id": {
+          "type": "string",
+          "pattern": "^DOC_[0-9]+$"
+        },
+        "source_text_revision_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_span_uid": {
+          "type": "string",
+          "pattern": "^PS-[a-f0-9]{16,64}$"
+        },
+        "source_span_uids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^PS-[a-f0-9]{16,64}$"
+          }
+        },
+        "source_quote_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_classification": {"$ref": "#/$defs/classification"},
+        "target_predicates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "negation_scope_analysis": {
+          "type": "string",
+          "minLength": 1
+        },
+        "propositions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/proposition"}
+        },
+        "review_required": {"type": "boolean"},
+        "analyzer": {"$ref": "#/$defs/analyzer"},
+        "analyzed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "source_receipt_id",
+        "scheme",
+        "case_id",
+        "document_id",
+        "source_text_revision_sha256",
+        "source_span_uid",
+        "source_span_uids",
+        "source_quote_sha256",
+        "source_classification",
+        "target_predicates",
+        "negation_scope_analysis",
+        "propositions",
+        "review_required",
+        "analyzer",
+        "analyzed_at"
+      ],
+      "additionalProperties": false
+    },
+    "receipt": {
+      "type": "object",
+      "description": "Phase B, carrying its Phase A receipt. Note the absence of any `bucket` field: a receipt is not issued for a bucket, so it cannot be checked against the one it was issued for -- the DAO compares source_receipt.source_classification against the bucket the writing contract actually used.",
+      "properties": {
+        "receipt_id": {
+          "type": "string",
+          "pattern": "^PPR-[a-f0-9]{32}$"
+        },
+        "cache_key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "scheme": {"const": "policy_polarity_semantic_v2"},
+        "case_id": {
+          "type": "string",
+          "pattern": "^CASE_[0-9]+$"
+        },
+        "document_id": {
+          "type": "string",
+          "pattern": "^DOC_[0-9]+$"
+        },
+        "source_text_revision_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_span_uid": {
+          "type": "string",
+          "pattern": "^PS-[a-f0-9]{16,64}$"
+        },
+        "source_span_uids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^PS-[a-f0-9]{16,64}$"
+          }
+        },
+        "source_quote_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "condition_text_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_receipt": {"$ref": "#/$defs/source_receipt"},
+        "meaning_preserved": {"type": "boolean"},
+        "omitted_propositions": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "added_propositions": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "contradiction_detected": {"type": "boolean"},
+        "review_required": {"type": "boolean"},
+        "analyzer": {"$ref": "#/$defs/analyzer"},
+        "analyzed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "receipt_id",
+        "cache_key",
+        "scheme",
+        "case_id",
+        "document_id",
+        "source_text_revision_sha256",
+        "source_span_uid",
+        "source_span_uids",
+        "source_quote_sha256",
+        "condition_text_sha256",
+        "source_receipt",
+        "meaning_preserved",
+        "omitted_propositions",
+        "added_propositions",
+        "contradiction_detected",
+        "review_required",
+        "analyzer",
+        "analyzed_at"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

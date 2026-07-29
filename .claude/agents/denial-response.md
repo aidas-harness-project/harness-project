@@ -18,7 +18,7 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. P
 2. Extract denial/reduction reason candidates from the text.
 3. Classify each against the reduction-reason taxonomy (R01-R21, R99 — see `pipeline.md` for the current code list and frequency metadata; the machine-readable metadata is `common_component_output.schema.json`'s `taxonomy_code.x-codebook`), including `candidate_codes` for Top-3 evaluation. Split materially distinct insurer reasons into separate findings instead of forcing several reasons into one code. Use the most specific supported code; use R99 only when no specific code fits.
 4. Extract the associated denial/reduction amount if stated.
-5. Match each denial reason to relevant policy clauses (`normalized_policy_clause_{document_id}.json` from `policy-pipeline` — one file per policy document, check every one relevant to the claim's insurer) — recorded in `policy_matches: [{document_id, clause_id, relevance_note}]`; empty array (with a note in `warnings`) if nothing matched, never omitted.
+5. Match each denial reason to relevant policy clauses (`normalized_policy_clause_{document_id}.json` from `policy-pipeline` — one file per policy document, check every one relevant to the claim's insurer) — recorded in `policy_matches: [{document_id, clause_uid, condition_uid?, display_clause_id?, relevance_note}]`. `clause_uid` (and `condition_uid` when condition-specific) is the immutable join key; `display_clause_id` is optional display metadata only. The DAO accepts a non-empty match only when the referenced normalized bytes have a current clear `policy_audit_result_{document_id}.json`; stale or open-finding audits block the write. Use an empty array (with a note in `warnings`) if nothing matched, never omit the field.
 
 Every extraction carries `evidence_references` (P1). Classification confidence and `review_required` per finding.
 
@@ -27,6 +27,8 @@ The taxonomy's `상`/`중`/`하` frequency tier is operational metadata supplied
 # Output
 
 `denial_reason_result.json` (denial reasons + candidate codes + amounts + policy matches).
+
+Whenever any denial reason carries a `policy_matches` entry, the file must also carry `upstream_policy_snapshot` — fetch it with `python tools/dao.py policy-snapshot CASE_ID --document-id DOC_ID [--document-id ...]` for exactly the policy documents you matched against, and paste the printed object in verbatim. It records which version of the policy layer your matches were made against, so a later renormalization makes this file provably stale instead of silently agreeing with bytes it never read. The DAO also requires `policy_clause_processing` to be currently `passed` before any `policy_matches` entry is writable; if it is not, extract the denial reasons without policy matches rather than citing an uncleared policy stage.
 
 # Consumers
 

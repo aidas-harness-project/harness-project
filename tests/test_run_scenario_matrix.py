@@ -43,6 +43,8 @@ def _seed_manifest(tmp_path, case_id, doc_id):
 
 def _mock_ocr_once(monkeypatch, pages):
     calls = []
+    monkeypatch.setattr(
+        rc1, "source_pdf_page_count", lambda _path: len(pages))
 
     def fake_run_ocr(case_id, doc_id, pdf_path, progress=None, **kwargs):
         calls.append((case_id, doc_id))

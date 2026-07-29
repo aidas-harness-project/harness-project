@@ -12,17 +12,333 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. M
 
 **Canonical stage name: `policy_clause_processing`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.2) now rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic.
 
-# Internal sub-phases (not separately gated — only the final output is)
+# Internal sub-phases (each leaves auditable DAO state)
 
-1. Identify clause boundaries in the policy text.
-2. Extract clause text per boundary.
-3. Normalize into standard fields (coverage type, payout conditions, exclusions, reduction conditions).
+1. Identify source boundaries down to material paragraph/item granularity.
+2. Account for the exact processed source with `policy_boundary_inventory_{document_id}.json`.
+   Every non-whitespace character on every policy page is covered by an exact-offset
+   span assigned to a boundary or explicitly excluded with a reason. A boundary may
+   not swallow multiple article/paragraph/item anchors. `excluded_with_reason` is
+   only for genuinely non-normative material: if the span contains an article,
+   paragraph, or numbered-item anchor, split and normalize it or route the boundary
+   to `review_required`. A reason such as "covered by the article boundary" is not
+   evidence and cannot exclude the article body.
+3. Extract clause text per boundary.
+4. Normalize into standard fields (coverage type, payout conditions, exclusions,
+   reduction conditions) and map every normalized boundary to its clause/condition item.
+   Mapping is bidirectional: every clause-declared boundary must exist and point back
+   to that clause, and every normalized boundary must be declared by its target clause.
 
-The intermediate artifacts from sub-phases 1-2 are working state for this one agent call, not separate contract files — only the final output goes through the DAO's `write_contract` (locked, schema-validated, run-state updated).
+The boundary inventory and normalized clause file are both real contract files,
+written through the DAO. `policy_clause_processing` cannot finalize while any
+automated policy document lacks either file, any source text is uncovered, any
+normalized mapping is unresolved, or any boundary remains `review_required` /
+`extraction_failed`. An administrative section is never silently dropped; record
+`excluded_with_reason`.
 
 # Output
 
-`normalized_policy_clause_{document_id}.json` — one file **per policy document** (e.g. `normalized_policy_clause_DOC_004.json`), not one combined file for the case. A case can have more than one policy document (multiple insurers, as in a real multi-insurer claim) — a flat, unversioned filename would let each invocation silently overwrite the previous policy document's clauses, the same class of bug the `draft_report_metadata`/`critic_result`/`expert_review` filenames were versioned to avoid. If you're invoked once per policy document, this is just "your own output filename"; if you process multiple policy documents in one invocation, write a separate file per document — never merge them into one. `clauses: []` in extraction order. Each clause gets a sequential `clause_id` (`C-1`, `C-2`, ...) — stable regardless of the source policy's own article/paragraph numbering, and what `claim-analysis` and `denial-response` reference by `{document_id, clause_id}` downstream (`document_id` picks the file, `clause_id` picks the clause within it). `payout_conditions`/`exclusions`/`reduction_conditions` are itemized lists, not a single blob — each item carries its own `evidence_references` (P1) at the actual granularity `requirement-matching` needs to check condition-by-condition. An empty list means none found, not an omission. Any field requiring judgment beyond direct restatement (e.g. inferring whether a clause's exclusion applies to this case's facts) gets hedged and flagged per P3, not asserted outright.
+`normalized_policy_clause_{document_id}.json` — one file **per policy document** (e.g. `normalized_policy_clause_DOC_004.json`), not one combined file for the case. A case can have more than one policy document (multiple insurers, as in a real multi-insurer claim) — a flat, unversioned filename would let each invocation silently overwrite the previous policy document's clauses. If you're invoked once per policy document, this is just "your own output filename"; if you process multiple policy documents in one invocation, write a separate file per document — never merge them into one.
+
+Every clause has an immutable `clause_uid` derived from document identity and exact source-boundary identity, plus `source_boundary_uids`. Every condition item has an immutable `condition_uid` derived from source identity. Never derive either UID from array position, extraction order, normalized wording, or sequential `clause_id`. `clause_id` (`C-1`, `C-2`, ...) is a display label only and may change when an earlier clause is inserted; downstream references use `{document_id, clause_uid}` and, for condition-specific references, `condition_uid`.
+
+UID equality does not mean that similar clauses from different insurers share one
+global code. Identity is source-local and deterministic. Cross-policy similarity or
+future canonical code assignment is a separate, evidence-backed matching layer and
+must never rewrite source UIDs.
+
+**Canonical UIDs (`canonical_v1`).** For a document the DAO has switched to
+`canonical_v1` (check with `python tools/dao.py read-revision-index CASE_ID`), UIDs
+are not yours to choose — `tools/policy_uid.py` derives them from immutable source
+identity: the registered source PDF digest, the physical page, the NFC-normalized
+exact span bytes, that span's occurrence ordinal on the page, and the parent UID for
+nested elements. The DAO recomputes every UID and refuses a mismatch, so compute
+them rather than inventing them. Deliberately NOT inputs: character offsets and
+page/document digests, both of which move when unrelated text elsewhere is corrected
+— a typo fix on one page must not re-identify clauses that never changed. Offsets
+and quotes stay in your contracts and are still verified; they establish that a span
+really sits where you say, not what it *is*.
+
+Every UID kind is recomputed, not just page spans, so each element must state the
+exact source spans it was derived FROM — `{page, start_char, end_char, quote}`,
+where the quote equals the page text at those offsets verbatim:
+
+- clause → `source_span_uids` (plus `source_boundary_uids` for its parent)
+- condition → `source_span_uids`
+- table → `source_regions`; row → `source_span` (or `source_spans` when the row
+  occupies several ranges); cell → `source_spans`
+
+A clause, condition, row or cell with no source spans is refused — not warned
+about — because there is nothing to derive its identity from. Normalized wording
+cannot stand in: it is rewritten text, and two identical condition phrases (or two
+cells reading `10`) are distinguishable only by their exact spans. List every span
+of a multi-page clause or table; submission order does not matter, since the DAO
+sorts by source position before deriving. Do not supply `occurrence_ordinal` unless
+you are certain — the DAO derives it from the registered page text and refuses a
+value that disagrees.
+
+The span must identify the element itself, not merely any real text on the page.
+Containment is checked against the element's own parent, one level at a time:
+
+    condition spans  ⊆  parent clause spans  ⊆  declared boundary spans
+
+A boundary is an *article*, and an article usually holds several clauses — so a
+condition span that lands in the right article but outside its own clause is
+refused, even though it is real, correctly quoted, and correctly evidenced.
+Every clause/condition span must also match one of that element's own evidence
+passages. Every row range must lie inside the table source regions;
+`row.source_span` must equal the first canonical range in `row.source_spans`;
+each cell span must identify exactly the cell value inside its row; and two
+cells may not overlap in source.
+
+**Semantic polarity receipts (P1-2).** Python does not attempt to understand
+arbitrary Korean negation scope. Before writing an outcome-sensitive condition
+(`payout_conditions`, `coverage_start_conditions`, `exclusions`, or
+`reduction_conditions`), run the explicit analysis command against the exact
+P0-7 source occurrence:
+
+    python tools/dao.py analyze-policy-polarity CASE_ID --doc-id DOC_ID \
+        --source-span-uid PS_UID \
+        --source-selector-json '{"source_spans": [...]}' \
+        --condition-text '조건 원문' --bucket payout_conditions \
+        --held-by policy-pipeline --run-id RUN_ID
+
+Repeat `--source-span-uid` in canonical source order for a multi-span
+condition. `--source-selector-json` carries the same exact
+`{page,start_char,end_char,quote}` objects the condition will carry. Both
+inputs are **inline values, not file paths** — the command reads no file the
+caller names, so no protected source, ground-truth report, or unrelated case
+output can be routed to a provider by pointing at it. These selectors are
+untrusted: the DAO reads the current registered revision, verifies each byte
+range and occurrence, and recomputes every PS UID before invoking the semantic
+provider. Never submit a revision hash, quote hash, classification, or analysis
+object as authority.
+
+**The analyzer is not yours to choose.** There is no `--provider`/`--model`.
+The provider, exact model, both prompt versions, the semantic schema version,
+and the settings fingerprint are resolved from trusted deployment
+configuration (`HARNESS_POLICY_SEMANTIC_PROVIDER` / `_MODEL`). A fixture
+provider is injectable in tests only and is refused in production. If the
+analyzer genuinely must change, that is a separate DAO admin operation
+(`set-policy-semantic-analyzer`), which invalidates `policy_clause_processing`
+and every downstream stage *before* activating the new analyzer — so a failed
+switch can never leave a new analyzer above a passed policy layer.
+
+**The model never learns which answer passes.** Analysis runs in two phases and
+neither is shown your bucket: Phase A classifies the registered source passage
+alone (no condition text, no bucket); Phase B compares the condition against
+that same passage (still no bucket). Python alone then checks the source
+reading against what your bucket requires — `payout_conditions` /
+`coverage_start_conditions` need `affirmative`, `exclusions` /
+`reduction_conditions` need `restrictive_or_negative`, and `mixed` /
+`ambiguous` are always refused. So a receipt records what the source *says*,
+never whether it passed; do not expect a `bucket` field on it.
+
+The command is the **only** policy-polarity path that calls an LLM. It returns
+a `PPR-...` receipt ID from the protected DAO index; place only that ID in the
+condition's `polarity_analysis_receipt_id`. `write-contract` and finalization
+never call a model. They recompute receipt integrity and require the current
+source revision, exact source occurrences, condition bytes, analyzer identity,
+prompts, and settings to match. Editing one character, filing the condition
+under a bucket its source reading does not support, changing source
+revision/occurrence, or switching the active analyzer makes the receipt
+unusable. Identical inputs hit the protected cache without another model call.
+
+The semantic binding is part of the document's policy snapshot: changing a
+receipt this document's contract cites, or switching the analyzer, moves
+`policy_document_digest` and therefore stales every downstream
+`upstream_policy_snapshot`. Another document's receipts do not.
+
+Bucket outcomes are fixed: payout/coverage-start require `affirmative`;
+exclusion/reduction require `restrictive_or_negative`. `mixed`, `ambiguous`,
+`meaning_preserved=false`, or `review_required=true` never auto-pass. This
+repository does not yet have an authenticated human-review ledger artifact
+kind for semantic receipt resolution, so those outcomes remain fail-closed;
+do not clear them by changing condition wording, moving buckets, or submitting
+`review_required=false`.
+
+**Scan every policy document for tables, before anything else (P0-8).** Whether
+a document contains tables is a fact about its PDF, not something the pipeline
+infers from whether you wrote a `reference_table`. So each `canonical_v1`
+policy document must carry its own DAO-derived scan:
+
+    python tools/dao.py scan-table-candidates CASE_ID --doc-id DOC_ID \
+        --held-by policy-pipeline --run-id RUN_ID
+
+This is an obligation of the **document**, not of the extraction: run it even
+when you believe the document has no tables. `policy_clause_processing` refuses
+to finalize while any policy document has no current scan, because "nobody
+scanned it" and "it has no tables" are different states. The DAO runs both a
+strict ruled-table detector and a broader text-layout sentinel. Only
+`complete_no_candidates` — neither detector found a table-like structure —
+clears the gate without a `reference_table`. `inconclusive`/`failed` never mean
+"no tables": sentinel-only structures remain `review_required` and block.
+Re-run the scan after any source-text revision — a revision makes the previous
+scan stale, and a table the revision introduced would sit entirely outside it.
+
+**A table's source region is not yours to declare (P0-8).** Before writing a
+`reference_table` for a `canonical_v1` document, register the table's region:
+
+    python tools/dao.py register-table-region CASE_ID --doc-id DOC_ID \
+        --page 12 --anchor "장해분류" --held-by policy-pipeline --run-id RUN_ID
+
+The DAO opens the registered PDF, detects the table itself, and issues a
+`table_region_v1` receipt naming the table's real extent and its row/header
+bands. Put the returned `receipt_id` in the table's `table_region_receipt_id`,
+set `source_regions` to exactly the receipt's extent, and extract exactly one
+row per `data_row` band.
+
+`--page` is a **seed, not a range**: give it the page where the table STARTS.
+The DAO decides where the table ends by following continuations itself, so a
+table running pages 12-13 is registered with `--page 12` and comes back with
+both pages. Do not pass a page list hoping to widen or narrow the extent -- you
+cannot, and naming several pages that each hold a candidate is refused as an
+ambiguous selector. `--anchor` likewise only SELECTS among candidates the DAO
+found; an anchor matching two tables, or none, issues no receipt.
+
+Joining two pages into one table needs **positive** evidence, not resemblance.
+A matching column grid and a reprinted header are necessary but not sufficient
+— two independent 별표 printed with the same layout look exactly like that. The
+DAO additionally requires either that page 1's table ran out of page while page
+2's resumes at the top, or an explicit continuation heading ("(계속)",
+"(cont.)"). Without one of those it refuses rather than guessing, because
+merging two tables fabricates one that does not exist and splitting a real one
+hides rows.
+
+This exists because every other check on a table runs *downwards* from
+`source_regions`: declare the region narrowly and the rows outside it are never
+examined, so an extraction that silently drops the last rows, or a whole
+continuation page, passes completeness checking. For the same reason a
+`header_span` may only cover a band the receipt classified as non-data —
+relabelling a data row `note` or `separator` is the same omission as deleting
+it, and is refused.
+
+**Every table the DAO's scan finds must be extracted.** The scan records strict
+candidates plus high-recall possible-table signals for the whole document.
+Finalization refuses while a strict candidate is unaccounted for or any
+possible-table signal remains unresolved — so registering one appendix and
+quietly ignoring a second one blocks the stage rather than passing. There is no
+agent-writable "ignore this candidate" field. `scan_id` is a deterministic
+whole-body corruption checksum and no-op identity, not an authenticated
+signature; the actual security boundary is that the index is DAO-owned and
+generic agent write paths cannot modify it.
+
+A declared `policy_processing_role` cannot exempt a document from this either.
+If a `clause_segment` turns out to contain a table, redeclare it
+`mixed_clause_and_table` and extract the table — the role is a statement about
+what the document owes, and it has to match what the document actually is.
+
+If the strict detector cannot issue a receipt but the sentinel sees a
+whitespace-aligned, partially ruled, or otherwise table-like structure, the
+scan is `inconclusive`, not empty. Image-only/OCR documents, merged cells,
+ambiguous candidates, an unresolvable continuation, or processed text that
+does not correspond to the PDF layout likewise remain blocking review items.
+Do not work around a refusal by narrowing the region or re-seeding until
+detection happens to succeed.
+
+A `reference_table_refs` entry (or a parent-coverage page's
+`reference_table_document_id`) pointing at ANOTHER document is recomputed in
+that document, against its own registered revision. Naming the owner is
+required — the DAO will not search for a table whose owner you left blank — and
+the owner must itself be `canonical_v1`: canonical status is per document and
+is never inherited from the citing one. Agreeing on the same `RT-…` string in
+both files proves nothing.
+
+Contracts on a `canonical_v1` document must also carry `source_text_revision` —
+the registered revision your offsets, quotes and UIDs were computed against,
+listing **every** document the contract references, not only its own
+(`read-revision-index` prints the current one). A revision recorded before a
+re-extraction is stale and the write is refused: re-derive rather than
+re-stamping — including when the stale document is an appendix you merely cite.
+
+Legacy (pre-`canonical_v1`) documents stay readable, and every migration-prep
+command still works on them, but they may not receive new policy-layer writes:
+run `record-source-digest` then `enable-canonical-uids` first. Activation
+invalidates the policy stage and everything downstream of it, by design — the
+artifacts written under the legacy scheme were never UID-verified, so they must
+be rewritten canonically rather than inherited.
+
+Set `clause_kind` and use only its dedicated semantic bucket: `coverage` → `payout_conditions`/`exclusions`/`reduction_conditions`; `definition` → `definitions`; `obligation` → `obligations`; `procedure` → `claim_requirements`; `termination` → `termination_conditions`; `dispute_resolution` → `dispute_resolution_conditions`; `coverage_start` → `coverage_start_conditions`. Split a source clause into multiple normalized clauses when it contains materially different kinds. Never put disclosure duties, definitions, claim-submission procedures, cancellation rules, dispute procedures, or coverage-start rules in `payout_conditions`. Use `other` only with `review_required: true`. Every bucket is required; an empty list means none found, not an omission. Each item carries its own `evidence_references` (P1) at the granularity downstream matching needs. Any judgment beyond direct restatement gets hedged and flagged per P3.
+
+For every condition item, set `support_level`, `support_rationale`, and
+`review_required`. Use `direct` only when at least one cited passage itself
+substantially states the condition. Use `composite` when the normalized
+condition combines two or more passages; cite every passage and set
+`review_required: true`. Never emit `insufficient` in a successful normalized
+contract. A clause title is valid clause-level provenance but is not condition
+support. Preserve the source's complete operative predicate, including negation and
+exclusion language, thresholds, dates, periods, percentages, and other numeric terms.
+Evidence that ends before the operative predicate is incomplete. First verify that
+the normalized meaning is supported; only then apply the DAO's conservative lexical
+support floor. Never rewrite or weaken a condition to raise lexical overlap. Passing
+the floor does not replace semantic review; uncertainty becomes `review_required`.
+
+`policy_boundary_inventory_{document_id}.json` — one file per policy document,
+covering the same processed source. Page-span offsets are relative to the exact page
+body after its `<<<PAGE page=N>>>` marker. Generate stable `boundary_uid`/`span_uid`
+values from source identity and exact span content; never reuse a UID for different
+source text. A `normalized` boundary has at least one mapping. A boundary that cannot
+yet be normalized is `review_required` or `extraction_failed`, which deliberately
+blocks stage finalization rather than contaminating downstream analysis.
+
+`reference_table_{document_id}.json` — one file per policy document when its
+appendices contain decision-bearing tables (for example disability rates,
+diagnosis-code mappings, fracture/burn classifications, or benefit grades).
+Give tables, rows, and cells stable source-derived UIDs; `table_id` is display
+only. Declare the columns and emit every row with exactly one cell per column.
+Every title and every cell carries its own strict evidence reference. A single
+blob quote for the whole table is not cell provenance. Write the reference
+table before a normalized clause links to it, then use
+`reference_table_refs[{document_id, table_uid, row_uids?}]`. Emit an empty
+`reference_table_refs` array when a clause needs no table. A table may claim only
+pages on which at least one table- or cell-level evidence reference exists.
+`review_required` on a table or any cell keeps the table unresolved and blocks both
+reference-table-only waiver and parent coverage finalization.
+
+`policy_parent_coverage_{parent_id}.json` — one file per PHYSICAL policy parent
+(a real raw PDF, not a segment). The per-document inventory only accounts for
+pages a segment already owns; it cannot see a parent page that was carved into
+no segment at all. This contract accounts for both the parent's full logical page
+range, 1..`total_logical_pages`, and every immutable-source physical page,
+1..`total_physical_pages`, exactly once. `total_physical_pages` must equal the
+parent manifest's `source_total_pages`; it is not an agent self-declaration. Each
+logical page is `owned_by_segment`
+(name the segment/physical document that carries its normalized text),
+`reference_table` (name the `reference_table_document_id` + `table_uid` the
+appendix was extracted into), or `administrative_excluded` with a concrete
+per-page reason — never a blanket "appendix"/"목차" over a whole range, and never
+excluding substantive text just because it is inconvenient. `review_required`/
+`extraction_failed` pages block finalization. The DAO verifies the 1..N coverage
+is exact (no gap/dup), verifies every disposition against the registered segment's
+actual logical/physical `page_map`, and requires page-specific processed evidence.
+Physical pages with no logical page require an explicit unpaged disposition;
+an `administrative_excluded` unpaged page rests entirely on a human decision
+(no processed-page evidence can exist for a page with no printed number), so it
+requires a DAO-recorded human review, not just a reviewer-name string. A human
+runs `dao.py record-human-review --artifact-kind unpaged_physical_exclusion
+--artifact-id {parent} --target-key physical:{N} --decision verified`; the DAO
+computes the artifact hash itself and returns an `HR-…` review UID you then
+write into that page's `human_review_uid`. A bare `verified_by` name no longer
+satisfies the gate.
+
+`policy_audit_result_{document_id}.json` — write this last for every policy
+document. It binds the audit to the exact SHA-256 bytes of the normalized
+clause, boundary inventory, and optional reference-table contracts, records
+the mandatory audit scope, and keeps every defect as a stable finding. Any
+later rewrite makes the audit stale automatically. Never finalize while a
+finding is `open`; fix it, mark a supported false positive/resolution, or
+obtain a human `accepted_risk` decision. An `accepted_risk` (or any
+`resolution_actor_type: human`) finding is not self-declarable: a human runs
+`dao.py record-human-review --artifact-kind policy_audit_finding --artifact-id
+{doc} --target-key {finding_uid} --decision accepted_risk` — recorded while the
+finding is still `open` — and you write the returned `HR-…` UID into the
+finding's `human_review_uid`, then flip status to `accepted_risk`. The DAO
+re-verifies the UID exists, was recorded for this finding against the audit's
+current substance, and carries the accepting decision; a name string alone,
+or an automated actor accepting risk on a human's behalf, is refused. An empty
+agent-authored finding list is not proof of completeness: finalization
+independently reruns deterministic boundary, bidirectional-provenance, and
+review-state checks.
 
 # Access rules
 
@@ -31,6 +347,14 @@ Read policy document text via `read_document_text(case_id, doc_id)` (the DAO) �
 # Error handling
 
 Schema validation failure: one self-correction attempt, then halt per P4. If the agent's whole invocation returns partial or fails, the orchestrator retries per P9 (3 fixed attempts, then halt for audit).
+
+Finalize only with `python tools/dao.py finalize-stage ... policy_clause_processing`.
+The DAO verifies every registered automated policy document has a non-empty
+normalized contract, a complete resolved boundary inventory, and a current
+version-bound audit with no open findings, AND that every physical policy
+parent has a `policy_parent_coverage` contract covering its full 1..N logical
+page range with no unresolved page, before it creates the P10 snapshot and
+records `passed`.
 
 # Collaboration
 

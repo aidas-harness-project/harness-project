@@ -1,41 +1,203 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "normalized_policy_clause.schema.json",
-  "title": "normalized_policy_clause.json -- normalized policy clauses for one policy document v0.1",
-  "description": "Produced by policy-pipeline. One file per policy document, array of every clause identified in it, normalized into standard fields (coverage type, payout conditions, exclusions, reduction conditions).",
+  "title": "normalized_policy_clause.json -- normalized policy clauses for one policy document v0.7",
+  "description": "Produced by policy-pipeline. Stable clause/condition UIDs are the machine addresses; sequential clause_id is display-only. Semantic clause kinds are stored in dedicated buckets so obligations, definitions, procedures, termination, disputes, and coverage-start rules cannot be mistaken for payout conditions. v0.5 adds source_span_uids on clauses and conditions: the normalized text is REWRITTEN wording and can never identify anything, so before this the PC/CI UIDs were unverifiable and any well-formed string passed. The field is schema-OPTIONAL only so pre-canonical (legacy) contracts stay readable and migratable -- it is MANDATORY under canonical_v1, where the DAO refuses a write whose clause or condition cannot be recomputed from these spans. Absent provenance is a refusal there, never a skipped check. v0.6 (P0-7) does the same for the other side of the binding: evidence_references gain optional start_char/end_char, MANDATORY under canonical_v1, and identity spans and evidence must resolve to the SAME exact ranges in the registered source revision. Quote equality -- including whitespace-normalized quote equality, which was the previous rule -- no longer binds canonical evidence, because it cannot distinguish two occurrences of a repeated passage. The offsets are a provenance selector only: they never enter a UID hash, so canonical_v1 UID values are unchanged. v0.7 (P1-2) adds a polarity_analysis_receipt_id reference. For canonical outcome-sensitive conditions the DAO requires this reference and deterministically binds it to the current revision, exact occurrence, condition bytes, bucket and active semantic analyzer; the condition never embeds or self-declares the analysis.",
   "allOf": [
-    { "$ref": "common_component_output.schema.json" },
+    {
+      "$ref": "common_component_output.schema.json"
+    },
     {
       "type": "object",
       "properties": {
         "clauses": {
           "type": "array",
-          "items": { "$ref": "#/$defs/clause" }
+          "items": {
+            "$ref": "#/$defs/clause"
+          }
+        },
+        "source_text_revision": {
+          "type": "object",
+          "description": "Which registered source-text revision this contract's offsets, quotes and source-derived UIDs were computed against (Part 11J). A single hash cannot express a contract that reads several documents, so this is a per-document map -- the same shape as upstream_policy_snapshot in Part 11I, deliberately, since using two shapes for one idea is itself a drift source. Absent on legacy (v0.1) contracts, which stay readable and migratable but cannot be written or finalized as new work; required once the document is canonical_v1.",
+          "properties": {
+            "documents": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "document_id": {
+                    "$ref": "common_component_output.schema.json#/$defs/document_id"
+                  },
+                  "revision_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "document_id",
+                  "revision_sha256"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "documents"
+          ],
+          "additionalProperties": false
         }
       },
-      "required": ["clauses"]
+      "required": [
+        "clauses"
+      ]
     }
   ],
   "$defs": {
     "condition_item": {
       "type": "object",
       "properties": {
-        "text": { "type": "string", "minLength": 1 },
+        "condition_uid": {
+          "type": "string",
+          "pattern": "^CI-[a-f0-9]{16,64}$",
+          "description": "Stable deterministic identifier derived from immutable source identity (parent clause UID + the condition's own canonical source spans), never from array position. Under canonical_v1 the DAO recomputes this from source_span_uids and refuses a mismatch."
+        },
+        "source_span_uids": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The exact source span(s) this condition was normalized FROM, in the processed page body. Required under canonical_v1 (the DAO refuses the write without it); optional in the schema only so legacy contracts stay readable. Every span must lie inside the PARENT CLAUSE's own source spans -- not merely inside the surrounding boundary, which is an article and normally holds sibling clauses -- and must match one of this condition's own evidence passages. A different real phrase from the same article is not valid provenance, however correctly it is quoted. A condition may span several passages or pages -- list each. Submission order is irrelevant: the DAO sorts by (physical page, start, end, span UID) before computing the identifier, so two extractions that list the same spans differently produce the same CI. This is what distinguishes two occurrences of an identical condition phrase on one page, which text/quote alone cannot.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/canonical_source_span"
+          }
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "polarity_analysis_receipt_id": {
+          "type": "string",
+          "pattern": "^PPR-[a-f0-9]{32}$",
+          "description": "DAO-issued semantic polarity receipt for outcome-sensitive buckets. The condition carries only this identifier, never an agent-submitted analysis object. Optional in the JSON schema solely so historical artifacts remain readable; canonical_v1 policy writes and finalization require it for payout_conditions, exclusions, reduction_conditions, and coverage_start_conditions and revalidate the receipt against current source, condition bytes, bucket, and active analyzer profile."
+        },
         "evidence_references": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+          "description": "Every condition carries its OWN source location -- document_id/page/quote all required (strict_evidence_reference). A condition may not inherit its provenance from the clause or from structural context; cross-contract validation additionally verifies each quote appears verbatim on the cited page. Under canonical_v1 each reference must ALSO carry start_char/end_char (P0-7): the DAO resolves them against the registered source revision and requires the element's identity spans and its evidence to be the same exact ranges, so the second occurrence of a repeated phrase can no longer be evidenced by the first. Optional in the schema only so legacy contracts stay readable -- the DAO refuses a canonical write or finalization without them.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
+          }
+        },
+        "support_level": {
+          "enum": [
+            "direct",
+            "composite",
+            "insufficient"
+          ],
+          "description": "direct=one source passage substantially supports the normalized condition; composite=the condition is assembled from multiple passages and must be reviewed; insufficient=cannot be emitted in a successful normalized contract."
+        },
+        "support_rationale": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Short explanation of how the cited source supports the normalized condition. This is auditable metadata, not a substitute for deterministic source checks."
+        },
+        "review_required": {
+          "type": "boolean"
         }
       },
-      "required": ["text", "evidence_references"]
+      "required": [
+        "condition_uid",
+        "text",
+        "evidence_references",
+        "support_level",
+        "support_rationale",
+        "review_required"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "support_level": {
+                "enum": [
+                  "composite",
+                  "insufficient"
+                ]
+              }
+            },
+            "required": [
+              "support_level"
+            ]
+          },
+          "then": {
+            "properties": {
+              "review_required": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "support_level": {
+                "const": "composite"
+              }
+            },
+            "required": [
+              "support_level"
+            ]
+          },
+          "then": {
+            "properties": {
+              "evidence_references": {
+                "minItems": 2
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
     },
     "clause": {
       "type": "object",
       "properties": {
+        "clause_uid": {
+          "type": "string",
+          "pattern": "^PC-[a-f0-9]{16,64}$",
+          "description": "Stable deterministic identifier derived from immutable source identity (parent boundary UIDs + the clause's own canonical source spans); downstream stages must reference this value. Under canonical_v1 the DAO recomputes it and refuses a mismatch."
+        },
+        "source_span_uids": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The exact source span(s) of THIS CLAUSE in the processed page body. Required under canonical_v1 (the DAO refuses the write without it); optional in the schema only so legacy contracts stay readable. Every span must lie inside a declared source boundary and match one of this clause's own evidence passages; unrelated bytes cannot be used merely because they exist in the document. source_boundary_uids says which boundary the clause sits in -- a boundary can hold several clauses, so it cannot identify one; these spans say which bytes the clause IS. A clause crossing two pages lists a span per page; the DAO sorts them into canonical source order before computing the identifier.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/canonical_source_span"
+          }
+        },
         "clause_id": {
           "type": "string",
           "pattern": "^C-[0-9]+$",
-          "description": "Assigned by policy-pipeline in extraction order -- stable regardless of the source policy's own article/paragraph numbering."
+          "description": "Sequential display label assigned in extraction order. It may change when an earlier clause is inserted and MUST NOT be used as a machine join key."
+        },
+        "source_boundary_uids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^PB-[a-f0-9]{16,64}$"
+          }
+        },
+        "clause_kind": {
+          "enum": [
+            "coverage",
+            "definition",
+            "obligation",
+            "procedure",
+            "termination",
+            "dispute_resolution",
+            "coverage_start",
+            "other"
+          ]
         },
         "coverage_type": {
           "type": "string",
@@ -44,29 +206,305 @@
         "payout_conditions": {
           "type": "array",
           "description": "Itemized. Empty array if the clause states no conditions beyond the base coverage trigger.",
-          "items": { "$ref": "#/$defs/condition_item" }
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
         },
         "exclusions": {
           "type": "array",
           "description": "Itemized. Empty array if none.",
-          "items": { "$ref": "#/$defs/condition_item" }
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
         },
         "reduction_conditions": {
           "type": "array",
           "description": "Itemized. Empty array if none.",
-          "items": { "$ref": "#/$defs/condition_item" }
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
         },
-        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "definitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
+        },
+        "obligations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
+        },
+        "claim_requirements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
+        },
+        "termination_conditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
+        },
+        "dispute_resolution_conditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
+        },
+        "coverage_start_conditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition_item"
+          }
+        },
+        "reference_table_refs": {
+          "type": "array",
+          "description": "Stable links to structured policy appendices required to interpret this clause. When `document_id` names another document, the DAO recomputes `table_uid`/`row_uids` IN THAT DOCUMENT against its own registered revision -- the owner must itself be canonical_v1 (canonical status is per document and is never inherited from the citing one), and matching UID strings across the two files establishes nothing on their own. `source_text_revision` must therefore bind every referenced document, so revising a cited appendix makes this clause stale rather than silently re-pointing it.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "document_id": {
+                "$ref": "common_component_output.schema.json#/$defs/document_id"
+              },
+              "table_uid": {
+                "type": "string",
+                "pattern": "^RT-[a-f0-9]{16,64}$"
+              },
+              "display_table_id": {
+                "type": "string",
+                "pattern": "^T-[0-9]+$"
+              },
+              "row_uids": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^RR-[a-f0-9]{16,64}$"
+                }
+              }
+            },
+            "required": [
+              "document_id",
+              "table_uid"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "confidence": {
+          "$ref": "common_component_output.schema.json#/$defs/confidence"
+        },
         "evidence_references": {
           "type": "array",
           "minItems": 1,
-          "description": "Clause-level source location (e.g. the clause heading/quote), independent of the per-condition references above.",
-          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+          "description": "Clause-level source location (e.g. the clause heading/quote), independent of the per-condition references above -- document_id/page/quote all required (strict_evidence_reference), verified verbatim against the processed text by cross-contract validation. Under canonical_v1 each reference must ALSO carry start_char/end_char (P0-7), resolved against the registered source revision and required to be the same exact ranges as the clause's source_span_uids.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
+          }
         },
-        "review_required": { "type": "boolean" },
-        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+        "review_required": {
+          "type": "boolean"
+        },
+        "reviewer_role": {
+          "$ref": "common_component_output.schema.json#/$defs/reviewer_role"
+        }
       },
-      "required": ["clause_id", "coverage_type", "payout_conditions", "exclusions", "reduction_conditions", "confidence", "evidence_references", "review_required"]
+      "required": [
+        "clause_uid",
+        "clause_id",
+        "source_boundary_uids",
+        "clause_kind",
+        "coverage_type",
+        "payout_conditions",
+        "exclusions",
+        "reduction_conditions",
+        "definitions",
+        "obligations",
+        "claim_requirements",
+        "termination_conditions",
+        "dispute_resolution_conditions",
+        "coverage_start_conditions",
+        "reference_table_refs",
+        "confidence",
+        "evidence_references",
+        "review_required"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "coverage"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "payout_conditions": {
+                    "minItems": 1
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "exclusions": {
+                    "minItems": 1
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "reduction_conditions": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "definition"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "definitions": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "obligation"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "obligations": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "procedure"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "claim_requirements": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "termination"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "termination_conditions": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "dispute_resolution"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "dispute_resolution_conditions": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "coverage_start"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "coverage_start_conditions": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "clause_kind": {
+                "const": "other"
+              }
+            },
+            "required": [
+              "clause_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "review_required": {
+                "const": true
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
     }
   }
 }
