@@ -2571,3 +2571,91 @@ half-way:
   entry is trying to avoid.
 
 Tracked as PARTIAL, not RESOLVED, deliberately.
+
+## 33. Stage 1 segmentation reasoning succeeds but full-prompt JSON serialization fails -- OPEN 2026-07-29 (CASE_111)
+
+`tools/segment_case.py propose` can correctly read the contact sheets and
+reason about document boundaries while returning no parseable JSON. The
+failure is downstream of image access and boundary reasoning: the full
+provider response is explanatory prose with no `{` character, so
+`_scan_for_json_object()` has nothing to recover.
+
+**Controlled observations.**
+
+| Condition | cwd | Image readable | Prompt | Result |
+|---|---|---:|---|---|
+| A | outside the repo (scratchpad) | yes | short | `{"cells_with_content": 10}` |
+| B | repo root | yes | abbreviated boundary instructions | complete JSON |
+| C | segmentation scratch directory | yes | short | `{"cells_with_content": 10}` |
+| D | segmentation scratch directory | yes | production `propose` prompt | prose, no JSON object |
+
+C and D held cwd, permissions, and images constant. In D the model described
+page contents, continuous internal numbering, titles, letterheads, and legal
+citations correctly, which rules out an unreadable-image explanation. The
+parser already scans prose for an embedded object; the observed response had
+no object to scan. The working hypothesis is that the accumulated image-reading
+and boundary rules in the production prompt displace the final serialization
+constraint. That hypothesis is strong but not yet isolated from prompt length,
+instruction count, and contact-sheet difficulty individually.
+
+**Reproduction breadth.** Earlier CASE_110/CASE_111 attempts failed repeatedly.
+On CASE_111 DOC_003, all 10 contact sheets failed JSON parsing under the full
+prompt while the prose still identified plausible new-title boundaries in the
+policy material. This makes blind retries poor value, but does not prove a
+literal zero probability of success.
+
+Completed 2026-07-29 on CASE_111: every raw PDF with a rendered sheet was run
+under the production prompt, giving **24/24 sheets parse-failed** -- DOC_001
+(1 sheet), DOC_002 (1), DOC_003 (10), DOC_004 (12). The failure is therefore
+independent of document class (legal opinion, insurer bundle, policy booklet),
+sheet position, and sheet fill ratio. DOC_005 was not run.
+
+Cost note: the earlier "145p is expensive" reasoning was wrong and led to
+deferring this measurement. Cost scales with contact sheets, not pages, at
+16 pages/sheet -- DOC_003 is 10 calls, not 145. Estimate sheets, not pages,
+before deciding an experiment is too expensive.
+
+A measurement caveat worth recording: two `propose` calls chained with `&&`
+in one shell command produced empty output that a `grep -c` over the stream
+scored as "0 parse failures", briefly reading as a partial success. The runs
+had not executed at all. Verify a proposal exists via `segment_case.py show`
+(or the DAO) rather than inferring success from the absence of error text.
+
+**Audited workarounds in the diagnostic run.**
+
+- DOC_001 was recorded `not_required` only after a genuine human confirmed the
+  result. Its manifest note distinguishes this from a normal successful
+  `propose`: the evidence came from the full-prompt prose plus an abbreviated
+  control prompt that returned JSON (single title on page 1, continuous
+  internal numbering `-1-` through `-10-`, no later title or letterhead).
+  Recorded 2026-07-29 via `dao.py set-segmentation-status ... --reviewer pyun`,
+  with the bypass path (direct child-CLI call, cwd=image dir, `--safe-mode
+  --allowedTools Read`, abbreviated prompt) written into the note itself, so a
+  later reader cannot mistake it for a normal `propose` result.
+- DOC_002 has strong bundle evidence (an insurer cover letter followed by a
+  separately headed and numbered legal opinion), but the human explicitly
+  directed this diagnostic run to retain it as one document so downstream
+  impact can be measured. Its manifest note states that `not_required` is an
+  experimental exception, not evidence that segmentation was unnecessary.
+  Recorded 2026-07-29 by the human (reviewer `pyun`), with the note stating
+  the diagnostic intent explicitly. DOC_003/004/005 remain `pending_review`,
+  so the Stage 2 gate is still closed.
+- DOC_003/004/005 remain subject to the normal human segmentation gate. No
+  machine prose is treated as a human decision.
+
+**Unverified remedies.**
+
+1. Move the output contract to the front and/or simplify the production
+   prompt, then compare repeated runs rather than treating one success as
+   proof.
+2. Use a direct API provider with structured-output support, while recording
+   the provider difference and accepting that cross-case comparability changes.
+3. Add a deterministic second-pass serializer over the successful prose
+   reasoning. This would be a design change and must preserve the human
+   segmentation gate rather than silently upgrading prose to an approved
+   proposal.
+
+No production prompt or parser change has been made. The agreed decision rule
+is to measure whether the intentionally unsplit DOC_002 materially corrupts
+later stages; if it does, fix and validate segmentation before rerunning from a
+clean stage boundary.
