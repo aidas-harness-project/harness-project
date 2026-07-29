@@ -78,8 +78,9 @@ DEFAULT_GRID_ROWS = 4
 # a literal rather than read from the schema at import time so this module stays
 # I/O-free; test_document_type_enum_matches_the_schema fails if they drift.
 DOCUMENT_TYPES = frozenset({
-    "insurance_certificate", "insurance_policy", "diagnosis_certificate",
-    "medical_record", "imaging_report", "receipt", "insurer_response", "other",
+    "insurance_certificate", "insurance_policy", "application_form",
+    "diagnosis_certificate", "medical_record", "imaging_report", "receipt",
+    "insurer_response", "other",
 })
 
 

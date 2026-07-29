@@ -2753,11 +2753,16 @@ def replace_manifest_documents(case_id: str, bundle_id: str, bundle_fields: dict
                 "\n".join(f"  - {e}" for e in errors)
         atomic_write_json(target, manifest)
         if stage:
-            state = _update_run_state(case_id, run_id, stage, "passed", held_by)
+            # A passed stage must always be coupled to its P10 snapshot.
+            # Segmentation previously called _update_run_state(..., "passed")
+            # directly, which is now deliberately refused.  Finalize only
+            # after the updated manifest is durable so the snapshot captures
+            # the exact split that this stage approved.
+            state = _finalize_stage(case_id, run_id, stage, held_by)
             if state is None:
                 return True, f"PASS: split {bundle_id} into {len(new_documents)} document(s) in {target}\n" \
-                    "WARNING: split succeeded, but run-state could not be updated (lock contention) -- " \
-                    "run-state may now lag behind actual progress; retry the run-state update."
+                    "WARNING: split succeeded, but the stage could not be finalized with its snapshot -- " \
+                    "run-state may now lag behind actual progress; retry finalize-stage."
         return True, f"PASS: split {bundle_id} into {len(new_documents)} document(s) in {target}"
     finally:
         release_lock(target)
