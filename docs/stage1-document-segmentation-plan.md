@@ -143,13 +143,21 @@ The proposal prompt asks for:
 - `continuations`: pages that continue the previous document;
 - `needs_full_page`: pages whose top crop is insufficient.
 
-The provider call always goes through `provider.transcribe_image()`. Supported
+The contact-sheet call goes through the provider-neutral
+`provider.analyze_image_structured()` contract. `claude-cli` enforces the
+contract natively with `--output-format json --json-schema`; a future local
+vision provider can implement the same method without changing Stage 1.
+Providers without native schema support fall back to their ordinary image call,
+after which Stage 1 still parses and validates the response itself. Supported
 CLI selections are `claude-cli`, `codex-cli`, `openai-api`, and `fixture`;
 `anthropic-api` is selectable but its execution adapter is not implemented.
 
 The parser fails safe. Invalid JSON, out-of-sheet page numbers, or malformed
 fields produce no invented boundaries. Only the failed sheet's pages become
-unassigned; valid neighboring sheets remain usable.
+unassigned; valid neighboring sheets remain usable. A failed initial response
+gets exactly one caller-owned correction attempt. If that also fails, the
+proposal remains auditable but the command reports `status: partial`, exits
+non-zero, and does not present the Stage 1 run as passed.
 
 ### 5.2 Merge semantics
 
@@ -219,14 +227,16 @@ The tool uses stable, non-PID scratch paths.
 
 - one cached result per contact sheet;
 - geometry fingerprint covers grid, crop, page count, and pixel geometry;
-- geometry changes invalidate sheet-response reuse;
+- geometry, contact-sheet prompt version, output-schema version, provider, or
+  model changes invalidate sheet-response reuse;
 - full-page verdicts are cached per page;
 - full-page prompt-version changes invalidate the verdict cache;
 - cache files use temporary-write then atomic replace;
-- provider/parse failures are not cached.
+- provider/parse failures may be retained as diagnostic cache records but are
+  never reusable; the next run calls the provider again.
 
 This preserves paid model work across interruption without trusting stale
-images or stale prompts.
+images, stale prompts, a different backend, or a prior failed response.
 
 ## 8. Human review gate
 
@@ -359,9 +369,12 @@ preserving the rule that a gap after the final boundary remains unassigned.
 - geometry and pixel caps;
 - page batching and partial sheets;
 - parser failure and contradiction handling;
+- provider-neutral structured-image calls and Claude native JSON Schema output;
+- exactly-one structured-output correction and partial-stage halt behavior;
 - sheet-edge merge behavior;
 - contact-sheet rendering and rotations;
-- resume-cache invalidation;
+- resume-cache invalidation across geometry, prompt/schema, provider/model, and
+  failed-result changes;
 - targeted full-page fallback, saturation, and unresolved verdicts;
 - full-page title/no-title policy;
 - long-segment refinement and shared verdict caching;

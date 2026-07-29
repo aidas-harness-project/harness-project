@@ -126,6 +126,11 @@ class ProviderResult:
     # provider's normal-completion marker means the text may be truncated -- the
     # provider raises rather than returning a partial page (see _post_responses).
     finish_reason: str | None = None
+    # Populated when the backend can enforce a caller-supplied output schema.
+    # Callers must still perform their domain validation; this field records
+    # that the transport returned a native structured-output value rather than
+    # merely prose which happened to contain JSON.
+    structured_output: dict[str, Any] | None = None
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -148,6 +153,7 @@ class BaseProvider:
         raw_metadata: dict[str, Any] | None = None,
         *,
         finish_reason: str | None = None,
+        structured_output: dict[str, Any] | None = None,
     ) -> ProviderResult:
         return ProviderResult(
             provider_name=self.provider_name,
@@ -156,10 +162,27 @@ class BaseProvider:
             text=text,
             raw_metadata=raw_metadata or {},
             finish_reason=finish_reason,
+            structured_output=structured_output,
         )
 
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
         raise NotImplementedError
+
+    def analyze_image_structured(
+        self,
+        image_path: Path,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        """Analyze an image under a caller-owned structured-output contract.
+
+        The default preserves provider portability: a backend without native
+        schema enforcement still performs the image call, and the caller owns
+        parsing, validation, and its one correction attempt. Providers with a
+        native structured-output surface override this method.
+        """
+        return self.transcribe_image(image_path, prompt, prompt_version)
 
     def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
         raise NotImplementedError
@@ -184,8 +207,16 @@ class ClaudeCliProvider(BaseProvider):
         self.root = root
         self.command = command
 
-    def _run(self, prompt: str, *, prompt_version: str, allowed_read: bool, timeout: int,
-             read_cwd: Path | None = None) -> ProviderResult:
+    def _run(
+        self,
+        prompt: str,
+        *,
+        prompt_version: str,
+        allowed_read: bool,
+        timeout: int,
+        read_cwd: Path | None = None,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> ProviderResult:
         # --safe-mode: the child claude -p session must see NOTHING but the
         # prompt -- no CLAUDE.md, skills, or session hooks. Without it, cwd=ROOT
         # auto-loads this project's context, and a context-aware reader
@@ -197,6 +228,16 @@ class ClaudeCliProvider(BaseProvider):
         # claude-cli call through this provider (transcribe/compare/classify/scan),
         # not just OCR -- the same context-inheritance risk exists for all of them.
         cmd = [self.command, "-p", prompt, "--safe-mode"]
+        if output_schema is not None:
+            # --output-format json alone only wraps arbitrary assistant prose in
+            # a JSON envelope. --json-schema is the part that requires a
+            # validated value in the envelope's structured_output field.
+            cmd.extend([
+                "--output-format",
+                "json",
+                "--json-schema",
+                json.dumps(output_schema, ensure_ascii=False, separators=(",", ":")),
+            ])
         # Pass the configured model through. Without this the model recorded in
         # provenance metadata is a lie (the CLI silently uses its own default),
         # and two readers configured with different models would be
@@ -229,7 +270,11 @@ class ClaudeCliProvider(BaseProvider):
         # touch P8 -- content agreement/disagreement is judged by compare(),
         # not here, so no disagreement tolerance is affected.
         last_exc: ProviderExecutionError | None = None
-        for attempt in range(_CLAUDE_CLI_MAX_ATTEMPTS):
+        # Structured-output correction belongs to the caller (P4: exactly one
+        # correction after validation failure). Do not hide extra whole-model
+        # retries here. Ordinary subprocess calls retain their transient retry.
+        max_attempts = 1 if output_schema is not None else _CLAUDE_CLI_MAX_ATTEMPTS
+        for attempt in range(max_attempts):
             try:
                 # stdin=DEVNULL: without it the child inherits the parent's
                 # stdin and blocks ~3s waiting for input it will never get
@@ -274,14 +319,41 @@ class ClaudeCliProvider(BaseProvider):
                         "stderr": result.stderr.strip(),
                         "attempts": attempt + 1,
                     }
-                    return self._result(out, prompt_version, raw_metadata)
+                    if output_schema is None:
+                        return self._result(out, prompt_version, raw_metadata)
+                    try:
+                        envelope = json.loads(out)
+                    except json.JSONDecodeError as exc:
+                        raise ProviderExecutionError(
+                            "claude-cli structured-output mode returned a non-JSON envelope"
+                        ) from exc
+                    structured = envelope.get("structured_output") if isinstance(envelope, dict) else None
+                    subtype = envelope.get("subtype") if isinstance(envelope, dict) else None
+                    is_error = envelope.get("is_error") if isinstance(envelope, dict) else None
+                    if not isinstance(structured, dict) or is_error is True or (
+                        subtype is not None and subtype != "success"
+                    ):
+                        raise ProviderExecutionError(
+                            "claude-cli did not return a successful structured_output "
+                            f"(subtype={subtype!r}, is_error={is_error!r})"
+                        )
+                    raw_metadata.update({
+                        "session_id": envelope.get("session_id"),
+                        "subtype": subtype,
+                    })
+                    return self._result(
+                        json.dumps(structured, ensure_ascii=False),
+                        prompt_version,
+                        raw_metadata,
+                        structured_output=structured,
+                    )
                 # Surface whatever diagnostic exists: stderr first, then stdout
                 # (where the CLI actually prints model/access errors), then a
                 # last-resort exit-code note so the message is never empty.
                 detail = result.stderr.strip() or out or f"exit {result.returncode}, no output"
                 last_exc = ProviderExecutionError(f"claude-cli call failed: {detail}")
 
-            if attempt < _CLAUDE_CLI_MAX_ATTEMPTS - 1:
+            if attempt < max_attempts - 1:
                 time.sleep(_CLAUDE_CLI_RETRY_SLEEP_SECONDS)
 
         assert last_exc is not None
@@ -309,6 +381,23 @@ class ClaudeCliProvider(BaseProvider):
         # Confine the child's Read to the image's own directory (H1).
         return self._run(framed_prompt, prompt_version=prompt_version, allowed_read=True,
                          timeout=180, read_cwd=Path(image_path).resolve().parent)
+
+    def analyze_image_structured(
+        self,
+        image_path: Path,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        framed_prompt = f"Read the image file at {image_path} and then: {prompt}"
+        return self._run(
+            framed_prompt,
+            prompt_version=prompt_version,
+            allowed_read=True,
+            timeout=180,
+            read_cwd=Path(image_path).resolve().parent,
+            output_schema=output_schema,
+        )
 
     def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, allowed_read=False, timeout=60)

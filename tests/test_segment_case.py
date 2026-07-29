@@ -718,6 +718,39 @@ class _SequencedProvider:
         )
 
 
+class _StructuredSequencedProvider:
+    provider_name = "local-vlm"
+    model_name = "local-test-model"
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+        self.schemas = []
+
+    def analyze_image_structured(
+        self, image_path, prompt, prompt_version, output_schema
+    ):
+        from llm_providers import ProviderResult
+        idx = min(self.calls, len(self._responses) - 1)
+        value = self._responses[idx]
+        self.calls += 1
+        self.schemas.append(output_schema)
+        if isinstance(value, dict):
+            return ProviderResult(
+                provider_name=self.provider_name,
+                model_name=self.model_name,
+                prompt_version=prompt_version,
+                text=json.dumps(value),
+                structured_output=value,
+            )
+        return ProviderResult(
+            provider_name=self.provider_name,
+            model_name=self.model_name,
+            prompt_version=prompt_version,
+            text=value,
+        )
+
+
 def _bundle_pdf(tmp_path, pages):
     import fitz
     pdf = tmp_path / "bundle.pdf"
@@ -768,6 +801,86 @@ def test_propose_merges_sheets_and_records_an_honest_method(tmp_path):
     assert out["method"]["model_name"] == "fixture-model"
     assert out["method"]["grid_cols"] == 3 and out["method"]["grid_rows"] == 4
     assert provider.calls == 1
+
+
+def test_propose_uses_provider_neutral_structured_image_contract(tmp_path):
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    provider = _StructuredSequencedProvider([{
+        "boundaries": [{"page": 1}],
+        "continuations": list(range(2, 13)),
+        "needs_full_page": [],
+    }])
+
+    out = sc.propose_boundaries(
+        pdf, case_id="CASE_940", doc_id="DOC_001", provider=provider,
+        geometry=geo, sheet_paths=sheets, resume=False,
+    )
+
+    assert provider.calls == 1
+    assert provider.schemas == [sc.SEGMENT_OUTPUT_SCHEMA]
+    assert out["unassigned_pages"] == []
+
+
+def test_propose_corrects_unstructured_sheet_exactly_once(tmp_path):
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    valid = {
+        "boundaries": [{"page": 1}],
+        "continuations": list(range(2, 13)),
+        "needs_full_page": [],
+    }
+    provider = _StructuredSequencedProvider(["analysis prose", valid])
+
+    out = sc.propose_boundaries(
+        pdf, case_id="CASE_941", doc_id="DOC_001", provider=provider,
+        geometry=geo, sheet_paths=sheets, resume=False,
+    )
+
+    assert provider.calls == 2
+    assert out["per_sheet"][0]["ok"] is True
+    assert out["unassigned_pages"] == []
+
+
+def test_non_native_provider_cannot_omit_required_structured_fields(tmp_path):
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    incomplete = {"boundaries": [{"page": 1}]}
+    complete = {
+        "boundaries": [{"page": 1}],
+        "continuations": list(range(2, 13)),
+        "needs_full_page": [],
+    }
+    provider = _StructuredSequencedProvider([incomplete, complete])
+
+    out = sc.propose_boundaries(
+        pdf, case_id="CASE_945", doc_id="DOC_001", provider=provider,
+        geometry=geo, sheet_paths=sheets, resume=False,
+    )
+
+    assert provider.calls == 2
+    assert out["per_sheet"][0]["ok"] is True
+    assert out["unassigned_pages"] == []
+
+
+def test_propose_halts_sheet_after_one_failed_correction(tmp_path):
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    provider = _StructuredSequencedProvider(["analysis prose", "still prose"])
+
+    out = sc.propose_boundaries(
+        pdf, case_id="CASE_942", doc_id="DOC_001", provider=provider,
+        geometry=geo, sheet_paths=sheets, resume=False,
+    )
+
+    assert provider.calls == 2
+    assert out["per_sheet"][0]["ok"] is False
+    assert set(out["unassigned_pages"]) == set(range(1, 13))
+    assert "exactly one" in out["per_sheet"][0]["warning"]
 
 
 def test_propose_output_assembles_into_a_schema_valid_proposal(tmp_path):
@@ -851,6 +964,68 @@ def test_a_geometry_change_invalidates_the_cache(tmp_path):
 
     import shutil
     shutil.rmtree(sc._resume_dir("CASE_902", "DOC_001"), ignore_errors=True)
+
+
+def test_failed_cache_is_diagnostic_only_and_is_recalled_next_run(tmp_path):
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    case_id = "CASE_943"
+    doc_id = "DOC_001"
+
+    failed = _StructuredSequencedProvider(["prose", "more prose"])
+    first = sc.propose_boundaries(
+        pdf, case_id=case_id, doc_id=doc_id, provider=failed,
+        geometry=geo, sheet_paths=sheets, resume=True,
+    )
+    assert first["per_sheet"][0]["ok"] is False
+    assert failed.calls == 2
+
+    valid = _StructuredSequencedProvider([{
+        "boundaries": [{"page": 1}],
+        "continuations": list(range(2, 13)),
+        "needs_full_page": [],
+    }])
+    second = sc.propose_boundaries(
+        pdf, case_id=case_id, doc_id=doc_id, provider=valid,
+        geometry=geo, sheet_paths=sheets, resume=True,
+    )
+
+    assert valid.calls == 1
+    assert second["per_sheet"][0]["ok"] is True
+
+    import shutil
+    shutil.rmtree(sc._resume_dir(case_id, doc_id), ignore_errors=True)
+
+
+def test_provider_or_model_change_invalidates_success_cache(tmp_path):
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    pdf = _bundle_pdf(tmp_path, 12)
+    sheets = _sheet_files(tmp_path, 1)
+    case_id = "CASE_944"
+    doc_id = "DOC_001"
+    response = _response(
+        boundaries=[{"page": 1}],
+        continuations=list(range(2, 13)),
+        needs_full_page=[],
+    )
+
+    first = _SequencedProvider([response], model_name="model-a")
+    sc.propose_boundaries(
+        pdf, case_id=case_id, doc_id=doc_id, provider=first,
+        geometry=geo, sheet_paths=sheets, resume=True,
+    )
+
+    second = _SequencedProvider([response], model_name="model-b")
+    sc.propose_boundaries(
+        pdf, case_id=case_id, doc_id=doc_id, provider=second,
+        geometry=geo, sheet_paths=sheets, resume=True,
+    )
+
+    assert second.calls == 1
+
+    import shutil
+    shutil.rmtree(sc._resume_dir(case_id, doc_id), ignore_errors=True)
 
 
 def test_fallback_saturation_flags_without_triggering(tmp_path):

@@ -1221,3 +1221,32 @@ DEFERRED, with why:
   frontend hole (serving ground-truth files) WAS fixed. If the frontend is ever
   exposed, auth + CSRF + upload/spawn caps + scrubbing the `/run` child env
   become required.
+
+## 20. Stage 1 full-prompt reasoning returned prose without JSON -- RESOLVED 2026-07-29
+
+The production contact-sheet prompt repeatedly produced accurate page and
+boundary reasoning as explanatory prose with no JSON object. Image access and
+reasoning succeeded; serialization did not. The engineering failure was that
+Stage 1 relied on a prompt-only `Reply with ONLY...` request over a free-text
+provider call, treated any non-empty exit-0 response as provider success, and
+cached parse-failed responses for reuse.
+
+Resolved by moving contact-sheet analysis behind the provider-neutral
+`analyze_image_structured()` contract. `claude-cli` now uses native
+`--output-format json --json-schema` and returns only the validated
+`structured_output` payload to Stage 1. Providers without native enforcement,
+including a future local vision provider, use the same Stage 1 parser and
+required-field check. A failed response receives exactly one caller-owned
+correction; a second failure remains unassigned and makes `propose` return
+`status: partial` with a non-zero exit.
+
+Resume reuse is now bound to geometry, contact-sheet prompt version,
+output-schema version, provider, and model. Failed cache entries remain
+available for diagnostics but are never reusable. Focused provider/segmentation
+coverage passes 170 tests; the non-frontend suite passes apart from a pre-existing
+Windows DAO lock timing test that passed immediately when rerun alone.
+
+**Integration note:** the beta pipeline branch independently recorded this
+incident as a later-numbered OPEN known-gap item. When this Stage 1 branch is
+merged into beta, consolidate that entry with this resolved record rather than
+retaining two copies.
