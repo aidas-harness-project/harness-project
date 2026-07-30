@@ -648,7 +648,15 @@ DEFAULT_SEPARATOR_PX = 4
 DEFAULT_FALLBACK_DPI = 110
 
 
-SEGMENT_PROMPT_VERSION = "segment_contact_sheet_v0.2"
+# v0.3: shortened prompt text (dropped the worked-example framing, kept every
+# load-bearing instruction -- red page numbers, rotated cells, repeated-title
+# rule, needs_full_page escape hatch). Bumping the version invalidates any
+# sheet cached under v0.2's longer wording so a re-run re-asks under the new
+# prompt rather than trusting a stale answer. The cache contract additionally
+# fingerprints SEGMENT_PROMPT's actual text (see _segment_prompt_fingerprint)
+# so a future in-place prompt edit that forgets to bump this constant still
+# invalidates the cache instead of silently reusing stale verdicts.
+SEGMENT_PROMPT_VERSION = "segment_contact_sheet_v0.3"
 SEGMENT_OUTPUT_SCHEMA_VERSION = "segment_contact_sheet_output_v0.1"
 
 # Provider-neutral output contract. Claude CLI enforces this natively with
@@ -665,7 +673,7 @@ SEGMENT_OUTPUT_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "page": {"type": "integer"},
-                    "type_guess": {"type": ["string", "null"]},
+                    "type_guess": {"type": ["string", "null"], "enum": [*sorted(DOCUMENT_TYPES), None]},
                     "type_label": {"type": ["string", "null"]},
                     "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
                     "evidence": {"type": ["string", "null"]},
@@ -685,8 +693,9 @@ SEGMENT_OUTPUT_SCHEMA = {
 # every rotated cell was read and the p74 boundary found at 0.92 confidence.
 #
 # Two constraints from llm_providers.py's recorded failures, both load-bearing:
-#   * Send this through provider.transcribe_image, which prepends the working
-#     "Read the image file at {path} and then:" imperative. The trailing-label
+#   * Send this through the provider's structured-image seam, whose Claude
+#     implementation prepends the working "Read the image file at {path} and
+#     then:" imperative. The trailing-label
 #     form ("Image: {path}") failed 9/9 with "no image was attached".
 #   * No self-legitimizing framing -- no "this is a sanctioned step", no "do not
 #     refuse". A prior version added that and the child model read it as a
@@ -694,27 +703,29 @@ SEGMENT_OUTPUT_SCHEMA = {
 #     argue for itself.
 SEGMENT_PROMPT = """This image is a contact sheet: {cell_count} cells in a \
 {cols}x{rows} grid, read left to right then top to bottom. Each cell shows the \
-top portion of one page from a single scanned PDF. The red number in each cell's \
-top-left corner is that page's number in the PDF -- use those numbers in your \
-answer rather than counting cell positions.
+top portion of one page. The red number in each cell is that page's number -- \
+use those numbers. Some cells were scanned rotated a quarter turn; read those \
+cells at whatever orientation they are in. {blank_note}The PDF concatenates \
+several separate documents. Identify which pages START a new document (its own \
+title block, a different form layout, a different letterhead, a page-1-of-N \
+reset). Repeated forms matter: if the SAME title is reprinted on consecutive \
+pages, each such page is its own document, not a continuation. A page with no \
+title that just continues the text or table above it is not a boundary. If a \
+cell's top portion is not enough to judge, list it in needs_full_page rather \
+than guessing."""
 
-Some pages were scanned rotated a quarter turn, so their text runs sideways. \
-Read those cells at whatever orientation they are in.
 
-{blank_note}The PDF concatenates several separate documents. Identify which \
-pages START a new document (a new title block, a different form layout, a \
-different letterhead, a page-1-of-N reset) as opposed to continuing the previous \
-one. A page that visually continues the document above it is not a boundary.
+def _segment_prompt_fingerprint() -> str:
+    """Hash of SEGMENT_PROMPT's literal text.
 
-If a cell's top portion is not enough to judge, list that page in \
-needs_full_page rather than guessing.
-
-Reply with ONLY one JSON object:
-{{"boundaries": [{{"page": N, "type_guess": "<one of: {types}>", \
-"type_label": "<the document's name in its own words>", \
-"confidence": 0.0-1.0, "evidence": "<what you saw>"}}],
- "continuations": [N, ...],
- "needs_full_page": [N, ...]}}"""
+    Belt-and-suspenders alongside SEGMENT_PROMPT_VERSION: the version constant
+    requires a human to remember to bump it on every wording change (missed
+    once already -- this file's prompt text changed while the constant stayed
+    at v0.2). Folding the actual text into the cache contract means an edit
+    that forgets the bump still invalidates cached sheets instead of silently
+    reusing verdicts produced under different wording.
+    """
+    return hashlib.sha256(SEGMENT_PROMPT.encode("utf-8")).hexdigest()[:16]
 
 
 def build_segment_prompt(sheet_pages: list[int], geometry: dict) -> str:
@@ -727,15 +738,13 @@ def build_segment_prompt(sheet_pages: list[int], geometry: dict) -> str:
     blank_note = ""
     if len(sheet_pages) < capacity:
         blank_note = (
-            f"Only the first {len(sheet_pages)} cells contain pages; the rest are "
-            f"blank and should be ignored.\n\n"
+            f"Only the first {len(sheet_pages)} cells contain pages; ignore the rest. "
         )
     return SEGMENT_PROMPT.format(
         cell_count=capacity,
         cols=geometry["cols"],
         rows=geometry["rows"],
         blank_note=blank_note,
-        types=", ".join(sorted(DOCUMENT_TYPES)),
     )
 
 
@@ -1079,11 +1088,12 @@ def propose_boundaries(
     wrapper (or a future orchestrator) owns process exit. This mirrors
     run_checkpoint1.run_checkpoint1's contract deliberately.
 
-    Every vision call goes through provider.transcribe_image, which prepends the
-    "Read the image file at {path} and then:" imperative the recorded 9/9 label
-    failure requires. One sheet's parse failure never discards the others (their
-    calls are already paid for): a failed sheet's pages fall through to
-    unassigned_pages via merge_sheet_proposals.
+    Every vision call goes through the provider-neutral structured-image seam.
+    Claude's implementation prepends the "Read the image file at {path} and
+    then:" imperative the recorded 9/9 label failure requires. One sheet's
+    parse failure never discards the others (their calls are already paid for):
+    a failed sheet's pages fall through to unassigned_pages via
+    merge_sheet_proposals.
 
     Returns ``{segments, unassigned_pages, needs_full_page, warnings, method,
     contact_sheets, per_sheet}`` -- enough for build_proposal_document to
@@ -1107,6 +1117,7 @@ def propose_boundaries(
     cache_contract = {
         "geometry_fingerprint": fingerprint,
         "prompt_version": SEGMENT_PROMPT_VERSION,
+        "prompt_fingerprint": _segment_prompt_fingerprint(),
         "output_schema_version": SEGMENT_OUTPUT_SCHEMA_VERSION,
         "provider_name": getattr(provider, "provider_name", None),
         "model_name": getattr(provider, "model_name", None),
@@ -1238,12 +1249,17 @@ def propose_boundaries(
             "unresolved_pages": resolution["unresolved_pages"],
             "new_boundaries": resolution["new_boundaries"],
             "calls": resolution["calls"],
+            "failure_reasons": {
+                str(page): reason
+                for page, reason in resolution["failure_reasons"].items()
+            },
         })
         if resolution["unresolved_pages"]:
             merged["warnings"].append(
                 f"full-page fallback could not resolve {len(resolution['unresolved_pages'])} "
                 f"page(s); they remain flagged for human review: "
-                f"{resolution['unresolved_pages']}"
+                f"{resolution['unresolved_pages']}. Failures: "
+                f"{_format_full_page_failures(resolution['failure_reasons'])}"
             )
 
     # The full-page fallback that actually moves the number: re-examine each long
@@ -1271,12 +1287,24 @@ def propose_boundaries(
             # different reasons a full-page call happened.
             "refinement_pages": refinement["pages_examined"],
             "refinement_calls": refinement["calls"],
+            "refinement_unresolved_pages": refinement["unresolved_pages"],
+            "refinement_failure_reasons": {
+                str(page): reason
+                for page, reason in refinement["failure_reasons"].items()
+            },
         }
         if refinement["new_boundaries"]:
             merged["warnings"].append(
                 f"full-page refinement split {len(refinement['refined_indices'])} "
                 f"long segment(s) at {len(refinement['new_boundaries'])} new "
                 f"boundary/boundaries: {refinement['new_boundaries']}"
+            )
+        if refinement["unresolved_pages"]:
+            merged["warnings"].append(
+                f"full-page refinement could not classify "
+                f"{len(refinement['unresolved_pages'])} page(s); they were not "
+                f"silently counted as continuations: "
+                f"{_format_full_page_failures(refinement['failure_reasons'])}"
             )
 
     method = {
@@ -1333,12 +1361,16 @@ def _plan_fallback(needs_full_page: list[int], page_count: int, cap_ratio: float
         "saturated": saturated,
         "cap": cap,
         "prompt_version": FULL_PAGE_PROMPT_VERSION,
+        "output_schema_version": FULL_PAGE_OUTPUT_SCHEMA_VERSION,
         "resolved_pages": [],
         "unresolved_pages": list(pages),
         "new_boundaries": [],
         "calls": 0,
+        "failure_reasons": {},
         "refinement_pages": [],
         "refinement_calls": 0,
+        "refinement_unresolved_pages": [],
+        "refinement_failure_reasons": {},
     }
 
 
@@ -1347,8 +1379,8 @@ def _plan_fallback(needs_full_page: list[int], page_count: int, cap_ratio: float
 # Asked of ONE full page, not a contact sheet. The crop-only first pass misses a
 # boundary when a repeating form reprints its title every page and the model
 # reads the run as continuation; a full page shows the whole title block and
-# page-1-of-N markers a top-third crop cut off. Goes through transcribe_image
-# like every other vision call (the 9/9 label-form failure requires it).
+# page-1-of-N markers a top-third crop cut off. Goes through the same
+# provider-neutral structured-image seam as contact-sheet segmentation.
 #
 # Split-biased on purpose (owner decision 2026-07-21, known-gaps item 18): a
 # reprinted title block IS a new-document signal, full stop -- we do NOT try to
@@ -1361,45 +1393,103 @@ def _plan_fallback(needs_full_page: list[int], page_count: int, cap_ratio: float
 # printed only on page 1). This deliberately splits repeating-form runs like
 # CASE_026's 내역서 pages; the type-aware "records merge, receipts split" rule
 # is the deferred alternative, not this.
-FULL_PAGE_PROMPT = """This is a single full page from a scanned PDF that \
-concatenates several separate documents. Decide ONE thing: does THIS page begin \
-a NEW document, or does it continue the document on the previous page?
+FULL_PAGE_PROMPT = """This is one full page from a scanned PDF containing \
+multiple documents. Decide whether THIS page starts a NEW document.
 
-Treat THIS page as beginning a new document if it shows its OWN title block (a \
-form/document title printed at the top), a page-1-of-N marker, a different form \
-layout, or a different letterhead -- EVEN IF the page immediately before it had \
-the same title. A reprinted title is a new-document signal, not a continuation: \
-when a run of pages each carry the same title at the top, treat EACH titled page \
-as its own document.
+Choose NEW when this page has its OWN title block, a page-1-of-N marker, a \
+different layout, or a different letterhead. A repeated title still means NEW: \
+if consecutive pages each show the same title, treat EACH titled page as a \
+separate document.
 
-Treat THIS page as a continuation ONLY when it has NO title block of its own -- \
-a bare continuation of a table or body text that plainly runs on from the \
-previous page (for example a wide itemized table whose header printed only on \
-its first page and whose later pages are rows with no title).
+Choose continuation ONLY when this page has NO title block of its own and \
+plainly continues a table or body text from the previous page. When unsure, \
+choose NEW. Read quarter-turned pages in place.
 
-When unsure, prefer "new document": splitting too finely is easily corrected \
-downstream, merging two real documents is not.
+Return only a JSON object with starts_new_document (boolean), type_label \
+(string or null), confidence (0.0-1.0 or null), and evidence (string or null)."""
 
-Some pages are scanned rotated a quarter turn; read them in place.
+# v0.3 moves the full-page verdict onto the same provider-neutral structured
+# image seam as the contact-sheet pass. The version bump invalidates every v0.2
+# free-form verdict: those calls could return prose, and the old cache did not
+# bind a verdict to provider/model/schema/image content.
+FULL_PAGE_PROMPT_VERSION = "segment_full_page_v0.3"
+FULL_PAGE_OUTPUT_SCHEMA_VERSION = "segment_full_page_output_v0.1"
+FULL_PAGE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "starts_new_document": {"type": "boolean"},
+        "type_label": {"type": ["string", "null"]},
+        "confidence": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 1,
+        },
+        "evidence": {"type": ["string", "null"]},
+    },
+    "required": [
+        "starts_new_document",
+        "type_label",
+        "confidence",
+        "evidence",
+    ],
+    "additionalProperties": False,
+}
 
-Reply with ONLY one JSON object:
-{"starts_new_document": true or false, \
-"type_label": "<the document's name in its own words, or null>", \
-"confidence": 0.0-1.0, "evidence": "<what you saw>"}"""
 
-# v0.2: split-biased rewrite (see the comment above and known-gaps item 18).
-# Bumping the version invalidates any cached verdict written under v0.1 so a
-# re-run re-asks under the new instruction rather than trusting a stale answer.
-FULL_PAGE_PROMPT_VERSION = "segment_full_page_v0.2"
+def _call_structured_full_page(provider, image_path: Path, prompt: str):
+    """Use native schema enforcement when the provider exposes it."""
+    analyze = getattr(provider, "analyze_image_structured", None)
+    if callable(analyze):
+        return analyze(
+            image_path,
+            prompt,
+            FULL_PAGE_PROMPT_VERSION,
+            FULL_PAGE_OUTPUT_SCHEMA,
+        )
+    return provider.transcribe_image(
+        image_path, prompt, FULL_PAGE_PROMPT_VERSION
+    )
 
 
-def parse_full_page_response(raw: str) -> dict:
+def _full_page_correction_prompt(validation_error: str | None) -> str:
+    detail = validation_error or "the response did not match the output contract"
+    return (
+        f"{FULL_PAGE_PROMPT}\n\n"
+        "Your previous response could not be used because it failed the output "
+        f"contract: {detail}. Re-evaluate the same page and return all four "
+        "required fields."
+    )
+
+
+def _full_page_cache_contract(provider) -> dict:
+    return {
+        "prompt_version": FULL_PAGE_PROMPT_VERSION,
+        "output_schema_version": FULL_PAGE_OUTPUT_SCHEMA_VERSION,
+        "provider_name": getattr(provider, "provider_name", None),
+        "model_name": getattr(provider, "model_name", None),
+    }
+
+
+def parse_full_page_response(
+    raw: str, *, require_output_contract: bool = False
+) -> dict:
     """Parses a single-page boundary verdict. NEVER raises -- same fail-safe as
     parse_segmentation_response: an unreadable verdict leaves the page as it was
     (a continuation of the long segment), never inventing a split."""
     parsed, error = _scan_for_json_object(raw)
     if parsed is None:
         return {"ok": False, "starts_new_document": False, "warning": error}
+    if require_output_contract:
+        missing = [
+            field for field in FULL_PAGE_OUTPUT_SCHEMA["required"]
+            if field not in parsed
+        ]
+        if missing:
+            return {
+                "ok": False,
+                "starts_new_document": False,
+                "warning": f"response omitted required fields: {missing}",
+            }
     starts = parsed.get("starts_new_document")
     if not isinstance(starts, bool):
         return {"ok": False, "starts_new_document": False,
@@ -1435,15 +1525,16 @@ def _inspect_full_pages(
     paying twice when a page is first named in ``needs_full_page`` and later
     falls inside a long segment selected by ``--refine``.
 
-    A provider or parse failure is returned as ``ok: false`` and is deliberately
-    not cached: a transient failure should be retried next run. Callers decide
-    the safe action (targeted fallback keeps the page flagged; refinement keeps
-    the existing continuation).
+    Every fresh page receives one initial attempt and exactly one correction
+    attempt when the provider or domain parser rejects the result. A failure is
+    returned as ``ok: false`` and is deliberately not cached. Callers keep the
+    page unresolved; they never present that failure as a valid continuation.
     """
     if scratch_dir is not None:
         scratch_dir.mkdir(parents=True, exist_ok=True)
 
     zoom = LONG_EDGE_CAP / DEFAULT_PAGE_HEIGHT_PT
+    cache_contract = _full_page_cache_contract(provider)
     verdict_cache: dict[int, dict] = {}
     cache_path = None
     if scratch_dir is not None:
@@ -1451,7 +1542,7 @@ def _inspect_full_pages(
         if cache_path.exists():
             try:
                 stored = json.loads(cache_path.read_text(encoding="utf-8"))
-                if stored.get("prompt_version") == FULL_PAGE_PROMPT_VERSION:
+                if stored.get("cache_contract") == cache_contract:
                     verdict_cache = {
                         int(k): v for k, v in stored.get("verdicts", {}).items()
                     }
@@ -1464,7 +1555,7 @@ def _inspect_full_pages(
         tmp = cache_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(
             {
-                "prompt_version": FULL_PAGE_PROMPT_VERSION,
+                "cache_contract": cache_contract,
                 "verdicts": {str(k): v for k, v in verdict_cache.items()},
             },
             ensure_ascii=False,
@@ -1474,16 +1565,11 @@ def _inspect_full_pages(
     verdicts: dict[int, dict] = {}
     calls = 0
     for page in sorted(set(pages)):
-        if page in verdict_cache:
-            verdict = verdict_cache[page]
-            verdicts[page] = verdict
-            if progress:
-                mark = "NEW" if verdict["starts_new_document"] else "cont"
-                progress(f"  full-page p{page}: {mark} (cached)")
-            continue
-
         images = render_page_images(pdf_path, [page], zoom=zoom)
         image = images[page]
+        image_fingerprint = hashlib.sha256(
+            f"{image.mode}|{image.size}".encode("utf-8") + image.tobytes()
+        ).hexdigest()[:16]
         temporary_path = scratch_dir is None
         if scratch_dir is not None:
             page_path = scratch_dir / f"fullpage_p{page:03d}.png"
@@ -1495,31 +1581,102 @@ def _inspect_full_pages(
             fd.close()
             image.save(page_path)
 
+        cached_entry = verdict_cache.get(page)
+        if (
+            isinstance(cached_entry, dict)
+            and cached_entry.get("image_fingerprint") == image_fingerprint
+            and (cached_entry.get("verdict") or {}).get("ok")
+        ):
+            verdict = cached_entry["verdict"]
+            verdicts[page] = verdict
+            if temporary_path:
+                page_path.unlink(missing_ok=True)
+            if progress:
+                mark = "NEW" if verdict["starts_new_document"] else "cont"
+                progress(f"  full-page p{page}: {mark} (cached)")
+            continue
+
+        verdict = {
+            "ok": False,
+            "starts_new_document": False,
+            "warning": "full-page verdict was not attempted",
+        }
+        attempt_errors: list[str] = []
         try:
-            result = provider.transcribe_image(
-                page_path, FULL_PAGE_PROMPT, FULL_PAGE_PROMPT_VERSION
-            )
-            verdict = parse_full_page_response(result.text)
-        except Exception as exc:  # noqa: BLE001
-            verdict = {
-                "ok": False,
-                "starts_new_document": False,
-                "warning": f"provider call failed: {exc}",
-            }
+            for attempt in range(2):
+                prompt = (
+                    FULL_PAGE_PROMPT
+                    if attempt == 0
+                    else _full_page_correction_prompt(verdict.get("warning"))
+                )
+                try:
+                    result = _call_structured_full_page(
+                        provider, page_path, prompt
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    error = f"{type(exc).__name__}: {exc}"
+                    attempt_errors.append(error)
+                    verdict = {
+                        "ok": False,
+                        "starts_new_document": False,
+                        "warning": f"provider call failed: {error}",
+                    }
+                else:
+                    raw = _result_text_for_parsing(result)
+                    verdict = parse_full_page_response(
+                        raw, require_output_contract=True
+                    )
+                calls += 1
+                if verdict.get("ok"):
+                    break
         finally:
             if temporary_path:
                 page_path.unlink(missing_ok=True)
 
-        calls += 1
+        if not verdict.get("ok"):
+            verdict["warning"] = (
+                f"{verdict.get('warning')}; failed after exactly one "
+                "structured-output correction attempt"
+            )
+            if attempt_errors:
+                verdict["provider_errors"] = attempt_errors
         verdicts[page] = verdict
         if verdict.get("ok"):
-            verdict_cache[page] = verdict
+            verdict_cache[page] = {
+                "image_fingerprint": image_fingerprint,
+                "verdict": verdict,
+            }
             persist_verdicts()
         if progress:
-            mark = "NEW" if verdict["starts_new_document"] else "cont"
-            progress(f"  full-page p{page}: {mark} (conf {verdict.get('confidence')})")
+            if verdict.get("ok"):
+                mark = "NEW" if verdict["starts_new_document"] else "cont"
+                progress(
+                    f"  full-page p{page}: {mark} "
+                    f"(conf {verdict.get('confidence')})"
+                )
+            else:
+                progress(
+                    f"  full-page p{page}: ERROR ({verdict.get('warning')})"
+                )
 
-    return {"verdicts": verdicts, "calls": calls}
+    return {
+        "verdicts": verdicts,
+        "calls": calls,
+        "failure_reasons": {
+            page: verdict.get("warning")
+            for page, verdict in verdicts.items()
+            if not verdict.get("ok")
+        },
+    }
+
+
+def _format_full_page_failures(failure_reasons: dict[int, str]) -> str:
+    """Bounded diagnostic text for proposal warnings and CLI output."""
+    items = sorted(failure_reasons.items())
+    shown = "; ".join(f"p{page}: {reason}" for page, reason in items[:5])
+    if len(items) > 5:
+        shown += f"; ... {len(items) - 5} more"
+    return shown
 
 
 def resolve_needs_full_page(
@@ -1598,6 +1755,7 @@ def resolve_needs_full_page(
         "unresolved_pages": unresolved_pages,
         "new_boundaries": new_boundaries,
         "calls": inspection["calls"],
+        "failure_reasons": inspection["failure_reasons"],
     }
 
 
@@ -1633,6 +1791,8 @@ def refine_long_segments(
     refined_indices: list[int] = []
     pages_examined: list[int] = []
     new_boundaries: list[int] = []
+    unresolved_pages: list[int] = []
+    failure_reasons: dict[int, str] = {}
     calls = 0
 
     for seg in segments:
@@ -1658,6 +1818,12 @@ def refine_long_segments(
         calls += inspection["calls"]
         for page in inspect_pages:
             verdict = inspection["verdicts"][page]
+            if not verdict.get("ok"):
+                unresolved_pages.append(page)
+                failure_reasons[page] = verdict.get(
+                    "warning", "full-page verdict failed"
+                )
+                continue
             if verdict["starts_new_document"]:
                 cut_points.append(page)
                 new_boundaries.append(page)
@@ -1695,6 +1861,8 @@ def refine_long_segments(
         "refined_indices": refined_indices,
         "pages_examined": pages_examined,
         "new_boundaries": sorted(new_boundaries),
+        "unresolved_pages": sorted(set(unresolved_pages)),
+        "failure_reasons": failure_reasons,
         "calls": calls,
     }
 
@@ -2103,6 +2271,7 @@ def _cmd_propose(args):
         pdf_path, case_id=args.case_id, doc_id=args.doc_id, provider=provider,
         geometry=geometry, page_count=page_count, sheet_paths=sheet_paths,
         refine=args.refine, refine_threshold=args.refine_threshold,
+        fallback_cap_ratio=args.fallback_cap_ratio,
         refine_scratch_dir=out_dir / "_fullpage",
         resume=not args.no_resume, progress=_stderr,
     )
@@ -2130,6 +2299,9 @@ def _cmd_propose(args):
         "fallback_unresolved_pages": proposal["method"]["full_page_fallback"].get(
             "unresolved_pages", []
         ),
+        "fallback_failure_reasons": proposal["method"]["full_page_fallback"].get(
+            "failure_reasons", {}
+        ),
         "warnings": proposal["warnings"],
     }
     if result.get("refinement"):
@@ -2137,6 +2309,11 @@ def _cmd_propose(args):
             "long_segments_refined": len(result["refinement"]["refined_indices"]),
             "pages_examined": len(result["refinement"]["pages_examined"]),
             "new_boundaries": result["refinement"]["new_boundaries"],
+            "unresolved_pages": result["refinement"]["unresolved_pages"],
+            "failure_reasons": {
+                str(page): reason
+                for page, reason in result["refinement"]["failure_reasons"].items()
+            },
             "vision_calls": result["refinement"]["calls"],
         }
     print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -2244,6 +2421,10 @@ def main(argv=None):
                         "boundaries (measured recall 0.81 -> 0.96; costs one call per interior page)")
     p.add_argument("--refine-threshold", type=int, default=DEFAULT_LONG_SEGMENT_THRESHOLD,
                    help=f"minimum segment length to re-examine (default {DEFAULT_LONG_SEGMENT_THRESHOLD})")
+    p.add_argument("--fallback-cap-ratio", type=float, default=DEFAULT_FALLBACK_CAP_RATIO,
+                   help="fraction of the bundle allowed a full-page second look "
+                        f"(default {DEFAULT_FALLBACK_CAP_RATIO}); raising it spends one "
+                        "call per extra page, 1.0 removes the ceiling")
     add_provider_args(p)
     p.set_defaults(fn=_cmd_propose)
 

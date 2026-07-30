@@ -669,10 +669,22 @@ def test_prompt_carries_no_self_legitimizing_language():
         assert phrase not in prompt
 
 
-def test_prompt_offers_the_real_enum_values():
+def test_type_guess_enum_is_enforced_by_the_schema_not_the_prompt():
+    """The prompt used to spell out every DOCUMENT_TYPES value. That listing cost
+    ~190 characters and pushed the rendered prompt over the length at which the
+    claude-cli child abandons the --json-schema envelope and answers in prose
+    (measured: 980 chars OK, 1064 chars prose 3/3). The constraint did not need to
+    live in the prompt: SEGMENT_OUTPUT_SCHEMA pins type_guess to the same enum, and
+    parse_segmentation_response drops an out-of-enum guess while keeping type_label
+    (see test_type_guess_outside_the_enum_is_dropped_but_the_wording_survives).
+    So the enum is still enforced -- twice -- just not by spending prompt budget."""
+    schema_enum = (
+        sc.SEGMENT_OUTPUT_SCHEMA["properties"]["boundaries"]["items"]
+        ["properties"]["type_guess"]["enum"]
+    )
+    assert set(schema_enum) == set(sc.DOCUMENT_TYPES) | {None}
     prompt = sc.build_segment_prompt([1], sc.compute_sheet_geometry())
-    for value in sc.DOCUMENT_TYPES:
-        assert value in prompt
+    assert len(prompt) < 1000, f"prompt grew to {len(prompt)} chars; see the 1064-char prose threshold"
 
 
 def test_manifest_entries_validate_against_the_real_schema():
@@ -1496,8 +1508,12 @@ def test_parse_full_page_rejects_a_non_boolean_verdict():
 def test_full_page_prompt_encodes_the_owner_set_title_rule():
     assert "OWN title block" in sc.FULL_PAGE_PROMPT
     assert "EACH titled page" in sc.FULL_PAGE_PROMPT
-    assert "continuation ONLY when it has NO title block" in sc.FULL_PAGE_PROMPT
-    assert sc.FULL_PAGE_PROMPT_VERSION == "segment_full_page_v0.2"
+    assert "continuation ONLY when this page has NO title block" in sc.FULL_PAGE_PROMPT
+    assert sc.FULL_PAGE_PROMPT_VERSION == "segment_full_page_v0.3"
+    assert sc.FULL_PAGE_OUTPUT_SCHEMA["required"] == [
+        "starts_new_document", "type_label", "confidence", "evidence",
+    ]
+    assert len(sc.FULL_PAGE_PROMPT) < 1000
 
 
 class _PageVerdictProvider:
@@ -1522,6 +1538,83 @@ class _PageVerdictProvider:
             confidence=0.8, evidence="e")
         return ProviderResult(provider_name="fixture", model_name="fixture-model",
                               prompt_version=prompt_version, text=text)
+
+
+class _StructuredPageVerdictProvider:
+    provider_name = "fixture-structured"
+    model_name = "fixture-model"
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+        self.schemas = []
+
+    def analyze_image_structured(
+        self, image_path, prompt, prompt_version, output_schema
+    ):
+        from llm_providers import ProviderResult
+        self.calls += 1
+        self.schemas.append(output_schema)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        if isinstance(response, dict):
+            return ProviderResult(
+                provider_name=self.provider_name,
+                model_name=self.model_name,
+                prompt_version=prompt_version,
+                text="",
+                structured_output=response,
+            )
+        return ProviderResult(
+            provider_name=self.provider_name,
+            model_name=self.model_name,
+            prompt_version=prompt_version,
+            text=response,
+        )
+
+
+def test_full_page_uses_provider_neutral_structured_contract(tmp_path):
+    pdf = _bundle_pdf(tmp_path, 2)
+    payload = {
+        "starts_new_document": True,
+        "type_label": "진단서",
+        "confidence": 0.9,
+        "evidence": "own title",
+    }
+    provider = _StructuredPageVerdictProvider([payload])
+
+    out = sc._inspect_full_pages(
+        [2], pdf_path=pdf, provider=provider, scratch_dir=tmp_path / "fp"
+    )
+
+    assert provider.calls == 1
+    assert provider.schemas == [sc.FULL_PAGE_OUTPUT_SCHEMA]
+    assert out["verdicts"][2]["ok"] is True
+    assert out["verdicts"][2]["starts_new_document"] is True
+    assert out["failure_reasons"] == {}
+
+
+def test_full_page_contract_failure_corrects_once_then_stays_unresolved(tmp_path):
+    pdf = _bundle_pdf(tmp_path, 2)
+    provider = _StructuredPageVerdictProvider([
+        "analysis prose",
+        "still prose",
+    ])
+    messages = []
+
+    out = sc._inspect_full_pages(
+        [2], pdf_path=pdf, provider=provider, scratch_dir=tmp_path / "fp",
+        progress=messages.append,
+    )
+
+    assert provider.calls == 2
+    assert out["calls"] == 2
+    assert out["verdicts"][2]["ok"] is False
+    assert 2 in out["failure_reasons"]
+    assert "exactly one structured-output correction" in out["failure_reasons"][2]
+    assert any("p2: ERROR" in message for message in messages)
+    assert not any("p2: cont" in message for message in messages)
 
 
 def test_refine_splits_a_long_segment_at_recovered_boundaries(tmp_path):
@@ -1586,9 +1679,9 @@ def test_refine_reuses_the_verdict_cache_on_a_second_run(tmp_path):
     assert out["new_boundaries"] == [5]  # cached verdict still splits at 5
 
 
-def test_refine_survives_a_provider_failure_on_one_page(tmp_path):
-    """A single page's provider exception must not kill the run -- it fails safe
-    to continuation, and the rest of the segment is still examined."""
+def test_refine_corrects_one_transient_provider_failure(tmp_path):
+    """A transient page failure receives the one caller-owned correction and
+    does not contaminate the remaining full-page verdicts."""
     pdf = _bundle_pdf(tmp_path, 10)
     segments = [{"segment_index": 0, "page_start": 1, "page_end": 6}]
 
@@ -1604,13 +1697,20 @@ def test_refine_survives_a_provider_failure_on_one_page(tmp_path):
                 raise RuntimeError("transient provider failure")
             return ProviderResult(provider_name="fixture", model_name="fixture-model",
                                   prompt_version=prompt_version,
-                                  text=_response(starts_new_document=False, confidence=0.8))
+                                  text=_response(
+                                      starts_new_document=False,
+                                      type_label=None,
+                                      confidence=0.8,
+                                      evidence="no own title",
+                                  ))
         # no cache so the failure is actually hit
     provider = _FlakyProvider()
     out = sc.refine_long_segments(segments, pdf_path=pdf, provider=provider,
                                   threshold=4, scratch_dir=None)
     assert len(out["pages_examined"]) == 5  # all interior pages still examined
-    assert out["new_boundaries"] == []      # failed page fell safe to continuation
+    assert out["new_boundaries"] == []
+    assert out["unresolved_pages"] == []
+    assert out["calls"] == 6  # five pages plus one correction
 
 
 def test_propose_with_refine_reruns_long_segments(tmp_path):
@@ -1639,7 +1739,12 @@ def test_propose_with_refine_reruns_long_segments(tmp_path):
             name = str(image_path)
             if "fullpage" in name:
                 page = int(re.search(r"p(\d+)", name).group(1))
-                text = _response(starts_new_document=(page == 7), confidence=0.8)
+                text = _response(
+                    starts_new_document=(page == 7),
+                    type_label="doc" if page == 7 else None,
+                    confidence=0.8,
+                    evidence="page verdict",
+                )
             else:
                 text = sheet_provider_text
             return ProviderResult(provider_name="fixture", model_name="fixture-model",

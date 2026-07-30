@@ -201,10 +201,12 @@ This pass is automatic during `propose`.
    fallback calls, and leave every page flagged. Saturation means the grid or
    crop is unsuitable and should be retuned rather than hidden by spending.
 4. Otherwise render each named page full-page and ask the single-page boundary
-   prompt.
+   prompt through the provider-neutral structured-image contract.
 5. A successful title verdict replaces the crop uncertainty with a boundary.
 6. A successful no-title verdict replaces it with a continuation.
-7. A parse/provider failure leaves `needs_full_page` intact.
+7. A parse/provider failure receives exactly one correction attempt. A second
+   failure leaves `needs_full_page` intact and records a bounded failure reason;
+   it is never displayed as a successful continuation.
 
 ### 6.2 Optional long-segment refinement
 
@@ -214,12 +216,15 @@ The crop model can confidently over-merge repeating forms without setting
 - segments of length at least 4 are selected by default;
 - every interior page is inspected full-page;
 - the pass may add boundaries but never remove an existing boundary;
-- failed verdicts remain continuations, so no split is invented;
+- failed verdicts add no split, remain explicitly unresolved in the refinement
+  diagnostics, and are never displayed as successful continuations;
 - it is off by default because it can add many provider calls.
 
 Targeted fallback and refinement share the same per-page verdict cache and
-`segment_full_page_v0.2` prompt version. A page inspected by the first path is
-not paid for again by the second.
+`segment_full_page_v0.3` prompt version. A page inspected by the first path is
+not paid for again by the second. Cache reuse requires the same prompt, output
+schema, provider, model, and rendered-page image fingerprint; failed verdicts
+are never cached.
 
 ## 7. Resume and cache behavior
 
@@ -229,6 +234,10 @@ The tool uses stable, non-PID scratch paths.
 - geometry fingerprint covers grid, crop, page count, and pixel geometry;
 - geometry, contact-sheet prompt version, output-schema version, provider, or
   model changes invalidate sheet-response reuse;
+- the cache contract also fingerprints the contact-sheet prompt's literal text
+  (`segment_contact_sheet_v0.3`), so an in-place prompt edit invalidates reuse
+  even if the version constant is forgotten -- found live when the prompt was
+  shortened without a version bump;
 - full-page verdicts are cached per page;
 - full-page prompt-version changes invalidate the verdict cache;
 - cache files use temporary-write then atomic replace;
