@@ -261,11 +261,16 @@
         },
         "resolution": {
           "type": ["object", "null"],
-          "description": "The usual case: set when agreement is 'disagreed' and a human has since verified which reading was correct (P8: this page's document is blocked from downstream use until this happens). null/absent while still pending. Once set, this page's text_path is written using the chosen reading's content. Also legitimately used when agreement is 'agreed' but a human found a problem compare() missed -- e.g. one reading contained fabricated content the other didn't have, which compare() (checking only for conflicting core facts, not extraneous content) can pass as 'agreed' -- found for real running CASE_012/DOC_001 page 3. In that case chosen_reading/note explain what was actually wrong and why the other reading was used instead.",
+          "description": "Set when agreement is 'disagreed' and a human has since verified one original reading or supplied a complete corrected page transcription because neither reading was correct (P8: this page's document is blocked from downstream use until this happens). null/absent while still pending. Once set, this page's text_path is written using the selected or human-corrected content. Also legitimately used when agreement is 'agreed' but a human found a problem compare() missed -- e.g. one reading contained fabricated content the other didn't have, which compare() (checking only for conflicting core facts, not extraneous content) can pass as 'agreed' -- found for real running CASE_012/DOC_001 page 3.",
           "properties": {
             "chosen_reading": {
-              "enum": ["reading_a", "reading_b"],
-              "description": "Which of the two original dual-path readings (from ocr_extract.py's reading_a/reading_b) was verified correct."
+              "enum": ["reading_a", "reading_b", "human_corrected"],
+              "description": "Which original dual-path reading was verified correct, or human_corrected when neither was correct and a human supplied the complete page transcription."
+            },
+            "corrected_text_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "description": "SHA-256 of the exact governed processed page text. Required only for chosen_reading=human_corrected; proves which complete human-verified transcription was written without duplicating its potentially sensitive contents in this contract."
             },
             "resolved_by": { "type": "string" },
             "resolved_at": { "type": "string", "format": "date-time" },
@@ -274,7 +279,19 @@
               "description": "Why -- e.g. what was checked against the raw page image, or corroborating evidence from elsewhere in the case."
             }
           },
-          "required": ["chosen_reading", "resolved_by", "resolved_at", "note"]
+          "required": ["chosen_reading", "resolved_by", "resolved_at", "note"],
+          "allOf": [
+            {
+              "if": {
+                "properties": { "chosen_reading": { "const": "human_corrected" } },
+                "required": ["chosen_reading"]
+              },
+              "then": { "required": ["corrected_text_sha256"] },
+              "else": {
+                "not": { "required": ["corrected_text_sha256"] }
+              }
+            }
+          ]
         }
       },
       "required": ["vision_model_reading", "agreement"],

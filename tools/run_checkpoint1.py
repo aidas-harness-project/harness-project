@@ -54,6 +54,7 @@ scenario/branch-testing script) can inspect the outcome programmatically.
 """
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -679,9 +680,9 @@ def resolve_as_non_text(
     }
 
 
-def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, chosen_reading: str,
+def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, chosen_reading: str | None,
                           resolved_by: str, note: str, held_by: str, run_id: str,
-                          classifier=None) -> dict:
+                          classifier=None, corrected_text: str | None = None) -> dict:
     """Resolves one disagreed page using the original run_ocr() result
     (which has both reading_a and reading_b) plus a human's decision of
     which one is correct and why. Writes that page's text, updates
@@ -689,12 +690,26 @@ def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, c
     resolution record. If every page is now agreed-or-resolved, continues
     on to classification + manifest update (same tail run_checkpoint1()
     uses when there's no disagreement at all)."""
-    if chosen_reading not in ("reading_a", "reading_b"):
+    if (chosen_reading is None) == (corrected_text is None):
+        sys.exit(
+            "error: provide exactly one of chosen_reading or corrected_text")
+    if chosen_reading is not None and chosen_reading not in ("reading_a", "reading_b"):
         sys.exit(f"error: chosen_reading must be reading_a or reading_b -- got {chosen_reading!r}")
     page_data = next((p for p in ocr_data["pages"] if p["page"] == page), None)
     if page_data is None:
         sys.exit(f"error: no page {page} in this OCR result")
-    chosen_text = page_data[chosen_reading]
+    if corrected_text is not None:
+        if not corrected_text.strip():
+            sys.exit("error: corrected_text must contain a complete non-empty page transcription")
+        if corrected_text in (page_data["reading_a"], page_data["reading_b"]):
+            sys.exit(
+                "error: corrected_text exactly matches an original reading; "
+                "use --chosen-reading so the audit record identifies that reading")
+        chosen_text = corrected_text
+        resolution_choice = "human_corrected"
+    else:
+        chosen_text = page_data[chosen_reading]
+        resolution_choice = chosen_reading
 
     _write_page_text(case_id, doc_id, page, chosen_text, held_by, run_id)
 
@@ -702,9 +717,16 @@ def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, c
     ocr_result = json.loads(ocr_result_path.read_text(encoding="utf-8"))
     page_entry = next(p for p in ocr_result["pages"] if p["page"] == page)
     page_entry["text_path"] = f"data/processed/{case_id}/{doc_id}/page_{page:03d}.md"
-    page_entry["cross_validation"]["resolution"] = {
-        "chosen_reading": chosen_reading, "resolved_by": resolved_by, "resolved_at": now_iso(), "note": note,
+    resolution = {
+        "chosen_reading": resolution_choice,
+        "resolved_by": resolved_by,
+        "resolved_at": now_iso(),
+        "note": note,
     }
+    if corrected_text is not None:
+        resolution["corrected_text_sha256"] = hashlib.sha256(
+            corrected_text.encode("utf-8")).hexdigest()
+    page_entry["cross_validation"]["resolution"] = resolution
 
     still_unresolved = [p["page"] for p in ocr_result["pages"]
                          if p["cross_validation"]["agreement"] == "disagreed"
@@ -775,6 +797,19 @@ def _resolve_from_args(args):
         sys.exit(f"error: could not read raw dual-read dump {raw_path}: {exc}")
 
     try:
+        classifier = build_classifier_provider(
+            classifier_provider_name=args.classifier_provider,
+            classifier_model=args.classifier_model,
+        )
+        corrected_text = None
+        if args.corrected_text_file is not None:
+            corrected_path = Path(args.corrected_text_file)
+            try:
+                corrected_text = corrected_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                sys.exit(
+                    f"error: could not read corrected transcription file "
+                    f"{corrected_path}: {exc}")
         result = resolve_from_raw_ocr(
             args.case_id,
             args.doc_id,
@@ -785,6 +820,8 @@ def _resolve_from_args(args):
             note=args.note,
             held_by=args.held_by,
             run_id=args.run_id,
+            classifier=classifier,
+            corrected_text=corrected_text,
         )
     except ProviderConfigError as exc:
         sys.exit(f"error: {exc}")
@@ -847,12 +884,32 @@ def main(argv=None):
     resolve_parser.add_argument("case_id")
     resolve_parser.add_argument("doc_id")
     resolve_parser.add_argument("--page", type=int, required=True, help="1-based page number of the disagreed page")
-    resolve_parser.add_argument("--chosen-reading", choices=["reading_a", "reading_b"], required=True,
-                                help="Which of the two independent reads the human verified as correct")
+    resolution_source = resolve_parser.add_mutually_exclusive_group(required=True)
+    resolution_source.add_argument(
+        "--chosen-reading",
+        choices=["reading_a", "reading_b"],
+        help="Which of the two independent reads the human verified as correct",
+    )
+    resolution_source.add_argument(
+        "--corrected-text-file",
+        help=(
+            "UTF-8 file containing the complete page transcription verified by a human "
+            "when neither independent reading is correct"
+        ),
+    )
     resolve_parser.add_argument("--resolved-by", required=True, help="Name of the human (e.g. 손해사정사) making the call")
     resolve_parser.add_argument("--note", required=True, help="Why this reading is correct")
     resolve_parser.add_argument("--held-by", required=True)
     resolve_parser.add_argument("--run-id", required=True)
+    resolve_parser.add_argument(
+        "--classifier-provider",
+        choices=SUPPORTED_PROVIDERS,
+        help="Provider for post-resolution document classification",
+    )
+    resolve_parser.add_argument(
+        "--classifier-model",
+        help="Model name for --classifier-provider",
+    )
 
     non_text_parser = sub.add_parser(
         "resolve-non-text",

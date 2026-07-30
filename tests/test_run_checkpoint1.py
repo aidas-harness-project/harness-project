@@ -3,6 +3,7 @@ stopping at a P8 disagreement; resolve_from_raw_ocr() continues past one
 once a human decides). Provider calls are mocked -- these tests never shell
 out to a real CLI or call an external API.
 """
+import hashlib
 import json
 
 import pytest
@@ -376,6 +377,67 @@ def test_resolve_from_raw_ocr_partial_when_multiple_disagreements(tmp_path, monk
     assert not (tmp_path / "outputs" / "CASE_009" / "classification_result_DOC_001.json").exists()
 
 
+def test_resolve_from_raw_ocr_accepts_human_corrected_transcription(
+        tmp_path, monkeypatch):
+    _seed_manifest(tmp_path, "CASE_009", "DOC_001")
+    _mock_ocr(monkeypatch, [("wrong A", "wrong B", "disagreed")])
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
+    blocked = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001")
+    assert blocked["status"] == "blocked_disagreement"
+
+    ocr_data = json.loads(
+        (tmp_path / "_ocr_scratch" / "CASE_009_DOC_001_raw.json").read_text(
+            encoding="utf-8"))
+    corrected_text = "Human-verified complete page transcription"
+    _mock_classify(monkeypatch, doc_type="medical_record", label="의무기록")
+
+    result = rc1.resolve_from_raw_ocr(
+        "CASE_009", "DOC_001", ocr_data, page=1, chosen_reading=None,
+        corrected_text=corrected_text, resolved_by="Reviewer",
+        note="Neither automated reading was correct; verified against the source page.",
+        held_by="tester", run_id="RUN_20260713_002")
+
+    assert result["status"] == "passed"
+    page_path = tmp_path / "data" / "processed" / "CASE_009" / "DOC_001" / "page_001.md"
+    assert page_path.read_text(encoding="utf-8") == corrected_text
+    ocr_result = json.loads(
+        (tmp_path / "outputs" / "CASE_009" / "ocr_result_DOC_001.json").read_text(
+            encoding="utf-8"))
+    resolution = ocr_result["pages"][0]["cross_validation"]["resolution"]
+    assert resolution["chosen_reading"] == "human_corrected"
+    assert resolution["corrected_text_sha256"] == hashlib.sha256(
+        corrected_text.encode("utf-8")).hexdigest()
+    assert ocr_data["pages"][0]["reading_a"] == "wrong A"
+    assert ocr_data["pages"][0]["reading_b"] == "wrong B"
+
+
+def test_cli_resolve_disagreement_reads_human_corrected_text_file(
+        tmp_path, monkeypatch, capsys):
+    _seed_manifest(tmp_path, "CASE_009", "DOC_001")
+    _mock_ocr(monkeypatch, [("wrong A", "wrong B", "disagreed")])
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
+    blocked = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001")
+    assert blocked["status"] == "blocked_disagreement"
+    corrected_path = tmp_path / "corrected-page.md"
+    corrected_path.write_text("verified corrected page", encoding="utf-8")
+    _mock_classify(monkeypatch, doc_type="medical_record", label="의무기록")
+
+    rc1.main([
+        "resolve-disagreement", "CASE_009", "DOC_001",
+        "--page", "1", "--corrected-text-file", str(corrected_path),
+        "--resolved-by", "Reviewer", "--note", "verified full page",
+        "--held-by", "document-pipeline", "--run-id", "RUN_20260713_002",
+        "--classifier-provider", "fixture",
+    ])
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "passed"
+    page_path = tmp_path / "data" / "processed" / "CASE_009" / "DOC_001" / "page_001.md"
+    assert page_path.read_text(encoding="utf-8") == "verified corrected page"
+
+
 def test_resolve_as_non_text_preserves_disagreement_and_writes_no_text(tmp_path, monkeypatch):
     _seed_manifest(tmp_path, "CASE_009", "DOC_010")
     _mock_ocr(monkeypatch, [("reader refused", "no transcribable text", "disagreed"),
@@ -481,6 +543,50 @@ def test_cli_resolve_disagreement_loads_scratch_dump_and_resolves(tmp_path, monk
     ocr_result = json.loads((tmp_path / "outputs" / "CASE_009" / "ocr_result_DOC_001.json").read_text(encoding="utf-8"))
     assert ocr_result["cross_validation_status"] == "disagreed_resolved"
     assert ocr_result["pages"][0]["cross_validation"]["resolution"]["resolved_by"] == "Pyun"
+
+
+def test_cli_resolve_disagreement_uses_explicit_classifier_provider(
+        tmp_path, monkeypatch, capsys):
+    _seed_manifest(tmp_path, "CASE_009", "DOC_001")
+    _mock_ocr(monkeypatch, [("A reading", "B reading", "disagreed")])
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
+    blocked = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001")
+    assert blocked["status"] == "blocked_disagreement"
+
+    classifier = object()
+    provider_args = {}
+
+    def fake_build_classifier_provider(**kwargs):
+        provider_args.update(kwargs)
+        return classifier
+
+    monkeypatch.setattr(rc1, "build_classifier_provider", fake_build_classifier_provider)
+
+    def fake_classify(text, selected_classifier=None):
+        assert selected_classifier is classifier
+        return {
+            "predicted_document_type": "medical_record",
+            "document_type_label": "의무기록",
+            "confidence": 0.9,
+            "quote": text[:20],
+        }
+
+    monkeypatch.setattr(rc1, "classify_document", fake_classify)
+    rc1.main([
+        "resolve-disagreement", "CASE_009", "DOC_001",
+        "--page", "1", "--chosen-reading", "reading_b",
+        "--resolved-by", "Pyun", "--note", "verified against the source page",
+        "--held-by", "document-pipeline", "--run-id", "RUN_20260713_002",
+        "--classifier-provider", "codex-cli", "--classifier-model", "gpt-test",
+    ])
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "passed"
+    assert provider_args == {
+        "classifier_provider_name": "codex-cli",
+        "classifier_model": "gpt-test",
+    }
 
 
 def test_cli_resolve_disagreement_errors_when_scratch_dump_missing(tmp_path):
