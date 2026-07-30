@@ -66,6 +66,17 @@ _segmentation_scratch/
 # Project-local offline runtimes and model weights (downloaded, never versioned)
 .runtime/
 
+# Protected loss-adjustment format-study artifacts. These contain source-derived
+# material or source-path-bearing review metadata and must stay out of commits.
+loss-adjustment-format-study/_ocr_cache/
+loss-adjustment-format-study/_working/
+loss-adjustment-format-study/manifest.json
+loss-adjustment-format-study/boundary-review.json
+loss-adjustment-format-study/independent-boundary-review.json
+loss-adjustment-format-study/sections/
+loss-adjustment-format-study/no-report/
+loss-adjustment-format-study/analysis/report-index.csv
+
 # graphify knowledge-graph build output -- regenerable from the corpus, not source
 graphify-out/
 
