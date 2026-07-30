@@ -88,6 +88,10 @@ def _statuses():
 # --- lock order ------------------------------------------------------------
 
 def test_declared_lock_order_is_enforced_not_merely_documented():
+    assert tx.check_lock_order(
+        ["semantic_index", "document_manifest", "revision_index"]) == []
+    errors = tx.check_lock_order(["revision_index", "semantic_index"])
+    assert any("lock order violation" in e for e in errors), errors
     assert tx.check_lock_order(["run_state", "current_pointer"]) == []
     # Reversed: the deadlock shape.
     errors = tx.check_lock_order(["current_pointer", "run_state"])

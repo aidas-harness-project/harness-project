@@ -1283,7 +1283,8 @@ def test_an_ocr_segment_blocks_finalization_rather_than_passing(
 
     assert rc == 1
     out = capsys.readouterr().out
-    assert "known P0-6 limitation, not a passing state" in out
+    assert "known P0-6 limitation" in out
+    assert "not a passing state" in out
 
 
 # ==========================================================================

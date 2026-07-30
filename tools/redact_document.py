@@ -147,6 +147,19 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
         "review_required": review_required,
         "warnings": warnings,
     }
+    if review_required:
+        # Schema rule (common_component_output.schema.json): review_required
+        # true requires reviewer_role set. Over-redaction risk is a masking-
+        # completeness question, not a medical/legal judgment call -- routes
+        # to 손해사정사, same role run_checkpoint1.py uses for its own
+        # review_required case (a P8 disagreement).
+        contract["reviewer_role"] = "손해사정사"
+        contract["review_reason"] = (
+            "Over-redaction risk: a span was left un-redacted because a safe "
+            "replacement could not be made without risking corruption of "
+            "surrounding kept text (privacy-safe direction, but needs a human "
+            "check). See warnings for the specific page(s)/span(s)."
+        )
 
     scratch_root = ROOT / "_redaction_scratch"
     scratch_root.mkdir(parents=True, exist_ok=True)

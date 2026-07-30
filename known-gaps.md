@@ -2663,3 +2663,197 @@ Focused provider/segmentation coverage passes 170 tests. The non-frontend suite
 passes apart from a pre-existing Windows DAO lock timing test that passed
 immediately when rerun alone. The existing human segmentation gate remains
 unchanged: structured output creates a proposal, never a human approval.
+
+## 34. Contact-sheet boundary verdicts can self-contradict their own evidence text -- OPEN 2026-07-30 (CASE_112)
+
+`merge_sheet_proposals()` (segment_case.py:366) builds segments strictly from
+the `boundaries` array a sheet response returns -- see the function's own
+"load-bearing idea" docstring. A page only avoids becoming its own segment by
+being absent from `boundaries` (or, per case D, being listed in both
+`boundaries` and `continuations`, where boundary wins). Nothing checks whether
+a boundary claim's own `evidence` field actually supports "new document."
+
+`SEGMENT_PROMPT` (segment_case.py:705) states the rule plainly: "A page with
+no title that just continues the text or table above it is not a boundary."
+Real production `propose` runs on CASE_112 show the model stating this exact
+finding in `evidence` -- literally "no title", "continues from p[N-1]" -- while
+still emitting the page as a `boundaries` entry rather than a `continuations`
+entry.
+
+**Measured, not estimated:** DOC_003 (145p, real claude-cli calls, production
+defaults) produced 135 segments; of the 29 segments with
+`provisional_type_label: null`, 29/29 (100%) have `boundary_evidence` text
+containing "continu[ation/es]". DOC_004 (178p, same conditions) produced 141
+segments; of 39 null-label segments, 39/39 (100%) show the identical pattern.
+Zero counterexamples in either document -- this is a systematic,
+one-directional failure (continuation mis-classified as boundary), not
+scattered noise, and it inflates `segment_count` toward page_count (135/145,
+141/178) far past what the source content plausibly contains (both are large
+policy/legal bundles with genuine repeating structure, not 135/141 distinct
+documents).
+
+This is invisible to `merge_sheet_proposals()` by construction: the function
+only reads the *presence* of a page in `boundaries`, never the *content* of
+that boundary's own evidence string, so a self-contradicting verdict passes
+through unflagged. It is also invisible to `--refine`, which only re-examines
+segments at or above a length threshold (default 4) to recover **over-merged**
+boundaries -- the opposite failure mode. A proposal made entirely of 1-page
+segments (this failure's exact shape) has no segment long enough to qualify
+for refine, so the flag is a no-op precisely when this bug is most active.
+
+**Not fixed this pass** -- per the user's explicit instruction (CASE_112 run,
+2026-07-30), the 68 affected segments (29 in DOC_003, 39 in DOC_004) were
+merged into their preceding segment by a human-directed edit at the `approve`
+step for this run only; `segment_case.py` itself is unchanged. A real fix
+needs a decision on where the check lives: (a) reject/re-ask a boundary claim
+at merge time when its own evidence string matches a continuation pattern
+(cheap, but pattern-matching natural-language evidence is brittle and
+model-wording-dependent), or (b) tighten `SEGMENT_PROMPT`/the structured
+output schema so `type_label`/`confidence` are required to be null only when
+`starts_new_document` is also constrained against the same evidence field
+server-side (schema can't express a cross-field semantic constraint, so this
+still needs code), or (c) treat any boundary with a continuation-worded
+evidence string as `needs_full_page` instead of trusting the contact-sheet
+verdict outright, spending one more call to resolve the contradiction properly
+rather than silently accepting either side.
+
+## 35. Multi-page insurance_policy documents burn redundant P8 vision calls on formatting-only variance -- OPEN 2026-07-30 (CASE_112)
+
+CASE_112's checkpoint-1 batch (221 documents, single-technology weak-P8:
+`claude-cli` reads both `reader_a`/`reader_b`) produced 18 real P8
+disagreements. Reviewing all 18 (human, page-by-page, comparing
+`reading_a`/`reading_b` in each `_ocr_scratch/CASE_112_{doc_id}_raw.json`)
+found that the `insurance_policy`-typed documents' disagreements were, without
+exception, **formatting-only**: identical clause text, identical numbering,
+differing only in whitespace/indentation (e.g. DOC_039, DOC_173) or the
+presence/absence of a trailing boilerplate line such as an insurer slogan
+(e.g. DOC_042, DOC_198) -- never a substantive content difference. This
+matches a broader pattern already visible across the case: `insurance_policy`
+segments are highly repetitive boilerplate (standard clause bundles), so two
+independent LLM-vision reads of the same policy page are likely to agree on
+substance and differ only on incidental transcription formatting, making the
+second read's marginal value low relative to its cost (a full extra
+vision call per page, plus the human-resolution overhead when formatting noise
+crosses whatever threshold the comparator's prompt uses to call disagreement).
+
+**Not fixed this pass** -- resolved page-by-page by human review for CASE_112
+(see run-notes `CASE_112_RUN_20260730_001.md`), `ocr_extract.py`/
+`run_checkpoint1.py` unchanged. Flagged as a design idea for a future pass,
+not decided: for documents already classified (at split time, from Stage 1's
+provisional typing or from a prior checkpoint-1 classification) as
+`insurance_policy`, consider either (a) a single read plus embedded-text
+extraction where available (many policy PDFs are not scans and already carry
+selectable text, making dual-vision-read P8 unnecessary overhead for that
+document class specifically), or (b) a cheaper single-read path with the
+formatting-noise tolerance built into the comparator prompt rather than into
+post-hoc human review. Needs a decision on where the type-based branch would
+live (Stage 1 already knows a provisional type before split; checkpoint 1
+currently classifies only after OCR) and whether skipping the second read for
+one document class is an acceptable weakening of P8 for that class specifically
+-- not something to decide unilaterally in code.
+
+## 36. `redact_document.py` never set `reviewer_role` on `review_required: true` -- FIXED 2026-07-31 (CASE_112)
+
+`common_component_output.schema.json` enforces (via an `allOf`/`if`/`then`
+block): if `review_required` is `true`, `reviewer_role` is a required
+property. `run_checkpoint1.py` already follows this rule for its own
+`review_required` case (a P8 disagreement sets `reviewer_role: "손해사정사"`).
+`redact_document.py`'s `contract` dict computed `review_required` from
+`review_warnings` (over-redaction risk -- a span left un-redacted to avoid
+corrupting kept text) but never set `reviewer_role` at all, in either branch.
+
+**Real failure, not a hypothetical**: hit live during CASE_112's checkpoint-2
+batch (219 documents) -- DOC_002 was the first document in the batch whose
+redaction actually produced `review_required: true`, and `dao.py
+write-contract` correctly rejected it (`'reviewer_role' is a required
+property`), per the same fail/don't-persist contract every other schema
+violation gets. All documents before DOC_002 in the batch had happened to
+have `review_required: false`, so the gap was latent until the first document
+that needed it.
+
+**Fixed**: `redact_document.py` now sets `contract["reviewer_role"] =
+"손해사정사"` and a `review_reason` string when `review_required` is true --
+over-redaction risk is a masking-completeness question (did every PII span
+get safely replaced), not a medical or legal judgment call, so it routes to
+손해사정사 like `run_checkpoint1.py`'s P8-disagreement case, not 의사 or
+법률전문가. Verified against the real failure: re-ran DOC_002 after the fix,
+`write-contract` passed cleanly (`review_required: true`, 0 items redacted,
+schema-valid). Existing `tests/test_redact_document.py` (4 tests) did not
+cover a `review_required: true` case at all, which is why this was never
+caught before a real run exercised it -- not extended with a new test this
+pass (deferred, same category as other CASE_112-run-discovered gaps flagged
+for follow-up rather than fixed inline mid-run).
+
+## 37. P0-8 table-boundary verification structurally cannot run on OCR-sourced policy documents -- human override added, RISK ACCEPTED 2026-07-31 (CASE_112)
+
+`table_region_provenance.py`'s `VERIFIABLE_EXTRACTION_METHODS = frozenset({"embedded_text"})`
+is a deliberate fail-closed design (module docstring: "`ocr` is absent on
+purpose... Listing it with a weaker check would be the fail-open version").
+An OCR-sourced page has no deterministic text layer, so the DAO's real table
+detector cannot establish where a table's boundary actually is -- and P0-8's
+whole point is that a table boundary is derived from the DAO's own scan of
+the registered PDF, never self-declared by an agent.
+
+**Real impact, not hypothetical**: CASE_112's entire policy corpus (203
+documents across two segmented physical parents, `DOC_003.pdf`/106 segments
+and `DOC_004.pdf`/102 segments -- both single large 삼성화재 영업배상책임보험
+약관 bundles carved into per-특약/조항 segments by Stage 1) has
+`extraction_method: "ocr"` for every segment. Two `policy-pipeline` subagent
+runs (one per parent) both hit `scan-table-candidates`'s `BLOCKED` refusal on
+every single document, meaning **stage 4 (policy_clause_processing) could not
+produce a single output for this case as originally designed** -- not a
+per-document edge case, a total stage blocker.
+
+A 별표/장해분류표 (disability-grade schedule) or other payout-condition table
+is plausible in a 영업배상책임보험 policy bundle of this size. Without a
+verified table boundary, a downstream clause could anchor to a row the real
+table doesn't contain, or miss a row it does -- silently, since nothing
+would flag it as wrong.
+
+**Explicit user decision (2026-07-31, this session)**: proceed without
+table-boundary verification for OCR-sourced documents, accepting the risk,
+rather than block the case indefinitely on a structural gap this PoC cannot
+close (a real OCR engine with a text layer, or embedded-text extraction, is
+the actual fix -- see `open-decisions.md` #4). Explicitly instructed to
+record the risk, not silently code around the guardrail.
+
+**Implemented, not silently bypassed**: added `dao.py
+record-unverifiable-table-scan CASE_ID --doc-id DOC_ID --authorized-by NAME
+--reason TEXT`, a new, separate, human-authorization-required command. It
+does NOT relax `scan-table-candidates` (real OCR documents still refuse there
+exactly as before -- regression-tested). It records a new, honestly distinct
+`scan_status: "unverifiable_ocr_source"` (never `complete_no_candidates`,
+which is reserved for a genuine scan that looked and found nothing) plus a
+schema-required `human_override: {authorized_by, authorized_at, reason}`
+object, so the authorization is permanently on record in
+`_table_region_index.json` for any later audit -- never indistinguishable
+from a real verified-empty scan. Everything about source identity (document
+registered, raw-PDF digest current, source-text revision bound, physical
+page mapping resolved) is still verified exactly as a real scan requires;
+only the actual table-detector run is skipped, because there is nothing
+deterministic to run it against. `_table_region_finalize_blockers` treats
+this status as non-blocking; `inventory_integrity_errors` and
+`inventory_currency_errors` (in `table_region_provenance.py`) were both
+updated to recognize the new status consistently (the first two implementation
+attempts each missed one of these two independent validation sites, caught by
+new tests before being applied to real case data).
+
+Schema (`table_region_index.schema.json` v0.1 -> effectively v0.2, `$id`
+unchanged): `scan_status` enum gained `unverifiable_ocr_source`; new
+`human_override` property with an `if`/`then` requiring it whenever that
+status is set.
+
+9 new tests in `tests/test_table_region_followup.py` (refusal for verifiable
+documents, refusal for unregistered documents, successful override recording
+with correct field values, finalization proceeding after an override,
+no-op on identical re-run, the real `scan-table-candidates` path still
+refusing OCR unchanged, source-digest-mismatch refusal). Full suite (1741
+tests after these additions) passes.
+
+**Not yet done**: the override has not yet been applied to CASE_112's real
+203 documents as of this entry -- that is the next step, to be run for real
+against the actual case (not just the test suite) before policy-pipeline is
+re-dispatched. Also not done: no retroactive review of whether either of the
+two 106/102-segment parents actually contains a 별표-style table that this
+override is now knowingly proceeding past unverified -- the risk is accepted
+in the abstract, not confirmed absent.

@@ -604,6 +604,14 @@ def build_manifest_entries(
         entries.append({
             "document_id": doc_id,
             "file_name": file_name,
+            # Stage 1 writes a real child PDF into data/raw below.  That makes
+            # this a physical document in the manifest model, even though the
+            # immutable source bundle and approved source-page range remain
+            # recorded separately.  Do not model this as a processed-text
+            # segment: those have no raw file of their own and acquire a
+            # source_document_id/page_map only through the DAO's derivation
+            # receipt path after document processing.
+            "document_role": "physical",
             # Forward slashes regardless of host OS: the schema pattern requires
             # them and the value is compared against paths built elsewhere.
             "file_path": f"data/raw/{case_id}/{file_name}",

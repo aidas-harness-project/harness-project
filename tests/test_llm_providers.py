@@ -879,3 +879,68 @@ def test_openai_empty_output_rejected(monkeypatch):
     )
     with pytest.raises(providers.ProviderExecutionError):
         provider.classify_document("prompt", "classification_v0.1")
+
+
+# --- compare_text timeout override (policy-polarity long-passage support) ---
+
+
+def test_compare_text_timeout_defaults_and_overrides():
+    """The default stays 60s; a valid override is honoured."""
+    assert providers.compare_text_timeout(env={}) == 60
+    assert providers.compare_text_timeout(
+        env={"HARNESS_LLM_COMPARE_TIMEOUT_SECONDS": "180"}) == 180
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "0", "-5", "  "])
+def test_compare_text_timeout_falls_back_on_invalid(bad):
+    """A malformed timeout must not make every semantic analysis a hard error."""
+    assert providers.compare_text_timeout(
+        env={"HARNESS_LLM_COMPARE_TIMEOUT_SECONDS": bad}) == 60
+
+
+def test_compare_text_passes_env_timeout_to_subprocess(monkeypatch, tmp_path):
+    """The resolved timeout actually reaches the claude-cli subprocess call."""
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = "AGREE"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    monkeypatch.setenv("HARNESS_LLM_COMPARE_TIMEOUT_SECONDS", "240")
+    providers.ClaudeCliProvider(root=tmp_path).compare_text(
+        "compare prompt", "ocr_compare_v0.1")
+
+    assert seen["timeout"] == 240
+
+
+def test_codex_compare_text_passes_env_timeout_to_subprocess(monkeypatch, tmp_path):
+    """Same override reaches codex-cli, the other production CLI analyzer.
+
+    codex-cli returns its result via an output FILE (`--output-last-message`),
+    not stdout, so the fake must populate that path or the provider correctly
+    fails closed on empty output.
+    """
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        for flag in ("--output-last-message", "--output_last_message"):
+            if flag in cmd:
+                Path(cmd[cmd.index(flag) + 1]).write_text("AGREE", encoding="utf-8")
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    monkeypatch.setenv("HARNESS_LLM_COMPARE_TIMEOUT_SECONDS", "150")
+    providers.CodexCliProvider(root=tmp_path).compare_text(
+        "compare prompt", "ocr_compare_v0.1")
+
+    assert seen["timeout"] == 150

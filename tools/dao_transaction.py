@@ -61,6 +61,7 @@ class TransactionAborted(Exception):
 # it, because a lock order that lives only in a comment is one refactor away
 # from being violated silently.
 LOCK_ORDER = (
+    "semantic_index",
     "run_state",
     "document_manifest",
     "revision_index",

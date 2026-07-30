@@ -44,7 +44,7 @@
         "provider": {"type": "string", "minLength": 1},
         "model": {"type": "string", "minLength": 1},
         "source_prompt_version": {
-          "const": "policy_polarity_source_v1"
+          "const": "policy_polarity_source_v2"
         },
         "comparison_prompt_version": {
           "const": "policy_polarity_comparison_v1"

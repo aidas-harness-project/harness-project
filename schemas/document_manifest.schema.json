@@ -36,7 +36,7 @@
         },
         "document_role": {
           "enum": ["physical", "segment"],
-          "description": "owner: Case Intake / document-pipeline. 'physical' = a real raw file (data/raw/...). 'segment' = a derived page-range of a physical parent (source_document_id), e.g. CASE_030's DOC_004/005/006 carved from the 240-page policy. Absent is treated as 'physical' for backward compatibility."
+          "description": "owner: Case Intake / document-pipeline. 'physical' = an entry with its own real file in data/raw, including a child PDF that Stage 1 materialized by splitting an intake bundle (its source_file_name/source_page_start/source_page_end retain that audit trail). 'segment' = processed text derived from an already-processed physical parent and has no raw file of its own; it requires source_document_id plus a DAO-issued page_map, e.g. CASE_030's DOC_004/005/006 carved from the 240-page policy. Absent is treated as 'physical' for backward compatibility."
         },
         "policy_processing_role": {
           "enum": [
@@ -370,6 +370,10 @@
           "type": "string",
           "minLength": 1,
           "description": "owner: document-pipeline. The verbatim printed page marker found ON that physical page confirming its logical number (e.g. '12 / 240'). The page offset is only ever a CANDIDATE; this is the independent confirmation that the candidate was right. A page whose printed number cannot be read is not written with a guess -- extraction blocks for review."
+        },
+        "verification_status": {
+          "const": "unverified_ocr_source",
+          "description": "owner: document-pipeline. Present ONLY on a page projected from a P0-6 unverified_override_receipt (segment_page_map_unverified_v1) -- an ocr_segment whose mapping could not be confirmed against the parent PDF's own pages. Absent on every page projected from a real segment_page_map_v2 receipt, where physical_page_sha256/logical_page_evidence carry the actual proof instead. A page with this field never also carries physical_page_sha256/logical_page_evidence -- there is nothing genuine to put there."
         }
       },
       "required": ["logical_page", "source_physical_page"],

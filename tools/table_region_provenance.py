@@ -1069,6 +1069,19 @@ def inventory_integrity_errors(inventory: dict, document_id: str,
         if not scan_errors:
             errors.append(
                 f"{prefix}failed scan has no recorded scan_errors")
+    elif status == "unverifiable_ocr_source":
+        if candidates or possible_tables or scan_errors:
+            errors.append(
+                f"{prefix}unverifiable_ocr_source is inconsistent: it "
+                "requires zero strict candidates, zero possible-table "
+                "signals, and no scan errors -- it records that no scan ran, "
+                "never a scan's findings")
+        override = inventory.get("human_override")
+        if not isinstance(override, dict) or not override.get("authorized_by"):
+            errors.append(
+                f"{prefix}unverifiable_ocr_source requires a human_override "
+                "with authorized_by set -- this status may never be recorded "
+                "without an explicit human authorization on file")
     else:
         errors.append(
             f"{prefix}unknown table candidate scan_status {status!r}")
@@ -1100,44 +1113,60 @@ def inventory_currency_errors(inventory: dict, *, current_pdf_sha256,
     prefix = f"{location}: " if location else ""
     errors: list[str] = []
 
-    profile = inventory.get("detector_profile")
-    if profile not in DETECTOR_PROFILES:
-        errors.append(
-            f"{prefix}the scan was run with detector profile {profile!r}, "
-            "which this build does not define -- it must be re-run")
-    elif inventory.get("detector_config_fingerprint") != detector_fingerprint(
-            profile):
-        errors.append(
-            f"{prefix}detector profile {profile!r} has been reconfigured since "
-            "this scan was run -- which tables the detector finds is a "
-            "function of its configuration, so the document must be re-scanned")
+    # unverifiable_ocr_source never ran a detector or sentinel -- there is no
+    # profile/config/library version to have gone stale, and checking one
+    # would demand a real DETECTOR_PROFILES entry for a scan that by
+    # definition never executed one. Source-identity currency (PDF digest,
+    # revision digest, page coverage, below) still fully applies: a changed
+    # source means even the override's authorization no longer describes
+    # what is on disk, and that must still force a fresh override.
+    is_unverifiable_override = (
+        inventory.get("scan_status") == "unverifiable_ocr_source")
 
-    sentinel_profile = inventory.get("sentinel_profile")
-    if sentinel_profile not in SENTINEL_PROFILES:
-        errors.append(
-            f"{prefix}the scan used sentinel profile {sentinel_profile!r}, "
-            "which this build does not define -- it must be re-run")
-    elif inventory.get("sentinel_config_fingerprint") != sentinel_fingerprint(
-            sentinel_profile):
-        errors.append(
-            f"{prefix}sentinel profile {sentinel_profile!r} has been "
-            "reconfigured since this scan was run -- a broader detector may "
-            "now find possible tables the old scan missed; re-scan")
+    if not is_unverifiable_override:
+        profile = inventory.get("detector_profile")
+        if profile not in DETECTOR_PROFILES:
+            errors.append(
+                f"{prefix}the scan was run with detector profile {profile!r}, "
+                "which this build does not define -- it must be re-run")
+        elif inventory.get(
+                "detector_config_fingerprint") != detector_fingerprint(
+                profile):
+            errors.append(
+                f"{prefix}detector profile {profile!r} has been reconfigured "
+                "since this scan was run -- which tables the detector finds "
+                "is a function of its configuration, so the document must be "
+                "re-scanned")
 
-    current_library = current_pymupdf_version()
-    if current_library is None:
-        errors.append(
-            f"{prefix}the PyMuPDF detector runtime is unavailable, so neither "
-            "the strict nor sentinel derivation can be confirmed")
-    else:
-        for label, recorded in (
-                ("strict detector", inventory.get("detector_library_version")),
-                ("sentinel", inventory.get("sentinel_library_version"))):
-            if recorded != current_library:
-                errors.append(
-                    f"{prefix}{label} PyMuPDF version changed since the scan "
-                    f"(scan {recorded!r}, current {current_library!r}) -- table "
-                    "detection output is version-dependent; re-scan")
+        sentinel_profile = inventory.get("sentinel_profile")
+        if sentinel_profile not in SENTINEL_PROFILES:
+            errors.append(
+                f"{prefix}the scan used sentinel profile {sentinel_profile!r}, "
+                "which this build does not define -- it must be re-run")
+        elif inventory.get(
+                "sentinel_config_fingerprint") != sentinel_fingerprint(
+                sentinel_profile):
+            errors.append(
+                f"{prefix}sentinel profile {sentinel_profile!r} has been "
+                "reconfigured since this scan was run -- a broader detector "
+                "may now find possible tables the old scan missed; re-scan")
+
+        current_library = current_pymupdf_version()
+        if current_library is None:
+            errors.append(
+                f"{prefix}the PyMuPDF detector runtime is unavailable, so "
+                "neither the strict nor sentinel derivation can be confirmed")
+        else:
+            for label, recorded in (
+                    ("strict detector",
+                     inventory.get("detector_library_version")),
+                    ("sentinel", inventory.get("sentinel_library_version"))):
+                if recorded != current_library:
+                    errors.append(
+                        f"{prefix}{label} PyMuPDF version changed since the "
+                        f"scan (scan {recorded!r}, current "
+                        f"{current_library!r}) -- table detection output is "
+                        "version-dependent; re-scan")
 
     if current_pdf_sha256 is None:
         errors.append(

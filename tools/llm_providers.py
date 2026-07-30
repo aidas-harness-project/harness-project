@@ -44,6 +44,33 @@ DEFAULT_ENV_PREFIX = "HARNESS_LLM"
 # never to content agreement -- see ClaudeCliProvider._run.
 _CLAUDE_CLI_MAX_ATTEMPTS = 3
 _CLAUDE_CLI_RETRY_SLEEP_SECONDS = 2.0
+
+# `compare_text` default. 60s was tuned for the short OCR agreement verdict
+# (ocr_extract.compare); the policy-polarity path reuses this same method for a
+# two-phase semantic reading of a long Korean article and legitimately runs
+# past it, so every attempt times out and no receipt can ever be issued for the
+# longer passages. Overridable per deployment rather than raised outright, so
+# the fast path stays fast and a slow analyzer is a config change, not a patch.
+_COMPARE_TEXT_DEFAULT_TIMEOUT_SECONDS = 60
+_COMPARE_TEXT_TIMEOUT_ENV = "HARNESS_LLM_COMPARE_TIMEOUT_SECONDS"
+
+
+def compare_text_timeout(env: Mapping[str, str] | None = None) -> int:
+    """Resolve compare_text's subprocess timeout.
+
+    Invalid or non-positive values fall back to the default rather than
+    raising: a malformed timeout must not turn every semantic analysis into a
+    hard configuration failure.
+    """
+    source = os.environ if env is None else env
+    raw = str(source.get(_COMPARE_TEXT_TIMEOUT_ENV, "")).strip()
+    if not raw:
+        return _COMPARE_TEXT_DEFAULT_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _COMPARE_TEXT_DEFAULT_TIMEOUT_SECONDS
+    return value if value > 0 else _COMPARE_TEXT_DEFAULT_TIMEOUT_SECONDS
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 # A child subprocess that reads untrusted claim-document images has no reason
@@ -184,7 +211,10 @@ class BaseProvider:
         """
         return self.transcribe_image(image_path, prompt, prompt_version)
 
-    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+    def compare_text(
+        self, prompt: str, prompt_version: str,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> ProviderResult:
         raise NotImplementedError
 
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
@@ -399,8 +429,13 @@ class ClaudeCliProvider(BaseProvider):
             output_schema=output_schema,
         )
 
-    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
-        return self._run(prompt, prompt_version=prompt_version, allowed_read=False, timeout=60)
+    def compare_text(
+        self, prompt: str, prompt_version: str,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> ProviderResult:
+        return self._run(prompt, prompt_version=prompt_version, allowed_read=False,
+                         timeout=compare_text_timeout(),
+                         output_schema=output_schema)
 
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, allowed_read=False, timeout=120)
@@ -516,8 +551,18 @@ class CodexCliProvider(BaseProvider):
             image_paths=[image_path],
         )
 
-    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
-        return self._run(prompt, prompt_version=prompt_version, timeout=60)
+    def compare_text(
+        self, prompt: str, prompt_version: str,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> ProviderResult:
+        # codex-cli has no native structured-output flag (unlike claude-cli's
+        # --json-schema) -- output_schema is accepted for interface parity
+        # with the other providers but cannot be enforced here. A caller
+        # relying on strict-JSON parsing over this provider still needs its
+        # own parse-with-one-correction handling; this is not silently
+        # equivalent to a provider that actually enforces the schema.
+        return self._run(prompt, prompt_version=prompt_version,
+                         timeout=compare_text_timeout())
 
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, timeout=120)
@@ -564,7 +609,10 @@ class _ApiProviderStub(BaseProvider):
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
         raise self._not_implemented()
 
-    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+    def compare_text(
+        self, prompt: str, prompt_version: str,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> ProviderResult:
         raise self._not_implemented()
 
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
@@ -685,7 +733,12 @@ class OpenAIApiProvider(_ApiProviderStub):
         }]
         return self._post_responses(input_payload, prompt_version=prompt_version, timeout=180)
 
-    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+    def compare_text(
+        self, prompt: str, prompt_version: str,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> ProviderResult:
+        # output_schema accepted for interface parity; _post_responses has no
+        # response_format/json_schema wiring yet, so it is not enforced here.
         return self._post_responses(prompt, prompt_version=prompt_version, timeout=60)
 
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
@@ -731,7 +784,10 @@ class FixtureProvider(BaseProvider):
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
         return self._response("transcribe_image", prompt_version)
 
-    def compare_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+    def compare_text(
+        self, prompt: str, prompt_version: str,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> ProviderResult:
         return self._response("compare_text", prompt_version)
 
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
@@ -769,6 +825,41 @@ def parse_provider_config(
     return ProviderConfig(provider_name=provider_name, model_name=model_name)
 
 
+def _resolve_claude_cli_command(explicit: str | None) -> str:
+    """Pick the real binary, not the npm `.cmd`/`.ps1` shim, on Windows.
+
+    `subprocess.run([..], shell=False)` executing a `.cmd` file still routes
+    through `cmd.exe /c` to interpret the batch script, and that layer's
+    batch-argument parsing corrupts a multi-line prompt (confirmed: a prompt
+    containing a blank line is silently truncated at the first blank line,
+    so the model only ever sees the instructions, never the data block that
+    followed). The shim's own body is a one-line passthrough to
+    `node_modules/@anthropic-ai/claude-code/bin/claude.exe` -- calling that
+    binary directly skips the batch layer entirely and was verified to
+    reproduce the same multi-line prompt correctly.
+
+    An explicit `HARNESS_CLAUDE_COMMAND` always wins (the caller may already
+    be pointing at a working binary, including on non-Windows hosts where
+    this rewrite does not apply). Falls back to the plain `"claude"` lookup
+    name if no shim can be resolved, so a host without the npm layout at all
+    (or a non-Windows host) is unaffected.
+    """
+    if explicit:
+        return explicit
+    if os.name != "nt":
+        return "claude"
+    import shutil
+    shim = shutil.which("claude.cmd") or shutil.which("claude")
+    if not shim:
+        return "claude"
+    shim_path = Path(shim)
+    if shim_path.suffix.lower() not in (".cmd", ".bat", ".ps1", ""):
+        return shim
+    candidate = (shim_path.parent / "node_modules" / "@anthropic-ai"
+                 / "claude-code" / "bin" / "claude.exe")
+    return str(candidate) if candidate.exists() else shim
+
+
 def build_provider(
     config: ProviderConfig | None = None,
     *,
@@ -784,7 +875,8 @@ def build_provider(
         return ClaudeCliProvider(
             model_name=selected.model_name,
             root=root,
-            command=source_env.get("HARNESS_CLAUDE_COMMAND") or "claude",
+            command=_resolve_claude_cli_command(
+                source_env.get("HARNESS_CLAUDE_COMMAND")),
         )
     if provider_name == "codex-cli":
         return CodexCliProvider(

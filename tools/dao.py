@@ -5004,6 +5004,299 @@ def _commit_segment_derivation(case_id, doc_id, parent_id, receipt, projection,
             release_lock(target)
 
 
+def cmd_record_unverifiable_segment_derivation(args):
+    """P0-6 human-authorized override: an ocr_segment's page map cannot be
+    verified against the parent PDF (see segment_derivation.py's module
+    docstring -- confirming it would require re-running OCR, which UID
+    verification is forbidden to do). This does not weaken
+    `register-segment-derivation`'s real verification; it records a
+    DIFFERENT, honestly-labeled state (segment_page_map_unverified_v1, never
+    segment_page_map_v2) that finalization accepts only because a human
+    explicitly authorized proceeding without per-page confirmation. The risk
+    this accepts: the asserted physical-page offset may be wrong for one or
+    more logical pages, silently mis-anchoring every evidence quote, policy
+    clause offset and canonical UID keyed to this segment.
+
+    Sets `document_role: "segment"` on first use if not already set -- a
+    caller who has never run Stage-1 lineage assignment can invoke this
+    directly, since the override IS the human asserting this document is a
+    segment of the named parent. It never sets these fields on a document
+    that already declares document_role=physical (refused instead).
+    """
+    case_id, doc_id = args.case_id, args.doc_id
+    case_directory = case_dir(case_id)
+
+    blockers = dao_transaction.pending_journal_errors(case_directory)
+    if blockers:
+        for blocker in blockers:
+            print(f"BLOCKED: {blocker}")
+        return 1
+
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        print("BLOCKED: document_manifest.json does not exist -- a segment's "
+              "parent cannot be resolved, so no override can be recorded")
+        return 1
+    by_id = {d.get("document_id"): d for d in manifest.get("documents", [])}
+
+    entry = by_id.get(doc_id)
+    if entry is None:
+        print(f"BLOCKED: {doc_id} is not registered in document_manifest.json")
+        return 1
+    if entry.get("document_role") == "physical":
+        print(f"BLOCKED: {doc_id} is declared document_role=physical -- an "
+              "override is for a segment of a physical parent, not a "
+              "physical document itself")
+        return 1
+
+    parent_id = args.parent_document_id or entry.get("source_document_id")
+    if not parent_id:
+        print(f"BLOCKED: {doc_id} names no parent (no --parent-document-id "
+              "and no registered source_document_id) -- there is no parent "
+              "to bind this override to")
+        return 1
+    if entry.get("source_document_id") and args.parent_document_id and \
+            args.parent_document_id != entry.get("source_document_id"):
+        print(f"REFUSED: --parent-document-id {args.parent_document_id!r} "
+              f"disagrees with the manifest's source_document_id "
+              f"{entry.get('source_document_id')!r} for {doc_id}")
+        return 1
+    parent = by_id.get(parent_id)
+    if parent is None:
+        print(f"BLOCKED: parent {parent_id} is not registered in "
+              "document_manifest.json")
+        return 1
+    if parent.get("document_role") == "segment":
+        print(f"BLOCKED: parent {parent_id} is itself a segment -- a segment "
+              "must be carved from a physical document")
+        return 1
+
+    actual_parent_digest = registered_source_pdf_sha256(case_id, parent_id)
+    if actual_parent_digest is None:
+        print(f"BLOCKED: parent {parent_id}'s raw source could not be hashed")
+        return 1
+    recorded_parent_digest = parent.get("source_pdf_sha256")
+    if recorded_parent_digest and recorded_parent_digest != actual_parent_digest:
+        print(f"REFUSED: parent {parent_id} records source_pdf_sha256 "
+              f"{recorded_parent_digest!r} but the registered file now hashes "
+              f"to {actual_parent_digest!r} -- the raw source changed")
+        return 1
+
+    logical_pages = _parse_logical_pages(args.pages)
+    if not logical_pages:
+        print("BLOCKED: --pages resolved to no logical pages")
+        return 1
+
+    segment_revision = revision_entry_for(case_id, doc_id)
+    current_revision = (segment_revision or {}).get("current_revision_sha256")
+    if not current_revision:
+        print(f"BLOCKED: {doc_id} has no registered source-text revision -- "
+              "run `dao.py write-redacted-text` first. An override must "
+              "still be bound to exact segment bytes, or a later rewrite "
+              "would silently inherit its authorization")
+        return 1
+
+    receipt = segment_derivation.build_unverified_override_receipt(
+        segment_document_id=doc_id,
+        parent_document_id=parent_id,
+        parent_source_pdf_sha256=actual_parent_digest,
+        segment_source_text_revision_sha256=current_revision,
+        logical_pages=logical_pages,
+        page_offset=args.page_offset,
+        issued_at=now_iso(),
+        issued_by=args.held_by,
+        run_id=args.run_id,
+        authorized_by=args.authorized_by,
+        reason=args.reason,
+    )
+    projection = segment_derivation.manifest_page_map_from_unverified_override(receipt)
+
+    existing = segment_derivation_receipt_for(case_id, doc_id)
+    if (existing is not None
+            and existing.get("scheme") == segment_derivation.UNVERIFIED_OVERRIDE_SCHEME
+            and segment_derivation.unverified_override_fingerprint(existing)
+            == segment_derivation.unverified_override_fingerprint(receipt)
+            and (entry.get("page_map") or []) == projection):
+        print(f"PASS: {doc_id} unverified-OCR override is unchanged (no-op) "
+              f"-- {len(projection)} pages, parent {parent_id} "
+              f"{actual_parent_digest[:12]}")
+        return 0
+
+    return _commit_unverifiable_segment_derivation(
+        case_id, doc_id, parent_id, receipt, projection,
+        args.held_by, args.run_id)
+
+
+def _commit_unverifiable_segment_derivation(case_id, doc_id, parent_id,
+                                            receipt, projection,
+                                            held_by, run_id):
+    """Write the override receipt, manifest projection (including
+    document_role/source_document_id/derivation_method if not already set),
+    and the downstream invalidation as one fail-closed transaction. Mirrors
+    `_commit_segment_derivation`'s lock order and journal discipline exactly.
+    """
+    lock_kinds = ("run_state", "document_manifest", "revision_index")
+    order_errors = dao_transaction.check_lock_order(lock_kinds)
+    if order_errors:
+        for error in order_errors:
+            print(f"FAIL: {error}")
+        return 1
+
+    case_directory = case_dir(case_id)
+    state_target = run_state_path(case_id)
+    manifest_target = case_directory / "document_manifest.json"
+    index_target = segment_derivation_index_path(case_id)
+    index_preimage: bytes | None = None
+    manifest_preimage: bytes | None = None
+
+    held: list[Path] = []
+    try:
+        for target, purpose in (
+            (state_target, f"record unverifiable segment derivation for {doc_id}"),
+            (manifest_target, f"project unverified page_map for {doc_id}"),
+            (index_target, f"issue unverified derivation override for {doc_id}"),
+        ):
+            existing_lock = acquire_lock_blocking(
+                target, held_by, run_id or "unknown", purpose)
+            if existing_lock is not None:
+                print(f"LOCKED: held_by={existing_lock['held_by']} "
+                      f"run_id={existing_lock['run_id']} on {target.name} -- "
+                      "the receipt, the manifest projection and the downstream "
+                      "invalidation must land together")
+                return 1
+            held.append(target)
+
+        manifest = load_json(manifest_target)
+        if manifest is None:
+            print("FAIL: document_manifest.json disappeared before the write")
+            return 1
+        entry = next((d for d in manifest.get("documents", [])
+                      if d.get("document_id") == doc_id), None)
+        if entry is None:
+            print(f"FAIL: {doc_id} is no longer in document_manifest.json")
+            return 1
+        if entry.get("document_role") == "physical":
+            print(f"FAIL: {doc_id} became document_role=physical while this "
+                  "override was being prepared; rerun from fresh state")
+            return 1
+
+        fresh_revision = revision_entry_for(case_id, doc_id)
+        fresh_revision_sha = (fresh_revision or {}).get("current_revision_sha256")
+        if fresh_revision_sha != receipt.get("segment_source_text_revision_sha256"):
+            print(f"FAIL: {doc_id} source-text revision changed while this "
+                  "override was being prepared; rerun from fresh state")
+            return 1
+        fresh_parent_digest = registered_source_pdf_sha256(case_id, parent_id)
+        if fresh_parent_digest != receipt.get("parent_source_pdf_sha256"):
+            print(f"FAIL: parent {parent_id} source bytes changed while this "
+                  "override was being prepared; rerun from fresh state")
+            return 1
+
+        index = load_segment_derivation_index(case_id)
+        segments = [s for s in index.get("segments", [])
+                    if s.get("document_id") != doc_id]
+        segments.append(receipt)
+        segments.sort(key=lambda s: s.get("document_id") or "")
+        index["segments"] = segments
+        index["case_id"] = case_id
+
+        index_errors = _schema_check(index, segment_derivation.INDEX_SCHEMA)
+        if index_errors:
+            print("FAIL: the override receipt would be schema-invalid -- "
+                  "nothing written:")
+            for error in index_errors:
+                print(f"  - {error}")
+            return 1
+
+        entry["document_role"] = "segment"
+        entry["source_document_id"] = parent_id
+        entry["derivation_method"] = "ocr_segment"
+        entry["page_map"] = projection
+        manifest["updated_at"] = now_iso()
+        manifest_errors = _schema_check(manifest, "document_manifest.schema.json")
+        if manifest_errors:
+            print("FAIL: the projected manifest would be schema-invalid -- "
+                  "nothing written:")
+            for error in manifest_errors:
+                print(f"  - {error}")
+            return 1
+        lineage_errors = _validate_manifest_lineage(case_id, manifest)
+        if lineage_errors:
+            print("FAIL: the projected manifest fails segment-lineage "
+                  "validation -- nothing written:")
+            for error in lineage_errors:
+                print(f"  - {error}")
+            return 1
+
+        index_preimage = (
+            index_target.read_bytes() if index_target.exists() else None)
+        manifest_preimage = manifest_target.read_bytes()
+
+        dao_transaction.write_journal(case_directory, {
+            "operation": "record_unverifiable_segment_derivation",
+            "case_id": case_id,
+            "document_id": doc_id,
+            "parent_source_document_id": parent_id,
+            "parent_source_pdf_sha256": receipt["parent_source_pdf_sha256"],
+            "status": "invalidating",
+            "started_at": now_iso(),
+        })
+        try:
+            _invalidate_dependents(
+                case_id, "document_processing",
+                f"upstream document_processing changed: {doc_id} unverified "
+                f"page map recorded against parent {parent_id}",
+                held_by, run_id, strict=True, lock_already_held=True)
+        except CascadeFailed as exc:
+            dao_transaction.clear_journal(case_directory)
+            print(f"FAIL: {doc_id} override NOT recorded -- {exc}")
+            print("  the existing receipt and manifest page_map are unchanged")
+            return 1
+
+        try:
+            atomic_write_json(index_target, index)
+            atomic_write_json(manifest_target, manifest)
+        except Exception as exc:  # noqa: BLE001
+            rollback_error = None
+            try:
+                _restore_file_preimage(index_target, index_preimage)
+                _restore_file_preimage(manifest_target, manifest_preimage)
+                dao_transaction.clear_journal(case_directory)
+            except Exception as restore_exc:  # noqa: BLE001
+                rollback_error = restore_exc
+            print(f"FAIL: unverifiable segment derivation persistence failed: {exc}")
+            if rollback_error is None:
+                print("  receipt and manifest were restored to their exact "
+                      "pre-transaction bytes; downstream remains "
+                      "conservatively invalidated")
+            else:
+                print("  ROLLBACK INCOMPLETE: the transaction journal remains "
+                      f"pending and blocks further work: {rollback_error}")
+            return 1
+
+        try:
+            dao_transaction.clear_journal(case_directory)
+        except Exception as exc:  # noqa: BLE001
+            print("FAIL: override files were committed and downstream was "
+                  "invalidated, but the transaction journal could not be "
+                  f"cleared: {exc}")
+            print("  the pending journal intentionally blocks further work; "
+                  "do not delete it without inspecting both files")
+            return 1
+
+        print(f"PASS: {doc_id} recorded as {segment_derivation.UNVERIFIED_OVERRIDE_SCHEME} "
+              f"-- NO per-page mapping was verified; this is a human-authorized "
+              f"reduced-assurance pass, authorized by {receipt['human_override']['authorized_by']!r}: "
+              f"{receipt['human_override']['reason']!r}")
+        for page in receipt["pages"]:
+            print(f"  logical {page['logical_page']} -> physical "
+                  f"{page['source_physical_page']} (UNVERIFIED)")
+        return 0
+    finally:
+        for target in reversed(held):
+            release_lock(target)
+
+
 def _parse_logical_pages(spec: str) -> list[int]:
     """'120-189' or '57,58,118,119' or a mix -> sorted unique logical pages."""
     pages: set[int] = set()
@@ -5881,6 +6174,14 @@ def _table_region_finalize_blockers(case_id: str, doc_id: str) -> list[str]:
         return blockers
 
     scan_status = inventory.get("scan_status")
+    if scan_status == "unverifiable_ocr_source":
+        # A human explicitly authorized proceeding without a verified table-
+        # boundary scan (see cmd_record_unverifiable_table_scan). This is
+        # never a blocker -- that is the entire point of the override -- but
+        # it is also never silent: human_override is schema-required on this
+        # status, so the authorization is permanently on record in
+        # _table_region_index.json for any later audit.
+        return []
     if scan_status in ("inconclusive", "failed"):
         signals = inventory.get("possible_tables") or []
         pages = sorted({signal.get("page") for signal in signals
@@ -6246,6 +6547,187 @@ def _scan_inventory_from(case_id, doc_id, prepared):
         pdf_owner=prepared["pdf_owner"],
         segment_receipt_id=prepared["segment_receipt_id"],
     )
+
+
+_UNVERIFIABLE_OCR_PROFILE = "none_ocr_source_unverifiable"
+
+
+def _prepare_unverifiable_table_scan(case_id: str, doc_id: str):
+    """Everything `record-unverifiable-table-scan` must establish before an
+    OCR-sourced document may be allowed past P0-8 without a deterministic
+    table-boundary scan.
+
+    Deliberately NOT a relaxed `_prepare_table_scan`: it still requires the
+    document be registered and its raw source/text-revision identity resolved
+    (an unregistered or digest-mismatched document is refused exactly as it
+    would be for a real scan) but it never opens the PDF or runs a detector --
+    there is nothing deterministic to run on an image-only page. The only
+    thing this function is willing to certify is source identity, not table
+    geometry.
+    """
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        raise _TableScanRefused(
+            "document_manifest.json does not exist -- no registered source "
+            "can be resolved, so no override can be recorded")
+    entry = next((d for d in manifest.get("documents", [])
+                  if d.get("document_id") == doc_id), None)
+    if entry is None:
+        raise _TableScanRefused(
+            f"{doc_id} is not registered in document_manifest.json")
+
+    method = entry.get("extraction_method")
+    if method in table_region_provenance.VERIFIABLE_EXTRACTION_METHODS:
+        raise _TableScanRefused(
+            f"{doc_id}'s extraction_method is {method!r}, which HAS a "
+            "deterministic text layer -- use `scan-table-candidates` for a "
+            "real verified scan instead of an override; recording an "
+            "unverifiable-source override for a verifiable document would "
+            "hide a check that could actually run.")
+
+    pdf_owner = _table_region_pdf_owner(case_id, doc_id)
+    actual_pdf_digest = registered_source_pdf_sha256(case_id, pdf_owner)
+    if actual_pdf_digest is None:
+        raise _TableScanRefused(f"{pdf_owner}'s raw source could not be hashed")
+    recorded_digest = next(
+        (d.get("source_pdf_sha256") for d in manifest.get("documents", [])
+         if d.get("document_id") == pdf_owner), None)
+    if recorded_digest and recorded_digest != actual_pdf_digest:
+        raise _TableScanRefused(
+            f"{pdf_owner} records source_pdf_sha256 {recorded_digest!r} but "
+            f"the registered file now hashes to {actual_pdf_digest!r} -- the "
+            "raw source changed; an override recorded against it cannot be "
+            "trusted")
+
+    revision_sha = (revision_entry_for(case_id, doc_id) or {}).get(
+        "current_revision_sha256")
+    if not revision_sha:
+        raise _TableScanRefused(
+            f"{doc_id} has no registered source-text revision -- the override "
+            "must still be bound to exact processed bytes, or a later "
+            "rewrite would silently inherit this override's authorization")
+    text = _registered_revision_text(case_id, doc_id)
+    if text is None:
+        raise _TableScanRefused(
+            f"{doc_id}'s registered revision text could not be read")
+    try:
+        pages = policy_completeness.split_pages(text)
+    except Exception as exc:  # noqa: BLE001
+        raise _TableScanRefused(
+            f"{doc_id}'s registered source text is unusable: {exc}") from exc
+    if not pages:
+        raise _TableScanRefused(
+            f"{doc_id}'s registered source text has no pages to cover")
+
+    physical_by_logical = {}
+    unmapped = []
+    for logical in sorted(pages):
+        physical = _physical_page_for(case_id, doc_id, logical)
+        if physical is None:
+            unmapped.append(logical)
+            continue
+        physical_by_logical[logical] = physical
+    if unmapped:
+        raise _TableScanRefused(
+            f"logical page(s) {unmapped} of {doc_id} have no physical page "
+            "mapping -- an override still requires knowing which physical "
+            "pages this document owns")
+
+    segment_receipt = segment_derivation_receipt_for(case_id, doc_id)
+    return {
+        "pdf_owner": pdf_owner,
+        "pdf_digest": actual_pdf_digest,
+        "revision_sha": revision_sha,
+        "physical_by_logical": physical_by_logical,
+        "segment_receipt_id": (
+            _segment_receipt_digest(segment_receipt) if segment_receipt
+            else None),
+    }
+
+
+def _unverifiable_scan_inventory(case_id, doc_id, prepared, *, authorized_by,
+                                  reason):
+    """Build the `unverifiable_ocr_source` inventory: source identity is
+    verified exactly as a real scan requires, but scan_status records
+    plainly that no table-boundary geometry was ever derived -- never
+    `complete_no_candidates`, which is reserved for a genuine scan that
+    looked and found nothing.
+    """
+    inventory = {
+        "scheme": table_region_provenance.SCAN_SCHEME,
+        "document_id": doc_id,
+        "pdf_owner_document_id": prepared["pdf_owner"] or doc_id,
+        "source_pdf_sha256": prepared["pdf_digest"],
+        "source_text_revision_sha256": prepared["revision_sha"],
+        "segment_derivation_receipt_id": prepared["segment_receipt_id"],
+        "detector_profile": _UNVERIFIABLE_OCR_PROFILE,
+        "detector_config_fingerprint": "n/a",
+        "detector_library_version": "n/a",
+        "sentinel_profile": _UNVERIFIABLE_OCR_PROFILE,
+        "sentinel_config_fingerprint": "n/a",
+        "sentinel_library_version": "n/a",
+        "scan_status": "unverifiable_ocr_source",
+        "human_override": {
+            "authorized_by": authorized_by,
+            "authorized_at": now_iso(),
+            "reason": reason,
+        },
+        "scan_errors": [],
+        "scanned_logical_pages": sorted(prepared["physical_by_logical"]),
+        "scanned_at": now_iso(),
+        "candidates": [],
+        "possible_tables": [],
+    }
+    inventory["scan_id"] = table_region_provenance.compute_scan_id(inventory)
+    return inventory
+
+
+def cmd_record_unverifiable_table_scan(args):
+    """Human-authorized P0-8 override for an OCR-sourced document.
+
+    `extraction_method: ocr` has no deterministic text layer, so P0-8's real
+    detector can never run on it -- `scan-table-candidates` always refuses.
+    This command does not weaken that check; it records a DIFFERENT, honestly
+    labeled state (`unverifiable_ocr_source`, never `complete_no_candidates`)
+    that finalization accepts only because a human explicitly authorized
+    proceeding without a verified table-boundary scan. The risk this accepts:
+    an un-scanned OCR document may contain a table (e.g. a 장해분류표 payout
+    schedule) whose boundary is never verified, so a downstream clause could
+    silently mismap a row it should have anchored to. See known-gaps.md for
+    the recorded risk acceptance behind this command's existence.
+    """
+    case_id, doc_id = args.case_id, args.doc_id
+    case_directory = case_dir(case_id)
+
+    blockers = dao_transaction.pending_journal_errors(case_directory)
+    if blockers:
+        for blocker in blockers:
+            print(f"BLOCKED: {blocker}")
+        return 1
+
+    try:
+        prepared = _prepare_unverifiable_table_scan(case_id, doc_id)
+    except _TableScanRefused as refusal:
+        print(f"BLOCKED: {refusal}")
+        return 1
+
+    inventory = _unverifiable_scan_inventory(
+        case_id, doc_id, prepared,
+        authorized_by=args.authorized_by, reason=args.reason)
+    existing = table_candidate_inventory_for(case_id, doc_id)
+    if existing is not None and existing.get("scan_id") == inventory["scan_id"]:
+        print(f"PASS: {doc_id} unverifiable-OCR override is unchanged (no-op) "
+              f"-- {inventory['scan_id'][:16]}")
+        return 0
+
+    rc = _commit_table_region(case_id, doc_id, None, inventory,
+                              args.held_by, args.run_id)
+    if rc == 0:
+        print(f"PASS: {doc_id} recorded as unverifiable_ocr_source -- NO table "
+              "boundary was verified; this is a human-authorized reduced-"
+              f"assurance pass, authorized by {args.authorized_by!r}: "
+              f"{args.reason!r}")
+    return rc
 
 
 def cmd_scan_table_candidates(args):
@@ -7112,6 +7594,98 @@ def _semantic_receipt_validator(case_id: str, doc_id: str):
             case_id, doc_id, condition, bucket, location)
 
 
+def _policy_polarity_source_snapshot(
+        case_id: str, doc_id: str, selector: dict,
+        submitted_uids: list[str], condition_text: str,
+        analyzer: dict) -> tuple[dict | None, list[str]]:
+    """Recompute every source-bound input while provenance locks are held."""
+    if uid_scheme_for(case_id, doc_id) != "canonical_v1":
+        return None, [
+            f"{doc_id} is not canonical_v1 -- semantic analysis must be "
+            "bound to a registered immutable source revision"]
+    context, context_errors = _uid_source_context(case_id, doc_id)
+    if context_errors:
+        return None, context_errors
+    try:
+        records = policy_uid_resolver.resolve_spans(
+            context, selector.get("source_spans"),
+            "semantic analysis source_spans")
+    except (policy_uid_resolver.UidResolutionError,
+            policy_uid.UidInputError) as exc:
+        return None, [
+            f"source selector is not registered provenance: {exc}"]
+    ordered = sorted(
+        records,
+        key=lambda item: (
+            item["physical_page"], item["start_char"], item["end_char"],
+            item["uid"]),
+    )
+    derived_uids = [item["uid"] for item in ordered]
+    if submitted_uids != derived_uids:
+        return None, [
+            "--source-span-uid does not equal the DAO-recomputed exact "
+            f"occurrence UID list (submitted={submitted_uids}, "
+            f"derived={derived_uids})"]
+    revision = (revision_entry_for(
+        case_id, doc_id) or {}).get("current_revision_sha256")
+    if not revision:
+        return None, [f"{doc_id} has no current registered revision"]
+    source_passage = policy_polarity_semantics.source_passage(ordered)
+    quote_hash = policy_polarity_semantics.source_quote_sha256(ordered)
+    condition_hash = policy_polarity_semantics.sha256_text(condition_text)
+    cache_key = policy_polarity_semantics.analysis_cache_key(
+        case_id=case_id,
+        document_id=doc_id,
+        source_revision=revision,
+        source_span_uids=derived_uids,
+        source_quote_hash=quote_hash,
+        condition_hash=condition_hash,
+        analyzer=analyzer,
+    )
+    return {
+        "uid_scheme": "canonical_v1",
+        "revision": revision,
+        "derived_uids": derived_uids,
+        "source_passage": source_passage,
+        "quote_hash": quote_hash,
+        "condition_hash": condition_hash,
+        "cache_key": cache_key,
+    }, []
+
+
+def _acquire_policy_polarity_snapshot_locks(
+        semantic_target: Path, manifest_target: Path, revision_target: Path,
+        args, purpose: str):
+    """Acquire semantic -> manifest -> revision, unwinding partial success."""
+    kinds = ("semantic_index", "document_manifest", "revision_index")
+    order_errors = dao_transaction.check_lock_order(kinds)
+    if order_errors:
+        raise RuntimeError("; ".join(order_errors))
+    targets = (semantic_target, manifest_target, revision_target)
+    purposes = (
+        purpose,
+        f"{purpose}: hold source manifest stable",
+        f"{purpose}: hold source revision stable",
+    )
+    acquired = []
+    for target, lock_purpose in zip(targets, purposes):
+        existing = acquire_lock_blocking(
+            target, args.held_by, args.run_id, lock_purpose)
+        if existing is not None:
+            for held in reversed(acquired):
+                release_lock(held)
+            return existing
+        acquired.append(target)
+    return None
+
+
+def _release_policy_polarity_snapshot_locks(
+        semantic_target: Path, manifest_target: Path,
+        revision_target: Path) -> None:
+    for target in (revision_target, manifest_target, semantic_target):
+        release_lock(target)
+
+
 def cmd_analyze_policy_polarity(args):
     """Issue one two-phase semantic receipt from registered source provenance.
 
@@ -7126,12 +7700,6 @@ def cmd_analyze_policy_polarity(args):
     handed to a provider by naming it, and nothing on the write path would
     ever see that it had happened.
     """
-    if uid_scheme_for(args.case_id, args.doc_id) != "canonical_v1":
-        print(
-            f"BLOCKED: {args.doc_id} is not canonical_v1 -- semantic analysis "
-            "must be bound to a registered immutable source revision")
-        return 1
-
     condition_text = args.condition_text
     try:
         selector = json.loads(args.source_selector_json)
@@ -7145,40 +7713,7 @@ def cmd_analyze_policy_polarity(args):
         print("FAIL: source selector must contain exactly source_spans")
         return 1
 
-    context, context_errors = _uid_source_context(
-        args.case_id, args.doc_id)
-    if context_errors:
-        for error in context_errors:
-            print(f"BLOCKED: {error}")
-        return 1
-    try:
-        records = policy_uid_resolver.resolve_spans(
-            context, selector.get("source_spans"),
-            "semantic analysis source_spans")
-    except (policy_uid_resolver.UidResolutionError,
-            policy_uid.UidInputError) as exc:
-        print(f"FAIL: source selector is not registered provenance: {exc}")
-        return 1
-    ordered = sorted(
-        records,
-        key=lambda item: (
-            item["physical_page"], item["start_char"], item["end_char"],
-            item["uid"]),
-    )
-    derived_uids = [item["uid"] for item in ordered]
     submitted_uids = list(args.source_span_uid or [])
-    if submitted_uids != derived_uids:
-        print(
-            "FAIL: --source-span-uid does not equal the DAO-recomputed exact "
-            f"occurrence UID list (submitted={submitted_uids}, "
-            f"derived={derived_uids})")
-        return 1
-
-    revision = (revision_entry_for(
-        args.case_id, args.doc_id) or {}).get("current_revision_sha256")
-    if not revision:
-        print(f"BLOCKED: {args.doc_id} has no current registered revision")
-        return 1
 
     # Analyzer identity comes from deployment configuration, never from args.
     try:
@@ -7193,23 +7728,12 @@ def cmd_analyze_policy_polarity(args):
         return 1
     active_analyzer = trusted.identity
 
-    source_passage = policy_polarity_semantics.source_passage(ordered)
-    quote_hash = policy_polarity_semantics.source_quote_sha256(ordered)
-    condition_hash = policy_polarity_semantics.sha256_text(condition_text)
-    cache_key = policy_polarity_semantics.analysis_cache_key(
-        case_id=args.case_id,
-        document_id=args.doc_id,
-        source_revision=revision,
-        source_span_uids=derived_uids,
-        source_quote_hash=quote_hash,
-        condition_hash=condition_hash,
-        analyzer=active_analyzer,
-    )
-
     target = policy_polarity_semantic_index_path(args.case_id)
-    existing_lock = acquire_lock_blocking(
-        target, args.held_by, args.run_id,
-        f"analyze policy polarity for {args.doc_id}")
+    manifest_target = case_dir(args.case_id) / "document_manifest.json"
+    revision_target = revision_index_path(args.case_id)
+    existing_lock = _acquire_policy_polarity_snapshot_locks(
+        target, manifest_target, revision_target, args,
+        f"prepare policy polarity analysis for {args.doc_id}")
     if existing_lock is not None:
         print(
             f"LOCKED: held_by={existing_lock['held_by']} "
@@ -7241,91 +7765,157 @@ def cmd_analyze_policy_polarity(args):
                 "invalidates the policy stage and all downstream stages first.")
             return 1
 
+        snapshot, snapshot_errors = _policy_polarity_source_snapshot(
+            args.case_id, args.doc_id, selector, submitted_uids,
+            condition_text, active_analyzer)
+        if snapshot_errors:
+            for error in snapshot_errors:
+                print(f"BLOCKED: {error}")
+            return 1
         for receipt in index.get("receipts") or []:
-            if receipt.get("cache_key") == cache_key:
+            if receipt.get("cache_key") == snapshot["cache_key"]:
                 print(
                     "PASS: semantic analysis cache hit "
                     f"{receipt['receipt_id']} (provider not called)")
                 return 0
+    finally:
+        _release_policy_polarity_snapshot_locks(
+            target, manifest_target, revision_target)
 
-        # --- Phase A: source classification, with no bucket and no condition.
-        try:
-            source_result = provider.compare_text(
-                policy_polarity_semantics.build_source_prompt(source_passage),
-                policy_polarity_semantics.SOURCE_PROMPT_VERSION)
-            if source_result.prompt_version != \
-                    policy_polarity_semantics.SOURCE_PROMPT_VERSION:
-                raise ValueError(
-                    "provider returned a different source prompt version")
-            if (source_result.provider_name != provider.provider_name
-                    or source_result.model_name != provider.model_name):
-                raise ValueError(
-                    "provider result identity differs from the trusted "
-                    "analyzer")
-            source_analysis = policy_polarity_semantics.parse_source_analysis(
-                source_result.text, source_passage)
-        except (llm_providers.ProviderExecutionError, ValueError) as exc:
-            print(
-                "FAIL: source semantic classification produced no receipt; "
-                f"provider/schema error: {exc}")
+    source_passage = snapshot["source_passage"]
+    revision = snapshot["revision"]
+    derived_uids = snapshot["derived_uids"]
+    quote_hash = snapshot["quote_hash"]
+    condition_hash = snapshot["condition_hash"]
+    cache_key = snapshot["cache_key"]
+
+    # Provider work deliberately runs without any shared-file lock.
+    # --- Phase A: source classification, with no bucket and no condition.
+    try:
+        source_result = provider.compare_text(
+            policy_polarity_semantics.build_source_prompt(source_passage),
+            policy_polarity_semantics.SOURCE_PROMPT_VERSION,
+            output_schema=policy_polarity_semantics.SOURCE_OUTPUT_SCHEMA)
+        if source_result.prompt_version != \
+                policy_polarity_semantics.SOURCE_PROMPT_VERSION:
+            raise ValueError(
+                "provider returned a different source prompt version")
+        if (source_result.provider_name != provider.provider_name
+                or source_result.model_name != provider.model_name):
+            raise ValueError(
+                "provider result identity differs from the trusted analyzer")
+        source_analysis = policy_polarity_semantics.parse_source_analysis(
+            source_result.text, source_passage)
+    except (llm_providers.ProviderExecutionError, ValueError) as exc:
+        print(
+            "FAIL: source semantic classification produced no receipt; "
+            f"provider/schema error: {exc}")
+        return 1
+
+    source_receipt = {
+        "source_receipt_id": "",
+        "scheme": policy_polarity_semantics.SCHEME,
+        "case_id": args.case_id,
+        "document_id": args.doc_id,
+        "source_text_revision_sha256": revision,
+        "source_span_uid": derived_uids[0],
+        "source_span_uids": derived_uids,
+        "source_quote_sha256": quote_hash,
+        **source_analysis,
+        "analyzer": active_analyzer,
+        "analyzed_at": now_iso(),
+    }
+    source_receipt["source_receipt_id"] = \
+        policy_polarity_semantics.source_receipt_id(source_receipt)
+
+    # --- Phase B: meaning preservation, same passage plus the condition.
+    try:
+        comparison_result = provider.compare_text(
+            policy_polarity_semantics.build_comparison_prompt(
+                source_passage, condition_text),
+            policy_polarity_semantics.COMPARISON_PROMPT_VERSION,
+            output_schema=policy_polarity_semantics.COMPARISON_OUTPUT_SCHEMA)
+        if comparison_result.prompt_version != \
+                policy_polarity_semantics.COMPARISON_PROMPT_VERSION:
+            raise ValueError(
+                "provider returned a different comparison prompt version")
+        if (comparison_result.provider_name != provider.provider_name
+                or comparison_result.model_name != provider.model_name):
+            raise ValueError(
+                "provider result identity differs from the trusted analyzer")
+        comparison = policy_polarity_semantics.parse_comparison_analysis(
+            comparison_result.text)
+    except (llm_providers.ProviderExecutionError, ValueError) as exc:
+        print(
+            "FAIL: semantic meaning comparison produced no receipt; "
+            f"provider/schema error: {exc}")
+        return 1
+
+    receipt = {
+        "receipt_id": "",
+        "cache_key": cache_key,
+        "scheme": policy_polarity_semantics.SCHEME,
+        "case_id": args.case_id,
+        "document_id": args.doc_id,
+        "source_text_revision_sha256": revision,
+        "source_span_uid": derived_uids[0],
+        "source_span_uids": derived_uids,
+        "source_quote_sha256": quote_hash,
+        "condition_text_sha256": condition_hash,
+        "source_receipt": source_receipt,
+        **comparison,
+        "analyzer": active_analyzer,
+        "analyzed_at": now_iso(),
+    }
+    receipt["receipt_id"] = policy_polarity_semantics.receipt_id(receipt)
+    candidate_errors = policy_polarity_semantics.receipt_integrity_errors(
+        receipt, "semantic receipt")
+    if candidate_errors:
+        print("FAIL: semantic receipt candidate validation failed:")
+        for error in candidate_errors:
+            print(f"  - {error}")
+        return 1
+
+    existing_lock = _acquire_policy_polarity_snapshot_locks(
+        target, manifest_target, revision_target, args,
+        f"commit policy polarity analysis for {args.doc_id}")
+    if existing_lock is not None:
+        print(
+            f"LOCKED: held_by={existing_lock['held_by']} "
+            f"run_id={existing_lock['run_id']} "
+            f"since={existing_lock['started_at']} "
+            f"purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        index = load_policy_polarity_semantic_index(args.case_id)
+        errors = _semantic_index_errors(index, args.case_id)
+        if errors:
+            print("FAIL: existing semantic index is invalid:")
+            for error in errors:
+                print(f"  - {error}")
             return 1
-
-        source_receipt = {
-            "source_receipt_id": "",
-            "scheme": policy_polarity_semantics.SCHEME,
-            "case_id": args.case_id,
-            "document_id": args.doc_id,
-            "source_text_revision_sha256": revision,
-            "source_span_uid": derived_uids[0],
-            "source_span_uids": derived_uids,
-            "source_quote_sha256": quote_hash,
-            **source_analysis,
-            "analyzer": active_analyzer,
-            "analyzed_at": now_iso(),
-        }
-        source_receipt["source_receipt_id"] = \
-            policy_polarity_semantics.source_receipt_id(source_receipt)
-
-        # --- Phase B: meaning preservation, same passage plus the condition.
-        try:
-            comparison_result = provider.compare_text(
-                policy_polarity_semantics.build_comparison_prompt(
-                    source_passage, condition_text),
-                policy_polarity_semantics.COMPARISON_PROMPT_VERSION)
-            if comparison_result.prompt_version != \
-                    policy_polarity_semantics.COMPARISON_PROMPT_VERSION:
-                raise ValueError(
-                    "provider returned a different comparison prompt version")
-            if (comparison_result.provider_name != provider.provider_name
-                    or comparison_result.model_name != provider.model_name):
-                raise ValueError(
-                    "provider result identity differs from the trusted "
-                    "analyzer")
-            comparison = policy_polarity_semantics.parse_comparison_analysis(
-                comparison_result.text)
-        except (llm_providers.ProviderExecutionError, ValueError) as exc:
+        if index.get("active_analyzer") not in (None, active_analyzer):
             print(
-                "FAIL: semantic meaning comparison produced no receipt; "
-                f"provider/schema error: {exc}")
+                "BLOCKED: active semantic analyzer changed while the provider "
+                "was running; the stale candidate was not committed")
             return 1
-
-        receipt = {
-            "receipt_id": "",
-            "cache_key": cache_key,
-            "scheme": policy_polarity_semantics.SCHEME,
-            "case_id": args.case_id,
-            "document_id": args.doc_id,
-            "source_text_revision_sha256": revision,
-            "source_span_uid": derived_uids[0],
-            "source_span_uids": derived_uids,
-            "source_quote_sha256": quote_hash,
-            "condition_text_sha256": condition_hash,
-            "source_receipt": source_receipt,
-            **comparison,
-            "analyzer": active_analyzer,
-            "analyzed_at": now_iso(),
-        }
-        receipt["receipt_id"] = policy_polarity_semantics.receipt_id(receipt)
+        current_snapshot, snapshot_errors = _policy_polarity_source_snapshot(
+            args.case_id, args.doc_id, selector, submitted_uids,
+            condition_text, active_analyzer)
+        if snapshot_errors or current_snapshot != snapshot:
+            print(
+                "BLOCKED: registered source provenance changed while the "
+                "provider was running; the stale candidate was not committed")
+            for error in snapshot_errors:
+                print(f"  - {error}")
+            return 1
+        for existing_receipt in index.get("receipts") or []:
+            if existing_receipt.get("cache_key") == \
+                    current_snapshot["cache_key"]:
+                print(
+                    "PASS: concurrent semantic analysis already committed "
+                    f"{existing_receipt['receipt_id']} (candidate discarded)")
+                return 0
         prospective = {
             "case_id": args.case_id,
             "active_analyzer": active_analyzer,
@@ -7347,7 +7937,8 @@ def cmd_analyze_policy_polarity(args):
             f"review_required={receipt['review_required'] or source_receipt['review_required']})")
         return 0
     finally:
-        release_lock(target)
+        _release_policy_polarity_snapshot_locks(
+            target, manifest_target, revision_target)
 
 
 def cmd_set_policy_semantic_analyzer(args):
@@ -7668,6 +8259,34 @@ def build_parser():
     p.set_defaults(fn=cmd_read_segment_derivation_index)
 
     p = sub.add_parser(
+        "record-unverifiable-segment-derivation",
+        help="P0-6 human-authorized override: record an ocr_segment's page "
+             "map as unverified (no per-page confirmation is possible "
+             "against an image-only parent PDF) instead of the real "
+             "register-segment-derivation verification")
+    p.add_argument("case_id")
+    p.add_argument("--doc-id", dest="doc_id", required=True,
+                   help="the segment this override is for")
+    p.add_argument("--parent-document-id", dest="parent_document_id",
+                   default=None,
+                   help="optional cross-check against the manifest's "
+                        "source_document_id (or sets it, if not yet "
+                        "registered as a segment)")
+    p.add_argument("--pages", required=True,
+                   help="logical page spec, e.g. '120-189' or '57,58,118,119'")
+    p.add_argument("--page-offset", dest="page_offset", type=int, required=True,
+                   help="ASSERTED offset (physical = logical + offset). Not "
+                        "verified against the parent's own pages -- this is "
+                        "exactly the confirmation an ocr_segment cannot "
+                        "obtain, which is why this call requires "
+                        "--authorized-by and --reason")
+    p.add_argument("--authorized-by", dest="authorized_by", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--held-by", dest="held_by", required=True)
+    p.add_argument("--run-id", dest="run_id", required=True)
+    p.set_defaults(fn=cmd_record_unverifiable_segment_derivation)
+
+    p = sub.add_parser(
         "register-table-region",
         help="derive a table's authoritative source region from the "
              "registered PDF's own layout (the ONLY issuer of a "
@@ -7714,6 +8333,29 @@ def build_parser():
     p.add_argument("--held-by", dest="held_by", required=True)
     p.add_argument("--run-id", dest="run_id", required=True)
     p.set_defaults(fn=cmd_scan_table_candidates)
+
+    p = sub.add_parser(
+        "record-unverifiable-table-scan",
+        help="human-authorized P0-8 override for a document whose "
+             "extraction_method is OCR and therefore has no deterministic "
+             "text layer a real table scan could run against. Records "
+             "scan_status=unverifiable_ocr_source (never "
+             "complete_no_candidates) plus a required human_override -- this "
+             "does not claim the document has no tables, only that a human "
+             "explicitly authorized finalizing without a verified table-"
+             "boundary scan. Refuses for any document whose extraction_method "
+             "IS verifiable -- use scan-table-candidates for those instead.")
+    p.add_argument("case_id")
+    p.add_argument("--doc-id", dest="doc_id", required=True)
+    p.add_argument("--authorized-by", dest="authorized_by", required=True,
+                   help="the human who authorized this override, for the "
+                        "permanent audit record")
+    p.add_argument("--reason", dest="reason", required=True,
+                   help="why proceeding without a verified table-boundary "
+                        "scan was accepted for this document")
+    p.add_argument("--held-by", dest="held_by", required=True)
+    p.add_argument("--run-id", dest="run_id", required=True)
+    p.set_defaults(fn=cmd_record_unverifiable_table_scan)
 
     p = sub.add_parser("read-table-region-index")
     p.add_argument("case_id")

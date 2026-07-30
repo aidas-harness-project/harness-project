@@ -1,7 +1,9 @@
 """P1-2 semantic receipt issuance: the only LLM-calling policy path."""
+from concurrent.futures import ThreadPoolExecutor
 import json
 import copy
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -65,7 +67,7 @@ class CountingProvider(llm_providers.FixtureProvider):
         self.calls = 0
         self.prompts = []
 
-    def compare_text(self, prompt, prompt_version):
+    def compare_text(self, prompt, prompt_version, output_schema=None):
         self.calls += 1
         self.prompts.append(prompt)
         if prompt_version == semantics.SOURCE_PROMPT_VERSION:
@@ -74,9 +76,50 @@ class CountingProvider(llm_providers.FixtureProvider):
 
 
 class TimeoutProvider(CountingProvider):
-    def compare_text(self, prompt, prompt_version):
+    def compare_text(self, prompt, prompt_version, output_schema=None):
         self.calls += 1
         raise llm_providers.ProviderExecutionError("fixture timeout")
+
+
+class OverlapProvider(CountingProvider):
+    """Requires two Phase-A calls to overlap, proving no DAO lock is held."""
+
+    def __init__(self, response):
+        super().__init__(response)
+        self.barrier = threading.Barrier(2)
+        self.first_entered = threading.Event()
+        self._active_lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def compare_text(self, prompt, prompt_version, output_schema=None):
+        if prompt_version == semantics.SOURCE_PROMPT_VERSION:
+            with self._active_lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                self.first_entered.set()
+            try:
+                self.barrier.wait(timeout=5)
+            finally:
+                with self._active_lock:
+                    self.active -= 1
+        return super().compare_text(prompt, prompt_version, output_schema)
+
+
+class BlockingProvider(CountingProvider):
+    """Pauses Phase A so a test can change protected state mid-analysis."""
+
+    def __init__(self, response):
+        super().__init__(response)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def compare_text(self, prompt, prompt_version, output_schema=None):
+        if prompt_version == semantics.SOURCE_PROMPT_VERSION:
+            self.entered.set()
+            if not self.release.wait(timeout=5):
+                raise AssertionError("test did not release blocked provider")
+        return super().compare_text(prompt, prompt_version, output_schema)
 
 
 def analysis_json(
@@ -336,6 +379,122 @@ def test_identical_analysis_is_cache_hit_without_provider_call(
     assert dao.cmd_analyze_policy_polarity(args) == 0
     assert provider.calls == 2  # the second call hit the cache, calling nothing
     assert len(dao.load_policy_polarity_semantic_index(CASE)["receipts"]) == 1
+
+
+def test_different_cache_keys_run_provider_concurrently_and_both_commit(
+        isolated_dao, make_args, canonicalize, monkeypatch):
+    monkeypatch.setattr(dao, "LOCK_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(dao, "LOCK_MAX_WAIT_SECONDS", 2)
+    span_uid, selector, condition = seed_case(
+        isolated_dao, make_args, canonicalize)
+    provider = OverlapProvider(analysis_json())
+    monkeypatch.setattr(
+        dao.llm_providers, "build_provider",
+        lambda *args, **kwargs: provider)
+    first = args_for(
+        make_args, span_uid, selector, condition,
+        condition_text=SOURCE, held_by="worker-a")
+    second = args_for(
+        make_args, span_uid, selector, condition,
+        condition_text=f"{SOURCE}.", held_by="worker-b")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_result = pool.submit(dao.cmd_analyze_policy_polarity, first)
+        assert provider.first_entered.wait(timeout=5)
+        second_result = pool.submit(dao.cmd_analyze_policy_polarity, second)
+        results = [first_result.result(), second_result.result()]
+
+    assert results == [0, 0]
+    assert provider.max_active == 2
+    index = dao.load_policy_polarity_semantic_index(CASE)
+    assert len(index["receipts"]) == 2
+    assert len({item["cache_key"] for item in index["receipts"]}) == 2
+    assert dao._semantic_index_errors(index, CASE) == []
+
+
+def test_same_cache_key_concurrent_commit_is_first_wins(
+        isolated_dao, make_args, canonicalize, monkeypatch):
+    monkeypatch.setattr(dao, "LOCK_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(dao, "LOCK_MAX_WAIT_SECONDS", 2)
+    span_uid, selector, condition = seed_case(
+        isolated_dao, make_args, canonicalize)
+    provider = OverlapProvider(analysis_json())
+    monkeypatch.setattr(
+        dao.llm_providers, "build_provider",
+        lambda *args, **kwargs: provider)
+    first = args_for(
+        make_args, span_uid, selector, condition, held_by="worker-a")
+    second = args_for(
+        make_args, span_uid, selector, condition, held_by="worker-b")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_result = pool.submit(dao.cmd_analyze_policy_polarity, first)
+        assert provider.first_entered.wait(timeout=5)
+        second_result = pool.submit(dao.cmd_analyze_policy_polarity, second)
+        results = [first_result.result(), second_result.result()]
+
+    assert results == [0, 0]
+    assert provider.max_active == 2
+    index = dao.load_policy_polarity_semantic_index(CASE)
+    assert len(index["receipts"]) == 1
+    assert dao._semantic_index_errors(index, CASE) == []
+
+
+def test_revision_change_during_provider_rejects_stale_candidate(
+        isolated_dao, make_args, canonicalize, monkeypatch):
+    span_uid, selector, condition = seed_case(
+        isolated_dao, make_args, canonicalize)
+    provider = BlockingProvider(analysis_json())
+    monkeypatch.setattr(
+        dao.llm_providers, "build_provider",
+        lambda *args, **kwargs: provider)
+    analyze_args = args_for(
+        make_args, span_uid, selector, condition, held_by="worker-a")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(dao.cmd_analyze_policy_polarity, analyze_args)
+        assert provider.entered.wait(timeout=5)
+        revised = isolated_dao / "semantic_revision_during_provider.md"
+        revised.write_text(
+            f"<<<PAGE page=1>>>\n앞 문장\n{SOURCE}", encoding="utf-8")
+        assert dao.cmd_write_redacted_text(make_args(
+            case_id=CASE, doc_id=DOC, text_file=str(revised),
+            held_by="document-pipeline", run_id=RUN)) == 0
+        provider.release.set()
+        assert future.result(timeout=5) == 1
+
+    assert not dao.load_policy_polarity_semantic_index(CASE)["receipts"]
+
+
+def test_analyzer_switch_during_provider_rejects_old_candidate(
+        isolated_dao, make_args, canonicalize, monkeypatch):
+    span_uid, selector, condition = seed_case(
+        isolated_dao, make_args, canonicalize)
+    old_provider = BlockingProvider(analysis_json())
+    monkeypatch.setattr(
+        dao.llm_providers, "build_provider",
+        lambda *args, **kwargs: old_provider)
+    monkeypatch.setattr(
+        dao, "resolve_trusted_analyzer", trusted_resolver(old_provider))
+    analyze_args = args_for(
+        make_args, span_uid, selector, condition, held_by="worker-a")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(dao.cmd_analyze_policy_polarity, analyze_args)
+        assert old_provider.entered.wait(timeout=5)
+        replacement = CountingProvider(
+            analysis_json(), model_name="semantic-fixture-v2")
+        monkeypatch.setattr(
+            dao, "resolve_trusted_analyzer", trusted_resolver(replacement))
+        assert dao.cmd_set_policy_semantic_analyzer(make_args(
+            case_id=CASE, reason="concurrent analyzer upgrade",
+            held_by="dao-admin", run_id=RUN)) == 0
+        old_provider.release.set()
+        assert future.result(timeout=5) == 1
+
+    index = dao.load_policy_polarity_semantic_index(CASE)
+    assert index["active_analyzer"] == trusted_resolver(replacement)().identity
+    assert not index["receipts"]
 
 
 def test_wrong_occurrence_uid_is_refused_before_provider(

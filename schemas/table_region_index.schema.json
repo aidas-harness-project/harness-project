@@ -194,9 +194,20 @@
             "complete_no_candidates",
             "complete_with_candidates",
             "inconclusive",
-            "failed"
+            "failed",
+            "unverifiable_ocr_source"
           ],
-          "description": "Only complete_no_candidates proves a reference_table is not owed. Inconclusive and failed are blockers, never synonyms for an empty document."
+          "description": "Only complete_no_candidates proves a reference_table is not owed. Inconclusive and failed are blockers, never synonyms for an empty document. unverifiable_ocr_source is a distinct, explicitly human-authorized state for an extraction_method with no deterministic text layer (OCR): it is NOT a claim that no tables exist, only that finalization was allowed to proceed without a verified table-boundary scan -- see human_override below, which is required whenever this status is set."
+        },
+        "human_override": {
+          "type": "object",
+          "description": "Required when scan_status is unverifiable_ocr_source. Records who authorized proceeding without deterministic table-boundary verification and why, so a reduced-assurance pass is never indistinguishable from a genuine complete_no_candidates scan.",
+          "properties": {
+            "authorized_by": { "type": "string", "minLength": 1 },
+            "authorized_at": { "type": "string", "format": "date-time" },
+            "reason": { "type": "string", "minLength": 1 }
+          },
+          "required": ["authorized_by", "authorized_at", "reason"]
         },
         "scan_errors": {
           "type": "array",
@@ -313,7 +324,12 @@
         "candidates",
         "possible_tables"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "if": {
+        "properties": { "scan_status": { "const": "unverifiable_ocr_source" } },
+        "required": ["scan_status"]
+      },
+      "then": { "required": ["human_override"] }
     },
     "derived_region": {
       "type": "object",

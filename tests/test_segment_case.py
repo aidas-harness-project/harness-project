@@ -472,9 +472,12 @@ def test_manifest_entries_record_provenance_and_leave_document_type_null():
         start_index=2,
     )
     first = entries[0]
+    assert first["document_role"] == "physical"
     assert first["source_file_name"] == "bundle.pdf"
     assert first["source_page_start"] == 1
     assert first["source_page_end"] == 5
+    assert "source_document_id" not in first
+    assert "page_map" not in first
     assert first["provisional_document_type"] == "diagnosis_certificate"
     assert first["document_type"] is None
     assert first["classification_confidence"] is None
@@ -491,6 +494,29 @@ def test_manifest_file_paths_use_forward_slashes_on_every_host():
     for entry in entries:
         assert entry["file_path"] == f"data/raw/CASE_001/{entry['file_name']}"
         assert "\\" not in entry["file_path"]
+
+
+def test_split_children_are_not_processed_text_segments():
+    """A split child owns a real raw PDF and must use the physical UID path.
+
+    ``source_file_name`` and ``source_page_*`` preserve the intake audit trail
+    back to the superseded bundle.  They do not turn the child into the other
+    manifest shape called ``segment``, which has no raw file and requires a
+    DAO-issued page-map receipt over already-processed parent text.
+    """
+    entries = sc.build_manifest_entries(
+        _segments(), case_id="CASE_001", source_file_name="bundle.pdf",
+        proposal_path="p.json", start_index=2,
+    )
+    for entry in entries:
+        assert entry["document_role"] == "physical"
+        assert entry["file_path"].startswith("data/raw/CASE_001/")
+        assert entry["file_format"] == "pdf"
+        assert entry["source_file_name"] == "bundle.pdf"
+        assert "source_document_id" not in entry
+        assert "derivation_method" not in entry
+        assert "derived_text_path" not in entry
+        assert "page_map" not in entry
 
 
 # ----------------------------------------------------------- cropping --

@@ -152,7 +152,8 @@ def issue_semantic_receipts(isolated_dao, make_args, monkeypatch):
                     class _TwoPhase(llm_providers.FixtureProvider):
                         """Answers Phase A then Phase B off prompt_version."""
 
-                        def compare_text(self, prompt, prompt_version):
+                        def compare_text(self, prompt, prompt_version,
+                                        output_schema=None):
                             payload = (
                                 source_response
                                 if prompt_version == policy_polarity_semantics

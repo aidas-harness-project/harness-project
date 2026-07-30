@@ -629,4 +629,144 @@ def test_the_original_narrow_region_attack_is_still_refused(
 
     assert _write_contract(isolated_dao, make_args, honest) == 1
     out = capsys.readouterr().out
+    assert "narrow" in out.lower() or "region" in out.lower()
+
+
+# ==========================================================================
+# 9. `record-unverifiable-table-scan` -- the P0-8 human-authorized OCR override
+# ==========================================================================
+#
+# CASE_112 (a real case) surfaced a real gap: every one of its 203 policy
+# segments has extraction_method "ocr" (image-only source, no deterministic
+# text layer), so scan-table-candidates refuses ALL of them and
+# policy_clause_processing can never finalize for the case -- not a bug, the
+# P0-8 fail-closed design working exactly as intended. These tests cover the
+# new, explicitly human-authorized escape hatch: record a DIFFERENT, honestly
+# labeled scan_status (never complete_no_candidates) that finalization accepts
+# only because a human accepted the risk of an unverified table boundary.
+
+def _override(make_args, *, doc_id="DOC_001", authorized_by="pyun",
+              reason="test override", held_by=HELD_BY, run_id=RUN,
+              case_id=CASE):
+    return dao.cmd_record_unverifiable_table_scan(make_args(
+        case_id=case_id, doc_id=doc_id, authorized_by=authorized_by,
+        reason=reason, held_by=held_by, run_id=run_id))
+
+
+def test_override_refuses_a_verifiable_embedded_text_document(
+        case, isolated_dao, make_args, capsys):
+    """The override exists for OCR only. A verifiable document must use the
+    real scan -- silently accepting an override for it would hide a check
+    that could actually run."""
+    case()  # extraction_method defaults to "embedded_text"
+
+    rc = _override(make_args)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "embedded_text" in out or "deterministic text layer" in out.lower()
+    assert dao.table_candidate_inventory_for(CASE, "DOC_001") is None
+
+
+def test_override_is_refused_for_an_unregistered_document(
+        isolated_dao, make_args, capsys):
+    """No manifest entry at all -- refuse rather than guessing an identity."""
+    rc = _override(make_args, doc_id="DOC_999")
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "not registered" in out.lower() or "does not exist" in out.lower()
+
+
+def test_override_records_unverifiable_ocr_source_with_human_override(
+        case, isolated_dao, make_args):
+    """The success path: source identity is still verified (registered,
+    digest-checked, revision-bound), but scan_status is the honest label --
+    never complete_no_candidates -- and human_override is populated."""
+    case()
+    dao.patch_manifest_document(
+        CASE, "DOC_001", {"extraction_method": "ocr"},
+        held_by=HELD_BY, run_id=RUN)
+
+    rc = _override(make_args, authorized_by="pyun",
+                   reason="known-gaps item 37: CASE_112 OCR-only policy docs")
+
+    assert rc == 0
+    inventory = dao.table_candidate_inventory_for(CASE, "DOC_001")
+    assert inventory is not None
+    assert inventory["scan_status"] == "unverifiable_ocr_source"
+    assert inventory["scan_status"] != "complete_no_candidates"
+    assert inventory["human_override"]["authorized_by"] == "pyun"
+    assert "CASE_112" in inventory["human_override"]["reason"]
+    assert inventory["candidates"] == []
+    assert inventory["possible_tables"] == []
+
+
+def test_finalization_proceeds_after_a_recorded_override(
+        case, isolated_dao, make_args):
+    """The whole point of the override: policy_clause_processing finalization
+    must not block on a document carrying an authorized override, unlike a
+    real 'inconclusive'/'failed' scan which still blocks."""
+    case()
+    dao.patch_manifest_document(
+        CASE, "DOC_001", {"extraction_method": "ocr"},
+        held_by=HELD_BY, run_id=RUN)
+
+    assert _override(make_args) == 0
+
+    blockers = dao._table_region_finalize_blockers(CASE, "DOC_001")
+
+    assert blockers == []
+
+
+def test_override_is_a_noop_on_identical_rerun(case, isolated_dao, make_args):
+    case()
+    dao.patch_manifest_document(
+        CASE, "DOC_001", {"extraction_method": "ocr"},
+        held_by=HELD_BY, run_id=RUN)
+    assert _override(make_args, reason="same reason") == 0
+    first = dao.table_candidate_inventory_for(CASE, "DOC_001")["scan_id"]
+
+    rc = _override(make_args, reason="same reason")
+
+    assert rc == 0
+    assert dao.table_candidate_inventory_for(CASE, "DOC_001")["scan_id"] == \
+        first
+
+
+def test_real_scan_table_candidates_still_refuses_ocr_unchanged(
+        case, isolated_dao, make_args, capsys):
+    """Regression guard: the override is a separate command, not a relaxation
+    of the real detector path. scan-table-candidates must still refuse OCR
+    exactly as before."""
+    case()
+    dao.patch_manifest_document(
+        CASE, "DOC_001", {"extraction_method": "ocr"},
+        held_by=HELD_BY, run_id=RUN)
+
+    rc = dao.cmd_scan_table_candidates(make_args(
+        case_id=CASE, doc_id="DOC_001", detector_profile=None,
+        held_by=HELD_BY, run_id=RUN))
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "ocr" in out.lower()
+
+
+def test_override_source_digest_mismatch_is_refused(
+        case, isolated_dao, make_args, capsys):
+    """If the raw PDF changed since it was registered, the override must not
+    bless a source identity that no longer matches -- it is source identity,
+    not table geometry, that this command still verifies."""
+    case()
+    dao.patch_manifest_document(
+        CASE, "DOC_001", {"extraction_method": "ocr",
+                          "source_pdf_sha256": "0" * 64},
+        held_by=HELD_BY, run_id=RUN)
+
+    rc = _override(make_args)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "changed" in out.lower() or "sha256" in out.lower()
     assert "C" in out and "30" in out

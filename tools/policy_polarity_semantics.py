@@ -33,7 +33,7 @@ from typing import Any
 
 
 SCHEME = "policy_polarity_semantic_v2"
-SOURCE_PROMPT_VERSION = "policy_polarity_source_v1"
+SOURCE_PROMPT_VERSION = "policy_polarity_source_v2"
 COMPARISON_PROMPT_VERSION = "policy_polarity_comparison_v1"
 SEMANTIC_SCHEMA_VERSION = "policy_polarity_semantic_v2"
 INDEX_SCHEMA = "policy_polarity_semantic_index.schema.json"
@@ -70,6 +70,61 @@ _COMPARISON_KEYS = frozenset({
 _PROPOSITION_KEYS = frozenset({
     "text", "classification", "source_start", "source_end", "reason",
 })
+
+# Structured-output contracts for the two phases. Without these, a provider
+# free to answer in prose is free to wrap valid JSON in a ```json fence or
+# add narration -- `_parse_strict` then rejects it outright (confirmed live:
+# claude-cli fenced its response 3/3 times without this, even though the
+# underlying analysis was correct). Passed to the provider's `output_schema`
+# seam (the same one Stage 1 segmentation already uses for structured image
+# output), which for claude-cli maps to native `--output-format json
+# --json-schema`.
+SOURCE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "source_classification": {
+            "type": "string",
+            "enum": sorted(CLASSIFICATIONS),
+        },
+        "target_predicates": {"type": "array", "items": {"type": "string"}},
+        "negation_scope_analysis": {"type": "string"},
+        "propositions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "classification": {
+                        "type": "string",
+                        "enum": ["affirmative", "restrictive_or_negative",
+                                 "ambiguous"],
+                    },
+                    "source_start": {"type": "integer"},
+                    "source_end": {"type": "integer"},
+                    "reason": {"type": "string"},
+                },
+                "required": sorted(_PROPOSITION_KEYS),
+                "additionalProperties": False,
+            },
+        },
+        "review_required": {"type": "boolean"},
+    },
+    "required": sorted(_SOURCE_KEYS),
+    "additionalProperties": False,
+}
+
+COMPARISON_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "meaning_preserved": {"type": "boolean"},
+        "omitted_propositions": {"type": "array", "items": {"type": "string"}},
+        "added_propositions": {"type": "array", "items": {"type": "string"}},
+        "contradiction_detected": {"type": "boolean"},
+        "review_required": {"type": "boolean"},
+    },
+    "required": sorted(_COMPARISON_KEYS),
+    "additionalProperties": False,
+}
 
 
 def canonical_json(value: Any) -> str:
@@ -108,6 +163,16 @@ Complex double negation that cannot be settled safely must be ambiguous.
 Report what the source says. No downstream use of this classification is
 described to you, and no answer is expected or preferred.
 Confidence is not requested and must not authorize a pass.
+
+For each proposition, "source_start"/"source_end" are character offsets into
+the passage exactly as given between the delimiters (0-indexed, end
+exclusive). "text" MUST be the exact verbatim substring of the passage at
+those offsets -- the identical characters, in the identical order, including
+any heading such as 제1조(...), any parenthetical such as (이하 ...라
+합니다), and all whitespace. Do not summarize, paraphrase, translate,
+shorten, or drop any parenthetical, heading, or word from "text". If you
+would naturally paraphrase a proposition, still set "text" to the raw
+substring and put any paraphrase only in "reason".
 
 Return exactly this JSON shape:
 {{
@@ -185,7 +250,6 @@ def parse_source_analysis(text: str, source_passage: str) -> dict:
     """Parse Phase A strictly; ambiguity is explicit, never guessed."""
     if not isinstance(source_passage, str) or not source_passage:
         raise ValueError("source passage must be non-empty")
-    source_length = len(source_passage)
     value = _parse_strict(text, _SOURCE_KEYS, "source analysis")
 
     classification = value.get("source_classification")
@@ -211,17 +275,33 @@ def parse_source_analysis(text: str, source_passage: str) -> dict:
                 f"propositions[{index}] has unsupported classification")
         start, end = proposition.get("source_start"), proposition.get("source_end")
         if (not isinstance(start, int) or isinstance(start, bool)
-                or not isinstance(end, int) or isinstance(end, bool)
-                or start < 0 or end <= start or end > source_length):
+                or not isinstance(end, int) or isinstance(end, bool)):
             raise ValueError(
-                f"propositions[{index}] offsets are outside the source passage")
+                f"propositions[{index}] offsets must be integers")
         for key in ("text", "reason"):
             if not isinstance(proposition.get(key), str) or not proposition[key]:
                 raise ValueError(f"propositions[{index}].{key} must be non-empty")
-        if source_passage[start:end] != proposition["text"]:
+        quoted = proposition["text"]
+        # The model's own character-offset arithmetic over Korean text is
+        # unreliable even when the quoted `text` itself is a correct verbatim
+        # substring (observed live: offsets pointing well past the passage's
+        # actual length, or mid-passage, for a `text` that in fact starts at
+        # 0) -- so the declared offsets are corroborating evidence, never the
+        # source of truth. `text` is what is checked for verbatim fidelity;
+        # its real position is then recomputed directly from the passage, not
+        # trusted from the model's count. An empty/whitespace-only quote could
+        # `.find()`-match trivially, but that is already excluded above.
+        found_at = source_passage.find(quoted)
+        if found_at == -1:
             raise ValueError(
-                f"propositions[{index}].text does not equal source passage "
-                "at its declared offsets")
+                f"propositions[{index}].text is not a verbatim substring of "
+                "the source passage")
+        if source_passage.find(quoted, found_at + 1) != -1:
+            raise ValueError(
+                f"propositions[{index}].text occurs more than once in the "
+                "source passage; its position cannot be resolved unambiguously")
+        proposition["source_start"] = found_at
+        proposition["source_end"] = found_at + len(quoted)
     if not isinstance(value.get("review_required"), bool):
         raise ValueError("review_required must be boolean")
     if classification in {"mixed", "ambiguous"} and not value["review_required"]:

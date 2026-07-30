@@ -592,7 +592,7 @@ class TwoPhaseProvider(llm_providers.FixtureProvider):
         self.calls = 0
         self.prompts = []
 
-    def compare_text(self, prompt, prompt_version):
+    def compare_text(self, prompt, prompt_version, output_schema=None):
         self.calls += 1
         self.prompts.append(prompt)
         if prompt_version == semantics.SOURCE_PROMPT_VERSION:

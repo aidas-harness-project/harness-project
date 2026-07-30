@@ -10,9 +10,12 @@
     },
     "segments": {
       "type": "array",
-      "description": "One entry per segment that has a verified page-map derivation. A segment absent from this array has no receipt, which is a finalization blocker -- never a check that is skipped for lack of data.",
+      "description": "One entry per segment that has a verified page-map derivation OR a recorded human override. A segment absent from this array has no receipt, which is a finalization blocker -- never a check that is skipped for lack of data.",
       "items": {
-        "$ref": "#/$defs/derivation_receipt"
+        "anyOf": [
+          { "$ref": "#/$defs/derivation_receipt" },
+          { "$ref": "#/$defs/unverified_override_receipt" }
+        ]
       }
     }
   },
@@ -150,6 +153,74 @@
         "segment_page_text_sha256",
         "logical_page_evidence"
       ],
+      "additionalProperties": false
+    },
+    "unverified_override_receipt": {
+      "type": "object",
+      "description": "P0-6 human-authorized override for an ocr_segment, whose mapping `derivation_receipt` can never verify (see the top-level scheme's derivation_method note -- confirming an OCR page mapping would require re-running OCR against the parent, which UID verification is forbidden to do). This is NOT a weaker verification: it is a different, honestly-labeled state that carries no printed-page confirmation and no parent-page text digest, because neither is derivable from an image-only PDF. A human explicitly accepts the risk that the asserted physical-page offset is wrong for one or more logical pages.",
+      "properties": {
+        "scheme": {
+          "const": "segment_page_map_unverified_v1",
+          "description": "Distinct from segment_page_map_v2 on purpose -- a reader must not be able to mistake this for a verified receipt by pattern-matching the scheme string."
+        },
+        "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+        "parent_source_document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+        "parent_source_pdf_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 of the parent's raw file, still computed by the DAO by reading the file at registration time -- source identity is verified even though page content is not."
+        },
+        "derivation_method": {
+          "const": "ocr_segment",
+          "description": "The only method this receipt type exists for. A verifiable method must use `derivation_receipt`, never this override."
+        },
+        "segment_source_text_revision_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "page_offset_candidate": {
+          "type": "integer",
+          "description": "The offset a human asserted. Recorded as a claim, not a proof -- there is no per-page confirmation behind it."
+        },
+        "pages": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/unverified_page" }
+        },
+        "human_override": {
+          "type": "object",
+          "properties": {
+            "authorized_by": { "type": "string", "minLength": 1 },
+            "authorized_at": { "type": "string", "format": "date-time" },
+            "reason": { "type": "string", "minLength": 1 }
+          },
+          "required": ["authorized_by", "authorized_at", "reason"],
+          "additionalProperties": false
+        },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "issued_by": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "pattern": "^RUN_[0-9]{8}_[0-9]+$" }
+      },
+      "required": [
+        "scheme", "document_id", "parent_source_document_id",
+        "parent_source_pdf_sha256", "derivation_method",
+        "segment_source_text_revision_sha256", "page_offset_candidate",
+        "pages", "human_override", "issued_at", "issued_by"
+      ],
+      "additionalProperties": false
+    },
+    "unverified_page": {
+      "type": "object",
+      "description": "One logical page's asserted (not confirmed) physical-page mapping. No digest field: the DAO cannot extract text from an image-only PDF page, so there is nothing to hash, and a placeholder digest would look like the real proof `verified_page` carries.",
+      "properties": {
+        "logical_page": { "type": "integer", "minimum": 1 },
+        "source_physical_page": { "type": "integer", "minimum": 1 },
+        "verification_status": {
+          "const": "unverified_ocr_source",
+          "description": "Explicit per-page label so a partial listing cannot be misread as partial verification -- every page in an override receipt carries this same value."
+        }
+      },
+      "required": ["logical_page", "source_physical_page", "verification_status"],
       "additionalProperties": false
     }
   }

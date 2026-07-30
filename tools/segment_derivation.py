@@ -407,6 +407,83 @@ def build_receipt(*, segment_document_id, parent_document_id,
     }
 
 
+UNVERIFIED_OVERRIDE_SCHEME = "segment_page_map_unverified_v1"
+
+
+def build_unverified_override_receipt(*, segment_document_id, parent_document_id,
+                                      parent_source_pdf_sha256,
+                                      segment_source_text_revision_sha256,
+                                      logical_pages, page_offset,
+                                      issued_at, issued_by, run_id,
+                                      authorized_by, reason):
+    """P0-6 human-authorized override receipt for an ocr_segment.
+
+    Deliberately NOT a relaxed `build_receipt`: no `extractor`, no
+    `parent_source_total_pages` requirement, no per-page digest or printed-page
+    evidence, because none of those are derivable from an image-only parent
+    PDF. Every page carries `verification_status: unverified_ocr_source`
+    instead of a proof -- the offset is recorded as what a human asserted, not
+    confirmed.
+    """
+    return {
+        "scheme": UNVERIFIED_OVERRIDE_SCHEME,
+        "document_id": segment_document_id,
+        "parent_source_document_id": parent_document_id,
+        "parent_source_pdf_sha256": parent_source_pdf_sha256,
+        "derivation_method": "ocr_segment",
+        "segment_source_text_revision_sha256": segment_source_text_revision_sha256,
+        "page_offset_candidate": page_offset,
+        "pages": [
+            {
+                "logical_page": lp,
+                "source_physical_page": lp + page_offset,
+                "verification_status": "unverified_ocr_source",
+            }
+            for lp in sorted(logical_pages)
+        ],
+        "human_override": {
+            "authorized_by": authorized_by,
+            "authorized_at": issued_at,
+            "reason": reason,
+        },
+        "issued_at": issued_at,
+        "issued_by": issued_by,
+        "run_id": run_id,
+    }
+
+
+def unverified_override_fingerprint(receipt: dict) -> tuple:
+    """What makes two override receipts the same derivation (excludes
+    timestamps/issued_by, matching receipt_fingerprint's no-op contract)."""
+    return (
+        receipt.get("scheme"),
+        receipt.get("document_id"),
+        receipt.get("parent_source_document_id"),
+        receipt.get("parent_source_pdf_sha256"),
+        receipt.get("segment_source_text_revision_sha256"),
+        receipt.get("page_offset_candidate"),
+        tuple(
+            (p.get("logical_page"), p.get("source_physical_page"),
+             p.get("verification_status"))
+            for p in receipt.get("pages") or []
+        ),
+    )
+
+
+def manifest_page_map_from_unverified_override(receipt: dict) -> list[dict]:
+    """The manifest projection of an unverified-override receipt -- mirrors
+    `manifest_page_map_from_receipt` but carries verification_status instead
+    of a digest/evidence pair that would not exist for real."""
+    return [
+        {
+            "logical_page": page["logical_page"],
+            "source_physical_page": page["source_physical_page"],
+            "verification_status": page["verification_status"],
+        }
+        for page in receipt.get("pages") or []
+    ]
+
+
 def receipt_fingerprint(receipt: dict) -> tuple:
     """What makes two receipts the same derivation.
 
@@ -571,6 +648,61 @@ def receipt_currency_errors(*, receipt: dict, parent_entry: dict | None,
     return errors
 
 
+def unverified_override_currency_errors(*, receipt: dict,
+                                        current_parent_pdf_sha256: str | None,
+                                        current_segment_revision_sha256: str | None,
+                                        location: str = "") -> list[str]:
+    """Currency check for a P0-6 override receipt -- source identity only.
+
+    No parent_source_total_pages / extractor / per-page digest checks: an
+    override receipt never claimed any of those, so there is nothing there to
+    go stale. What CAN go stale, and is still checked unconditionally, is
+    whether this is still the same parent file and the same segment text the
+    human authorized the override against.
+    """
+    prefix = f"{location}: " if location else ""
+    errors: list[str] = []
+
+    if receipt.get("scheme") != UNVERIFIED_OVERRIDE_SCHEME:
+        return [
+            f"{prefix}override receipt scheme {receipt.get('scheme')!r} is "
+            f"not {UNVERIFIED_OVERRIDE_SCHEME!r} -- an unrecognized scheme is "
+            "refused rather than assumed equivalent"
+        ]
+    if not isinstance(receipt.get("human_override"), dict) or not (
+            receipt["human_override"].get("authorized_by")):
+        errors.append(
+            f"{prefix}override receipt has no valid human_override block -- "
+            "an unverified mapping without recorded authorization is not a "
+            "state that may finalize")
+
+    recorded_parent = receipt.get("parent_source_pdf_sha256")
+    if current_parent_pdf_sha256 is None:
+        errors.append(
+            f"{prefix}the parent's registered raw source cannot be read or "
+            "hashed now -- the override cannot be re-confirmed against the "
+            "file it was authorized for")
+    elif recorded_parent != current_parent_pdf_sha256:
+        errors.append(
+            f"{prefix}the parent raw source changed: the override was "
+            f"authorized against {recorded_parent!r}, the registered file now "
+            f"hashes to {current_parent_pdf_sha256!r} -- it must be "
+            "re-authorized")
+
+    recorded_revision = receipt.get("segment_source_text_revision_sha256")
+    if current_segment_revision_sha256 is None:
+        errors.append(
+            f"{prefix}the segment has no current registered source-text "
+            "revision -- there is nothing for the override to be bound to")
+    elif recorded_revision != current_segment_revision_sha256:
+        errors.append(
+            f"{prefix}the segment's source text was revised after this "
+            f"override was authorized (receipt {recorded_revision!r}, current "
+            f"{current_segment_revision_sha256!r}) -- it must be re-authorized")
+
+    return errors
+
+
 def segment_finalization_blockers(manifest, receipt_for,
                                   current_parent_digest_for,
                                   current_segment_revision_for,
@@ -597,14 +729,36 @@ def segment_finalization_blockers(manifest, receipt_for,
         receipt = receipt_for(seg_id)
 
         if method not in VERIFIABLE_METHODS:
-            # ocr_segment lands here. Named explicitly so the limitation is
-            # visible in the refusal rather than inferred from a silence.
+            # ocr_segment lands here. A real segment_page_map_v2 receipt is
+            # structurally impossible for it (see the module docstring) -- the
+            # only way past this point is a recorded, human-authorized
+            # segment_page_map_unverified_v1 override, checked explicitly
+            # rather than silently accepting any non-verifiable method.
+            if receipt is not None and receipt.get("scheme") == UNVERIFIED_OVERRIDE_SCHEME:
+                blockers.extend(unverified_override_currency_errors(
+                    receipt=receipt,
+                    current_parent_pdf_sha256=current_parent_digest_for(
+                        receipt.get("parent_source_document_id")),
+                    current_segment_revision_sha256=current_segment_revision_for(seg_id),
+                    location=location,
+                ))
+                projection = manifest_page_map_from_unverified_override(receipt)
+                if (entry.get("page_map") or []) != projection:
+                    blockers.append(
+                        f"{location}: manifest page_map does not match the "
+                        f"{UNVERIFIED_OVERRIDE_SCHEME} receipt's projection -- "
+                        "the manifest was changed outside the DAO override path")
+                continue
             blockers.append(
                 f"{location}: derivation_method {method!r} cannot be verified "
                 "against the parent PDF deterministically (UID verification "
                 "may not re-run OCR), so no page-map derivation receipt can be "
                 "issued for it and the stage cannot finalize. This is a known "
-                "P0-6 limitation, not a passing state")
+                "P0-6 limitation -- a human-authorized "
+                f"{UNVERIFIED_OVERRIDE_SCHEME} override can be recorded via "
+                "`dao.py record-unverifiable-segment-derivation` if the risk "
+                "has been explicitly accepted; absent that, this is not a "
+                "passing state")
             continue
 
         projection_errors = receipt_projection_errors(entry, receipt, location)
