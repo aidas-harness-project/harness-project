@@ -128,10 +128,14 @@
               "description": "True when more pages needed full-page review than the cap allows. The fallback is then SKIPPED entirely rather than run: saturation means the crop ratio or grid is wrong for this bundle, which is a tuning signal for a human, not something to spend a large number of extra vision calls papering over."
             },
             "cap": { "type": "integer", "minimum": 0 },
-            "prompt_version": {
-              "type": "string",
-              "description": "Full-page verdict prompt version. Separate from method.prompt_version, which records the contact-sheet prompt."
-            },
+              "prompt_version": {
+                "type": "string",
+                "description": "Full-page verdict prompt version. Separate from method.prompt_version, which records the contact-sheet prompt."
+              },
+              "output_schema_version": {
+                "type": "string",
+                "description": "Provider-neutral structured-output contract used for each full-page verdict."
+              },
             "resolved_pages": {
               "type": "array",
               "items": { "type": "integer", "minimum": 1 }
@@ -140,17 +144,31 @@
               "type": "array",
               "items": { "type": "integer", "minimum": 1 }
             },
-            "new_boundaries": {
-              "type": "array",
-              "items": { "type": "integer", "minimum": 1 }
-            },
-            "calls": { "type": "integer", "minimum": 0 },
-            "refinement_pages": {
-              "type": "array",
-              "items": { "type": "integer", "minimum": 1 },
-              "description": "Interior pages examined because --refine selected a long segment, distinct from crop-ambiguous pages."
-            },
-            "refinement_calls": { "type": "integer", "minimum": 0 }
+              "new_boundaries": {
+                "type": "array",
+                "items": { "type": "integer", "minimum": 1 }
+              },
+              "calls": { "type": "integer", "minimum": 0 },
+              "failure_reasons": {
+                "type": "object",
+                "additionalProperties": { "type": "string" },
+                "description": "Bounded provider/parser diagnostics keyed by targeted fallback page."
+              },
+              "refinement_pages": {
+                "type": "array",
+                "items": { "type": "integer", "minimum": 1 },
+                "description": "Interior pages examined because --refine selected a long segment, distinct from crop-ambiguous pages."
+              },
+              "refinement_calls": { "type": "integer", "minimum": 0 },
+              "refinement_unresolved_pages": {
+                "type": "array",
+                "items": { "type": "integer", "minimum": 1 }
+              },
+              "refinement_failure_reasons": {
+                "type": "object",
+                "additionalProperties": { "type": "string" },
+                "description": "Bounded provider/parser diagnostics keyed by refinement page."
+              }
           },
           "required": ["triggered", "pages", "saturated", "cap"]
         }
