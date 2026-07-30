@@ -1378,6 +1378,31 @@ def test_split_writes_one_pdf_per_segment_with_correct_page_counts(tmp_path):
         assert d.page_count == 7
 
 
+def test_split_returns_proposal_linked_to_created_document_ids(tmp_path):
+    pdf = _bundle_pdf(tmp_path, 12)
+    prop = _proposal([
+        _seg(0, 1, 5, status="approved"),
+        _seg(1, 6, 12, status="approved"),
+    ], review_status="approved")
+    dao = _FakeDao()
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        out = sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_1", dao=dao,
+        )
+    finally:
+        sc.ROOT = orig_root
+
+    assert [
+        segment["assigned_document_id"]
+        for segment in out["updated_proposal"]["segments"]
+    ] == ["DOC_002", "DOC_003"]
+    assert all(segment["assigned_document_id"] is None for segment in prop["segments"])
+
+
 def test_split_marks_the_bundle_superseded_and_records_provenance(tmp_path):
     pdf = _bundle_pdf(tmp_path, 12)
     prop = _proposal([_seg(0, 1, 12, status="approved")], review_status="approved")
@@ -1462,6 +1487,27 @@ def test_split_is_idempotent_when_entries_already_exist(tmp_path):
     )
     assert out["status"] == "already_split"
     assert dao.calls == []
+
+
+def test_idempotent_split_returns_proposal_linked_to_existing_document_ids(tmp_path):
+    pdf = _bundle_pdf(tmp_path, 12)
+    prop = _proposal([_seg(0, 1, 12, status="approved")], review_status="approved")
+    manifest = _manifest_with_bundle()
+    manifest["documents"].append({
+        "document_id": "DOC_002", "file_name": "DOC_002.pdf",
+        "file_path": "data/raw/CASE_900/DOC_002.pdf", "file_format": "pdf",
+        "file_size_bytes": 10, "ocr_status": "pending",
+        "source_file_name": "bundle.pdf", "source_page_start": 1, "source_page_end": 12,
+    })
+
+    out = sc.split_bundle(
+        prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+        proposal_path="p.json", manifest=manifest, held_by="R", run_id="RUN_1",
+        dao=_FakeDao(),
+    )
+
+    assert out["status"] == "already_split"
+    assert out["updated_proposal"]["segments"][0]["assigned_document_id"] == "DOC_002"
 
 
 def test_split_reports_orphans_when_the_manifest_write_fails(tmp_path):

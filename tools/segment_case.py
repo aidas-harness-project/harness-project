@@ -2036,6 +2036,22 @@ def _next_document_index(manifest: dict) -> int:
     return highest + 1
 
 
+def proposal_with_assignments(proposal: dict, document_ids: list[str]) -> dict:
+    """Return a copy whose segments link to the documents created by a split."""
+    import copy
+
+    segments = proposal.get("segments", [])
+    if len(segments) != len(document_ids):
+        raise SegmentationError(
+            f"cannot assign {len(document_ids)} document id(s) to "
+            f"{len(segments)} segment(s)"
+        )
+    updated = copy.deepcopy(proposal)
+    for segment, document_id in zip(updated["segments"], document_ids):
+        segment["assigned_document_id"] = document_id
+    return updated
+
+
 def split_bundle(
     proposal: dict,
     *,
@@ -2082,14 +2098,37 @@ def split_bundle(
     source_file_name = proposal["source_file_name"]
 
     # Idempotency: a prior split leaves per-document entries carrying this
-    # bundle's source_file_name. If any already match a proposed range, treat
-    # the whole split as done rather than minting duplicate DOC_XXX.pdf files.
+    # bundle's source_file_name. Only a complete one-to-one range match is safe
+    # to treat as done; a partial or ambiguous match must fail closed.
     proposed_ranges = {(s["page_start"], s["page_end"]) for s in segments}
+    existing_by_range: dict[tuple[int, int], str] = {}
     for doc in manifest.get("documents", []):
-        if (doc.get("source_file_name") == source_file_name
-                and (doc.get("source_page_start"), doc.get("source_page_end")) in proposed_ranges):
-            return {"status": "already_split",
-                    "message": f"{source_file_name} already has split entries in the manifest"}
+        page_range = (doc.get("source_page_start"), doc.get("source_page_end"))
+        if doc.get("source_file_name") != source_file_name or page_range not in proposed_ranges:
+            continue
+        if page_range in existing_by_range:
+            return {
+                "status": "inconsistent_existing_split",
+                "message": f"multiple manifest entries match {source_file_name} pages {page_range}",
+            }
+        existing_by_range[page_range] = doc["document_id"]
+    if existing_by_range:
+        missing_ranges = proposed_ranges - existing_by_range.keys()
+        if missing_ranges:
+            return {
+                "status": "inconsistent_existing_split",
+                "message": f"only part of {source_file_name} is already split",
+                "missing_ranges": sorted(missing_ranges),
+            }
+        document_ids = [
+            existing_by_range[(segment["page_start"], segment["page_end"])]
+            for segment in segments
+        ]
+        return {
+            "status": "already_split",
+            "message": f"{source_file_name} already has split entries in the manifest",
+            "updated_proposal": proposal_with_assignments(proposal, document_ids),
+        }
 
     start_index = _next_document_index(manifest)
     raw_dir = ROOT / "data" / "raw" / case_id
@@ -2154,6 +2193,9 @@ def split_bundle(
         "message": message,
         "new_document_ids": [d["document_id"] for d in new_documents],
         "new_pdf_paths": [str(p) for p in written_paths],
+        "updated_proposal": proposal_with_assignments(
+            proposal, [d["document_id"] for d in new_documents]
+        ),
     }
 
 
@@ -2388,6 +2430,16 @@ def _cmd_split(args):
         proposal_path=f"outputs/{args.case_id}/{proposal_filename(args.doc_id)}",
         manifest=manifest, held_by=args.held_by, run_id=args.run_id, progress=_stderr,
     )
+    updated_proposal = result.pop("updated_proposal", None)
+    if updated_proposal is not None:
+        _write_proposal(
+            args.case_id, args.doc_id, updated_proposal,
+            args.held_by, args.run_id,
+        )
+        result["assigned_document_ids"] = [
+            segment["assigned_document_id"]
+            for segment in updated_proposal["segments"]
+        ]
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["status"] in ("split", "already_split") else 1
 
