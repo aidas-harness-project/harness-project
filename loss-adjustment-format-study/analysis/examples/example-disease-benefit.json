@@ -1,0 +1,323 @@
+{
+  "schema_version": "loss_adjustment_report.v1",
+  "document_profile": {
+    "family": "disease_benefit",
+    "claim_mechanism": "disease_policy_benefit",
+    "mode": "full",
+    "title": "보험금사정서",
+    "language": "ko-KR",
+    "ordered_components": [
+      "cover",
+      "submission_letter",
+      "inner_cover",
+      "summary",
+      "assignment_contract",
+      "facts",
+      "governing_basis",
+      "analysis",
+      "calculations",
+      "conclusion",
+      "evidence_index",
+      "signature"
+    ]
+  },
+  "case_reference": {
+    "case_id": "CASE_EXAMPLE_DISEASE",
+    "pseudonymization_status": "pseudonymized",
+    "event_type": "disease",
+    "disability_benefit_claimed": false,
+    "contract_reference": "CONTRACT-REF",
+    "claim_reference": "CLAIM-REF"
+  },
+  "evidence_registry": [
+    {
+      "evidence_id": "E1",
+      "source_kind": "policy",
+      "title": "적용 특별약관",
+      "locator": "약관 조항 및 별표 위치",
+      "available": true
+    },
+    {
+      "evidence_id": "E2",
+      "source_kind": "contract_schedule",
+      "title": "보험계약 가입내역",
+      "locator": "해당 담보 및 가입금액",
+      "available": true
+    },
+    {
+      "evidence_id": "E3",
+      "source_kind": "medical_record",
+      "title": "진단서 및 의무기록",
+      "locator": "진단명, 진단일, 검사결과",
+      "available": true
+    }
+  ],
+  "sections": {
+    "summary": {
+      "heading": "I. 사정 요약",
+      "status": "included",
+      "rationale": "",
+      "statements": [
+        {
+          "text": "청구 담보, 잠정 사정금액 및 핵심 검토 쟁점을 요약함.",
+          "evidence_refs": ["E1", "E2", "E3"],
+          "support_type": "derived",
+          "confidence": "medium",
+          "uncertainty_note": "의학적 적합성 검토 전 잠정 결과임.",
+          "human_review_required": true
+        }
+      ]
+    },
+    "assignment_contract": {
+      "heading": "II. 위임 및 보험계약 사항",
+      "status": "included",
+      "rationale": "",
+      "statements": [
+        {
+          "text": "해당 담보의 계약상 가입 여부와 가입금액을 확인함.",
+          "evidence_refs": ["E2"],
+          "support_type": "direct",
+          "confidence": "high",
+          "human_review_required": false
+        }
+      ]
+    },
+    "facts": {
+      "heading": "III. 보험사고 및 치료 사실",
+      "status": "included",
+      "rationale": "",
+      "statements": [
+        {
+          "text": "진단서와 의무기록에 기재된 진단 및 검사 사실을 시간순으로 정리함.",
+          "evidence_refs": ["E3"],
+          "support_type": "direct",
+          "confidence": "high",
+          "human_review_required": false
+        }
+      ]
+    },
+    "governing_basis": {
+      "heading": "IV. 보험금 지급책임",
+      "status": "included",
+      "rationale": "",
+      "statements": [
+        {
+          "text": "특별약관의 질병 정의, 진단확정 요건, 감액기간 및 면책사유를 검토함.",
+          "evidence_refs": ["E1"],
+          "support_type": "direct",
+          "confidence": "high",
+          "human_review_required": false
+        }
+      ]
+    },
+    "analysis": {
+      "heading": "V. 쟁점별 적용 및 판단",
+      "status": "included",
+      "rationale": "",
+      "statements": [
+        {
+          "text": "의학적 기록과 약관상 정의의 일치 여부는 전문 검토를 거쳐 확정함.",
+          "evidence_refs": ["E1", "E3"],
+          "support_type": "professional_judgment",
+          "confidence": "medium",
+          "uncertainty_note": "의료전문가 검토가 필요함.",
+          "human_review_required": true
+        }
+      ]
+    },
+    "calculation_summary": {
+      "heading": "VI. 보험금 사정",
+      "status": "included",
+      "rationale": "",
+      "statements": [
+        {
+          "text": "가입금액과 적용 지급률을 분리 표시하여 산식을 제시함.",
+          "evidence_refs": ["E1", "E2"],
+          "support_type": "derived",
+          "confidence": "high",
+          "human_review_required": false
+        }
+      ]
+    },
+    "conclusion": {
+      "heading": "VII. 사정 결과 및 의견",
+      "status": "included",
+      "rationale": "",
+      "statements": [
+        {
+          "text": "현 자료 기준 잠정 결과이며 의학적 검토 후 최종 확정함.",
+          "evidence_refs": ["E1", "E2", "E3"],
+          "support_type": "professional_judgment",
+          "confidence": "medium",
+          "uncertainty_note": "검토 전 확정적 지급판단 금지.",
+          "human_review_required": true
+        }
+      ]
+    },
+    "evidence_index": {
+      "heading": "VIII. 증빙자료",
+      "status": "included",
+      "rationale": "",
+      "statements": [
+        {
+          "text": "약관, 가입내역, 진단서 및 의무기록을 증빙자료로 색인함.",
+          "evidence_refs": ["E1", "E2", "E3"],
+          "support_type": "direct",
+          "confidence": "high",
+          "human_review_required": false
+        }
+      ]
+    }
+  },
+  "reasoning_issues": [
+    {
+      "issue_id": "I1",
+      "issue_kind": "coverage",
+      "question": "청구 담보가 계약상 유효하고 청구사고에 적용되는가?",
+      "facts": [
+        {
+          "text": "계약 가입내역에 해당 담보와 가입금액이 기재되어 있음.",
+          "evidence_refs": ["E2"],
+          "support_type": "direct",
+          "confidence": "high",
+          "human_review_required": false
+        }
+      ],
+      "rules": [
+        {
+          "rule_type": "policy",
+          "citation": "적용 특별약관의 지급사유 조항",
+          "rule_text": "담보별 지급사유와 지급금액은 해당 특별약관에 따름.",
+          "evidence_refs": ["E1"]
+        }
+      ],
+      "application_steps": [
+        {
+          "text": "계약 내역의 담보와 청구 담보를 동일성 기준으로 대조함.",
+          "evidence_refs": ["E1", "E2"],
+          "support_type": "derived",
+          "confidence": "high",
+          "human_review_required": false
+        }
+      ],
+      "counterevidence": [],
+      "alternative_interpretations": [],
+      "unresolved_items": [
+        "전체 약관 제한조항 검토"
+      ],
+      "finding": {
+        "text": "계약 적용 여부는 자료상 충족하는 것으로 보이나 다른 제한 조항 검토가 남아 있음.",
+        "evidence_refs": ["E1", "E2"],
+        "support_type": "derived",
+        "confidence": "medium",
+        "uncertainty_note": "전체 약관 제한조항 확인 필요.",
+        "human_review_required": true
+      },
+      "disposition": "human_review_required",
+      "outcome_effect": "none"
+    },
+    {
+      "issue_id": "I2",
+      "issue_kind": "diagnosis_definition_match",
+      "question": "의무기록상 진단이 약관상 질병 정의와 진단확정 요건을 충족하는가?",
+      "facts": [
+        {
+          "text": "진단명과 관련 검사결과가 의료기록에 기재되어 있음.",
+          "evidence_refs": ["E3"],
+          "support_type": "direct",
+          "confidence": "high",
+          "human_review_required": false
+        }
+      ],
+      "rules": [
+        {
+          "rule_type": "policy",
+          "citation": "적용 특별약관의 질병 정의 및 진단확정 조항",
+          "rule_text": "약관이 정한 진단 주체, 검사방법 및 질병분류 요건을 충족해야 함.",
+          "evidence_refs": ["E1"]
+        }
+      ],
+      "application_steps": [
+        {
+          "text": "진단 주체, 검사방법, 진단일 및 질병분류를 약관 요건별로 대조함.",
+          "evidence_refs": ["E1", "E3"],
+          "support_type": "professional_judgment",
+          "confidence": "medium",
+          "uncertainty_note": "의료전문가의 적합성 검토가 필요함.",
+          "human_review_required": true
+        }
+      ],
+      "counterevidence": [],
+      "alternative_interpretations": [
+        "검사결과가 약관상 확정진단 요건을 충족하지 않을 가능성"
+      ],
+      "unresolved_items": [
+        "의료전문가의 진단 적합성 검토"
+      ],
+      "finding": {
+        "text": "약관 정의 충족 여부는 의료전문가 검토 전 확정하지 않음.",
+        "evidence_refs": ["E1", "E3"],
+        "support_type": "professional_judgment",
+        "confidence": "low",
+        "uncertainty_note": "의료검토 대기 중.",
+        "human_review_required": true
+      },
+      "disposition": "human_review_required",
+      "outcome_effect": "none"
+    }
+  ],
+  "calculations": [
+    {
+      "calculation_id": "C1",
+      "category": "benefit_amount",
+      "label": "질병 진단 담보 잠정 보험금",
+      "operation": "multiply",
+      "inputs": [
+        {
+          "label": "가입금액",
+          "input_type": "literal",
+          "value": "10000000",
+          "unit": "KRW",
+          "evidence_refs": ["E2"]
+        },
+        {
+          "label": "적용 지급률",
+          "input_type": "literal",
+          "value": "1",
+          "unit": "ratio",
+          "evidence_refs": ["E1"]
+        }
+      ],
+      "result": 10000000,
+      "currency": "KRW",
+      "rounding_rule": {
+        "mode": "none",
+        "unit": 1
+      },
+      "status": "provisional"
+    }
+  ],
+  "final_assessment": {
+    "outcome": "human_review_required",
+    "amount": null,
+    "reasoning_summary": {
+      "text": "계약 및 산식은 확인되었으나 진단정의 일치 여부의 의료검토가 완료되지 않아 잠정 결과로 유지함.",
+      "evidence_refs": ["E1", "E2", "E3"],
+      "support_type": "professional_judgment",
+      "confidence": "medium",
+      "uncertainty_note": "의료검토 완료 전 최종화 금지.",
+      "human_review_required": true
+    },
+    "evidence_refs": ["E1", "E2", "E3"],
+    "reservations": [
+      "추가 의무기록 또는 전문의 검토 결과에 따라 판단과 금액이 달라질 수 있음."
+    ]
+  },
+  "review_gates": {
+    "evidence": "passed",
+    "calculation": "review_required",
+    "medical": "review_required",
+    "legal": "review_required",
+    "finalization": "review_required"
+  }
+}

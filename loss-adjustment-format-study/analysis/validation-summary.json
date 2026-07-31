@@ -1,0 +1,92 @@
+{
+  "schema_version": "loss_adjustment_format_study_validation.v3",
+  "candidate_evidence": {
+    "protected_fixture_present": false,
+    "corpus_validation": "not_run_protected_fixture_absent",
+    "metrics_staleness_check": "not_run_protected_fixture_absent",
+    "example_validation": "passed",
+    "focused_tests": {
+      "passed": 115,
+      "failed": 0,
+      "files": [
+        "tests/test_extract_loss_adjustment_sections.py",
+        "tests/test_generate_loss_adjustment_corpus_metrics.py",
+        "tests/test_validate_loss_adjustment_report.py",
+        "tests/test_loss_adjustment_schema_artifacts.py"
+      ]
+    },
+    "repository_tests": {
+      "passed": 548,
+      "failed": 0
+    },
+    "note": "The protected source, manifest, reviews, OCR cache, report index, and extracted derivatives are intentionally absent from the pull-request checkout. Current-candidate corpus validation and metric staleness checking therefore were not run and are not claimed."
+  },
+  "historical_completed_study_snapshot": {
+    "source_documents": 95,
+    "reviewed_decisions": 95,
+    "independently_reviewed_decisions": 95,
+    "independent_boundary_mismatches": 0,
+    "reports": 94,
+    "no_report_documents": 1,
+    "source_pages": 2883,
+    "report_pages": 864,
+    "pdf_cuts": 94,
+    "text_extracts": 94,
+    "report_metadata_files": 94,
+    "no_report_metadata_files": 1,
+    "page_markers": 864,
+    "rendered_source_output_pages_verified": 864,
+    "exact_reviewed_text_slices_verified": 94,
+    "scope_note": "These are aggregate facts retained from the completed protected-fixture study. They are not a validation result for the current pull-request commit."
+  },
+  "historical_ocr_cache_provenance": {
+    "source_bound_documents": 95,
+    "recomputed_from_source": 12,
+    "reviewed_legacy_sidecar": 83,
+    "scope_note": "Historical provenance snapshot only. Current tooling additionally requires an extraction-contract digest; the protected fixture must be migrated or refreshed before current-candidate corpus validation."
+  },
+  "historical_visual_boundary_sample": {
+    "documents": [
+      "DOC_002",
+      "DOC_019",
+      "DOC_026",
+      "DOC_066",
+      "DOC_088"
+    ],
+    "confirmed": 5,
+    "failed": 0
+  },
+  "authoring_contract": {
+    "json_schema_draft": "2020-12",
+    "schema_meta_validation": "passed",
+    "example_validation": "passed",
+    "custom_cross_field_validation": "passed",
+    "model_authored_finalization": [
+      "draft",
+      "review_required"
+    ],
+    "embedded_approval_records_allowed": false,
+    "deterministic_exact_rational_recomputation": true,
+    "typed_literal_and_calculation_reference_inputs": true,
+    "free_form_calculation_formula_allowed": false,
+    "explicit_net_calculation_reference_required": true,
+    "all_calculations_reachable_from_net_root": true,
+    "payable_amount_must_be_positive": true,
+    "all_payable_calculations_must_be_complete": true,
+    "not_payable_requires_explicit_denial_effect": true,
+    "negative_exact_results_rejected_before_rounding": true,
+    "rounding_unit_enforced_for_none_mode": true,
+    "open_professional_judgment_prevents_gate_self_clearance": true,
+    "family_event_and_component_invariants": true
+  },
+  "metrics_contract": {
+    "schema_version": "loss_adjustment_corpus_metrics.v0.2",
+    "generator": "tools/generate_loss_adjustment_corpus_metrics.py",
+    "reviewed_report_index_is_family_source": true,
+    "report_index_binds_source_hash_and_size": true,
+    "report_index_hash_embedded": true,
+    "regex_definitions_embedded": true,
+    "independently_adjudicated_semantic_labels": false,
+    "current_candidate_staleness_check": "not_run_protected_fixture_absent"
+  }
+}
