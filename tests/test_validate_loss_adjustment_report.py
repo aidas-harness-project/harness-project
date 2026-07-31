@@ -59,6 +59,33 @@ def test_validate_document_blocks_approval_when_human_review_is_required():
     assert any("cannot be approved" in error for error in errors)
 
 
+def test_validate_document_blocks_professional_gates_for_review_required_issue():
+    document = _load_example()
+    _clear_model_review_flags(document)
+    for _, value in validator._walk(document):
+        if not isinstance(value, dict):
+            continue
+        if value.get("support_type") == "professional_judgment":
+            value["support_type"] = "documentary"
+        if isinstance(value.get("unresolved_items"), list):
+            value["unresolved_items"] = []
+    document["review_gates"]["medical"] = "passed"
+    document["review_gates"]["legal"] = "passed"
+    document["reasoning_issues"][0]["disposition"] = "supported"
+
+    baseline_errors = validator.validate_document(document, _schema())
+
+    assert not any(
+        "professional review gate cannot pass" in error for error in baseline_errors
+    )
+
+    document["reasoning_issues"][0]["disposition"] = "human_review_required"
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("professional review gate cannot pass" in error for error in errors)
+
+
 def test_validate_document_rejects_out_of_order_components():
     document = _load_example()
     components = document["document_profile"]["ordered_components"]
@@ -86,10 +113,82 @@ def test_validate_document_reconciles_final_benefit_amount():
         "value": 9000000,
         "currency": "KRW",
     }
+    document["final_assessment"]["net_calculation_ref"] = "C1"
 
     errors = validator.validate_document(document, _schema())
 
     assert any("does not reconcile" in error for error in errors)
+
+
+def test_validate_document_rejects_payable_outcome_with_resolved_denial_issue():
+    document = _load_example()
+    _clear_model_review_flags(document)
+    calculation = document["calculations"][0]
+    calculation["status"] = "complete"
+    document["reasoning_issues"][0]["outcome_effect"] = "denies_payment"
+    document["final_assessment"].update(
+        {
+            "outcome": "payable",
+            "amount": {"value": calculation["result"], "currency": "KRW"},
+            "net_calculation_ref": calculation["calculation_id"],
+        }
+    )
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("denying issue requires a not_payable outcome" in error for error in errors)
+
+
+def test_validate_document_rejects_resolved_outcome_with_unresolved_issue():
+    document = _load_example()
+    calculation = document["calculations"][0]
+    calculation["status"] = "complete"
+    document["final_assessment"].update(
+        {
+            "outcome": "payable",
+            "amount": {"value": calculation["result"], "currency": "KRW"},
+            "net_calculation_ref": calculation["calculation_id"],
+        }
+    )
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any(
+        "unresolved issue requires an unresolved final outcome" in error
+        for error in errors
+    )
+
+
+def test_validate_document_treats_undetermined_issue_as_unresolved():
+    document = _load_example()
+    _clear_model_review_flags(document)
+    calculation = document["calculations"][0]
+    calculation["status"] = "complete"
+    document["reasoning_issues"][0]["disposition"] = "undetermined"
+    document["final_assessment"].update(
+        {
+            "outcome": "payable",
+            "amount": {"value": calculation["result"], "currency": "KRW"},
+            "net_calculation_ref": calculation["calculation_id"],
+        }
+    )
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("unresolved issue requires an unresolved final outcome" in error for error in errors)
+
+
+def test_validate_document_requires_not_payable_for_resolved_denial():
+    document = _load_example()
+    _clear_model_review_flags(document)
+    document["reasoning_issues"][0]["outcome_effect"] = "denies_payment"
+    document["final_assessment"].update(
+        {"outcome": "human_review_required", "amount": None}
+    )
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("denying issue requires a not_payable outcome" in error for error in errors)
 
 
 def test_validate_document_enforces_family_specific_requirements():
@@ -140,6 +239,25 @@ def test_model_authored_document_cannot_self_assert_final_approval():
     assert any("model-authored document cannot claim final approval" in error for error in errors)
 
 
+def test_model_authored_professional_gates_cannot_self_clear_open_judgment():
+    document = _load_example()
+    document["review_gates"]["medical"] = "passed"
+    document["review_gates"]["legal"] = "passed"
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("professional review gate cannot pass" in error for error in errors)
+
+
+def test_open_professional_judgment_cannot_be_not_applicable():
+    document = _load_example()
+    document["review_gates"]["medical"] = "not_applicable"
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("professional review gate must remain open" in error for error in errors)
+
+
 def test_validate_document_recomputes_declared_calculation():
     document = _load_example()
     document["calculations"][0]["inputs"][1]["value"] = "0.5"
@@ -149,8 +267,18 @@ def test_validate_document_recomputes_declared_calculation():
     assert any("result does not match deterministic recomputation" in error for error in errors)
 
 
+def test_validate_document_rejects_dimensionally_invalid_money_multiplication():
+    document = _load_example()
+    document["calculations"][0]["inputs"][1]["unit"] = "KRW"
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("dimensionally invalid" in error for error in errors)
+
+
 def test_validate_document_recomputes_large_decimals_exactly():
     document = _load_example()
+    _clear_model_review_flags(document)
     calculation = document["calculations"][0]
     left = 123456789012345678901234567890
     right = 9
@@ -164,6 +292,7 @@ def test_validate_document_recomputes_large_decimals_exactly():
         "value": expected,
         "currency": "KRW",
     }
+    document["final_assessment"]["net_calculation_ref"] = "C1"
 
     errors = validator.validate_document(document, _schema())
 
@@ -185,6 +314,21 @@ def test_validate_document_rejects_negative_exact_result_hidden_by_truncation():
     assert any("negative before rounding" in error for error in errors)
 
 
+def test_validate_document_requires_none_rounding_result_to_match_unit():
+    document = _load_example()
+    calculation = document["calculations"][0]
+    calculation["operation"] = "identity"
+    calculation["inputs"] = [calculation["inputs"][0]]
+    calculation["inputs"][0]["value"] = "15"
+    calculation["rounding_rule"] = {"mode": "none", "unit": 10}
+    calculation["result"] = 15
+    calculation["status"] = "complete"
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("multiple of the declared unit" in error for error in errors)
+
+
 def test_validate_document_rejects_payable_with_relevant_provisional_calculation():
     document = _load_example()
     complete = document["calculations"][0]
@@ -203,7 +347,70 @@ def test_validate_document_rejects_payable_with_relevant_provisional_calculation
 
     errors = validator.validate_document(document, _schema())
 
-    assert any("all relevant typed calculations to be complete" in error for error in errors)
+    assert any("every declared calculation to be complete" in error for error in errors)
+
+
+def test_validate_document_rejects_complete_calculation_with_provisional_parent():
+    document = _load_example()
+    parent = document["calculations"][0]
+    parent["status"] = "provisional"
+    child = json.loads(json.dumps(parent))
+    child.update(
+        {
+            "calculation_id": "C2",
+            "operation": "identity",
+            "inputs": [
+                {
+                    "input_type": "calculation_ref",
+                    "calculation_ref": "C1",
+                }
+            ],
+            "status": "complete",
+        }
+    )
+    document["calculations"].append(child)
+    document["status"] = "review_required"
+    document["final_assessment"].update(
+        {
+            "outcome": "human_review_required",
+            "amount": None,
+            "net_calculation_ref": None,
+        }
+    )
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("complete calculation must reference only complete calculations" in error for error in errors)
+
+
+def test_validate_document_allows_provisional_calculation_with_provisional_parent():
+    document = _load_example()
+    parent = document["calculations"][0]
+    parent["status"] = "provisional"
+    child = json.loads(json.dumps(parent))
+    child.update(
+        {
+            "calculation_id": "C2",
+            "operation": "identity",
+            "inputs": [
+                {
+                    "label": "provisional parent",
+                    "input_type": "calculation_ref",
+                    "calculation_ref": "C1",
+                }
+            ],
+            "status": "provisional",
+        }
+    )
+    document["calculations"].append(child)
+
+    errors = validator.validate_document(document, _schema())
+
+    assert not any("unknown or invalid calculation_ref" in error for error in errors)
+    assert not any(
+        "complete calculation must reference only complete calculations" in error
+        for error in errors
+    )
 
 
 def test_validate_document_requires_known_denial_basis_for_not_payable():
@@ -223,6 +430,15 @@ def test_validate_document_requires_known_denial_basis_for_not_payable():
 
     document["final_assessment"]["denial_basis_issue_refs"] = ["I1"]
     errors = validator.validate_document(document, _schema())
+    assert any("does not deny payment" in error for error in errors)
+
+    document["reasoning_issues"][0]["disposition"] = "not_supported"
+    document["reasoning_issues"][0]["outcome_effect"] = "denies_payment"
+    errors = validator.validate_document(document, _schema())
+    assert not any("denial_basis_issue_refs" in error for error in errors)
+
+    document["reasoning_issues"][0]["disposition"] = "supported"
+    errors = validator.validate_document(document, _schema())
     assert not any("denial_basis_issue_refs" in error for error in errors)
 
 
@@ -234,6 +450,95 @@ def test_validate_document_rejects_payable_outcome_without_amount():
     errors = validator.validate_document(document, _schema())
 
     assert any("payable outcome requires an exact KRW amount" in error for error in errors)
+
+
+def test_validate_document_requires_explicit_net_calculation_reference():
+    document = _load_example()
+    calculation = document["calculations"][0]
+    calculation["status"] = "complete"
+    document["final_assessment"]["outcome"] = "payable"
+    document["final_assessment"]["amount"] = {
+        "value": calculation["result"],
+        "currency": "KRW",
+    }
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("net_calculation_ref" in error for error in errors)
+
+
+def test_validate_document_accepts_typed_calculation_dependency():
+    document = _load_example()
+    _clear_model_review_flags(document)
+    gross = document["calculations"][0]
+    gross["status"] = "complete"
+    for item in gross["inputs"]:
+        item["input_type"] = "literal"
+    net = {
+        "calculation_id": "C2",
+        "category": "benefit_amount",
+        "label": "net payable",
+        "operation": "identity",
+        "inputs": [
+            {
+                "label": "gross benefit",
+                "input_type": "calculation_ref",
+                "calculation_ref": "C1",
+            }
+        ],
+        "result": gross["result"],
+        "currency": "KRW",
+        "rounding_rule": {"mode": "none", "unit": 1},
+        "status": "complete",
+    }
+    document["calculations"].append(net)
+    document["final_assessment"].update(
+        {
+            "outcome": "payable",
+            "amount": {"value": net["result"], "currency": "KRW"},
+            "net_calculation_ref": "C2",
+        }
+    )
+
+    assert validator.validate_document(document, _schema()) == []
+
+
+def test_validate_document_rejects_unlinked_complete_calculation():
+    document = _load_example()
+    net = document["calculations"][0]
+    net["status"] = "complete"
+    document["calculations"].append(
+        {
+            "calculation_id": "C2",
+            "category": "benefit_amount",
+            "label": "unlinked complete amount",
+            "operation": "identity",
+            "inputs": [
+                {
+                    "label": "standalone amount",
+                    "input_type": "literal",
+                    "value": "1",
+                    "unit": "KRW",
+                    "evidence_refs": ["E1"],
+                }
+            ],
+            "result": 1,
+            "currency": "KRW",
+            "rounding_rule": {"mode": "none", "unit": 1},
+            "status": "complete",
+        }
+    )
+    document["final_assessment"].update(
+        {
+            "outcome": "payable",
+            "amount": {"value": net["result"], "currency": "KRW"},
+            "net_calculation_ref": "C1",
+        }
+    )
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("net calculation graph" in error for error in errors)
 
 
 def test_validate_document_rejects_zero_value_payable_outcome():
@@ -269,6 +574,17 @@ def test_validate_document_rejects_unresolved_outcome_with_final_amount():
     errors = validator.validate_document(document, _schema())
 
     assert any("unresolved outcome must not assert a final amount" in error for error in errors)
+
+
+def test_validate_document_rejects_outcome_irrelevant_reference_fields():
+    document = _load_example()
+    document["final_assessment"]["net_calculation_ref"] = "C999"
+    document["final_assessment"]["denial_basis_issue_refs"] = ["I999"]
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("net_calculation_ref is allowed only for payable outcomes" in error for error in errors)
+    assert any("denial_basis_issue_refs is allowed only for not_payable" in error for error in errors)
 
 
 def test_validate_document_requires_all_full_mode_components():

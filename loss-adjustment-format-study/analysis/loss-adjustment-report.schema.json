@@ -942,7 +942,8 @@
         "alternative_interpretations",
         "unresolved_items",
         "finding",
-        "disposition"
+        "disposition",
+        "outcome_effect"
       ],
       "properties": {
         "issue_id": {
@@ -1021,6 +1022,14 @@
             "undetermined",
             "human_review_required"
           ]
+        },
+        "outcome_effect": {
+          "enum": [
+            "supports_payment",
+            "reduces_payment",
+            "denies_payment",
+            "none"
+          ]
         }
       }
     },
@@ -1029,22 +1038,32 @@
       "additionalProperties": false,
       "required": [
         "label",
-        "value",
-        "unit",
-        "evidence_refs"
+        "input_type"
       ],
       "properties": {
         "label": {
           "type": "string",
           "minLength": 1
         },
+        "input_type": {
+          "enum": [
+            "literal",
+            "calculation_ref"
+          ]
+        },
+        "calculation_ref": {
+          "type": "string",
+          "pattern": "^C[1-9][0-9]*$"
+        },
         "value": {
           "type": "string",
           "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"
         },
         "unit": {
-          "type": "string",
-          "minLength": 1
+          "enum": [
+            "KRW",
+            "ratio"
+          ]
         },
         "evidence_refs": {
           "type": "array",
@@ -1055,7 +1074,29 @@
             "pattern": "^E[1-9][0-9]*$"
           }
         }
-      }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "input_type": {"const": "literal"}
+          },
+          "required": ["value", "unit", "evidence_refs"],
+          "not": {"required": ["calculation_ref"]}
+        },
+        {
+          "properties": {
+            "input_type": {"const": "calculation_ref"}
+          },
+          "required": ["calculation_ref"],
+          "not": {
+            "anyOf": [
+              {"required": ["value"]},
+              {"required": ["unit"]},
+              {"required": ["evidence_refs"]}
+            ]
+          }
+        }
+      ]
     },
     "calculation": {
       "type": "object",
@@ -1225,6 +1266,10 @@
             }
           ]
         },
+        "net_calculation_ref": {
+          "type": "string",
+          "pattern": "^C[1-9][0-9]*$"
+        },
         "reasoning_summary": {
           "$ref": "#/$defs/supportedStatement"
         },
@@ -1271,6 +1316,14 @@
             }
           },
           "then": {
+            "required": [
+              "net_calculation_ref"
+            ],
+            "not": {
+              "required": [
+                "denial_basis_issue_refs"
+              ]
+            },
             "properties": {
               "amount": {
                 "$ref": "#/$defs/money"
@@ -1293,6 +1346,11 @@
             "required": [
               "denial_basis_issue_refs"
             ],
+            "not": {
+              "required": [
+                "net_calculation_ref"
+              ]
+            },
             "properties": {
               "amount": {
                 "type": "object",
@@ -1323,6 +1381,16 @@
             }
           },
           "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["net_calculation_ref"]
+                },
+                {
+                  "required": ["denial_basis_issue_refs"]
+                }
+              ]
+            },
             "properties": {
               "amount": {
                 "type": "null"
