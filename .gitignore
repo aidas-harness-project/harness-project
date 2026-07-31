@@ -41,9 +41,11 @@ _ocr_scratch/
 _redaction_scratch/
 loss-adjustment-format-study/_ocr_cache/
 loss-adjustment-format-study/_working/
+loss-adjustment-format-study/.publication-journal.json
 loss-adjustment-format-study/manifest.json
 # Protected local corpus artifacts. These include answer-key derivatives and
 # source-path-bearing review metadata; keep them out of commits and PRs.
+/sources/
 loss-adjustment-format-study/boundary-review.json
 loss-adjustment-format-study/independent-boundary-review.json
 loss-adjustment-format-study/sections/

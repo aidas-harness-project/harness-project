@@ -1,4 +1,5 @@
 import csv
+import os
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,27 @@ def test_build_metrics_counts_each_defined_phrase_at_most_once_per_document(
     assert result["generator"]["report_index_sha256"] == "b" * 64
 
 
+def test_generate_remains_bound_to_locked_root_after_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    study = tmp_path / "study"
+    moved = tmp_path / "moved-study"
+    study.mkdir()
+
+    def generate_anchored(anchored_root: Path) -> dict[str, object]:
+        assert "/proc/self/fd/" in anchored_root.as_posix()
+        os.replace(study, moved)
+        study.mkdir()
+        (anchored_root / "metrics.marker").write_text("locked", encoding="utf-8")
+        return {"schema_version": "test"}
+
+    monkeypatch.setattr(metrics, "_generate_unlocked", generate_anchored)
+
+    assert metrics.generate(study) == {"schema_version": "test"}
+    assert (moved / "metrics.marker").read_text(encoding="utf-8") == "locked"
+    assert not (study / "metrics.marker").exists()
+
+
 def test_load_report_index_requires_exact_manifest_metadata(tmp_path: Path):
     analysis = tmp_path / "analysis"
     analysis.mkdir()
@@ -77,6 +99,8 @@ def test_load_report_index_requires_exact_manifest_metadata(tmp_path: Path):
             {
                 "document_id": "DOC_001",
                 "source_relative_path": "arbitrary/source.pdf",
+                "source_sha256": "a" * 64,
+                "source_size_bytes": 1234,
                 "source_page_count": 3,
                 "contains_report": True,
                 "page_start": 1,
@@ -88,6 +112,8 @@ def test_load_report_index_requires_exact_manifest_metadata(tmp_path: Path):
     row = {
         "document_id": "DOC_001",
         "source_relative_path": "arbitrary/source.pdf",
+        "source_sha256": "a" * 64,
+        "source_size_bytes": "1234",
         "family": "liability_damages",
         "contains_report": "True",
         "source_page_count": "3",
@@ -108,6 +134,15 @@ def test_load_report_index_requires_exact_manifest_metadata(tmp_path: Path):
     assert loaded_path == index_path
 
     row["report_page_end"] = "3"
+    with index_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=metrics.REPORT_INDEX_FIELDS)
+        writer.writeheader()
+        writer.writerow(row)
+    with pytest.raises(ValueError, match="report index metadata mismatch"):
+        metrics.load_report_index(manifest, tmp_path)
+
+    row["report_page_end"] = "2"
+    row["source_sha256"] = "b" * 64
     with index_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=metrics.REPORT_INDEX_FIELDS)
         writer.writeheader()

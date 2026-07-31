@@ -372,11 +372,11 @@ For every `calculations` item:
 
 1. Choose a typed category.
 2. Select the executable operation: `identity`, `sum`, `subtract`, `multiply`, or `divide`.
-3. List every numeric input separately as an exact decimal string, in operation order.
-4. Give each input a unit.
-5. Cite evidence for every input.
+3. Type every input as either `literal` or `calculation_ref`.
+4. For a literal, provide an exact decimal string, a closed unit (`KRW` or `ratio`), and evidence references. For a calculation reference, name an earlier calculation; do not repeat its value, unit, or evidence. A `complete` calculation may reference only complete parents, while an explicitly provisional or human-review-required chain may reference an earlier non-complete parent.
+5. Keep operation dimensions valid for a KRW result: addition/subtraction use KRW operands, multiplication uses one KRW operand and ratio operands, and division uses KRW divided only by ratios.
 6. Show a whole-won integer result or `null` when the result cannot yet be computed.
-7. Encode rounding as `mode` (`none`, `truncate`, or `half_up`) plus a positive whole-won `unit`.
+7. Encode rounding as `mode` (`none`, `truncate`, or `half_up`) plus a positive whole-won `unit`; even `none` requires the exact result to be a multiple of that unit.
 8. Let the custom validator recompute the operation with exact rational arithmetic; a model-authored assertion cannot substitute for recomputation.
 9. Do not emit a duplicate free-form formula. The typed operation, ordered inputs, and rounding rule are the single source of truth; a renderer may derive a display formula from them.
 10. Use `provisional` or `human_review_required` when any input is provisional. `complete` requires a non-null result.
@@ -395,7 +395,7 @@ Before approval:
 
 Never hide an unsupported rate or assumption outside the typed inputs.
 
-For `payable` and `partially_payable`, every relevant typed calculation must be complete and the final KRW amount must reconcile with the complete typed net calculation total. For `not_payable`, the final amount is zero, but a positive gross damages or policy-benefit calculation may remain when a separately evidenced coverage, exclusion, liability, or other issue explains why none of that gross amount is payable. The reasoning chain must make that gross-to-net distinction explicit, and `denial_basis_issue_refs` must identify at least one existing reasoning issue that supplies the denying basis.
+For `payable` and `partially_payable`, every declared calculation must be complete and transitively reachable from the calculation identified by `net_calculation_ref`; the final KRW amount must equal that exact recomputed graph-root result. For `not_payable`, the final amount is zero, but a positive gross damages or policy-benefit calculation may remain when a separately evidenced issue explains why none is payable. A denial-basis issue must have a resolved disposition (`supported`, `not_supported`, or `partially_supported`) and `outcome_effect: denies_payment`; merely unresolved or known issues cannot serve as a denial basis. Disposition describes whether the issue's own proposition is supported, independently of its payment effect: for example, a supported exclusion or a not-supported eligibility proposition can each deny payment.
 
 ## 10. Evidence and citation rules
 
@@ -483,11 +483,11 @@ Pass only when every typed operation has been independently recomputed and recon
 
 ### Medical
 
-Pass only after required medical appropriateness, causation, diagnosis-definition, or disability review is complete. Otherwise use `review_required` or `blocked`.
+This model-authored validator cannot authenticate professional completion. If any professional-judgment statement, human-review flag, `human_review_required` issue disposition, or unresolved item remains, use `review_required` or `blocked`; a `passed` assertion is rejected.
 
 ### Legal
 
-Pass only after required liability, exclusion, policy interpretation, negligence, limitation, and precedent review is complete. Otherwise use `review_required` or `blocked`.
+This model-authored validator cannot authenticate professional completion. If any professional-judgment statement, human-review flag, `human_review_required` issue disposition, or unresolved item remains, use `review_required` or `blocked`; a `passed` assertion is rejected.
 
 ### Finalization
 

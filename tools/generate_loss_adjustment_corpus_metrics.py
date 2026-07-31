@@ -26,6 +26,8 @@ FAMILY_ORDER = (
 REPORT_INDEX_FIELDS = (
     "document_id",
     "source_relative_path",
+    "source_sha256",
+    "source_size_bytes",
     "family",
     "contains_report",
     "source_page_count",
@@ -206,6 +208,8 @@ def load_report_index(
         expected = {
             "document_id": document_id,
             "source_relative_path": record.get("source_relative_path"),
+            "source_sha256": record.get("source_sha256"),
+            "source_size_bytes": str(record.get("source_size_bytes")),
             "contains_report": str(contains_report),
             "source_page_count": str(record.get("source_page_count")),
             "report_page_start": report_page_start,
@@ -301,8 +305,8 @@ def build_metrics(
     }
 
 
-def generate(study_root: Path) -> dict[str, Any]:
-    validation = extractor.validate_study(study_root)
+def _generate_unlocked(study_root: Path) -> dict[str, Any]:
+    validation = extractor._validate_study_unlocked(study_root)
     if not validation["valid"]:
         raise ValueError(
             "study validation failed before metrics generation: "
@@ -319,6 +323,12 @@ def generate(study_root: Path) -> dict[str, Any]:
     )
 
 
+def generate(study_root: Path) -> dict[str, Any]:
+    study_root = extractor._validate_study_root(study_root)
+    with extractor._exclusive_study_lock(study_root) as anchored_root:
+        return _generate_unlocked(anchored_root)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("study_root", type=Path)
@@ -328,21 +338,29 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    output = args.study_root / "analysis/corpus-metrics.json"
-    metrics = generate(args.study_root)
-    rendered = json.dumps(metrics, ensure_ascii=False, indent=2) + "\n"
-    if args.check:
-        if not output.is_file() or output.read_text(encoding="utf-8") != rendered:
-            print(f"metrics are stale: {output}")
-            return 1
-        print(f"metrics are current: {output}")
+    study_root = extractor._validate_study_root(args.study_root)
+    with extractor._exclusive_study_lock(study_root) as anchored_root:
+        output = extractor._confined_path(
+            anchored_root,
+            "analysis/corpus-metrics.json",
+            field_name="corpus metrics output",
+            expected_relative="analysis/corpus-metrics.json",
+        )
+        metrics = _generate_unlocked(anchored_root)
+        rendered = json.dumps(metrics, ensure_ascii=False, indent=2) + "\n"
+        if args.check:
+            if (
+                not output.is_file()
+                or extractor._read_regular_file_no_follow(output).decode("utf-8")
+                != rendered
+            ):
+                print(f"metrics are stale: {output}")
+                return 1
+            print(f"metrics are current: {output}")
+            return 0
+        extractor.atomic_write_json(output, metrics)
+        print(f"wrote {output}")
         return 0
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_suffix(output.suffix + ".tmp")
-    temporary.write_text(rendered, encoding="utf-8")
-    temporary.replace(output)
-    print(f"wrote {output}")
-    return 0
 
 
 if __name__ == "__main__":

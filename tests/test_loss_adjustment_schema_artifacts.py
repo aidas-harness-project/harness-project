@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 
@@ -45,3 +46,14 @@ def test_every_canonical_render_component_is_documented_in_rulebook():
 
     for component in components:
         assert f"`{component}`" in rulebook
+
+
+def test_protected_study_source_root_is_git_ignored():
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "sources/protected.pdf"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr

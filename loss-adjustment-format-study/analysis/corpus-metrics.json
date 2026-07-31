@@ -5,7 +5,7 @@
     "path": "tools/generate_loss_adjustment_corpus_metrics.py",
     "manifest_sha256": "46a390285e778e0f663a721f4cf4b3e081bf51523a966bc4f09e54f9870d3b57",
     "report_index_path": "analysis/report-index.csv",
-    "report_index_sha256": "50ce0f758383af10205acaf1bc09aff0cb86f288e0a2f753ed4da0efa105d3e1",
+    "report_index_sha256": "9ab633497cdbe553f4c68441b641a6e34df17f63f98a78762f6daf8f303672db",
     "component_patterns": {
       "submission_letter": [
         "(?:손해사정서|보험금\\s*사정서).{0,100}(?:제출|송부)",

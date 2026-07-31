@@ -213,7 +213,8 @@
         "uncertainty_note": "전체 약관 제한조항 확인 필요.",
         "human_review_required": true
       },
-      "disposition": "human_review_required"
+      "disposition": "human_review_required",
+      "outcome_effect": "none"
     },
     {
       "issue_id": "I2",
@@ -261,7 +262,8 @@
         "uncertainty_note": "의료검토 대기 중.",
         "human_review_required": true
       },
-      "disposition": "human_review_required"
+      "disposition": "human_review_required",
+      "outcome_effect": "none"
     }
   ],
   "calculations": [
@@ -273,12 +275,14 @@
       "inputs": [
         {
           "label": "가입금액",
+          "input_type": "literal",
           "value": "10000000",
           "unit": "KRW",
           "evidence_refs": ["E2"]
         },
         {
           "label": "적용 지급률",
+          "input_type": "literal",
           "value": "1",
           "unit": "ratio",
           "evidence_refs": ["E1"]
@@ -313,7 +317,7 @@
     "evidence": "passed",
     "calculation": "review_required",
     "medical": "review_required",
-    "legal": "not_applicable",
+    "legal": "review_required",
     "finalization": "review_required"
   }
 }

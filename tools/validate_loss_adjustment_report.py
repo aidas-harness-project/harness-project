@@ -41,7 +41,10 @@ def _duplicate_values(values: list[str]) -> set[str]:
 
 
 def _recompute_calculation(
-    calculation: dict[str, Any], index: int, errors: list[str]
+    calculation: dict[str, Any],
+    index: int,
+    errors: list[str],
+    prior_results: dict[str, Decimal],
 ) -> Decimal | None:
     path = f"$.calculations[{index}]"
     operation = calculation.get("operation")
@@ -63,17 +66,53 @@ def _recompute_calculation(
         return None
 
     operands: list[Fraction] = []
+    units: list[str] = []
     try:
         for item in inputs:
+            input_type = item.get("input_type") if isinstance(item, dict) else None
+            if input_type == "calculation_ref":
+                calculation_ref = item.get("calculation_ref")
+                if calculation_ref not in prior_results:
+                    errors.append(
+                        f"{path}.inputs: calculation reference must identify an earlier complete calculation"
+                    )
+                    return None
+                operands.append(Fraction(prior_results[calculation_ref]))
+                units.append("KRW")
+                continue
+            if input_type != "literal":
+                return None
             value = item.get("value") if isinstance(item, dict) else None
+            unit = item.get("unit") if isinstance(item, dict) else None
             if not isinstance(value, str):
+                return None
+            if unit not in {"KRW", "ratio"}:
+                errors.append(f"{path}.inputs: operand unit must be KRW or ratio")
                 return None
             operand = Decimal(value)
             if not operand.is_finite():
                 errors.append(f"{path}.inputs: operands must be finite decimals")
                 return None
             operands.append(Fraction(operand))
+            units.append(unit)
     except InvalidOperation:
+        return None
+
+    dimensionally_valid = (
+        (operation in {"identity", "sum", "subtract"} and set(units) == {"KRW"})
+        or (
+            operation == "multiply"
+            and units.count("KRW") == 1
+            and units.count("ratio") == len(units) - 1
+        )
+        or (
+            operation == "divide"
+            and units[0] == "KRW"
+            and all(unit == "ratio" for unit in units[1:])
+        )
+    )
+    if not dimensionally_valid:
+        errors.append(f"{path}.inputs: operation is dimensionally invalid for a KRW result")
         return None
 
     try:
@@ -116,6 +155,11 @@ def _recompute_calculation(
         if computed.denominator != 1:
             errors.append(
                 f"{path}.rounding_rule: non-integral KRW result requires explicit rounding"
+            )
+            return None
+        if computed.numerator % unit_value != 0:
+            errors.append(
+                f"{path}.rounding_rule: result must be a multiple of the declared unit"
             )
             return None
         recomputed = computed
@@ -206,6 +250,11 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
         for issue in document.get("reasoning_issues", [])
         if isinstance(issue, dict) and isinstance(issue.get("issue_id"), str)
     }
+    known_issues = {
+        issue["issue_id"]: issue
+        for issue in document.get("reasoning_issues", [])
+        if isinstance(issue, dict) and isinstance(issue.get("issue_id"), str)
+    }
 
     components = document.get("document_profile", {}).get("ordered_components", [])
     if isinstance(components, list):
@@ -275,13 +324,41 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
             )
     calculations = document.get("calculations", [])
     recomputed_results: dict[str, Decimal] = {}
+    calculation_dependencies: dict[str, set[str]] = {}
+    calculation_statuses: dict[str, str] = {}
     for index, calculation in enumerate(calculations):
         if not isinstance(calculation, dict):
             continue
-        recomputed = _recompute_calculation(calculation, index, errors)
+        if calculation.get("status") == "complete":
+            for input_index, item in enumerate(calculation.get("inputs", [])):
+                if (
+                    isinstance(item, dict)
+                    and item.get("input_type") == "calculation_ref"
+                    and isinstance(
+                        calculation_ref := item.get("calculation_ref"), str
+                    )
+                    and calculation_statuses.get(calculation_ref) != "complete"
+                ):
+                    errors.append(
+                        f"$.calculations[{index}].inputs[{input_index}]: complete calculation must reference only complete calculations"
+                    )
+        recomputed = _recompute_calculation(
+            calculation, index, errors, recomputed_results
+        )
         calculation_id = calculation.get("calculation_id")
-        if recomputed is not None and isinstance(calculation_id, str):
-            recomputed_results[calculation_id] = recomputed
+        if isinstance(calculation_id, str):
+            status = calculation.get("status")
+            if isinstance(status, str):
+                calculation_statuses[calculation_id] = status
+            calculation_dependencies[calculation_id] = {
+                item["calculation_ref"]
+                for item in calculation.get("inputs", [])
+                if isinstance(item, dict)
+                and item.get("input_type") == "calculation_ref"
+                and isinstance(item.get("calculation_ref"), str)
+            }
+            if recomputed is not None:
+                recomputed_results[calculation_id] = recomputed
 
     final_assessment = document.get("final_assessment", {})
     final_amount = final_assessment.get("amount")
@@ -313,6 +390,38 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
         errors.append(
             "$.final_assessment.amount: not_payable outcome requires a zero KRW amount"
         )
+    net_calculation_ref = final_assessment.get("net_calculation_ref")
+    if outcome in {"payable", "partially_payable"}:
+        if not isinstance(net_calculation_ref, str):
+            errors.append(
+                "$.final_assessment.net_calculation_ref: payable outcome requires an explicit net calculation reference"
+            )
+        elif net_calculation_ref not in recomputed_results:
+            errors.append(
+                "$.final_assessment.net_calculation_ref: net calculation must reference a complete recomputed calculation"
+            )
+        elif (
+            isinstance(final_amount, dict)
+            and isinstance(final_amount.get("value"), int)
+            and final_amount["value"] != int(recomputed_results[net_calculation_ref])
+        ):
+            errors.append(
+                "$.final_assessment.amount.value: amount does not reconcile with net_calculation_ref"
+            )
+        if isinstance(net_calculation_ref, str) and net_calculation_ref in recomputed_results:
+            reachable: set[str] = set()
+            pending = [net_calculation_ref]
+            while pending:
+                calculation_id = pending.pop()
+                if calculation_id in reachable:
+                    continue
+                reachable.add(calculation_id)
+                pending.extend(calculation_dependencies.get(calculation_id, set()))
+            declared_ids = set(calculation_dependencies)
+            if reachable != declared_ids:
+                errors.append(
+                    "$.calculations: every calculation must be reachable from the net calculation graph"
+                )
     denial_basis_issue_refs = final_assessment.get("denial_basis_issue_refs")
     if outcome == "not_payable":
         if not isinstance(denial_basis_issue_refs, list) or not denial_basis_issue_refs:
@@ -325,58 +434,70 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
                     errors.append(
                         f"$.final_assessment.denial_basis_issue_refs: unknown denial basis issue {issue_ref}"
                     )
+                elif isinstance(issue_ref, str):
+                    issue = known_issues[issue_ref]
+                    if not (
+                        issue.get("disposition")
+                        in {"supported", "not_supported", "partially_supported"}
+                        and issue.get("outcome_effect") == "denies_payment"
+                    ):
+                        errors.append(
+                            f"$.final_assessment.denial_basis_issue_refs: issue {issue_ref} does not deny payment"
+                        )
 
-    category = (
-        "benefit_amount"
-        if family
-        in {
-            "automobile_self_injury",
-            "personal_accident_benefit",
-            "disease_benefit",
-        }
-        else "total_damages"
-        if family in {"automobile_compensation", "liability_damages"}
-        else None
-    )
-    if category and isinstance(final_amount, dict) and outcome in {
+    unresolved_issue_ids = [
+        issue_id
+        for issue_id, issue in known_issues.items()
+        if issue.get("disposition")
+        in {"undetermined", "human_review_required"}
+    ]
+    if unresolved_issue_ids and outcome not in {
+        "undetermined",
+        "human_review_required",
+    }:
+        errors.append(
+            "$.final_assessment.outcome: unresolved issue requires an unresolved final outcome "
+            f"({', '.join(sorted(unresolved_issue_ids))})"
+        )
+
+    denying_issue_ids = [
+        issue_id
+        for issue_id, issue in known_issues.items()
+        if issue.get("disposition")
+        in {"supported", "not_supported", "partially_supported"}
+        and issue.get("outcome_effect") == "denies_payment"
+    ]
+    if denying_issue_ids and outcome != "not_payable":
+        errors.append(
+            "$.final_assessment.outcome: resolved denying issue requires a "
+            f"not_payable outcome ({', '.join(denying_issue_ids)})"
+        )
+
+    net_ref = final_assessment.get("net_calculation_ref")
+    if net_ref is not None and outcome not in {"payable", "partially_payable"}:
+        errors.append(
+            "$.final_assessment.net_calculation_ref: net_calculation_ref is "
+            "allowed only for payable outcomes"
+        )
+    denial_refs = final_assessment.get("denial_basis_issue_refs")
+    if denial_refs is not None and outcome != "not_payable":
+        errors.append(
+            "$.final_assessment.denial_basis_issue_refs: "
+            "denial_basis_issue_refs is allowed only for not_payable"
+        )
+
+    if isinstance(final_amount, dict) and outcome in {
         "payable",
         "partially_payable",
     }:
-        relevant_calculations = [
-            calculation
-            for calculation in calculations
-            if isinstance(calculation, dict)
-            and calculation.get("category") == category
-        ]
         if any(
             calculation.get("status") != "complete"
             or calculation.get("calculation_id") not in recomputed_results
-            for calculation in relevant_calculations
+            for calculation in calculations
+            if isinstance(calculation, dict)
         ):
             errors.append(
-                "$.calculations: payable outcome requires all relevant typed calculations to be complete"
-            )
-        relevant_results: list[Decimal] = []
-        for calculation in relevant_calculations:
-            calculation_id = calculation.get("calculation_id")
-            if (
-                calculation.get("status") == "complete"
-                and calculation_id in recomputed_results
-            ):
-                relevant_results.append(recomputed_results[calculation_id])
-        expected_amount: int | None = None
-        if category == "benefit_amount" and relevant_results:
-            expected_amount = sum(int(result) for result in relevant_results)
-        elif category == "total_damages" and len(relevant_results) == 1:
-            expected_amount = int(relevant_results[0])
-        actual_amount = final_amount.get("value")
-        if expected_amount is None:
-            errors.append(
-                "$.calculations: payable outcome requires recomputed complete typed calculations"
-            )
-        elif isinstance(actual_amount, int) and actual_amount != expected_amount:
-            errors.append(
-                "$.final_assessment.amount.value: amount does not reconcile with the typed calculation total"
+                "$.calculations: payable outcome requires every declared calculation to be complete and recomputable"
             )
 
     gates = document.get("review_gates", {})
@@ -394,6 +515,32 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
     if calculation_review and gates.get("calculation") == "passed":
         errors.append(
             "$.review_gates.calculation: provisional calculation cannot pass the calculation gate"
+        )
+    open_professional_judgment = any(
+        isinstance(value, dict)
+        and (
+            value.get("human_review_required") is True
+            or value.get("disposition") == "human_review_required"
+            or value.get("support_type") == "professional_judgment"
+            or (
+                isinstance(value.get("unresolved_items"), list)
+                and bool(value["unresolved_items"])
+            )
+        )
+        for _, value in _walk(document)
+    )
+    if open_professional_judgment and any(
+        gates.get(name) == "passed" for name in ("medical", "legal")
+    ):
+        errors.append(
+            "$.review_gates: professional review gate cannot pass while professional judgment or unresolved items remain open"
+        )
+    if open_professional_judgment and any(
+        gates.get(name) == "not_applicable" for name in ("medical", "legal")
+    ):
+        errors.append(
+            "$.review_gates: professional review gate must remain open and cannot "
+            "be not_applicable while professional judgment or unresolved items remain open"
         )
 
     return errors
