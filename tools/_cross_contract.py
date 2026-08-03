@@ -584,9 +584,7 @@ def _looks_like_heading_only(quote: str) -> bool:
     return bool(_HEADING_ONLY_RE.match(normalized))
 
 
-def check_condition_support(
-        clauses: list[dict],
-        semantic_receipts_authoritative: bool = False) -> list[str]:
+def check_condition_support(clauses: list[dict]) -> list[str]:
     """Enforce a deterministic evidence-quality floor for each condition."""
     errors: list[str] = []
     for clause_index, clause in enumerate(clauses):
@@ -674,15 +672,16 @@ def check_condition_support(
                         bucket == "reduction_conditions":
                     expected_condition_outcome = RESTRICTIVE_OR_NEGATIVE
 
-                # In the production DAO path, a protected semantic receipt is
-                # the meaning authority. The local Korean regex analyzer stays
-                # available for legacy/standalone diagnostics and regression
-                # tests, but it must not overrule a receipt by pretending
-                # Python has fully understood unseen negation scope.
-                polarity_sensitive = (
-                    expected_condition_outcome is not None
-                    and not semantic_receipts_authoritative)
-                if polarity_sensitive:
+                # The deterministic Korean analyzer is the meaning check. It
+                # deliberately refuses to settle a passage whose negation scope
+                # it cannot resolve -- MIXED/AMBIGUOUS is an error routed to
+                # review, not a silent pass -- so "Python did not fully
+                # understand this" surfaces as a human decision rather than a
+                # guess. (An LLM receipt layer used to override this; it was
+                # removed because it demanded a provider call per condition
+                # while the provenance guarantee that actually matters comes
+                # from strict_evidence_reference's verbatim quote check.)
+                if expected_condition_outcome is not None:
                     condition_analysis = _analyze_policy_polarity(
                         condition_text, expected_condition_outcome)
 
@@ -786,8 +785,7 @@ def check_condition_support(
 
 
 def check_normalized_policy_clause(
-        data: dict, filename: str, redacted_text: str | None,
-        semantic_receipt_validator=None) -> list[str]:
+        data: dict, filename: str, redacted_text: str | None) -> list[str]:
     """Full cross-contract check for one normalized_policy_clause file.
 
     redacted_text is the processed policy text for the target document (from
@@ -811,18 +809,7 @@ def check_normalized_policy_clause(
 
     errors.extend(check_clause_ids(clauses))
     errors.extend(check_stable_ids_and_semantics(clauses))
-    errors.extend(check_condition_support(
-        clauses,
-        semantic_receipts_authoritative=(
-            semantic_receipt_validator is not None)))
-    if semantic_receipt_validator is not None:
-        for clause_index, clause in enumerate(clauses):
-            for bucket in CONDITION_BUCKETS:
-                for item_index, item in enumerate(clause.get(bucket) or []):
-                    loc = (
-                        f"clauses[{clause_index}].{bucket}[{item_index}]")
-                    errors.extend(semantic_receipt_validator(
-                        item, bucket, loc))
+    errors.extend(check_condition_support(clauses))
 
     if redacted_text is None:
         raise SourceUnavailable(

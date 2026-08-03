@@ -91,71 +91,31 @@ passages. Every row range must lie inside the table source regions;
 each cell span must identify exactly the cell value inside its row; and two
 cells may not overlap in source.
 
-**Semantic polarity receipts (P1-2).** Python does not attempt to understand
-arbitrary Korean negation scope. Before writing an outcome-sensitive condition
-(`payout_conditions`, `coverage_start_conditions`, `exclusions`, or
-`reduction_conditions`), run the explicit analysis command against the exact
-P0-7 source occurrence:
+**Condition polarity is checked deterministically.** Filing a condition under
+an outcome-sensitive bucket (`payout_conditions`, `coverage_start_conditions`,
+`exclusions`, `reduction_conditions`) is a claim about what the source says,
+and `write-contract` verifies it with the Korean predicate/negation-scope
+analyzer in `_cross_contract.check_condition_support`. Payout/coverage-start
+require an affirmative reading; exclusion/reduction require a
+restrictive/negative one.
 
-    python tools/dao.py analyze-policy-polarity CASE_ID --doc-id DOC_ID \
-        --source-span-uid PS_UID \
-        --source-selector-json '{"source_spans": [...]}' \
-        --condition-text '조건 원문' --bucket payout_conditions \
-        --held-by policy-pipeline --run-id RUN_ID
+The analyzer refuses to settle what it cannot resolve: a passage it reads as
+`mixed` or `ambiguous` is an **error**, not a pass. That happens most often
+when a condition is carved so that its operative predicate is left behind --
+`1. 계약자의 고의로 생긴 손해에 대한 배상책임` is a bare noun phrase, and
+whether it is paid or excluded lives in the article lead above it. The fix is
+to carry the lead into the condition (its text and both source spans), not to
+reword the condition until it passes. If the source genuinely is mixed,
+preserve the wording and route it to `review_required`, or split the
+propositions.
 
-Repeat `--source-span-uid` in canonical source order for a multi-span
-condition. `--source-selector-json` carries the same exact
-`{page,start_char,end_char,quote}` objects the condition will carry. Both
-inputs are **inline values, not file paths** — the command reads no file the
-caller names, so no protected source, ground-truth report, or unrelated case
-output can be routed to a provider by pointing at it. These selectors are
-untrusted: the DAO reads the current registered revision, verifies each byte
-range and occurrence, and recomputes every PS UID before invoking the semantic
-provider. Never submit a revision hash, quote hash, classification, or analysis
-object as authority.
-
-**The analyzer is not yours to choose.** There is no `--provider`/`--model`.
-The provider, exact model, both prompt versions, the semantic schema version,
-and the settings fingerprint are resolved from trusted deployment
-configuration (`HARNESS_POLICY_SEMANTIC_PROVIDER` / `_MODEL`). A fixture
-provider is injectable in tests only and is refused in production. If the
-analyzer genuinely must change, that is a separate DAO admin operation
-(`set-policy-semantic-analyzer`), which invalidates `policy_clause_processing`
-and every downstream stage *before* activating the new analyzer — so a failed
-switch can never leave a new analyzer above a passed policy layer.
-
-**The model never learns which answer passes.** Analysis runs in two phases and
-neither is shown your bucket: Phase A classifies the registered source passage
-alone (no condition text, no bucket); Phase B compares the condition against
-that same passage (still no bucket). Python alone then checks the source
-reading against what your bucket requires — `payout_conditions` /
-`coverage_start_conditions` need `affirmative`, `exclusions` /
-`reduction_conditions` need `restrictive_or_negative`, and `mixed` /
-`ambiguous` are always refused. So a receipt records what the source *says*,
-never whether it passed; do not expect a `bucket` field on it.
-
-The command is the **only** policy-polarity path that calls an LLM. It returns
-a `PPR-...` receipt ID from the protected DAO index; place only that ID in the
-condition's `polarity_analysis_receipt_id`. `write-contract` and finalization
-never call a model. They recompute receipt integrity and require the current
-source revision, exact source occurrences, condition bytes, analyzer identity,
-prompts, and settings to match. Editing one character, filing the condition
-under a bucket its source reading does not support, changing source
-revision/occurrence, or switching the active analyzer makes the receipt
-unusable. Identical inputs hit the protected cache without another model call.
-
-The semantic binding is part of the document's policy snapshot: changing a
-receipt this document's contract cites, or switching the analyzer, moves
-`policy_document_digest` and therefore stales every downstream
-`upstream_policy_snapshot`. Another document's receipts do not.
-
-Bucket outcomes are fixed: payout/coverage-start require `affirmative`;
-exclusion/reduction require `restrictive_or_negative`. `mixed`, `ambiguous`,
-`meaning_preserved=false`, or `review_required=true` never auto-pass. This
-repository does not yet have an authenticated human-review ledger artifact
-kind for semantic receipt resolution, so those outcomes remain fail-closed;
-do not clear them by changing condition wording, moving buckets, or submitting
-`review_required=false`.
+An earlier design (v0.7) required a per-condition LLM "polarity receipt"
+instead. It was removed: it cost one provider call per condition -- 813 for a
+single 145-page bundle -- to establish something no downstream stage consumed,
+while the guarantee that actually matters (a cited passage exists verbatim
+where it claims) comes from `strict_evidence_reference`, which is
+deterministic and free. Do not populate `polarity_analysis_receipt_id`; it
+survives in the schema only so pre-v0.8 contracts still validate.
 
 **Scan every policy document for tables, before anything else (P0-8).** Whether
 a document contains tables is a fact about its PDF, not something the pipeline
