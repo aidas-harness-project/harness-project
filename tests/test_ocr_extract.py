@@ -145,6 +145,39 @@ def test_compare_prompt_asks_about_one_sided_extraneous_content():
     assert "hallucinated" in prompt.lower()
 
 
+def test_compare_prompt_forbids_a_second_revised_verdict():
+    """CASE_907: the single-line rule was the prompt's LAST line and carried no
+    more weight than the checks above it, so the comparator wrote its reasoning,
+    emitted a verdict, then corrected itself and emitted a SECOND one:
+
+        DISAGREE: <reason>
+        Correction: that reasoning supports AGREE, not DISAGREE.
+        AGREE: <reason>
+
+    parse_verdict searches the whole string, so it saw the leading DISAGREE and
+    blocked the page. 4 of 34 pages (12%) were blocked this way and every one was
+    a false block. The format rule must therefore lead, and must forbid revising
+    a verdict in place rather than merely asking for one line."""
+    prompt = oe.COMPARE_PROMPT_TEMPLATE
+    assert "OUTPUT FORMAT" in prompt
+    assert "ONCE" in prompt
+    assert "do not revise a verdict" in prompt
+    # The rule has to precede the transcriptions it governs, not trail them.
+    assert prompt.index("OUTPUT FORMAT") < prompt.index("--- Transcription A ---")
+
+
+def test_compare_prompt_scopes_the_one_sided_check_to_content_not_layout():
+    """The one-sided-content check above is about CONTENT, and the comparator
+    read it as covering layout too -- returning DISAGREE while its own reason
+    said 'no material difference' (a whitespace-only variant). Table borders and
+    line breaks differ freely between two vision reads of the same page, so
+    without this scoping every table-bearing page is a coin flip."""
+    prompt = oe.COMPARE_PROMPT_TEMPLATE
+    assert "not about layout" in prompt
+    for token in ("whitespace", "line breaks", "table borders"):
+        assert token in prompt, token
+
+
 def test_scratch_dir_distinct_per_process_id(monkeypatch):
     """PID-tagged so a retry racing a stale process can't collide on one path."""
     monkeypatch.setattr(oe.os, "getpid", lambda: 111)

@@ -52,7 +52,16 @@ from llm_providers import (
 ROOT = Path(__file__).resolve().parent.parent
 SCRATCH_ROOT = ROOT / "_ocr_scratch"
 OCR_PROMPT_VERSION = "ocr_extraction_v0.1"
-COMPARE_PROMPT_VERSION = "ocr_compare_v0.1"
+# v0.2 (2026-08-03): the single-line instruction was the prompt's last line and
+# carried no more weight than the checks above it, so the comparator routinely
+# wrote its reasoning first, emitted a verdict, then corrected itself and
+# emitted a SECOND verdict. Measured on CASE_907's two scanned documents: 4 of
+# 34 pages (12%) came back "DISAGREE: <reason> / Correction: ... / AGREE: ...",
+# and the parser -- which searches the whole string -- saw only the first token
+# and blocked the page. Every one of those 4 was a false block. The format rule
+# is now stated first, as a governing instruction, and explicitly forbids
+# revising a verdict in place.
+COMPARE_PROMPT_VERSION = "ocr_compare_v0.2"
 
 TRANSCRIBE_PROMPT = (
     "Transcribe every piece of text visible in this page/image exactly as written, "
@@ -71,7 +80,19 @@ COMPARE_PROMPT_TEMPLATE = (
     "One transcription containing text the source page doesn't actually have (hallucinated "
     "content) is exactly the failure this check exists to catch. Treat any such one-sided "
     "addition as a disagreement, not just conflicting facts.\n\n"
-    "Reply with exactly one line: AGREE or DISAGREE: <brief reason>.\n\n"
+    "This second check is about CONTENT that one reading has and the other does not. "
+    "It is not about layout. Differences in whitespace, line breaks, paragraph breaks, "
+    "indentation, table borders (| or +---+), column alignment, or cell ordering are "
+    "presentation, not content: if every name, date, number, code and diagnosis is "
+    "present in both, the answer is AGREE even when the two readings look nothing "
+    "alike as strings.\n\n"
+    "OUTPUT FORMAT -- this governs your entire reply:\n"
+    "Decide FIRST, then write. Your reply must be exactly one line, beginning "
+    "with the single word AGREE or DISAGREE, followed by ': ' and a brief "
+    "reason. State the verdict word ONCE. Do not think aloud, do not write a "
+    "preamble, and do not revise a verdict after writing it -- if you find "
+    "yourself about to correct your own answer, stop and emit only the "
+    "corrected verdict as that single line.\n\n"
     "--- Transcription A ---\n{a}\n\n--- Transcription B ---\n{b}"
 )
 
