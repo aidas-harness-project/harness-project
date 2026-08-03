@@ -1832,3 +1832,125 @@ def test_propose_with_refine_reruns_long_segments(tmp_path):
     assert ranges == [(1, 6), (7, 12)]  # long p1-12 split at the recovered p7
     assert out["method"]["full_page_fallback"]["triggered"] is True
     assert out["refinement"]["new_boundaries"] == [7]
+
+
+# ---------------------------------------------------------------------------
+# Text-layer boundary veto (known-gaps.md item 34, CASE_112)
+# ---------------------------------------------------------------------------
+
+def _veto_sheet(*boundary_pages, continuations=(), needs_full_page=()):
+    return {
+        "ok": True,
+        "boundaries": [
+            {
+                "page": p,
+                "type_guess": "insurance_policy",
+                "type_label": f"doc-{p}",
+                "confidence": 0.9,
+                "evidence": "title",
+            }
+            for p in boundary_pages
+        ],
+        "continuations": list(continuations),
+        "needs_full_page": list(needs_full_page),
+        "warning": None,
+    }
+
+
+def test_text_layer_veto_absorbs_a_mid_clause_boundary():
+    """A page whose own text begins mid-clause is not a document start."""
+    per_sheet = [_veto_sheet(1, 2, 3)]
+    merged = sc.merge_sheet_proposals(
+        per_sheet, 3, sheet_pages=[[1, 2, 3]], text_layer_continuations={2}
+    )
+    spans = [(s["page_start"], s["page_end"]) for s in merged["segments"]]
+    assert spans == [(1, 2), (3, 3)]
+    assert merged["unassigned_pages"] == []
+    assert sc.validate_segments(merged["segments"], 3) == []
+
+
+def test_text_layer_veto_is_recorded_as_a_warning():
+    merged = sc.merge_sheet_proposals(
+        [_veto_sheet(1, 2)], 2, sheet_pages=[[1, 2]], text_layer_continuations={2}
+    )
+    assert any("dropped" in w for w in merged["warnings"])
+
+
+def test_text_layer_veto_never_removes_page_1():
+    """Case A: a bundle's first page begins something whatever its text looks like."""
+    merged = sc.merge_sheet_proposals(
+        [_veto_sheet(1, 3)], 4, sheet_pages=[[1, 2, 3, 4]], text_layer_continuations={1}
+    )
+    assert merged["segments"][0]["page_start"] == 1
+    assert sc.validate_segments(merged["segments"], 4) == []
+
+
+def test_no_text_layer_evidence_leaves_the_proposal_untouched():
+    """A scanned bundle (CASE_112 DOC_005) must behave exactly as before."""
+    per_sheet = [_veto_sheet(1, 2, 3)]
+    base = sc.merge_sheet_proposals(per_sheet, 3, sheet_pages=[[1, 2, 3]])
+    with_empty = sc.merge_sheet_proposals(
+        per_sheet, 3, sheet_pages=[[1, 2, 3]], text_layer_continuations=set()
+    )
+    assert base["segments"] == with_empty["segments"]
+    assert base["warnings"] == with_empty["warnings"]
+
+
+def test_veto_only_removes_boundaries_never_adds_them():
+    """Evidence about a non-boundary page must not create a segment."""
+    merged = sc.merge_sheet_proposals(
+        [_veto_sheet(1, 3)], 4, sheet_pages=[[1, 2, 3, 4]], text_layer_continuations={2, 4}
+    )
+    assert [s["page_start"] for s in merged["segments"]] == [1, 3]
+
+
+def test_continuation_start_re_matches_real_case_112_page_openings():
+    """The exact first lines of the 16 over-split CASE_112 pages."""
+    for line in [
+        "11. 에너지 및 관리할 수 있는 자연력, 상표권, 특허권 등 무체물에 입힌 손해에",
+        "3. 회사는 1회의 보험사고에 대하여 다음과 같이 보상합니다.",
+        "나. 부상당한 사람에게 그 부상이 원인이 되어 후유장애가 생긴 경우",
+        "그러나 제1조(사고) 제1호 내지 제4호의 재물손해는 보상합니다.",
+        "다만, 보호자의 감독하에 있는 경우는 그러하지 아니하다",
+    ]:
+        assert sc.CONTINUATION_START_RE.match(line), line
+
+
+def test_continuation_start_re_does_not_match_document_titles():
+    """A real document start must never be vetoed."""
+    for line in [
+        "구내치료비 추가특별약관",
+        "영업배상책임보험 보통약관",
+        "제1조(보상하는 손해)",
+        "시설소유(관리)자 특별약관",
+        "대위권포기 특별약관",
+    ]:
+        assert not sc.CONTINUATION_START_RE.match(line), line
+
+
+def test_continuation_pages_from_text_layer_on_a_scan_returns_empty(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    path = tmp_path / "scan.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.new_page()
+    doc.save(str(path))
+    doc.close()
+    assert sc.continuation_pages_from_text_layer(path, 2) == set()
+
+
+def test_continuation_pages_from_text_layer_detects_a_mid_clause_page(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    path = tmp_path / "policy.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "Chapter One", fontname="helv", fontsize=11)
+    doc.new_page().insert_text((72, 72), "11. continued item", fontname="helv", fontsize=11)
+    doc.save(str(path))
+    doc.close()
+    assert sc.continuation_pages_from_text_layer(path, 2) == {2}
+
+
+def test_continuation_pages_from_text_layer_on_a_broken_pdf_returns_empty(tmp_path):
+    path = tmp_path / "broken.pdf"
+    path.write_bytes(b"%PDF-1.4 not really a pdf")
+    assert sc.continuation_pages_from_text_layer(path, 2) == set()

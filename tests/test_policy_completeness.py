@@ -680,3 +680,80 @@ def test_evidence_landing_in_an_excluded_span_is_rejected():
         normalized, inventory, REDACTED)
     assert any("overlaps a span the inventory marked excluded" in e
                for e in errors), errors
+
+
+# ---------------------------------------------------------------------------
+# Operative-predicate coverage (CASE_112). The gate uses this regex to decide
+# whether a page carries normative content and therefore may NOT be dismissed
+# as administrative. Every string below is real CASE_112 policy wording that the
+# pre-2026-08 pattern missed, which let genuine payout/exclusion clauses look
+# non-normative.
+# ---------------------------------------------------------------------------
+
+def test_honorific_payout_forms_are_operative():
+    """"보상하여 드립니다" states the same rule as "보상합니다" (DOC_052 제1조)."""
+    for text in [
+        "회사는 ... 수탁물이 화재로 입은 손해만을 보상하여 드립니다.",
+        "그러나 아래의 경우에는 보상하여 드립니다.",
+        "회사는 보험금을 지급하여 드립니다.",
+    ]:
+        assert pc._OPERATIVE_PREDICATE_RE.search(text), text
+
+
+def test_waiver_and_negated_application_are_operative():
+    """대위권포기 특별약관's entire operative content is "…포기합니다" (DOC_089/192)."""
+    assert pc._OPERATIVE_PREDICATE_RE.search(
+        "회사는 보통약관 제14조(대위권)의 규정에도 불구하고 "
+        "아래에 기재된 사람에 대한 대위권을 포기합니다."
+    )
+    assert pc._OPERATIVE_PREDICATE_RE.search(
+        "단, 보호자의 감독하의 비행에 대해서는 적용하지 아니합니다."
+    )
+
+
+def test_liability_assumption_and_substitution_are_operative():
+    # DOC_078/DOC_184 제1조, DOC_179 제5조(현물보상).
+    assert pc._OPERATIVE_PREDICATE_RE.search(
+        "아래에 기재된 보트로 생긴 배상책임을 부담하기로 정합니다."
+    )
+    assert pc._OPERATIVE_PREDICATE_RE.search(
+        "회사는 현물보상으로서 보험금의 지급에 갈음할 수 있습니다."
+    )
+
+
+def test_deemed_effect_provision_is_operative():
+    # DOC_103/DOC_205: a deeming rule, not boilerplate.
+    assert pc._OPERATIVE_PREDICATE_RE.search(
+        "피보험자가 소속단체를 탈퇴하는 즉시 당해 피보험자의 계약은 해지된 것으로 합니다."
+    )
+
+
+def test_negated_grant_and_affirmative_duty_are_operative():
+    # DOC_104 제재위반 부담보 (no 보상/지급 verb at all); DOC_101 제6조.
+    assert pc._OPERATIVE_PREDICATE_RE.search(
+        "보험회사는 아래의 제재에 반하는 위험의 보장, 보험금의 지급 또는 "
+        "이익의 제공을 하지 않습니다."
+    )
+    assert pc._OPERATIVE_PREDICATE_RE.search(
+        "회사는 보험계약자에게 보험증권을 드려야 하고, 그 약관의 주요한 내용을 알려드립니다."
+    )
+    assert pc._OPERATIVE_PREDICATE_RE.search(
+        "개별 피보험자에게는 가입증명서를 발급하여 드립니다."
+    )
+
+
+def test_boilerplate_and_qualifiers_stay_non_operative():
+    """준용규정 / 목차 wording must NOT count as normative content.
+
+    This is the half of the contract that keeps the administrative-exclusion
+    path usable: a 준용규정-only page (DOC_087/DOC_094) states no rule of its
+    own, and 포함합니다/따릅니다/적용합니다 merely qualify a rule stated
+    elsewhere.
+    """
+    for text in [
+        "이 특별약관에 정하지 않은 사항은 보통약관을 따릅니다.",
+        "제4회 :    년  월  일(총 보험료의 20% 해당액)",
+        "의사(한의사 및 수의사를 포함합니다), 간호사, 약사",
+        "이 규정을 적용합니다.",
+    ]:
+        assert not pc._OPERATIVE_PREDICATE_RE.search(text), text

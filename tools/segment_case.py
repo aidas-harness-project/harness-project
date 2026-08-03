@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -361,6 +362,65 @@ def parse_segmentation_response(
     }
 
 
+# ------------------------------------------------ text-layer boundary veto --
+
+# A page whose first non-empty line matches CONTINUATION_START_RE is grammatically
+# mid-document: an enumerated item ("11.", "가."), or a connective that cannot open
+# a document ("그러나", "다만"). Korean policy bundles number every clause item, so
+# these are high-precision. Deliberately NOT a general "does this look like a
+# title" heuristic -- the veto only ever REMOVES a boundary the model proposed,
+# and only on positive evidence that the page continues the previous one.
+CONTINUATION_START_RE = re.compile(
+    r"^(?:"
+    r"\d+[.)]"            # "11." / "11)" -- clause item numbering
+    r"|[가-힣][.)]\s"      # "가." / "나)" -- sub-item numbering
+    r"|그러나|다만|또한|이 경우|위 제"   # connectives; cannot begin a document
+    r")"
+)
+
+
+def continuation_pages_from_text_layer(pdf_path, page_count: int) -> set[int]:
+    """Pages whose own embedded text proves they continue the previous page.
+
+    Returns an empty set for a scanned bundle (no text layer) -- the veto simply
+    does not apply there and the vision verdict stands unmodified.
+
+    Why this exists: `merge_sheet_proposals` builds segments from the `boundaries`
+    array alone and never checks a boundary claim against the page it describes.
+    On CASE_112 that produced 16 segments starting mid-clause (DOC_003 p20/22/24/
+    25/49/50/51/60/114/128/129/141, DOC_004 p161/162/174/175), 12 of which carried
+    a `provisional_type_label` that literally read "continuation" while still being
+    emitted as a boundary -- known-gaps.md item 34. Downstream, a segment starting
+    mid-clause has no `제N조(` anchor for the policy normalizer to bind to, which
+    is why DOC_039 (p49) and DOC_096 (p128) produced zero clauses.
+
+    This is deterministic and costs no model call: the born-digital policy PDFs
+    carry the publisher's own text (see ocr_extract.pdf_embedded_page_texts)."""
+    try:
+        import fitz
+    except ImportError:
+        return set()
+    pages: set[int] = set()
+    try:
+        with fitz.open(str(pdf_path)) as document:
+            limit = min(page_count, document.page_count)
+            for index in range(limit):
+                lines = [
+                    line.strip()
+                    for line in document[index].get_text().splitlines()
+                    if line.strip()
+                ]
+                if not lines:
+                    continue
+                if CONTINUATION_START_RE.match(lines[0]):
+                    pages.add(index + 1)
+    except Exception:
+        # An unreadable/encrypted PDF yields no evidence, so no veto. The vision
+        # proposal stands rather than this masking a PDF-level error.
+        return set()
+    return pages
+
+
 # ---------------------------------------------------------------- merge --
 
 def merge_sheet_proposals(
@@ -368,6 +428,7 @@ def merge_sheet_proposals(
     page_count: int,
     *,
     sheet_pages: list[list[int]] | None = None,
+    text_layer_continuations: set[int] | None = None,
 ) -> dict:
     """Stitches per-sheet responses into contiguous segments.
 
@@ -393,6 +454,15 @@ def merge_sheet_proposals(
        over-splitting is undone by a human merging two segments, while
        over-merging only surfaces after OCR, classification, and extraction have
        all run on the wrong boundaries.
+
+    `text_layer_continuations` (optional) narrows case D with real evidence: a
+    page whose own embedded text begins mid-clause is not a document start, so a
+    boundary claimed there is dropped and the page becomes interior to the
+    preceding document. This is the only input that can REMOVE a boundary, it
+    never adds one, and it applies solely where the page's own text proves the
+    case -- so the asymmetry argument above is unchanged for every page without
+    such evidence. Page 1 is never vetoed (case A: a bundle's first page begins
+    something by definition, whatever its text looks like).
     """
     if page_count < 1:
         raise SegmentationError(f"page_count must be >= 1, got {page_count}")
@@ -424,7 +494,28 @@ def merge_sheet_proposals(
 
     mentioned |= needs_full_page
 
+    # Text-layer veto: drop boundaries the page's own text contradicts. Applied
+    # before case A so a vetoed page cannot be mistaken for the first boundary.
+    # p1 is exempt -- a bundle's first page starts a document regardless.
+    vetoed: list[int] = []
+    if text_layer_continuations:
+        for page in sorted(set(text_layer_continuations) & set(boundary_meta)):
+            if page == 1:
+                continue
+            del boundary_meta[page]
+            vetoed.append(page)
+            # The page stays 'mentioned' -- it is real content, now interior to
+            # the preceding document rather than the start of a new one.
+            mentioned.add(page)
+
     boundaries = sorted(boundary_meta)
+    if vetoed:
+        warnings.append(
+            f"{len(vetoed)} proposed boundary page(s) were dropped because the "
+            f"page's own embedded text begins mid-document (an enumerated item or "
+            f"a connective, so it continues the previous page): {vetoed[:20]}"
+            f"{'...' if len(vetoed) > 20 else ''}"
+        )
     # Case A, but only when page 1 was actually covered by some sheet. Applying it
     # to a partial run -- sheets covering p65-80 of an 80-page document, say --
     # would fabricate a one-page segment at p1 that nothing ever looked at.
@@ -1221,7 +1312,19 @@ def propose_boundaries(
             "page_numbers": list(pages),
         })
 
-    merged = merge_sheet_proposals(per_sheet, page_count, sheet_pages=batches)
+    # Deterministic, no model call. Empty for a scanned bundle, in which case
+    # merge behaves exactly as before.
+    text_layer_continuations = continuation_pages_from_text_layer(pdf_path, page_count)
+    if text_layer_continuations and progress:
+        progress(
+            f"text layer: {len(text_layer_continuations)} page(s) begin mid-document "
+            f"and cannot be boundaries"
+        )
+
+    merged = merge_sheet_proposals(
+        per_sheet, page_count, sheet_pages=batches,
+        text_layer_continuations=text_layer_continuations,
+    )
 
     fallback = _plan_fallback(
         merged["needs_full_page"], page_count, fallback_cap_ratio
@@ -1251,7 +1354,10 @@ def propose_boundaries(
         # verdict replaces the crop-pass uncertainty with either a boundary or
         # a continuation; an unreadable/failed verdict stays in
         # needs_full_page and therefore remains visible to the human gate.
-        merged = merge_sheet_proposals(per_sheet, page_count, sheet_pages=batches)
+        merged = merge_sheet_proposals(
+            per_sheet, page_count, sheet_pages=batches,
+            text_layer_continuations=text_layer_continuations,
+        )
         fallback.update({
             "triggered": True,
             "resolved_pages": resolution["resolved_pages"],

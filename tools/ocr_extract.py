@@ -86,6 +86,17 @@ AGREE_RE = re.compile(r"\bAGREE\b")
 # hallucinated readings and a spurious P8 disagreement (CASE_024/DOC_001, a
 # CP949 Korean note read as "an AI assistant's message about running iconv").
 TEXT_SUFFIXES = {".txt", ".md", ".text"}
+# Minimum non-whitespace characters on a PDF page for its embedded text layer to
+# count as real content. Deliberately 1, not a tuned threshold: measured on
+# CASE_112, the low-character pages (DOC_077/DOC_094/DOC_124/DOC_183, 4-41 chars)
+# were short because the page genuinely holds only a form blank or a one-line
+# 준용규정 -- not because the text layer was partial. Vision OCR of those same
+# pages returned identical content plus a hallucinated insurer slogan
+# ("당신에게 좋은보험 삼성화재") absent from the source, so a character-count
+# threshold would route the *more* faithful reading to the *less* faithful path.
+# A genuine scan has a strictly empty text layer (0 chars), which is the only
+# case this distinguishes.
+PDF_EMBEDDED_TEXT_MIN_CHARS = 1
 # Encodings tried in order for a text-file decode. utf-8-sig FIRST -- not cp949 --
 # on purpose: UTF-8 is self-validating (invalid UTF-8 reliably raises), so a real
 # UTF-8 file always decodes here and a cp949/euc-kr file falls through cleanly
@@ -360,6 +371,19 @@ def run_ocr(
     if doc_path.suffix.lower() in TEXT_SUFFIXES:
         return _run_embedded_text(case_id, doc_id, doc_path, progress=progress)
 
+    # A born-digital PDF carries the publisher's own text; transcribing it by
+    # vision is strictly worse (measured on CASE_112: identical content, plus
+    # reordered footnotes, substituted quote glyphs, and an appended insurer
+    # slogan that is not on the page). Checked before provider construction so
+    # such a document costs zero model calls. Returns None -- falling through to
+    # OCR -- for a genuine scan or a mixed bundle.
+    if doc_path.suffix.lower() == ".pdf":
+        page_texts = pdf_embedded_page_texts(doc_path)
+        if page_texts is not None:
+            return _run_embedded_pdf(
+                case_id, doc_id, doc_path, page_texts, progress=progress
+            )
+
     if reader_a is None or reader_b is None or comparator is None:
         providers = build_ocr_providers()
         reader_a = reader_a or providers["reader_a"]
@@ -420,6 +444,97 @@ def run_ocr(
         "cross_validation_mode": cross_validation_mode,
         "cross_validation_note": cross_validation_note,
         "pages": pages_out,
+    }
+
+
+def pdf_embedded_page_texts(pdf_path: Path) -> list[str] | None:
+    """Return per-page embedded text for a born-digital PDF, or None.
+
+    None means "this PDF is not a whole-document embedded-text source" and the
+    caller must fall through to vision OCR. That is returned in two cases:
+
+      * no page carries a text layer -- a genuine scan (the CASE_112 medical
+        records: DOC_214-DOC_224 all extract 0 characters), and
+      * only SOME pages carry one -- a mixed bundle. Deliberately not handled
+        per-page here: mixing a lossless decode and a probabilistic vision read
+        inside one document would make extraction_method a single label over two
+        different provenances, and `cross_validation_mode` likewise. Such a
+        document stays wholly on the OCR path until that distinction can be
+        carried per page in the schema.
+
+    A PDF whose every page has real text is the case worth taking: measured
+    across CASE_112's 202 comparable documents, the embedded layer matched the
+    vision transcription at 0.976 mean similarity, and every top divergence was
+    the vision read reordering a footnote, substituting quote glyphs, or
+    appending an insurer slogan that is not on the page at all."""
+    try:
+        import fitz
+    except ImportError:
+        return None
+    try:
+        with fitz.open(str(pdf_path)) as document:
+            if document.page_count < 1:
+                return None
+            texts = [document[i].get_text() for i in range(document.page_count)]
+    except Exception:
+        # A malformed/encrypted PDF is not an embedded-text source; the OCR path
+        # rasterizes and reports its own error rather than this one masking it.
+        return None
+    if not all(len(t.strip()) >= PDF_EMBEDDED_TEXT_MIN_CHARS for t in texts):
+        return None
+    return texts
+
+
+def _run_embedded_pdf(
+    case_id: str, doc_id: str, doc_path: Path, page_texts: list[str], progress=None
+) -> dict:
+    """Embedded-text passthrough for a born-digital PDF, shaped exactly like
+    run_ocr()'s dual-path output so run_checkpoint1._assemble_ocr_result
+    consumes it unchanged.
+
+    Same honesty contract as _run_embedded_text: reading_a == reading_b is not a
+    fake second read, it is the single decoded text carried in the slot the
+    downstream page-write reads; `deferred_poc` records that no dual-read
+    cross-check happened, and `agreed` reflects that a text-layer extraction is
+    its own ground truth rather than a probabilistic read that could be
+    confidently wrong."""
+    pages = []
+    total = len(page_texts)
+    for i, text in enumerate(page_texts, start=1):
+        pages.append({
+            "page": i,
+            "reading_a": text,
+            "reading_b": text,
+            "agreement": "agreed",
+            "disagreement_details": [],
+            "provider_metadata": {
+                "reader_a": {"provider_name": "embedded-text", "model_name": "pdf:text-layer"},
+                "reader_b": {"provider_name": "embedded-text", "model_name": "pdf:text-layer"},
+                "comparator": {
+                    "shortcut": "embedded_text_no_cross_validation",
+                    "comparator_called": False,
+                },
+            },
+        })
+    msg = f"pages 1-{total}: embedded PDF text layer (no OCR/cross-validation)"
+    progress(msg) if progress else print(msg, file=sys.stderr)
+    return {
+        "document_path": str(doc_path),
+        "providers": {
+            "reader_a": {"provider_name": "embedded-text", "model_name": "pdf:text-layer"},
+            "reader_b": {"provider_name": "embedded-text", "model_name": "pdf:text-layer"},
+            "comparator": {"provider_name": "embedded-text", "model_name": "none"},
+        },
+        "extraction_method": "embedded_text",
+        "encoding_detected": None,
+        "cross_validation_mode": "deferred_poc",
+        "cross_validation_note": (
+            f"Born-digital PDF: all {total} page(s) carry an embedded text layer, extracted "
+            "losslessly. No OCR or vision read was performed, so P8's dual-path "
+            "cross-validation does not apply (there is no independent second reading that "
+            "could disagree). Deterministic extraction, not a probabilistic read."
+        ),
+        "pages": pages,
     }
 
 

@@ -450,12 +450,36 @@ _PARENT_COVERAGE_DOC_RE = re.compile(r"_(DOC_\d+)\.json$")
 # (table of contents) page LISTS 제N조 titles without stating any rule -- an
 # anchor-only rule would reject exactly the administrative pages this is meant
 # to allow.
+#
+# The honorific "-여 드립니다" forms are listed explicitly alongside the plain
+# ones. Korean policy wording uses "보상하여 드립니다" and "보상합니다"
+# interchangeably for the SAME operative rule, and matching only the plain form
+# made the gate miss real payout clauses: measured on CASE_112, "보상하여
+# 드립니다" appears 40 times across 39 documents, and DOC_052's sole payout
+# clause (제1조(보상하는 손해) ... 보상하여 드립니다) was invisible to this
+# regex. The list is deliberately of predicates that STATE A RULE; verbs that
+# merely qualify one (포함합니다, 따릅니다, 적용합니다) stay out, since a
+# 준용규정 boilerplate line is not itself normative content.
 _OPERATIVE_PREDICATE_RE = re.compile(
-    r"(?:지급합니다|지급하지|지급하여야|지급되지|"
-    r"보상합니다|보상하지|보상하여야|보상되지|"
+    r"(?:지급합니다|지급하지|지급하여야|지급되지|지급하여\s*드립니다|"
+    r"보상합니다|보상하지|보상하여야|보상되지|보상하여\s*드립니다|"
+    r"보장합니다|보장하여\s*드립니다|"
     r"하여야\s*합니다|해야\s*합니다|"
     r"해지합니다|해지할\s*수\s*있습니다|해지됩니다|"
     r"면책|부지급|무효로\s*합니다|"
+    # 부담하기로 정합니다 = the insurer assumes a liability (DOC_078/DOC_184's
+    # sole 보상하는 손해 clause); 갈음할 수 있습니다 = payment-in-kind substitution
+    # (DOC_179 제5조); "해지된 것으로 합니다" = a deemed-effect provision
+    # (DOC_103/DOC_205). All three state a rule, none is 준용규정 boilerplate.
+    r"부담하기로\s*정합니다|갈음할\s*수\s*있습니다|(?:된|한)\s*것으로\s*합니다|"
+    # 하지 않습니다 = a negated grant, the exclusion form used when the clause
+    # names no 보상/지급 verb (DOC_104's 제재위반 부담보); 드려야 하고 /
+    # 발급하여 드립니다 = an affirmative duty owed to the policyholder
+    # (DOC_101/DOC_203 제6조 보험증권의 발급).
+    r"하지\s*않습니다|드려야\s*하고|발급하여\s*드립니다|"
+    # 대위권포기 특별약관's entire operative content is "…포기합니다"; a
+    # negated-application proviso ("…적용하지 아니합니다") is likewise a rule.
+    r"포기합니다|아니합니다|"
     r"말합니다|뜻합니다|의미합니다)"
 )
 # A table-of-contents entry: an article title trailed by dot leaders or a

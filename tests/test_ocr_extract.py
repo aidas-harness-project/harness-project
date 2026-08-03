@@ -378,3 +378,79 @@ def test_decode_undecodable_fails_closed(tmp_path):
     # bytes invalid in utf-8/cp949/euc-kr
     with pytest.raises(llm_providers.ProviderExecutionError):
         oe.decode_text_file(_write(tmp_path, b"\xff\xfe\x00\x81\xff"))
+
+
+# ---------------------------------------------------------------------------
+# Born-digital PDF passthrough (CASE_112): a PDF whose pages carry the
+# publisher's own text layer must never be sent to vision OCR.
+# ---------------------------------------------------------------------------
+
+def _pdf(tmp_path, name, pages):
+    """Build a PDF where pages is a list of str (text page) or None (blank/scan)."""
+    fitz = pytest.importorskip("fitz")
+    path = tmp_path / name
+    doc = fitz.open()
+    for text in pages:
+        page = doc.new_page()
+        if text:
+            page.insert_text((72, 72), text, fontname="helv", fontsize=11)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_born_digital_pdf_routes_to_embedded_text(tmp_path):
+    path = _pdf(tmp_path, "policy.pdf", ["Article 1 coverage", "Article 2 exclusions"])
+    texts = oe.pdf_embedded_page_texts(path)
+    assert texts is not None and len(texts) == 2
+    assert "Article 1" in texts[0] and "Article 2" in texts[1]
+
+
+def test_scanned_pdf_falls_through_to_ocr(tmp_path):
+    # No text layer on any page -- a genuine scan (CASE_112 DOC_214-DOC_224).
+    path = _pdf(tmp_path, "scan.pdf", [None, None])
+    assert oe.pdf_embedded_page_texts(path) is None
+
+
+def test_mixed_pdf_falls_through_rather_than_splitting_provenance(tmp_path):
+    # One text page + one scanned page: extraction_method is a single label per
+    # document, so a partially-digital bundle stays wholly on the OCR path.
+    path = _pdf(tmp_path, "mixed.pdf", ["Article 1 coverage", None])
+    assert oe.pdf_embedded_page_texts(path) is None
+
+
+def test_sparse_page_still_counts_as_embedded_text(tmp_path):
+    # CASE_112 DOC_077 was 4 characters ("업무내용") because the page genuinely
+    # holds only a form label -- not because the text layer was partial. Vision
+    # OCR of that page appended an insurer slogan absent from the source, so a
+    # character-count threshold would prefer the less faithful reading.
+    path = _pdf(tmp_path, "sparse.pdf", ["a"])
+    assert oe.pdf_embedded_page_texts(path) is not None
+
+
+def test_malformed_pdf_falls_through_without_raising(tmp_path):
+    path = tmp_path / "broken.pdf"
+    path.write_bytes(b"%PDF-1.4 not really a pdf")
+    assert oe.pdf_embedded_page_texts(path) is None
+
+
+def test_run_ocr_on_born_digital_pdf_makes_no_provider_call(tmp_path):
+    """The whole point: zero model calls, and an honest provenance label."""
+    path = _pdf(tmp_path, "policy.pdf", ["Article 1 coverage"])
+
+    def _boom(*a, **k):  # any reader/comparator use is a failure
+        raise AssertionError("a provider was called for a born-digital PDF")
+
+    result = oe.run_ocr(
+        "CASE_999", "DOC_001", path,
+        progress=lambda m: None,
+        reader_a=_boom, reader_b=_boom, comparator=_boom,
+    )
+    assert result["extraction_method"] == "embedded_text"
+    assert result["cross_validation_mode"] == "deferred_poc"
+    assert len(result["pages"]) == 1
+    page = result["pages"][0]
+    assert page["agreement"] == "agreed"
+    # reading_a is what the downstream page-write persists.
+    assert "Article 1" in page["reading_a"]
+    assert page["reading_a"] == page["reading_b"]
