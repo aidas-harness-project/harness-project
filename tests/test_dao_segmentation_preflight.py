@@ -5,7 +5,6 @@ pipeline output is read or written.
 """
 import json
 import threading
-import time
 
 import dao
 
@@ -114,8 +113,26 @@ def test_human_decision_reads_fresh_after_manifest_lock(isolated_dao, monkeypatc
     )
     dao.acquire_lock(manifest_path, "splitter", "RUN_SPLIT", "splitting bundle")
 
+    # The split must land while the review command is genuinely blocked on the
+    # lock. Sleeping a fixed 0.06s against a 0.02s poll was a race the loser
+    # side of which reads as a real failure: under load the reviewer could
+    # acquire first and legitimately see a non-superseded bundle. Waiting for
+    # the reviewer to actually start polling makes the ordering the test
+    # asserts an established fact rather than a timing bet.
+    reviewer_is_waiting = threading.Event()
+    real_acquire = dao.acquire_lock
+
+    def signal_once_blocked(target, *args, **kwargs):
+        result = real_acquire(target, *args, **kwargs)
+        if result is not None and target == manifest_path:
+            reviewer_is_waiting.set()   # someone else holds it: we are queued
+        return result
+
+    monkeypatch.setattr(dao, "acquire_lock", signal_once_blocked)
+
     def supersede_then_release():
-        time.sleep(0.06)
+        assert reviewer_is_waiting.wait(timeout=5), \
+            "reviewer never blocked on the manifest lock"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["documents"][0].update({
             "segmentation_status": "completed",

@@ -396,8 +396,11 @@ def test_direct_evidence_must_include_complete_operative_predicate():
     errors = check_normalized_policy_clause(
         _contract([clause]), "normalized_policy_clause_DOC_001.json",
         REDACTED_TEXT)
+    # The truncation itself is still the blocker. The polarity of a quote cut
+    # off before its verb is deliberately no longer an error -- an unsettled
+    # reading means the fragment does not state the predicate, which is what
+    # "complete policy proposition" already says.
     assert any("complete policy proposition" in error for error in errors)
-    assert any("polarity contradiction" in error for error in errors)
 
 
 def test_exclusion_bucket_requires_exclusion_marker_in_evidence():
@@ -644,7 +647,14 @@ def test_unrestricted_payment_condition_and_evidence_pass_end_to_end():
     assert not any("polarity" in error for error in errors), errors
 
 
-def test_mixed_polarity_inside_one_evidence_quote_is_a_blocker():
+def test_mixed_polarity_inside_one_evidence_quote_is_allowed():
+    """An unsettled reading is reported by the analyzer but does not block.
+
+    A quote carrying both directions ("지급하지 않습니다. 다만 ... 지급합니다")
+    is real policy language, and the buckets it would be gating have no
+    downstream consumer -- clauses are matched on document/UID/location and
+    quoted text. Only an explicit contradiction still blocks.
+    """
     clause = _polarity_clause()
     item = clause["payout_conditions"][0]
     item["text"] = "특정 수술은 보험금을 지급합니다"
@@ -655,11 +665,17 @@ def test_mixed_polarity_inside_one_evidence_quote_is_a_blocker():
         _contract([clause]), "normalized_policy_clause_DOC_001.json",
         P1_2_POLARITY_TEXT)
 
-    assert any("mixed" in error and "polarity" in error
-               for error in errors), errors
+    assert not any("polarity" in error for error in errors), errors
 
 
-def test_ambiguous_double_negation_evidence_is_a_blocker():
+def test_ambiguous_double_negation_evidence_is_allowed():
+    """Double negation the analyzer cannot settle no longer blocks the write.
+
+    It reads "지급하지 않는 것은 아닙니다" as ambiguous rather than guessing at
+    the scope, which is the honest answer -- but an honest "I cannot tell" is
+    not evidence of a defect, and routing it to a human bought review time to
+    protect a bucket field nothing downstream reads.
+    """
     text = (
         "<<<PAGE page=1>>>\n"
         "제3조(보험금의 지급사유)\n"
@@ -674,8 +690,7 @@ def test_ambiguous_double_negation_evidence_is_a_blocker():
     errors = check_normalized_policy_clause(
         _contract([clause]), "normalized_policy_clause_DOC_001.json", text)
 
-    assert any("ambiguous" in error and "polarity" in error
-               for error in errors), errors
+    assert not any("polarity" in error for error in errors), errors
 
 
 def test_polarity_validation_never_mutates_normalized_condition():

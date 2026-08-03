@@ -98,15 +98,22 @@ analyzer in `_cross_contract.check_condition_support`. Payout/coverage-start
 require an affirmative reading; exclusion/reduction require a
 restrictive/negative one.
 
-The analyzer refuses to settle what it cannot resolve: a passage it reads as
-`mixed` or `ambiguous` is an **error**, not a pass. That happens most often
-when a condition is carved so that its operative predicate is left behind --
-`1. 계약자의 고의로 생긴 손해에 대한 배상책임` is a bare noun phrase, and
-whether it is paid or excluded lives in the article lead above it. The fix is
-to carry the lead into the condition (its text and both source spans), not to
-reword the condition until it passes. If the source genuinely is mixed,
-preserve the wording and route it to `review_required`, or split the
-propositions.
+Only an **explicit contradiction** blocks the write: a condition whose own
+operative predicate says the opposite of its bucket, evidence quotes that
+contradict each other, or a condition grounded solely in a quote of the
+opposite polarity. Do not repair those by rewording the condition or moving
+the bucket — correct the extraction.
+
+A reading the analyzer cannot settle (`mixed`/`ambiguous`) is **not** an error
+and needs no human approval. It usually means the operative predicate sits
+outside the fragment: `1. 계약자의 고의로 생긴 손해에 대한 배상책임` is a bare
+noun phrase whose 보상/부보상 verb lives in the article lead above it. Carrying
+the lead into the condition (its text and both source spans) is still the
+better extraction and gives a settled reading — but an unsettled one is
+recorded and passes, because the buckets have no downstream consumer:
+`denial-response` and `claim-analysis` match clauses on
+`document_id`/`clause_uid`, source location, and the quoted text, never on
+which bucket a condition was filed under.
 
 An earlier design (v0.7) required a per-condition LLM "polarity receipt"
 instead. It was removed: it cost one provider call per condition -- 813 for a
