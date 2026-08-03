@@ -463,10 +463,6 @@ def _is_toc_page(lines: list[str]) -> bool:
     return titles == len(lines)
 
 
-_TOC_MIN_LINES = 5
-_TOC_TITLE_SHARE = 0.6
-
-
 def text_anchor_boundaries(pdf_path, page_count: int) -> dict[int, str | None] | None:
     """Document-start pages derived from the PDF's own text layer. No model call.
 
