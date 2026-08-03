@@ -64,8 +64,8 @@
           "description": "e.g. segment_contact_sheet_v0.1"
         },
         "mode": {
-          "enum": ["manual", "vision_proposal"],
-          "description": "manual = a human read the contact sheets and entered ranges; no model was called. vision_proposal = a model proposed boundaries. Deliberately NOT one value per backend: claude-cli and local-vlm are both vision_proposal, distinguished by provider_name/model_name, so a provider swap does not change the mode's meaning."
+          "enum": ["manual", "vision_proposal", "text_anchor"],
+          "description": "manual = a human read the contact sheets and entered ranges; no model was called. vision_proposal = a model proposed boundaries. Deliberately NOT one value per backend: claude-cli and local-vlm are both vision_proposal, distinguished by provider_name/model_name, so a provider swap does not change the mode's meaning. text_anchor = boundaries were derived deterministically from the PDF's own embedded text layer (publisher-authored document titles), with no model call at all; provider_name/model_name/contact_sheets are null/empty for such a proposal because none were used."
         },
         "provider_name": { "type": ["string", "null"] },
         "model_name": { "type": ["string", "null"] },
@@ -75,9 +75,9 @@
           "description": "ProviderResult.metadata() from the proposal call(s)."
         },
         "render_dpi": {
-          "type": "integer",
+          "type": ["integer", "null"],
           "minimum": 36,
-          "description": "Used for the full-page fallback path. Contact-sheet cells are rendered directly at cell size via a zoom matrix, not at a DPI, because the vision long-edge cap makes any higher render resolution pure waste."
+          "description": "Used for the full-page fallback path. Contact-sheet cells are rendered directly at cell size via a zoom matrix, not at a DPI, because the vision long-edge cap makes any higher render resolution pure waste. null in text_anchor mode: nothing was rendered."
         },
         "crop_ratio": {
           "type": "number",
@@ -88,13 +88,13 @@
         "grid_cols": { "type": "integer", "minimum": 1 },
         "grid_rows": { "type": "integer", "minimum": 1 },
         "sheet_pixel_budget": {
-          "type": "object",
+          "type": ["object", "null"],
           "properties": {
             "long_edge": { "type": "integer", "minimum": 1 },
             "total_pixels": { "type": "integer", "minimum": 1 }
           },
           "required": ["long_edge", "total_pixels"],
-          "description": "The achieved sheet geometry, not the cap. Recorded because grid/crop choices interact with the vision API's downscaling in a way that is invisible after the fact otherwise."
+          "description": "The achieved sheet geometry, not the cap. Recorded because grid/crop choices interact with the vision API's downscaling in a way that is invisible after the fact otherwise. null in text_anchor mode: no contact sheet was built."
         },
         "contact_sheets": {
           "type": "array",

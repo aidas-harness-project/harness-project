@@ -4,6 +4,7 @@ No I/O and no provider calls -- rendering, compositing, and the split path arriv
 in later build steps with their own tests.
 """
 import json
+from pathlib import Path
 
 import pytest
 
@@ -1954,3 +1955,187 @@ def test_continuation_pages_from_text_layer_on_a_broken_pdf_returns_empty(tmp_pa
     path = tmp_path / "broken.pdf"
     path.write_bytes(b"%PDF-1.4 not really a pdf")
     assert sc.continuation_pages_from_text_layer(path, 2) == set()
+
+
+# ------------------------------------------ text-anchor boundary detection --
+
+# The fixtures below need a font that can round-trip Hangul through a PDF text
+# layer; PyMuPDF's built-in CJK aliases insert blanks. Every Windows/most Linux
+# boxes have one of these, and the whole group skips rather than silently
+# testing empty strings if none does.
+_KOREAN_FONTS = (
+    "C:/Windows/Fonts/malgun.ttf",
+    "C:/Windows/Fonts/gulim.ttc",
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+)
+
+
+def _korean_pdf(tmp_path, pages, name="bundle.pdf"):
+    """A PDF whose pages carry the given lines as a real embedded text layer."""
+    fitz = pytest.importorskip("fitz")
+    font = next((f for f in _KOREAN_FONTS if Path(f).exists()), None)
+    if font is None:
+        pytest.skip("no Hangul-capable font available to build the fixture")
+    path = tmp_path / name
+    doc = fitz.open()
+    for lines in pages:
+        page = doc.new_page(width=595, height=841)
+        for offset, line in enumerate(lines):
+            page.insert_text((72, 72 + offset * 16), line,
+                             fontfile=font, fontname="K", fontsize=11)
+    doc.save(str(path))
+    doc.close()
+    # Guard the fixture itself: if the font silently dropped the glyphs, every
+    # assertion below would pass vacuously against empty pages.
+    with fitz.open(str(path)) as check:
+        if pages and pages[0] and not check[0].get_text().strip():
+            pytest.skip("font did not embed Hangul; fixture unusable")
+    return path
+
+
+def test_text_anchor_boundaries_cuts_on_title_lines(tmp_path):
+    path = _korean_pdf(tmp_path, [
+        ["영업배상책임보험", "보통약관"],
+        ["11. 계속되는 항목입니다"],
+        ["시설소유(관리)자 특별약관", "제1조(사고)"],
+        ["그러나 앞 조항에서 정한 손해는 보상합니다"],
+        ["구내치료비 추가특별약관", "(시설소유(관리)자 특별약관에 적용)"],
+    ])
+    assert set(sc.text_anchor_boundaries(path, 5)) == {1, 3, 5}
+
+
+def test_text_anchor_boundaries_records_the_title_that_marked_each_cut(tmp_path):
+    path = _korean_pdf(tmp_path, [
+        ["영업배상책임보험"],
+        ["도급업자 특별약관", "제1조(사고)"],
+    ])
+    found = sc.text_anchor_boundaries(path, 2)
+    # Page 1 starts a document by position, not by a title, so it carries none.
+    assert found[1] is None
+    assert found[2] == "도급업자 특별약관"
+
+
+def test_text_anchor_boundaries_accepts_an_ordinal_suffixed_title(tmp_path):
+    # "주위재산 추가특별약관2" and "창고업자 특별약관(Ⅰ)" are real CASE_112 titles;
+    # a rule anchored on a bare "약관$" would miss both.
+    path = _korean_pdf(tmp_path, [
+        ["영업배상책임보험"],
+        ["주위재산 추가특별약관2"],
+        ["창고업자 특별약관(Ⅰ)"],
+    ])
+    assert set(sc.text_anchor_boundaries(path, 3)) == {1, 2, 3}
+
+
+def test_text_anchor_boundaries_does_not_cut_on_an_article_heading(tmp_path):
+    # 제N조 is an ARTICLE boundary, not a document boundary. Admitting these was
+    # measured on CASE_112 to drop precision 1.00 -> 0.91.
+    path = _korean_pdf(tmp_path, [
+        ["영업배상책임보험"],
+        ["제4조(준용규정)", "이 특별약관에 정하지 않은 사항은 보통약관을 따릅니다"],
+        ["제5조(현물보상)", "회사는 현물로 보상하여 드립니다"],
+    ])
+    assert set(sc.text_anchor_boundaries(path, 3)) == {1}
+
+
+def test_text_anchor_boundaries_suppresses_a_table_of_contents(tmp_path):
+    # A TOC lists the very titles this module keys on. Without suppression the
+    # 6-page CASE_112 DOC_004 contents block alone emits ~60 spurious cuts.
+    toc = [
+        "날짜인식오류 보상제외 특별약관",
+        "정보기술 추가특별약관",
+        "테러행위 면책 특별약관",
+        "시설소유(관리)자 특별약관",
+        "구내치료비 추가특별약관",
+        "비행 추가특별약관",
+    ]
+    path = _korean_pdf(tmp_path, [
+        ["영업배상책임보험 목차"] + toc,
+        toc,
+        ["영업배상책임보험", "보통약관", "제1조(목적)", "이 계약은 다음과 같이 보상합니다"],
+    ])
+    found = set(sc.text_anchor_boundaries(path, 3))
+    # p2 is inside the contents block; p3 is the first real page after it.
+    assert found == {1, 3}
+
+
+def test_text_anchor_boundaries_returns_none_for_a_scan(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    path = tmp_path / "scan.pdf"
+    doc = fitz.open()
+    doc.new_page(width=595, height=841)
+    doc.new_page(width=595, height=841)
+    doc.save(str(path))
+    doc.close()
+    # None, not an empty set: the caller must fall back to vision, not treat the
+    # bundle as having exactly zero boundaries.
+    assert sc.text_anchor_boundaries(path, 2) is None
+
+
+def test_text_anchor_boundaries_returns_none_when_only_some_pages_have_text(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    font = next((f for f in _KOREAN_FONTS if Path(f).exists()), None)
+    if font is None:
+        pytest.skip("no Hangul-capable font available to build the fixture")
+    path = tmp_path / "mixed.pdf"
+    doc = fitz.open()
+    doc.new_page(width=595, height=841).insert_text(
+        (72, 72), "시설소유(관리)자 특별약관", fontfile=font, fontname="K", fontsize=11)
+    doc.new_page(width=595, height=841)  # scanned insert: no text layer
+    doc.save(str(path))
+    doc.close()
+    # A partially-digital bundle must not get a deterministic verdict that is
+    # blind to the pages it cannot read.
+    assert sc.text_anchor_boundaries(path, 2) is None
+
+
+def test_text_anchor_boundaries_on_a_broken_pdf_returns_none(tmp_path):
+    path = tmp_path / "broken.pdf"
+    path.write_bytes(b"%PDF-1.4 not really a pdf")
+    assert sc.text_anchor_boundaries(path, 2) is None
+
+
+def test_segments_from_boundaries_covers_every_page_without_overlap(tmp_path):
+    segments = sc.segments_from_boundaries({1: None, 4: "도급업자 특별약관"}, 9)
+    assert [(s["page_start"], s["page_end"]) for s in segments] == [(1, 3), (4, 9)]
+    assert [s["segment_index"] for s in segments] == [0, 1]
+    assert all(s["review_status"] == "pending" for s in segments)
+    assert segments[1]["provisional_type_label"] == "도급업자 특별약관"
+    # Provisional TYPE stays null even though a label is known: mapping the
+    # publisher's words onto the document_type enum is not this stage's call.
+    assert all(s["provisional_document_type"] is None for s in segments)
+
+
+def test_propose_boundaries_takes_the_text_anchor_path_without_a_provider(tmp_path):
+    path = _korean_pdf(tmp_path, [
+        ["영업배상책임보험"],
+        ["11. 계속되는 항목입니다"],
+        ["도급업자 특별약관", "제1조(사고)"],
+    ])
+    # provider=None proves structurally that no model call is made: any attempt
+    # to use it would raise.
+    result = sc.propose_boundaries(
+        path, case_id="CASE_001", doc_id="DOC_001", provider=None
+    )
+    assert result["method"]["mode"] == "text_anchor"
+    assert result["method"]["provider_name"] is None
+    assert result["method"]["contact_sheets"] == []
+    assert result["per_sheet"] == []
+    assert result["unassigned_pages"] == []
+    assert [(s["page_start"], s["page_end"]) for s in result["segments"]] == [(1, 2), (3, 3)]
+
+
+def test_propose_boundaries_can_be_forced_back_onto_the_vision_path(tmp_path):
+    path = _korean_pdf(tmp_path, [
+        ["영업배상책임보험"],
+        ["도급업자 특별약관"],
+    ])
+    # The diagnostic escape hatch (--no-text-anchor) must actually leave the
+    # deterministic path, otherwise a vision-vs-text comparison run is
+    # impossible. The vision path degrades gracefully rather than raising when a
+    # sheet cannot be produced, so assert on the mode it records, not on a throw.
+    result = sc.propose_boundaries(
+        path, case_id="CASE_001", doc_id="DOC_001", provider=None,
+        prefer_text_anchor=False, resume=False,
+    )
+    assert result["method"]["mode"] == "vision_proposal"
