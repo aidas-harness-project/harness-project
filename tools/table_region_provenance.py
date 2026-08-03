@@ -97,7 +97,7 @@ RECEIPT_SCHEME = "table_region_v1"
 INDEX_SCHEMA = "table_region_index.schema.json"
 
 DEFAULT_DETECTOR_PROFILE = "pymupdf_find_tables_lines_v1"
-DEFAULT_SENTINEL_PROFILE = "pymupdf_find_tables_text_sentinel_v1"
+DEFAULT_SENTINEL_PROFILE = "pdfplumber_lines_sentinel_v1"
 
 # Detection settings, pinned per profile. The profile NAME enters the receipt
 # fingerprint, so changing what a profile means requires a new profile name and
@@ -118,12 +118,52 @@ DETECTOR_PROFILES = {
 # prevent "the strict detector found zero" from being upgraded to "the document
 # contains no tables" when a second, deliberately broader layout reading sees a
 # table-like structure. False positives therefore fail closed as review items.
+#
+# A profile names its own backing library, so a sentinel can be swapped without
+# the caller assuming PyMuPDF. `settings` is what reaches the library verbatim
+# and is the only thing entering the config fingerprint -- `library` is recorded
+# separately in the scan receipt.
 SENTINEL_PROFILES = {
-    DEFAULT_SENTINEL_PROFILE: {
-        "vertical_strategy": "text",
-        "horizontal_strategy": "text",
-        "min_words_vertical": 2,
-        "min_words_horizontal": 1,
+    # Retained for reading pre-2026-08-03 scans, NOT for new ones. Measured on
+    # CASE_112 against 107 ruled-line tables and 200 prose pages: it fires on
+    # 82.7% of PROSE pages, because "text" strategies infer columns from
+    # whitespace and Korean policy prose aligns by accident at inter-word gaps
+    # -- it cut running sentences into fake cells ('회사' / '는 창고업자 특별약관(이하'
+    # / '특별약관이라 합' / '니다)'). Every policy page therefore came back
+    # `inconclusive`, which blocks policy_clause_processing finalization, so all
+    # 203 CASE_112 policy documents needed a human override. Not a tuning
+    # problem: min_words_horizontal has no effect at all, and raising
+    # min_words_vertical loses real tables faster than it sheds prose (at 8,
+    # detection is already down to 47.7% while prose still fires at 51.4%; the
+    # first setting that silences prose also detects zero real tables).
+    "pymupdf_find_tables_text_sentinel_v1": {
+        "library": "pymupdf",
+        "settings": {
+            "vertical_strategy": "text",
+            "horizontal_strategy": "text",
+            "min_words_vertical": 2,
+            "min_words_horizontal": 1,
+        },
+    },
+    # Current default. Same evaluation set: detects 99.1% of the ruled tables
+    # (vs 92.5%) while firing on 7.0% of prose pages (vs 82.7%) -- better on
+    # BOTH axes, not a trade. Of those 14 prose-set hits, 9 are real ruled boxes
+    # the strict detector missed (a boxed payout formula '보상한도액 / 손해액 × /
+    # 재고가액의 80%', a 【렌트비용 용어설명】 definition panel, a 보관시설(창고)
+    # intake form) -- i.e. the sentinel doing exactly its job. Only 5 are empty
+    # boxes, a 2.5% true false-positive rate.
+    #
+    # Why lines and not a Korean-specific model: the failure above was never
+    # about language, it was the "infer columns from whitespace" strategy. A
+    # vector-ruling reading is language-neutral. Deep-learning layout models
+    # (PP-Structure, Surya) were considered and rejected -- non-deterministic
+    # output cannot back a fail-closed provenance receipt.
+    "pdfplumber_lines_sentinel_v1": {
+        "library": "pdfplumber",
+        "settings": {
+            "vertical_strategy": "lines",
+            "horizontal_strategy": "lines",
+        },
     },
 }
 
@@ -685,8 +725,22 @@ def detector_fingerprint(profile: str) -> str:
         repr(sorted(config.items())).encode("utf-8")).hexdigest()[:32]
 
 
+def sentinel_settings(profile: str) -> dict:
+    """The kwargs a sentinel profile passes to its library, verbatim."""
+    return dict((SENTINEL_PROFILES.get(profile) or {}).get("settings") or {})
+
+
+def sentinel_library(profile: str) -> str | None:
+    """Which library backs a sentinel profile ('pymupdf' / 'pdfplumber')."""
+    return (SENTINEL_PROFILES.get(profile) or {}).get("library")
+
+
 def sentinel_fingerprint(profile: str) -> str:
-    config = SENTINEL_PROFILES.get(profile) or {}
+    # Only `settings` is hashed -- the library is recorded separately on the
+    # scan receipt. Hashing the whole profile dict would make the fingerprint
+    # depend on the shape of this module's own bookkeeping rather than on what
+    # was actually asked of the detector.
+    config = sentinel_settings(profile)
     return hashlib.sha256(
         repr(sorted(config.items())).encode("utf-8")).hexdigest()[:32]
 
@@ -698,6 +752,21 @@ def current_pymupdf_version() -> str | None:
     except ImportError:
         return None
     return getattr(fitz, "VersionBind", None) or None
+
+
+def current_sentinel_library_version(profile: str) -> str | None:
+    """Runtime version of whichever library a sentinel profile names.
+
+    Enters the scan receipt, so a library upgrade makes existing scans stale
+    exactly as a profile change does."""
+    library = sentinel_library(profile)
+    if library == "pdfplumber":
+        try:
+            import pdfplumber
+        except ImportError:
+            return None
+        return getattr(pdfplumber, "__version__", None)
+    return current_pymupdf_version()
 
 
 # --- currency --------------------------------------------------------------
@@ -1151,22 +1220,31 @@ def inventory_currency_errors(inventory: dict, *, current_pdf_sha256,
                 "reconfigured since this scan was run -- a broader detector "
                 "may now find possible tables the old scan missed; re-scan")
 
-        current_library = current_pymupdf_version()
-        if current_library is None:
-            errors.append(
-                f"{prefix}the PyMuPDF detector runtime is unavailable, so "
-                "neither the strict nor sentinel derivation can be confirmed")
-        else:
-            for label, recorded in (
-                    ("strict detector",
-                     inventory.get("detector_library_version")),
-                    ("sentinel", inventory.get("sentinel_library_version"))):
-                if recorded != current_library:
-                    errors.append(
-                        f"{prefix}{label} PyMuPDF version changed since the "
-                        f"scan (scan {recorded!r}, current "
-                        f"{current_library!r}) -- table detection output is "
-                        "version-dependent; re-scan")
+        # The strict detector is always PyMuPDF; the sentinel names its own
+        # library, so each is compared against ITS OWN runtime. Comparing both
+        # against PyMuPDF would report every pdfplumber-backed scan as stale
+        # (pdfplumber 0.11.10 vs fitz 1.28.0), which is a false staleness, not
+        # a real one -- and it would never clear, so no scan could ever hold.
+        strict_current = current_pymupdf_version()
+        sentinel_current = current_sentinel_library_version(sentinel_profile)
+        sentinel_lib = sentinel_library(sentinel_profile) or "PyMuPDF"
+        for label, recorded, current, lib in (
+                ("strict detector",
+                 inventory.get("detector_library_version"),
+                 strict_current, "PyMuPDF"),
+                ("sentinel",
+                 inventory.get("sentinel_library_version"),
+                 sentinel_current, sentinel_lib)):
+            if current is None:
+                errors.append(
+                    f"{prefix}the {label} runtime ({lib}) is unavailable, so "
+                    "that derivation cannot be confirmed")
+            elif recorded != current:
+                errors.append(
+                    f"{prefix}{label} {lib} version changed since the "
+                    f"scan (scan {recorded!r}, current "
+                    f"{current!r}) -- table detection output is "
+                    "version-dependent; re-scan")
 
     if current_pdf_sha256 is None:
         errors.append(

@@ -5577,22 +5577,49 @@ def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
         "settings": repr(sorted(settings.items())),
     }
     sentinel_profile = table_region_provenance.DEFAULT_SENTINEL_PROFILE
-    sentinel_settings = table_region_provenance.SENTINEL_PROFILES[
-        sentinel_profile]
+    sentinel_settings = table_region_provenance.sentinel_settings(
+        sentinel_profile)
+    sentinel_library = table_region_provenance.sentinel_library(
+        sentinel_profile)
     sentinel = {
         "tool": "dao.scan-table-candidates.sentinel",
         "profile": sentinel_profile,
-        "library": "pymupdf",
-        "library_version": getattr(fitz, "VersionBind", None) or None,
+        "library": sentinel_library,
+        "library_version":
+            table_region_provenance.current_sentinel_library_version(
+                sentinel_profile),
         "config_fingerprint": table_region_provenance.sentinel_fingerprint(
             sentinel_profile),
         "settings": repr(sorted(sentinel_settings.items())),
     }
+    # A sentinel backed by a library that is not installed must FAIL, never
+    # silently degrade to "no table-like structure": that is precisely the
+    # fail-open reading this whole module exists to prevent.
+    if sentinel_library == "pdfplumber":
+        try:
+            import pdfplumber  # noqa: F401
+        except ImportError:
+            return None, None, detector, sentinel, (
+                f"sentinel profile {sentinel_profile!r} needs pdfplumber, "
+                f"which is not installed; a scan cannot establish table-free "
+                f"without its high-recall second reading")
     try:
         doc = fitz.open(pdf_path)
     except Exception as exc:  # noqa: BLE001
         return None, None, detector, sentinel, \
             f"the PDF could not be opened: {exc}"
+    # The sentinel may be backed by a different library than the strict
+    # detector. Opened once for the whole scan rather than per page, and closed
+    # in the same finally block as the fitz handle.
+    plumber_doc = None
+    if sentinel_library == "pdfplumber":
+        import pdfplumber
+        try:
+            plumber_doc = pdfplumber.open(pdf_path)
+        except Exception as exc:  # noqa: BLE001
+            doc.close()
+            return None, None, detector, sentinel, (
+                f"the PDF could not be opened for the sentinel reading: {exc}")
     try:
         candidates = []
         possible_tables = []
@@ -5609,7 +5636,8 @@ def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
                     f"table detection failed on physical page {physical}: "
                     f"{exc}")
             try:
-                sentinel_found = page.find_tables(**sentinel_settings)
+                sentinel_tables = _run_sentinel(
+                    page, plumber_doc, physical, sentinel_settings)
             except Exception as exc:  # noqa: BLE001
                 return None, None, detector, sentinel, (
                     f"high-recall table sentinel failed on physical page "
@@ -5692,7 +5720,7 @@ def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
                 candidate for candidate in candidates
                 if candidate["physical_page"] == physical
             ]
-            for table in sentinel_found.tables:
+            for table in sentinel_tables:
                 if not _sentinel_table_is_plausible(table):
                     continue
                 sentinel_bbox = [float(value) for value in table.bbox]
@@ -5728,6 +5756,8 @@ def _detect_table_candidates(pdf_path: Path, physical_pages, profile: str):
         return candidates, possible_tables, detector, sentinel, None
     finally:
         doc.close()
+        if plumber_doc is not None:
+            plumber_doc.close()
 
 
 def _strict_bbox_accounts_for_sentinel(strict_bbox, sentinel_bbox) -> bool:
@@ -5756,6 +5786,24 @@ def _strict_bbox_accounts_for_sentinel(strict_bbox, sentinel_bbox) -> bool:
         and vertical_overlap / strict_height >= 0.85
         and by1 <= sy1 + table_region_provenance.PAGE_EDGE_TOLERANCE
     )
+
+
+def _run_sentinel(page, plumber_doc, physical: int, settings: dict) -> list:
+    """The sentinel's tables for one page, whichever library backs the profile.
+
+    Returns objects exposing `.bbox` and `.extract()` either way, which is all
+    the caller and _sentinel_table_is_plausible need. pdfplumber's page index is
+    0-based like fitz's, and both report bboxes in PDF points from the top-left,
+    so the geometry stays directly comparable to the strict detector's.
+    """
+    if plumber_doc is None:
+        return list(page.find_tables(**settings).tables)
+    if physical - 1 >= len(plumber_doc.pages):
+        raise IndexError(
+            f"physical page {physical} is outside the sentinel document's "
+            f"{len(plumber_doc.pages)} pages")
+    plumber_page = plumber_doc.pages[physical - 1]
+    return list(plumber_page.find_tables(table_settings=dict(settings)))
 
 
 def _sentinel_table_is_plausible(table) -> bool:

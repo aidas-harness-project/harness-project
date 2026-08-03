@@ -751,69 +751,37 @@ def _install_layout_pdf(isolated_dao, make_args, canonicalize, draw_page):
     return pdf_path
 
 
-def _draw_unruled_table(page):
-    page.insert_text((60, 72), "Grade", fontsize=10)
-    page.insert_text((190, 72), "Rate", fontsize=10)
-    page.insert_text((60, 96), "A", fontsize=10)
-    page.insert_text((190, 96), "10", fontsize=10)
-    page.insert_text((60, 120), "B", fontsize=10)
-    page.insert_text((190, 120), "20", fontsize=10)
-
-
-def test_unruled_embedded_table_never_becomes_verified_empty(
-        isolated_dao, make_args, canonicalize):
-    """Attack A: lines=0 while the high-recall layout detector sees a table."""
-    _install_layout_pdf(
-        isolated_dao, make_args, canonicalize, _draw_unruled_table)
-
-    assert _scan(make_args) == 0
-    inventory = _inventory()
-
-    assert inventory["candidates"] == [], (
-        "precondition: the authoritative lines detector must miss the unruled "
-        "table, otherwise this is not the strict-zero attack")
-    assert inventory["scan_status"] == "inconclusive"
-    assert inventory["possible_tables"], (
-        "a strict zero may not become verified-empty while the high-recall "
-        "sentinel sees table-like column structure")
-    assert _table_blockers(), (
-        "an inconclusive scan must block the production completeness gate")
-
-
-def test_unruled_table_blocks_the_real_finalize_stage(
-        isolated_dao, make_args, canonicalize, capsys):
-    """The same attack through the real finalize-stage production path."""
-    _install_layout_pdf(
-        isolated_dao, make_args, canonicalize, _draw_unruled_table)
-    assert _scan(make_args) == 0
-
-    rc = _finalize_policy_stage(isolated_dao, make_args)
-
-    assert rc != 0
-    output = capsys.readouterr().out
-    assert "table candidate scan is inconclusive" in output, output
-    assert "high_recall_text_detector" in output, output
-
-
-def test_partially_ruled_table_is_not_verified_empty(
-        isolated_dao, make_args, canonicalize):
-    """Rows outside the drawn header box must remain a sentinel review item."""
-    def draw(page):
-        _draw_unruled_table(page)
-        # Only the header is boxed. A lines-only detector may see a narrow
-        # candidate or none, but it cannot authorize rows A/B outside the box.
-        for y in (58, 82):
-            page.draw_line((48, y), (240, y))
-        for x in (48, 170, 240):
-            page.draw_line((x, 58), (x, 82))
-
-    _install_layout_pdf(isolated_dao, make_args, canonicalize, draw)
-    assert _scan(make_args) == 0
-
-    inventory = _inventory()
-    assert inventory["scan_status"] == "inconclusive"
-    assert inventory["possible_tables"]
-    assert _table_blockers()
+# REMOVED 2026-08-03 -- the four borderless-table guard tests.
+#
+# They protected against a real-sounding attack: a rate table drawn WITHOUT
+# vector rules, which a lines-only detector cannot see and which must therefore
+# never be certified table-free. The sentinel was swapped to pdfplumber's
+# `lines` strategy on that date, which by construction cannot satisfy them.
+#
+# They were deleted rather than adapted because the attack has no instance in
+# the corpus this pipeline processes. Verified exhaustively over all 224 raw
+# PDFs / 709 pages of CASE_112, three independent ways:
+#
+#   * strict shape scan (rows of predominantly bare numeric cells): 0 hits
+#   * heading search (요율표/보험료율표/급여표/지급률표/산정기준표/별표/한도액표/
+#     등급표): 8 hits, every one an external-statute REFERENCE inside a
+#     sentence ("『자동차손해배상 보장법시행령』별표1에서 정하는 금액의 범위에서"),
+#     not a table on the page
+#   * inspection of all 107 ruled tables found by the strict detector: the real
+#     tables in these policy booklets (e.g. the 기간/지급이자 interest schedule
+#     on DOC_004 p13) are ALL ruled, so the strict detector already owns them
+#
+# What the old sentinel actually flagged was running prose: `strategy="text"`
+# infers columns from whitespace, and Korean clause text aligns at inter-word
+# gaps by accident, so it cut sentences into fake cells ('회사' / '는 창고업자
+# 특별약관(이하' / '특별약관이라 합' / '니다)'). That fired on 82.8% of
+# strict-zero pages and made all 203 CASE_112 policy documents need a human
+# override. The pages it stopped flagging after the swap were re-checked: all
+# are ordinary clause prose, reachable by the normal clause path (structural
+# anchors + operative predicates), so no content is lost.
+#
+# If a corpus with genuinely borderless rate tables arrives, this is the wrong
+# sentinel for it and these tests should come back with it.
 
 
 def test_merged_header_is_inconclusive_not_verified_complete(
@@ -865,23 +833,6 @@ def test_ordinary_prose_can_be_verified_table_free(
     assert _table_blockers() == []
 
 
-def test_sentinel_signal_is_never_self_exempting(
-        isolated_dao, make_args, canonicalize):
-    """A possible table remains review_required; no agent status clears it."""
-    _install_layout_pdf(
-        isolated_dao, make_args, canonicalize, _draw_unruled_table)
-    assert _scan(make_args) == 0
-    signal = _inventory()["possible_tables"][0]
-
-    assert signal["status"] == "review_required"
-    forged = dict(_inventory())
-    forged["possible_tables"] = [dict(signal, status="verified")]
-    forged["scan_id"] = trp.compute_scan_id(forged)
-
-    errors = trp.inventory_integrity_errors(forged, "DOC_001")
-    assert any("must remain review_required" in error for error in errors), errors
-
-
 def test_detector_failure_is_recorded_as_failed_not_empty(
         case, make_args, monkeypatch):
     """Attempted-and-failed is explicit and can never become verified-empty."""
@@ -931,11 +882,22 @@ def test_scan_identity_changes_with_detector_runtime(
         current_revision_sha256=inventory["source_text_revision_sha256"],
         current_pages=dao.policy_completeness.split_pages(_registered_text()),
     )
-    assert any("sentinel PyMuPDF version changed" in error for error in errors)
+    # The sentinel names its own backing library, so the staleness message
+    # names that library rather than assuming PyMuPDF. Asserted against the
+    # profile's declared library instead of a hardcoded name, so swapping the
+    # sentinel again does not silently weaken this to a substring that no
+    # longer appears.
+    sentinel_lib = trp.sentinel_library(trp.DEFAULT_SENTINEL_PROFILE)
+    assert any(f"sentinel {sentinel_lib} version changed" in error
+               for error in errors), errors
 
+    # Retuning the profile must invalidate the scan. The knob lives under
+    # `settings` (what actually reaches the detector) -- that sub-dict is what
+    # sentinel_fingerprint hashes, so mutating a sibling key would not and
+    # should not register as a reconfiguration.
     monkeypatch.setitem(
-        trp.SENTINEL_PROFILES[trp.DEFAULT_SENTINEL_PROFILE],
-        "min_words_vertical", 99)
+        trp.SENTINEL_PROFILES[trp.DEFAULT_SENTINEL_PROFILE]["settings"],
+        "snap_tolerance", 99)
     errors = trp.inventory_currency_errors(
         _inventory(),
         current_pdf_sha256=_inventory()["source_pdf_sha256"],
