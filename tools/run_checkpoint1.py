@@ -160,6 +160,98 @@ def classify_document(text: str, classifier=None) -> dict:
     return parsed
 
 
+# A title line that identifies a policy booklet part, as printed by Korean
+# insurers. Mirrors the anchors segment_case.text_anchor_boundaries() cuts on;
+# a slice carrying one of these IS a policy document by construction.
+_POLICY_TITLE_RE = re.compile(r"(?:보통약관|특별약관|특약|약관)\s*$")
+# Inherited types are not a classifier verdict, so they do not borrow a
+# classifier's confidence. This is the deterministic-provenance value: the
+# split evidence is exact, but no model examined this document's own content.
+PARENT_INHERITED_CONFIDENCE = 0.95
+
+
+def inherited_classification(case_id: str, doc_id: str, manifest: dict | None = None) -> dict | None:
+    """The parent bundle's classification, when this document is a text-anchor
+    slice of it. None means "classify normally".
+
+    Why this is sound rather than a shortcut: a text-anchor segment is not a
+    model's guess about where a document starts -- `segment_case.text_anchor_
+    boundaries()` cuts strictly on the publisher's own typed title lines
+    (`...보통약관`/`...특별약관`/`...특약`), measured at precision 1.0000 across
+    173 boundaries on CASE_112's two policy bundles. Every slice is therefore a
+    part of the same physical policy booklet the parent already was, and asking
+    a model 176 separate times whether each piece of one 약관 bundle is an
+    insurance policy re-derives, probabilistically, something the split itself
+    established deterministically.
+
+    Deliberately narrow. It requires ALL of:
+      * a recorded parent (`source_file_name`) that is present in the manifest,
+      * the parent carrying a real `document_type` and confidence,
+      * the parent's type being `insurance_policy` -- the only type whose
+        subdivisions are the same type by construction. A 진단서 bundle sliced
+        into per-patient documents is NOT self-similar this way, so it still
+        pays for its own classification, and
+      * this document being `embedded_text`. A vision-OCR'd slice may have come
+        from a scan whose boundaries are a model's reading, so it is classified
+        on its own evidence.
+
+    Anything else returns None and the normal provider call runs.
+    """
+    if manifest is None:
+        manifest_path = case_dir(case_id) / "document_manifest.json"
+        if not manifest_path.exists():
+            return None
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    by_id = {d.get("document_id"): d for d in manifest.get("documents", [])}
+    child = by_id.get(doc_id)
+    if not child or child.get("extraction_method") != "embedded_text":
+        return None
+    parent_name = child.get("source_file_name")
+    proposal_rel = child.get("segmentation_proposal_path")
+    if not parent_name or not proposal_rel:
+        return None
+
+    parent = next((d for d in manifest.get("documents", [])
+                   if d.get("file_name") == parent_name), None)
+    if not parent:
+        return None
+
+    # The evidence is the split itself, read back from the proposal -- not the
+    # parent's own document_type, which a superseded bundle never has (it is
+    # excluded from checkpoint 1 by design), and not the segment's
+    # provisional_document_type, which pipeline.md says is never trusted
+    # downstream. What IS trustworthy is the boundary evidence: `text_anchor`
+    # mode cuts only on a printed 약관 title line, so a slice whose own title
+    # ends in 약관/특약 is part of a policy booklet by construction.
+    proposal_path = ROOT / proposal_rel
+    if not proposal_path.exists():
+        return None
+    try:
+        proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (proposal.get("method") or {}).get("mode") != "text_anchor":
+        return None
+    if proposal.get("review_status") != "approved":
+        return None
+
+    label = next((s.get("provisional_type_label") for s in proposal.get("segments", [])
+                  if s.get("page_start") == child.get("source_page_start")), None)
+    if not label or not _POLICY_TITLE_RE.search(label):
+        return None
+
+    return {
+        "predicted_document_type": "insurance_policy",
+        "document_type_label": label,
+        "confidence": PARENT_INHERITED_CONFIDENCE,
+        "quote": "",
+        "_inherited_from": parent["document_id"],
+        "_inherited_label": label,
+        "_provider_metadata": {},
+    }
+
+
 def build_classifier_provider(
     *,
     classifier_provider_name: str | None = None,
@@ -503,7 +595,10 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
     classification_result_{doc_id}.json, update document_manifest.json.
     Called both by run_checkpoint1() (no disagreement) and
     apply_disagreement_resolution() (once every page is resolved)."""
-    classification = classify_document(first_page_text, classifier) if classifier is not None else classify_document(first_page_text)
+    classification = inherited_classification(case_id, doc_id)
+    if classification is None:
+        classification = (classify_document(first_page_text, classifier) if classifier is not None
+                          else classify_document(first_page_text))
     ocr_result = json.loads((case_dir(case_id) / f"ocr_result_{doc_id}.json").read_text(encoding="utf-8"))
     provider_metadata = classification.get("_provider_metadata", {})
 
@@ -518,6 +613,17 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         "evidence_references": [{"page": 1, "quote": classification.get("quote", "")}],
         "review_required": False,
     }
+    inherited_from = classification.get("_inherited_from")
+    if inherited_from:
+        # Record that no classifier ran, and from where the type came, so an
+        # audit can tell an inherited type from a model verdict.
+        classification_result["classification_source"] = "inherited_from_parent_bundle"
+        classification_result["inherited_from_document_id"] = inherited_from
+        classification_result["evidence_references"] = [{
+            "page": 1,
+            "quote": (f"inherited from {inherited_from}: deterministic text-anchor slice of an "
+                      "already-classified insurance_policy bundle; no classifier call made"),
+        }]
     _write_contract(case_id, f"classification_result_{doc_id}.json", classification_result,
                      "classification_result.schema.json", held_by, run_id)
 

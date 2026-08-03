@@ -162,7 +162,7 @@ import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import NamedTuple
+from typing import Mapping, NamedTuple
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -313,16 +313,56 @@ def acquire_lock(target: Path, held_by: str, run_id: str, purpose: str):
 
 
 def release_lock(target: Path) -> None:
-    lp = lock_path(target)
-    if lp.exists():
-        lp.unlink()
+    """Release is atomic for the same reason acquire is: `exists()` then
+    `unlink()` is a TOCTOU window, and a concurrent releaser landing inside it
+    makes this raise FileNotFoundError. That crash surfaced for real on
+    CASE_907 -- ten polarity workers, once the poll interval dropped to
+    sub-second and commits actually overlapped -- and it aborts a caller that
+    had already committed its write, so the work looks failed when it
+    succeeded. Ask forgiveness, not permission: the post-condition wanted here
+    is "no lock file remains", and another process having already removed it
+    satisfies that."""
+    try:
+        lock_path(target).unlink()
+    except FileNotFoundError:
+        pass
 
 
 # P5's mid-run poll-and-wait cadence -- module-level, not bound into a
 # function default, so tests can monkeypatch dao.LOCK_POLL_INTERVAL_SECONDS
 # / dao.LOCK_MAX_WAIT_SECONDS to tiny values instead of a test waiting 15
 # real minutes to see a timeout.
-LOCK_POLL_INTERVAL_SECONDS = 30
+#
+# 30s suits what P5 was written for: a lock held by a person or a long stage,
+# where polling faster only burns cycles. It is badly wrong for a parallel
+# batch of short commits -- `analyze-policy-polarity` holds the index lock for
+# milliseconds to append one receipt, so N concurrent workers serialise at 30s
+# apiece and wait orders of magnitude longer than the work takes (measured on
+# CASE_907: ten workers, nine cache hits, 4.5 minutes of pure polling).
+# Overridable per deployment rather than lowered outright, mirroring
+# llm_providers.compare_text_timeout: the human-gate cadence stays as designed
+# and a batch driver is a config change, not a patch.
+LOCK_POLL_INTERVAL_ENV = "HARNESS_LOCK_POLL_INTERVAL_SECONDS"
+_LOCK_POLL_INTERVAL_DEFAULT = 30.0
+
+
+def _lock_poll_interval(env: Mapping[str, str] | None = None) -> float:
+    """Resolve the poll interval. Invalid or non-positive values fall back to
+    the default rather than raising -- a malformed interval must not turn every
+    lock wait into a hard configuration failure, and a zero or negative value
+    would spin."""
+    source = os.environ if env is None else env
+    raw = str(source.get(LOCK_POLL_INTERVAL_ENV, "")).strip()
+    if not raw:
+        return _LOCK_POLL_INTERVAL_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        return _LOCK_POLL_INTERVAL_DEFAULT
+    return value if value > 0 else _LOCK_POLL_INTERVAL_DEFAULT
+
+
+LOCK_POLL_INTERVAL_SECONDS = _lock_poll_interval()
 LOCK_MAX_WAIT_SECONDS = 900
 
 

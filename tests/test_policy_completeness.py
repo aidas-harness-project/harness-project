@@ -757,3 +757,53 @@ def test_boilerplate_and_qualifiers_stay_non_operative():
         "이 규정을 적용합니다.",
     ]:
         assert not pc._OPERATIVE_PREDICATE_RE.search(text), text
+
+
+# --- 제N조 cross-references are not nested headings (CASE_907) ---------------
+
+def test_article_cross_reference_is_not_a_second_anchor():
+    """Korean policy text cites other articles mid-sentence constantly. Before
+    2026-08-03 `_STRUCTURAL_ANCHOR_RE` matched `제N조` anywhere, so one article
+    with one citing sentence read as 2 anchors and `check_policy_boundary_
+    inventory` refused the span with "split material subparagraphs" -- 112 of
+    CASE_907/DOC_003's 1321 spans, 38 of them unsplittable (both anchors in one
+    sentence). Line-anchoring makes 제N조 consistent with the item forms, which
+    were already `^`-anchored for the same class of false positive."""
+    span = ("제1조(보상하는 손해) \n회사는 특별약관 제2조(보상하지 않는 손해)의 "
+            "규정에도 불구하고 보상합니다.")
+    assert len(pc._STRUCTURAL_ANCHOR_RE.findall(span)) == 1
+
+
+def test_cross_reference_inside_a_paragraph_item_is_not_an_anchor():
+    """The unsplittable shape: a circled-paragraph item citing another article.
+    One anchor (①), not two."""
+    span = "① 회사는 보통약관 제8조(보험금 등의 지급한도) 제1항을 아래의 사항으로 대체합니다."
+    assert len(pc._STRUCTURAL_ANCHOR_RE.findall(span)) == 1
+
+
+def test_two_real_article_headings_still_count_as_two():
+    """The rule must keep doing its actual job: a span swallowing two article
+    headings is still refused."""
+    span = "제1조(보상하는 손해)\n내용입니다.\n제2조(보상하지 않는 손해)\n다른 내용입니다."
+    assert len(pc._STRUCTURAL_ANCHOR_RE.findall(span)) == 2
+
+
+def test_indented_article_heading_is_still_an_anchor():
+    """Leading whitespace is layout, not a demotion from heading."""
+    assert len(pc._STRUCTURAL_ANCHOR_RE.findall("  제3조(보험기간의 연장)\n내용")) == 1
+
+
+def test_sentence_referring_to_paragraph_items_is_not_an_anchor():
+    """DOC_003 p11: a sentence that REFERS to two paragraph items. Before the
+    circled forms were line-anchored this was the last surviving anchor error
+    after the 제N조 fix -- 3 anchors for a span holding one real item."""
+    span = ("② 대여자동차로 대체하여 사용할 수 없는 차종은 실임차료.\n"
+            "* 위 ①, ② 조항은 자동차 보험 표준약관이 변경되는 경우 그 변경사항도 포함합니다.")
+    assert len(pc._STRUCTURAL_ANCHOR_RE.findall(span)) == 1
+
+
+def test_line_initial_paragraph_items_still_count():
+    """Real items must keep matching: two line-initial circled markers are two
+    anchors."""
+    span = "① 첫 번째 항목입니다.\n② 두 번째 항목입니다."
+    assert len(pc._STRUCTURAL_ANCHOR_RE.findall(span)) == 2

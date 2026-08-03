@@ -1379,6 +1379,62 @@ def test_split_writes_one_pdf_per_segment_with_correct_page_counts(tmp_path):
         assert d.page_count == 7
 
 
+def test_split_preserves_the_text_layer_of_every_page(tmp_path):
+    """A split child must extract the same text its source page does.
+
+    Regression: split_bundle used insert_pdf(), which rebuilds page resources
+    into a fresh document and dropped the glyphs of pages whose text is drawn
+    in a subset TrueType font with a mislabelled encoding -- the Korean cover
+    pages of CASE_905's two policy bundles ("영업배상책임보험\n보통약관").  A
+    cover extracting 0 chars reads as a genuine scan to
+    ocr_extract.pdf_embedded_page_texts(), silently routing the segment to
+    vision OCR.  Nothing failed loudly; the only symptom was cost.
+    """
+    import fitz
+
+    # NOTE on fixture fidelity: the production trigger is a page drawing text
+    # in a subset TrueType font whose /BaseFont name is UTF-8 bytes reinterpreted
+    # as Latin-1 ("ABCDEE+ë\x8f\x8bì\x9b\x80") and whose encoding is mislabelled
+    # WinAnsi.  A synthetic PDF built with PyMuPDF does not reproduce that
+    # corruption -- both insert_pdf and select keep its text -- so this test
+    # asserts the invariant (child text == source text) rather than proving the
+    # old implementation fails.  The measured evidence for the fix is in the
+    # real bundles: across CASE_905's 323 policy pages, insert_pdf silently
+    # dropped the text layer on 3 cover pages and select on 0.
+    pdf = tmp_path / "textful.pdf"
+    with fitz.open() as doc:
+        for i in range(4):
+            page = doc.new_page()
+            page.insert_text((72, 100), f"PAGE {i + 1} CONTENT", fontsize=14)
+        doc.save(pdf)
+
+    with fitz.open(pdf) as doc:
+        source_text = [doc[i].get_text().strip() for i in range(4)]
+    assert all(source_text), "fixture must have text on every page"
+
+    prop = _proposal([_seg(0, 1, 1, status="approved"),
+                      _seg(1, 2, 4, status="approved")],
+                     review_status="approved")
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        out = sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_1",
+            dao=_FakeDao(),
+        )
+    finally:
+        sc.ROOT = orig_root
+
+    assert out["status"] == "split"
+    raw = tmp_path / "data" / "raw" / "CASE_900"
+    with fitz.open(raw / "DOC_002.pdf") as d:
+        assert d[0].get_text().strip() == source_text[0]
+    with fitz.open(raw / "DOC_003.pdf") as d:
+        assert [d[i].get_text().strip() for i in range(3)] == source_text[1:]
+
+
 def test_split_returns_proposal_linked_to_created_document_ids(tmp_path):
     pdf = _bundle_pdf(tmp_path, 12)
     prop = _proposal([

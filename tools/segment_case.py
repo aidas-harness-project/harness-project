@@ -2464,18 +2464,28 @@ def split_bundle(
     written_paths: list[Path] = []
     file_sizes: dict[int, int] = {}
 
-    with fitz.open(bundle_pdf_path) as source:
-        for offset, seg in enumerate(segments):
-            doc_id = f"DOC_{start_index + offset:03d}"
-            out_path = raw_dir / f"{doc_id}.pdf"
-            with fitz.open() as out:
-                # insert_pdf is 0-based inclusive; segments are 1-based inclusive.
-                out.insert_pdf(source, from_page=seg["page_start"] - 1, to_page=seg["page_end"] - 1)
-                out.save(out_path)
-            written_paths.append(out_path)
-            file_sizes[seg["page_start"]] = out_path.stat().st_size  # size AFTER save
-            if progress:
-                progress(f"wrote {doc_id}.pdf (p{seg['page_start']}-{seg['page_end']})")
+    for offset, seg in enumerate(segments):
+        doc_id = f"DOC_{start_index + offset:03d}"
+        out_path = raw_dir / f"{doc_id}.pdf"
+        # select() keeps the page's own resources; insert_pdf() rebuilds them
+        # into a fresh document and drops the glyphs of a page whose text is
+        # drawn in a subset TrueType font with a broken/WinAnsi-mislabelled
+        # encoding -- exactly the Korean cover pages here ("영업배상책임보험\n
+        # 보통약관", 13 chars). Measured across both CASE_905 bundles (323
+        # pages): insert_pdf silently lost the text layer on 3 cover pages,
+        # select on 0. A cover that extracts 0 chars reads as a genuine scan
+        # to ocr_extract.pdf_embedded_page_texts(), which then routes the whole
+        # segment to vision OCR -- the failure is invisible except as cost.
+        # select() mutates the document it is called on, so each segment opens
+        # its own handle rather than sharing one across the loop.
+        with fitz.open(bundle_pdf_path) as out:
+            # select is 0-based; segments are 1-based inclusive.
+            out.select(list(range(seg["page_start"] - 1, seg["page_end"])))
+            out.save(out_path)
+        written_paths.append(out_path)
+        file_sizes[seg["page_start"]] = out_path.stat().st_size  # size AFTER save
+        if progress:
+            progress(f"wrote {doc_id}.pdf (p{seg['page_start']}-{seg['page_end']})")
 
     new_documents = build_manifest_entries(
         segments,

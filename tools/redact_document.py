@@ -39,7 +39,8 @@ from llm_providers import (
     SUPPORTED_PROVIDERS,
     build_provider,
 )
-from redaction import PROMPT_VERSION, LlmRedactor, RedactionLeakError, RedactionParseError
+from redaction import (PROMPT_VERSION, LlmRedactor, NoPiiClassRedactor,
+                       RedactionLeakError, RedactionParseError)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -191,6 +192,31 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
     }
 
 
+# Document classes whose text is published standard-form contract wording,
+# identical for every policyholder, and therefore structurally free of claimant
+# PII. Eligibility is decided from the manifest's classified document_type --
+# never from a filename or an agent's assertion. See
+# redaction.NoPiiClassRedactor for what the exemption does and does not give up
+# (the deterministic residual-PII sweep still runs on every page and still
+# hard-fails, so the claim is verified per page rather than trusted).
+NO_PII_DOCUMENT_TYPES = frozenset({"insurance_policy"})
+
+
+def _redactor_for(case_id: str, doc_id: str, provider_name: str, model: str | None):
+    """Pick the redactor for this document: deterministic pass-through for a
+    PII-free document class, otherwise the real LLM span redactor."""
+    manifest = json.loads(_dao("read-contract", case_id, "document_manifest.json"))
+    entry = next((d for d in manifest.get("documents", [])
+                  if d.get("document_id") == doc_id), None)
+    if entry and entry.get("document_type") in NO_PII_DOCUMENT_TYPES:
+        print(f"{doc_id}: document_type={entry['document_type']} is a PII-free class -- "
+              "deterministic pass-through, no redaction model called "
+              "(residual-PII scan still enforced per page)", file=sys.stderr)
+        return NoPiiClassRedactor()
+    provider = build_provider(ProviderConfig(provider_name, model), env=os.environ, root=ROOT)
+    return LlmRedactor(provider)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("case_id")
@@ -203,8 +229,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        provider = build_provider(ProviderConfig(args.provider, args.model), env=os.environ, root=ROOT)
-        redactor = LlmRedactor(provider)
+        redactor = _redactor_for(args.case_id, args.doc_id, args.provider, args.model)
         result = redact_document(args.case_id, args.doc_id, args.held_by, args.run_id, redactor)
     except RedactionLeakError as exc:
         # Possible PII leak detected -- nothing was written. Block the document.

@@ -636,3 +636,76 @@ def test_classify_document_rejects_unknown_document_type():
 
     with pytest.raises(SystemExit):
         rc1.classify_document("some text", classifier)
+
+
+# --- classification inheritance for text-anchor policy slices -----------------
+
+def _inherit_case(tmp_path, *, child=None, parent=None, proposal=None):
+    """Writes a manifest + proposal on disk and returns the manifest dict."""
+    case_id = "CASE_905"
+    out = tmp_path / "outputs" / case_id
+    out.mkdir(parents=True, exist_ok=True)
+    prop = {"review_status": "approved",
+            "method": {"mode": "text_anchor"},
+            "segments": [{"page_start": 5, "page_end": 6,
+                          "provisional_type_label": "구내치료비 추가특별약관"}]}
+    prop.update(proposal or {})
+    (out / "segmentation_proposal_DOC_003.json").write_text(
+        json.dumps(prop, ensure_ascii=False), encoding="utf-8")
+
+    parent_doc = {"document_id": "DOC_003", "file_name": "DOC_003.pdf",
+                  "downstream_disposition": "superseded_bundle"}
+    parent_doc.update(parent or {})
+    child_doc = {"document_id": "DOC_007", "file_name": "DOC_007.pdf",
+                 "extraction_method": "embedded_text",
+                 "source_file_name": "DOC_003.pdf", "source_page_start": 5,
+                 "segmentation_proposal_path":
+                     f"outputs/{case_id}/segmentation_proposal_DOC_003.json"}
+    child_doc.update(child or {})
+    return {"documents": [parent_doc, child_doc]}
+
+
+def test_inherited_classification_uses_the_split_evidence_not_the_parent_type(isolated_roots):
+    """The parent is a superseded bundle and never gets a document_type of its
+    own; the proposal's text-anchor title line is what establishes the type."""
+    m = _inherit_case(isolated_roots)
+    got = rc1.inherited_classification("CASE_905", "DOC_007", m)
+    assert got["predicted_document_type"] == "insurance_policy"
+    assert got["document_type_label"] == "구내치료비 추가특별약관"
+    assert got["_inherited_from"] == "DOC_003"
+
+
+def test_inherited_classification_refuses_a_vision_ocr_slice(isolated_roots):
+    m = _inherit_case(isolated_roots, child={"extraction_method": "ocr"})
+    assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None
+
+
+def test_inherited_classification_refuses_a_vision_mode_proposal(isolated_roots):
+    """Vision boundaries are a model's reading, so a slice from them is
+    classified on its own evidence."""
+    m = _inherit_case(isolated_roots, proposal={"method": {"mode": "vision_proposal"}})
+    assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None
+
+
+def test_inherited_classification_refuses_an_unapproved_proposal(isolated_roots):
+    m = _inherit_case(isolated_roots, proposal={"review_status": "pending"})
+    assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None
+
+
+def test_inherited_classification_refuses_a_non_policy_title(isolated_roots):
+    """A slice whose title is not a 약관 heading is not a policy by
+    construction -- e.g. a 진단서 bundle cut on some other anchor."""
+    m = _inherit_case(isolated_roots, proposal={"segments": [
+        {"page_start": 5, "page_end": 6, "provisional_type_label": "진단서"}]})
+    assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None
+
+
+def test_inherited_classification_refuses_an_unsegmented_document(isolated_roots):
+    m = _inherit_case(isolated_roots, child={"source_file_name": None,
+                                             "segmentation_proposal_path": None})
+    assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None
+
+
+def test_inherited_classification_refuses_a_missing_parent(isolated_roots):
+    m = _inherit_case(isolated_roots, child={"source_file_name": "GONE.pdf"})
+    assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None

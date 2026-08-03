@@ -24,16 +24,42 @@ _DOC_ID_RE = re.compile(r"_(DOC_\d+)\.json$")
 #   ㉮ .. ㉺ / ㈀ ..         circled Korean item markers
 #   1. / 1) / (1)           arabic item markers (line-anchored or parenthesised)
 #   가. / 가) / (가)         Korean-consonant item markers
-# The arabic/consonant "N." and "가." forms are line-anchored (^) so a decimal
-# like "50.5" or a mid-sentence "다." ending doesn't false-positive; the
-# parenthesised and circled forms are safe to match anywhere.
+# EVERY form here is line-anchored (^). A structural anchor is something that
+# STARTS a unit of the document, and in this corpus such a marker is always
+# line-initial; the same glyph appearing mid-line is prose citing a unit, not
+# opening one. The arabic/consonant "N." and "가." forms were anchored from the
+# start (a decimal like "50.5" or a sentence ending in "다." must not match).
+# 제N조 and the circled forms were not, and both produced the same class of
+# false positive on real text -- see the CASE_907 note below.
+#
+# `제N조` is line-anchored for the same reason, added 2026-08-03 (CASE_907).
+# Korean policy text cites other articles constantly -- "회사는 특별약관 제2조
+# (보상하지 않는 손해)의 규정에도 불구하고" -- and matching anywhere counted
+# every such cross-reference as a second nested heading. One article with one
+# citing sentence already read as 2 anchors, so `check_policy_boundary_
+# inventory` refused the span with "split material subparagraphs"; 112 of
+# DOC_003's 1321 spans tripped it, 38 of them unsplittable because both anchors
+# sit in ONE sentence. It is not a scale effect: CASE_030's 4-page DOC_004
+# produces 20 such errors against this same code. An article heading is
+# line-initial in every document in this corpus, which is exactly the property
+# the other item forms already relied on -- this makes `제N조` consistent with
+# them rather than introducing a new assumption.
+#
+# The circled forms were line-anchored in the same pass and for the same
+# reason. The previous comment claimed they were "safe to match anywhere";
+# DOC_003 p11 is the counter-example -- `* 위 ①, ② 조항은 자동차 보험
+# 표준약관이 변경되는 경우` is a sentence REFERRING to two paragraph items,
+# and it was the last surviving anchor error after the 제N조 fix. Measured over
+# DOC_003's full 97,630-character redacted text: anchoring the circled forms
+# drops the total from 1205 matches to 1203, and both dropped matches are that
+# one sentence. No real paragraph item is line-internal in this corpus.
 _ITEM_LETTERS = "가나다라마바사아자차카타파하"
 _STRUCTURAL_ANCHOR_RE = re.compile(
     r"(?:"
-    r"제\s*\d+\s*조(?:의\s*\d+)?(?:\s*\([^)]*\))?"        # 제1조 / 제1조의2
-    r"|[①-⑳]"                                   # ①-⑳
-    r"|[㉠-㉿]"                                   # ㉠-㉿ (incl. ㉮)
-    r"|[㈀-㈞]"                                   # ㈀-㈞
+    r"^[ \t]*제\s*\d+\s*조(?:의\s*\d+)?(?:\s*\([^)]*\))?"  # 제1조 / 제1조의2
+    r"|^[ \t]*[①-⑳]"                            # ①-⑳
+    r"|^[ \t]*[㉠-㉿]"                            # ㉠-㉿ (incl. ㉮)
+    r"|^[ \t]*[㈀-㈞]"                            # ㈀-㈞
     r"|^[ \t]*\(?\d+\)"                                   # (1) / 1)
     rf"|^[ \t]*\([{_ITEM_LETTERS}]\)"                     # (가)
     r"|^[ \t]*\d+\.[ \t]"                                 # 1.  (line-anchored)
