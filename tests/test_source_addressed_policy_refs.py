@@ -194,6 +194,50 @@ def test_a_source_reference_to_an_unprocessed_document_is_refused(
     assert any("no processed/redacted text found" in e for e in errors), errors
 
 
+def _denial(page=1, quote=QUOTE):
+    return {
+        "denial_reasons": [{
+            "reason_id": "DR_1",
+            "policy_matches": [{
+                "policy_match_id": "PM_1",
+                "document_id": "DOC_001",
+                "clause_id": "C-1",
+                "policy_clause_evidence_references": [
+                    {"document_id": "DOC_001", "page": page, "quote": quote}],
+            }],
+        }],
+        "upstream_policy_snapshot": dao.policy_snapshot_for(
+            "CASE_030", ["DOC_001"]),
+    }
+
+
+def test_a_denial_policy_match_grounds_itself_one_level_down(
+        unnormalized_policy):
+    """A policy_match carries its location in policy_clause_evidence_references.
+
+    Regression: the source-form branch read `page`/`quote` off the reference
+    object, which is right for `matched_clause_ref`/`clause_ref` (inline) and
+    wrong for a policy_match (one level down). Every match on a non-normalized
+    document was rejected as "missing page or quote" -- blocking the exact path
+    this change exists to open, for every case citing an unpromoted policy
+    document. `check_policy_matches` verifies these correctly; this branch must
+    not second-guess it from the wrong level.
+    """
+    assert dao._downstream_policy_ref_errors(
+        "CASE_030", "denial_reason_result.schema.json", _denial()) == []
+
+
+def test_a_denial_policy_match_with_a_fabricated_quote_is_still_refused(
+        unnormalized_policy, isolated_dao):
+    """Not second-guessing must not become not checking."""
+    import _cross_contract
+    errors = _cross_contract.check_policy_matches(
+        _denial(quote="제99조(존재하지 않는 조항)"),
+        isolated_dao / "outputs" / "CASE_030",
+        lambda d: dao._redacted_text_for_doc("CASE_030", d))
+    assert any("does not appear verbatim" in e for e in errors), errors
+
+
 def test_the_snapshot_still_detects_a_changed_policy_layer(
         unnormalized_policy):
     """Staleness detection must survive the absent contract.

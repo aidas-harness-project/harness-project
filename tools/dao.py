@@ -1625,14 +1625,25 @@ def _downstream_policy_ref_errors(
         errors.extend(f"{loc}: {error}" for error in doc_errors)
         if not _uid_addressed_ref(ref):
             # Source form: the page+quote IS the address, so it gets verified
-            # against the processed text here. Without this branch a
-            # source-form reference would fall through the `normalized is
-            # None` guard below and be persisted unverified -- the exact
-            # unresolvable-reference state the UID path refuses.
-            errors.extend(
-                f"{loc}: {error}" for error in
-                _cross_contract.source_addressed_ref_errors(
-                    ref, lambda d: _redacted_text_for_doc(case_id, d)))
+            # against the processed text. Without this a source-form reference
+            # would fall through the `normalized is None` guard below and be
+            # persisted unverified -- the exact unresolvable-reference state
+            # the UID path refuses.
+            #
+            # Only for refs that carry the location INLINE
+            # (`matched_clause_ref`, `clause_ref`). A `denial_reason_result`
+            # policy_match is source-addressed too, but it grounds itself in
+            # `policy_clause_evidence_references` rather than at top level, and
+            # `_cross_contract.check_policy_matches` already verifies it there
+            # against the same processed text. Passing the match object here
+            # read page/quote off a level that never has them, so EVERY match
+            # on a non-normalized document was rejected as "missing page or
+            # quote" -- blocking the path this whole change exists to open.
+            if schema_name != "denial_reason_result.schema.json":
+                errors.extend(
+                    f"{loc}: {error}" for error in
+                    _cross_contract.source_addressed_ref_errors(
+                        ref, lambda d: _redacted_text_for_doc(case_id, d)))
             continue
         if normalized is None:
             continue
