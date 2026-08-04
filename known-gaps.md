@@ -5,7 +5,34 @@ they don't get lost. Unlike `open-decisions.md` (deferred, waiting on the
 user), most of these have a clear resolution -- they're TODO, not
 undecided. Each entry: what's missing/broken, why it matters, what closes it.
 
-## Policy reference-table reading order -- OPEN 2026-07-24
+**Conventions** (enforced by `tests/test_known_gaps_index.py`, so they cannot
+drift back): every item carries a unique number and a status token in its
+`##` header -- `OPEN` / `PARTIAL` / `RISK ACCEPTED` / `RESOLVED` / `FIXED`.
+Items are cited by number from `CLAUDE.md`'s changelog and `open-decisions.md`,
+so numbers are **never reused or reassigned** once referenced; when a
+collision had to be broken, the item nothing cited was the one renumbered.
+A header must not say `OPEN` above a body announcing a fix -- update both in
+the same pass.
+
+### Still open (2026-08-04)
+
+| # | Status | Item |
+|---|---|---|
+| 14 | OPEN | Single-denial-pack under-scoping (user decision) |
+| 16 | OPEN | CASE_003 checkpoint 1 |
+| 18 | PARTIAL | Review-fleet deferred set (D1 Bash-read seal, manifest ownership, …) |
+| 21 | PARTIAL | Pre-redaction page text: filesystem still open |
+| 32 | OPEN | Pre-redaction residual risk (specs fixed, filesystem not) |
+| 34 | OPEN | Contact-sheet verdicts can self-contradict their evidence |
+| 35 | OPEN | Redundant P8 vision calls on formatting-only variance |
+| 37 | RISK ACCEPTED | P0-8 table-boundary verification on OCR-sourced policy docs |
+| 39 | OPEN (residual) | CASE_907's own contract still needs the AC_1/PM_3 entry written |
+| 43 | OPEN | Policy reference-table reading order |
+
+Resolved items keep their full write-up below -- the reasoning is the point,
+not the checkbox.
+
+## 43. Policy reference-table reading order -- OPEN 2026-07-24
 
 `reference_table_DOC_XXX.json` now prevents a whole-table blob from posing as
 cell provenance: every cell must independently resolve to the correct document,
@@ -546,7 +573,7 @@ with the precedent set elsewhere -- all three now show the literal
 <agent-name> --run-id RUN_ID` invocation, matching `document-pipeline.md`/
 `critic.md`.
 
-## 10. `tools/fork_case.py` added -- reuse expensive OCR/redaction work across branching test runs
+## 10. `tools/fork_case.py` added -- reuse expensive OCR/redaction work across branching test runs -- RESOLVED 2026-07-13
 
 Built to support testing the pipeline in pieces rather than one all-in-one
 run: P10's `snapshot-backup` only versions `outputs/` (never `data/`), and
@@ -704,7 +731,7 @@ raw page image, the same way the original page-3 finding was made.
   pipeline. Revisit if/when item 2's disposition question is resolved and
   CASE_002 (or its raw files under a new case) is ever unblocked.
 
-## 12. `tools/run_checkpoint1.py` and `tools/run_scenario_matrix.py` added
+## 12. `tools/run_checkpoint1.py` and `tools/run_scenario_matrix.py` added -- RESOLVED 2026-07-13
 
 Built after manually running checkpoint 1 step-by-step (item 11's real run)
 made clear how many separate commands that actually took. Two scripts,
@@ -1162,7 +1189,7 @@ as one-sided fabricated content per the item-11 fix. With
 residual path is a second line of defense that has not been independently
 hardened and is not urgent to close before it recurs in practice.
 
-## 18. Full review-fleet findings -- fixed set + deferred set (2026-07-22)
+## 18. Full review-fleet findings -- fixed set + deferred set (2026-07-22) -- PARTIAL
 
 An 8-reviewer adversarial fleet went over `main`. The clear, verified fixes
 landed (see the CLAUDE.md 2026-07-22 row). These are the findings deliberately
@@ -1274,7 +1301,13 @@ covers logical pages 1-12 (partial OCR), but `check_policy_parent_coverage` read
 the manifest + reference tables, never DOC_001's processed text, so this does not
 affect the coverage accounting.
 
-## 20. Human provenance for policy decisions was self-declarable -- RESOLVED 2026-07-27 (Part 11A)
+## 41. Human provenance for policy decisions was self-declarable -- RESOLVED 2026-07-27 (Part 11A)
+
+> Renumbered 2026-08-04 from `20` (was a duplicate). The Part 11 series ran
+> 11A→20 … 11J→29, colliding with the earlier 2026-07-22 items 20/21. The 7/22
+> items keep their numbers because three live references point at them
+> (`open-decisions.md` ×2, and item 32's own cross-reference); nothing cited
+> this one by number.
 
 Two policy decisions that are, by nature, human calls no automated check can
 substitute were reachable by writing the right strings into a normal
@@ -1317,7 +1350,9 @@ different bytes rejected; UID for a different finding rejected; automated actor'
 shapes for the unpaged exclusion; and a full `record-human-review` round-trip
 confirming the DAO computes and binds the hash itself. 551 tests pass.
 
-## 21. Condition/evidence polarity was checked only one direction -- RESOLVED 2026-07-27 (Part 11B)
+## 42. Condition/evidence polarity was checked only one direction -- RESOLVED 2026-07-27 (Part 11B)
+
+> Renumbered 2026-08-04 from `21` (was a duplicate) -- see item 41's note.
 
 `check_condition_support` caught a negation asserted from a quote lacking the
 negating predicate, but NOT the reverse: a positive payout condition ("회사는
@@ -2859,7 +2894,7 @@ override is now knowingly proceeding past unverified -- the risk is accepted
 in the abstract, not confirmed absent.
 
 
-## 38. An untagged claim is invisible to the evidence-tag checker -- OPEN 2026-08-04 (CASE_907)
+## 38. An untagged claim is invisible to the evidence-tag checker -- RESOLVED 2026-08-04 (CASE_907), floor only
 
 `dao.py read-evidence-tags` verifies that the `[E#]` tags in a rendered draft
 and the entries in its `.evidence.json` sidecar agree: no orphaned tag, no
@@ -2971,7 +3006,7 @@ the critic's semantic pass remains the ceiling.
 
 ---
 
-## 39. An acceptance-owned `policy_match` is unverifiable by omission -- OPEN 2026-08-04 (CASE_907)
+## 39. An acceptance-owned `policy_match` is unverifiable by omission -- RESOLVED 2026-08-04 (CASE_907), CASE_907 contract rewrite OPEN
 
 `denial_reason_result.json` gained `accepted_coverages` on 2026-08-04 so a split
 denial/acceptance outcome could be recorded. An accepted coverage carries
@@ -3048,7 +3083,7 @@ DOC_004 p38 구내치료비 추가특별약관 제1조) before that stage can re
 
 ---
 
-## 40. Ground truth had an authorization gate but no read path -- and the workaround I used bypassed D1 -- PARTIAL 2026-08-04 (CASE_907)
+## 40. Ground truth had an authorization gate but no read path -- and the workaround I used bypassed D1 -- RESOLVED 2026-08-04 (CASE_907)
 
 Two findings, one from the pipeline and one from me.
 
