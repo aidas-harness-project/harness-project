@@ -487,3 +487,54 @@ def test_run_ocr_on_born_digital_pdf_makes_no_provider_call(tmp_path):
     # reading_a is what the downstream page-write persists.
     assert "Article 1" in page["reading_a"]
     assert page["reading_a"] == page["reading_b"]
+
+
+# ------------------------------------------- self-corrected comparator verdicts --
+#
+# The comparator sometimes writes a verdict, notices its own reasoning does not
+# support it, and emits a corrected one. Measured on CASE_907's two scanned
+# documents: 4 of 34 pages (12%). Reading the FIRST token blocked all four, and
+# every one was a false block -- the readings differed only in whitespace.
+
+# The exact reply that blocked CASE_907/DOC_002 page 8.
+_REAL_SELF_CORRECTION = (
+    "DISAGREE: Transcription B's body text matches A on all names, dates, "
+    "numbers, and diagnoses, and neither adds extra commentary -- the only "
+    "differences are blank-line/indent spacing, which is formatting, not "
+    "content.\n\nCorrection: that reasoning supports AGREE, not DISAGREE. "
+    "Restating the answer as required:\n\nAGREE"
+)
+
+
+def test_self_corrected_disagree_to_agree_is_read_as_agree():
+    result = oe.compare("text A", "text B", FakeComparator(_REAL_SELF_CORRECTION))
+
+    assert result["agreement"] == "agreed"
+
+
+def test_self_correction_the_other_way_still_disagrees():
+    """P8 is not weakened: a model that corrects itself INTO a disagreement is
+    taken at its corrected word, exactly like the reverse case."""
+    verdict = ("AGREE: the readings look equivalent. Correction: B appends a "
+               "paragraph absent from A entirely. DISAGREE")
+
+    result = oe.compare("text A", "text B", FakeComparator(verdict))
+
+    assert result["agreement"] == "disagreed"
+
+
+def test_a_revised_verdict_is_recorded_even_when_it_lands_on_agree():
+    """An agreed page normally carries no details. A format violation must not
+    vanish just because its outcome was benign."""
+    result = oe.compare("text A", "text B", FakeComparator(_REAL_SELF_CORRECTION))
+
+    assert result["metadata"]["verdict_revised_in_place"] is True
+    assert result["disagreement_details"], \
+        "a multi-verdict reply must stay visible in the record"
+
+
+def test_an_ordinary_single_verdict_is_not_flagged_as_revised():
+    result = oe.compare("text A", "text B", FakeComparator("AGREE: same facts"))
+
+    assert result["metadata"]["verdict_revised_in_place"] is False
+    assert result["disagreement_details"] == []

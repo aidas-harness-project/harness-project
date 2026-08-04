@@ -98,6 +98,11 @@ COMPARE_PROMPT_TEMPLATE = (
 
 DISAGREE_RE = re.compile(r"\bDISAGREE\b")
 AGREE_RE = re.compile(r"\bAGREE\b")
+# Both tokens in one pass, in order, so a reply carrying more than one verdict
+# can be read as the sequence it is. DISAGREE is listed first so the alternation
+# prefers it -- otherwise "AGREE" would match inside "DISAGREE" at a position
+# where \b holds on the right but the token is the wrong one.
+VERDICT_RE = re.compile(r"\bDISAGREE\b|\bAGREE\b")
 
 # File suffixes handled as embedded plain text rather than page images. A
 # plain-text source is a lossless byte decode, not a probabilistic OCR/vision
@@ -186,14 +191,39 @@ def compare(text_a: str, text_b: str, comparator=None) -> dict:
 
     # Word-boundary search, not startswith -- the model doesn't always lead
     # with the bare token despite the prompt asking for exactly that (e.g. a
-    # full sentence like "The two transcriptions AGREE on..."). Check
-    # DISAGREE before AGREE for readability; \b makes the order irrelevant
-    # for correctness since "AGREE" as a substring of "DISAGREE" doesn't sit
-    # on a word boundary and won't match AGREE_RE.
-    if DISAGREE_RE.search(verdict_upper):
-        return {"agreement": "disagreed", "disagreement_details": [verdict], "metadata": metadata}
-    if AGREE_RE.search(verdict_upper):
-        return {"agreement": "agreed", "disagreement_details": [], "metadata": metadata}
+    # full sentence like "The two transcriptions AGREE on...").
+    #
+    # Take the LAST verdict token, not the first. v0.2's prompt forbids
+    # revising a verdict in place, but a prompt is a request, not a guarantee,
+    # and the failure it addresses is a real observed one: on CASE_907's two
+    # scanned documents 4 of 34 pages (12%) came back "DISAGREE: <reason> /
+    # Correction: that reasoning supports AGREE / AGREE", and reading the first
+    # token blocked all 4 -- every one a false block, on pages whose readings
+    # differed only in whitespace. When a model corrects itself, the correction
+    # is its answer; honouring the retracted token instead means a page is
+    # blocked by reasoning the model itself withdrew.
+    #
+    # This does NOT weaken P8. A genuine "AGREE ... actually DISAGREE" self-
+    # correction still lands on disagreed, and anything unparseable below still
+    # fails closed. A multi-verdict reply is recorded either way so the format
+    # violation stays visible rather than being silently normalised away.
+    verdicts = [
+        ("disagreed" if match.group(0) == "DISAGREE" else "agreed")
+        for match in VERDICT_RE.finditer(verdict_upper)
+    ]
+    if verdicts:
+        agreement = verdicts[-1]
+        revised = len(set(verdicts)) > 1
+        details = [verdict] if agreement == "disagreed" else []
+        if revised:
+            details = details or [
+                f"comparator emitted {len(verdicts)} verdicts and revised "
+                f"itself to AGREE; last verdict taken: {verdict!r}"]
+        return {
+            "agreement": agreement,
+            "disagreement_details": details,
+            "metadata": {**metadata, "verdict_revised_in_place": revised},
+        }
 
     # Neither token found -- the model didn't follow the expected format.
     # Fail safe as disagreed (P8: no tolerance, never silently assume
