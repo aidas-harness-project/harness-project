@@ -891,10 +891,13 @@ def _canonical_uid_finalize_blockers(case_id: str, doc_id: str) -> list[str]:
 
 
 def _automated_policy_documents(manifest: dict) -> list[dict]:
-    """The policy documents this pipeline processes automatically.
+    """The policy documents that owe a normalized clause contract.
 
-    One definition, used by both the completion gate and the P0-3 scheme gate,
-    so a document cannot be in scope for one and out of scope for the other.
+    Narrow on purpose: `automated_text_pipeline` is the opt-IN to
+    normalization. A `text_only_no_normalization` policy document is fully
+    processed and citable but owes no clause contract, so it is out of scope
+    HERE while remaining in scope for anything about its text -- see
+    `_text_processed_policy_documents`.
     """
     return [
         d for d in (manifest or {}).get("documents", [])
@@ -905,18 +908,38 @@ def _automated_policy_documents(manifest: dict) -> list[dict]:
     ]
 
 
+def _text_processed_policy_documents(manifest: dict) -> list[dict]:
+    """The policy documents whose processed text the pipeline produces and
+    downstream stages may cite. Superset of the normalization scope."""
+    return [
+        d for d in (manifest or {}).get("documents", [])
+        if (
+            d.get("document_type") == "insurance_policy"
+            and d.get("downstream_disposition")
+            in policy_completeness._TEXT_PROCESSED
+        )
+    ]
+
+
 def _policy_layer_document_ids(case_id: str) -> set[str]:
     """Every document whose UID verification the policy layer stands on.
 
-    The manifest's automated policy documents, plus any further document a
+    Every TEXT-processed policy document, plus any further document a
     parent-coverage contract accounts for pages of. The second part matters
     because a segmented_parent's coverage can cite an owning segment that the
     manifest's own filter might not reach the same way -- and a parent whose
     coverage rests on an unverified segment is not a verified parent.
+
+    Scoped to text processing rather than to normalization: canonical UIDs are
+    what make an evidence citation resolvable to one exact source occurrence,
+    and downstream stages cite a policy document whether or not its clauses
+    were normalized. Narrowing this to the normalization opt-in would leave the
+    documents that actually get quoted unverified.
     """
     manifest = read_contract_data(case_id, "document_manifest.json")
     doc_ids = {
-        d.get("document_id") for d in _automated_policy_documents(manifest)}
+        d.get("document_id")
+        for d in _text_processed_policy_documents(manifest)}
     for doc_id in list(doc_ids):
         coverage = read_contract_data(
             case_id, f"policy_parent_coverage_{doc_id}.json")
@@ -962,9 +985,24 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
     manifest = read_contract_data(case_id, "document_manifest.json")
     if manifest is None:
         return ["document_manifest.json is missing"]
+    # The stage may not finalize on a case whose policy documents were never
+    # processed at all -- that was the CASE_112 failure, where an override
+    # recorded `passed` over zero policy work. But "processed" is about TEXT:
+    # a document at text_only_no_normalization has been OCR'd, redacted and
+    # chunked, and every downstream stage can cite it. Requiring a normalized
+    # contract here instead would mean a case can only clear this gate by
+    # normalizing, which is exactly the obligation that value exists to lift.
+    text_processed_policy_docs = [
+        d for d in manifest.get("documents", [])
+        if d.get("document_type") == "insurance_policy"
+        and d.get("downstream_disposition") in policy_completeness._TEXT_PROCESSED
+    ]
+    if not text_processed_policy_docs:
+        return ["no text-processed insurance_policy document is registered"]
+
+    # Only the opted-in documents owe a normalized clause contract; the checks
+    # below are scoped to them.
     policy_docs = _automated_policy_documents(manifest)
-    if not policy_docs:
-        return ["no automated insurance_policy document is registered"]
 
     schemas, registry = load_registry()
     # What each policy document owes is DECLARED (policy_processing_role) and

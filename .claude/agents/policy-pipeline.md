@@ -29,12 +29,35 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. M
    Mapping is bidirectional: every clause-declared boundary must exist and point back
    to that clause, and every normalized boundary must be declared by its target clause.
 
-The boundary inventory and normalized clause file are both real contract files,
-written through the DAO. `policy_clause_processing` cannot finalize while any
-automated policy document lacks either file, any source text is uncovered, any
-normalized mapping is unresolved, or any boundary remains `review_required` /
-`extraction_failed`. An administrative section is never silently dropped; record
-`excluded_with_reason`.
+**You do not normalize every policy document in the case.** Normalization is
+opt-IN, carried by the manifest's `downstream_disposition`: a policy document
+is classified into `text_only_no_normalization` and owes nothing here, while
+one promoted to `automated_text_pipeline` owes the full contract set. Both are
+processed, chunked and citable either way — the difference is only this stage's
+obligation. The reason is cost against consumption: a 145-page 약관 bundle
+carries 800+ conditions, and no downstream stage reads the normalized buckets.
+`denial-response` and `claim-analysis` address a clause by `document_id`, page
+and quoted text, verified verbatim against the processed source.
+
+So a case whose policy documents are all `text_only_no_normalization` finalizes
+this stage with zero normalized contracts, and that is a real pass, not a
+skipped one — what must exist is *processed policy text*, which the gate checks.
+The stage still refuses to finalize on a case with no text-processed policy
+document at all (the CASE_112 failure, where an override recorded `passed` over
+zero policy work).
+
+Which documents get promoted is expected to come from `denial-response`: it is
+the stage that reads the insurer's own citations, so it knows which 약관 the
+case actually turns on. That wiring is not built yet — until it is, promotion is
+an explicit human/operator decision recorded through
+`dao.py patch-manifest-document`.
+
+For a document that IS promoted, the boundary inventory and normalized clause
+file are both real contract files, written through the DAO.
+`policy_clause_processing` cannot finalize while any such document lacks either
+file, any source text is uncovered, any normalized mapping is unresolved, or any
+boundary remains `review_required` / `extraction_failed`. An administrative
+section is never silently dropped; record `excluded_with_reason`.
 
 # Output
 

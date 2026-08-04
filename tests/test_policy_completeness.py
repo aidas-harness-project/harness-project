@@ -807,3 +807,74 @@ def test_line_initial_paragraph_items_still_count():
     anchors."""
     span = "① 첫 번째 항목입니다.\n② 두 번째 항목입니다."
     assert len(pc._STRUCTURAL_ANCHOR_RE.findall(span)) == 2
+
+
+# ------------------------------------- normalization is opt-in, not automatic --
+#
+# A policy document at text_only_no_normalization is fully processed and
+# citable but owes no clause contract. The completion gate must let such a case
+# finalize, while still refusing a case with no processed policy text at all --
+# the CASE_112 failure, where an override recorded `passed` over zero work.
+
+def _policy_manifest(disposition):
+    return {
+        "case_id": "CASE_030",
+        "documents": [{
+            "document_id": "DOC_001",
+            "file_name": "DOC_001.pdf",
+            "file_path": "data/raw/CASE_030/DOC_001.pdf",
+            "file_format": "pdf",
+            "file_size_bytes": 100,
+            "ocr_status": "completed",
+            "cross_validation_status": "agreed",
+            "redacted_text_path":
+                "data/processed/CASE_030/DOC_001/redacted_text.md",
+            "document_type": "insurance_policy",
+            "downstream_disposition": disposition,
+        }],
+    }
+
+
+def _seed_policy_case(isolated_dao, disposition):
+    out = isolated_dao / "outputs" / "CASE_030"
+    processed = isolated_dao / "data" / "processed" / "CASE_030" / "DOC_001"
+    out.mkdir(parents=True)
+    processed.mkdir(parents=True)
+    (processed / "redacted_text.md").write_text(REDACTED, encoding="utf-8")
+    (out / "document_manifest.json").write_text(
+        json.dumps(_policy_manifest(disposition), ensure_ascii=False),
+        encoding="utf-8")
+    return out
+
+
+def test_text_only_policy_document_owes_no_clause_contract(isolated_dao):
+    _seed_policy_case(isolated_dao, "text_only_no_normalization")
+
+    blockers = dao._policy_completion_blockers("CASE_030")
+
+    assert not any("normalized_policy_clause" in b for b in blockers), blockers
+    assert not any("policy_processing_role" in b for b in blockers), blockers
+    assert not any("policy_parent_coverage" in b for b in blockers), blockers
+
+
+def test_same_document_promoted_does_owe_a_clause_contract(isolated_dao):
+    """The identical manifest, promoted, must demand the full contract set --
+    otherwise the opt-in would be indistinguishable from removing the gate."""
+    _seed_policy_case(isolated_dao, "automated_text_pipeline")
+
+    blockers = dao._policy_completion_blockers("CASE_030")
+
+    assert any("normalized_policy_clause_DOC_001.json" in b for b in blockers), \
+        blockers
+
+
+def test_case_with_no_text_processed_policy_document_still_refuses(
+        isolated_dao):
+    """expert_review_only is not "processed": its text is never read, so a case
+    whose only policy document is routed there has no policy layer to stand on."""
+    _seed_policy_case(isolated_dao, "expert_review_only")
+
+    blockers = dao._policy_completion_blockers("CASE_030")
+
+    assert any("no text-processed insurance_policy document" in b
+               for b in blockers), blockers

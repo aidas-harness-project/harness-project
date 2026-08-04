@@ -26,6 +26,15 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. P
    - `match_source: agent_inferred` when you independently find a potentially relevant clause, with an empty insurer-citation array, populated clause evidence, and `review_required: true` routed to `손해사정사`.
    - no match at all when the link is unsupported. An empty `policy_matches` array plus a specific warning is safer than a plausible but wrong link.
 
+**Expected future role: naming which policy documents get normalized.** Policy
+documents are classified into `text_only_no_normalization` and owe no clause
+contract unless promoted (see `policy-pipeline`). You are the stage that reads
+the insurer's own citations, so you are the natural place to identify which
+policy document a case actually turns on and promote it. That wiring does not
+exist yet — today promotion is an operator decision — so for now match against
+whatever normalized contracts exist, and cite the processed source text
+directly when none does. Do not promote a document yourself.
+
 Every extraction carries source locations (P1), classification confidence, and review routing. A location is not decorative: do not write a basis or policy match unless its cited document/page/quote was checked against the processed source available through the DAO. This contract's evidence references are `strict_evidence_reference` — `document_id`, `page`, and `quote` are all required, so a quote with no resolvable location is rejected at the write rather than accepted as grounded.
 
 Reason ids are addresses other contracts resolve. `reason_id` and `policy_match_id` must be unique across the whole contract (duplicates are rejected), and Phase 2's `denial_validation_result.json` must later carry exactly one validation per reason and one verification per policy match — no orphans, no omissions, no duplicates. The DAO checks this across files at write time.

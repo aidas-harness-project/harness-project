@@ -27,6 +27,8 @@ quote check both key on.
 import hashlib
 import re
 
+from policy_completeness import _TEXT_PROCESSED
+
 _PAGE_MARKER_RE = re.compile(r"(?m)^<<<PAGE page=(\d+)>>>")
 
 
@@ -234,7 +236,7 @@ def check_classification_manifest_consistency(
         cls = classification_for(did)
         if cls is None:
             if (require_complete
-                    and doc.get("downstream_disposition") == "automated_text_pipeline"):
+                    and doc.get("downstream_disposition") in _TEXT_PROCESSED):
                 errors.append(
                     f"{did}: automated physical document has no "
                     "classification_result -- document processing is incomplete"
@@ -257,10 +259,16 @@ def check_classification_manifest_consistency(
 
 def is_registered_automated_source(manifest: dict, document_id: str) -> bool:
     """True if document_id is a manifest entry usable as an automated-text
-    source: it exists AND its downstream_disposition is automated_text_pipeline
-    (not expert_review_only). A normalized_policy_clause file may only cite such
-    a document. A document absent from the manifest returns False -- exactly the
-    CASE_030 hole where DOC_004/005/006 were cited but never registered."""
+    source: it exists AND its downstream_disposition is automated_text_pipeline.
+    A normalized_policy_clause file may only cite such a document. A document
+    absent from the manifest returns False -- exactly the CASE_030 hole where
+    DOC_004/005/006 were cited but never registered.
+
+    Deliberately NOT widened to text_only_no_normalization: this is the
+    normalization gate, not a text-processing question. Writing a clause
+    contract for a document declared as owing none is a contradiction, and it
+    should fail loudly rather than quietly accept work the completion gate will
+    never look at."""
     entry = _by_id(manifest).get(document_id)
     if entry is None:
         return False
@@ -284,7 +292,10 @@ def parent_processing_complete(manifest: dict, document_id: str) -> bool:
     return (
         parent.get("ocr_status") in ("completed", "not_applicable")
         and parent.get("cross_validation_status") in ("agreed", "non_text_verified")
-        and parent.get("downstream_disposition") == "automated_text_pipeline"
+        # About TEXT, not normalization: the question is whether the parent's
+        # processed text exists for the segment to rest on. A parent that is
+        # text_only_no_normalization has exactly that.
+        and parent.get("downstream_disposition") in _TEXT_PROCESSED
         and bool(parent.get("redacted_text_path"))
         and bool(parent.get("document_type"))
     )

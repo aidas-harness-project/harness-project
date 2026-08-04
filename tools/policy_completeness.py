@@ -53,6 +53,16 @@ _DOC_ID_RE = re.compile(r"_(DOC_\d+)\.json$")
 # DOC_003's full 97,630-character redacted text: anchoring the circled forms
 # drops the total from 1205 matches to 1203, and both dropped matches are that
 # one sentence. No real paragraph item is line-internal in this corpus.
+# Dispositions whose processed text the pipeline actually produces and reads.
+# Both are text-processed; they differ only in whether the document also owes a
+# normalized clause contract (automated_text_pipeline does,
+# text_only_no_normalization does not). Checks about TEXT must use this set --
+# checking for automated_text_pipeline alone would reject a perfectly ordinary
+# page whose owning segment simply is not being normalized. Checks about
+# NORMALIZATION stay narrow and keep naming automated_text_pipeline directly.
+_TEXT_PROCESSED = frozenset({
+    "automated_text_pipeline", "text_only_no_normalization"})
+
 _ITEM_LETTERS = "가나다라마바사아자차카타파하"
 _STRUCTURAL_ANCHOR_RE = re.compile(
     r"(?:"
@@ -666,9 +676,9 @@ def check_policy_parent_coverage(
                 errors.append(
                     f"page {lp}: owned_by_segment owner {owner!r} is not a "
                     "registered manifest document")
-            elif entry.get("downstream_disposition") != "automated_text_pipeline":
+            elif entry.get("downstream_disposition") not in _TEXT_PROCESSED:
                 errors.append(
-                    f"page {lp}: owner {owner!r} is not an automated-text "
+                    f"page {lp}: owner {owner!r} is not a text-processed "
                     "document")
             elif entry.get("document_type") != "insurance_policy":
                 errors.append(

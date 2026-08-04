@@ -170,6 +170,26 @@ _POLICY_TITLE_RE = re.compile(r"(?:보통약관|특별약관|특약|약관)\s*$"
 PARENT_INHERITED_CONFIDENCE = 0.95
 
 
+def default_disposition(document_type: str | None) -> str:
+    """The downstream disposition a freshly classified document starts at.
+
+    A policy document starts at `text_only_no_normalization`: processed,
+    chunked and citable, but owing no normalized clause contract. Normalizing
+    is opt-IN, because it is the expensive obligation (one 145-page bundle
+    carries 800+ conditions) and nothing downstream consumes its output --
+    clauses are addressed by document/page/quote, verified verbatim against the
+    processed source. A case that genuinely disputes a specific policy document
+    promotes just that one to `automated_text_pipeline`.
+
+    Every other document type is unaffected: the disposition only ever gates
+    the policy-normalization obligation, so a diagnosis certificate or an
+    insurer response keeps the full-pipeline value it always had.
+    """
+    if document_type == "insurance_policy":
+        return "text_only_no_normalization"
+    return "automated_text_pipeline"
+
+
 def inherited_classification(case_id: str, doc_id: str, manifest: dict | None = None) -> dict | None:
     """The parent bundle's classification, when this document is a text-anchor
     slice of it. None means "classify normally".
@@ -637,7 +657,8 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         "document_type": classification["predicted_document_type"],
         "classification_confidence": classification.get("confidence", 0.5),
         "extraction_method": ocr_result.get("extraction_method", "ocr"),
-        "downstream_disposition": "automated_text_pipeline",
+        "downstream_disposition": default_disposition(
+            classification["predicted_document_type"]),
         "non_text_verification": None,
     }
     ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)

@@ -709,3 +709,33 @@ def test_inherited_classification_refuses_an_unsegmented_document(isolated_roots
 def test_inherited_classification_refuses_a_missing_parent(isolated_roots):
     m = _inherit_case(isolated_roots, child={"source_file_name": "GONE.pdf"})
     assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None
+
+
+# --------------------------------------------- default downstream disposition --
+#
+# Normalizing a policy bundle is the expensive obligation (800+ conditions on a
+# single 145-page 약관) and nothing downstream consumes its output, so a policy
+# document is classified into text_only_no_normalization and promoted to
+# automated_text_pipeline only when a case actually disputes it. Every other
+# document type is unaffected.
+
+def test_policy_documents_default_to_no_normalization():
+    assert rc1.default_disposition("insurance_policy") == \
+        "text_only_no_normalization"
+
+
+@pytest.mark.parametrize("document_type", [
+    "insurer_response", "diagnosis_certificate", "medical_record",
+    "receipt", "other", None,
+])
+def test_non_policy_documents_keep_the_full_pipeline(document_type):
+    assert rc1.default_disposition(document_type) == "automated_text_pipeline"
+
+
+def test_both_defaults_are_text_processed():
+    """Neither default may exclude the document from text processing -- that is
+    expert_review_only's job, and reaching it by classification would silently
+    stop the pipeline reading a document it is supposed to read."""
+    from policy_completeness import _TEXT_PROCESSED
+    for document_type in ("insurance_policy", "insurer_response"):
+        assert rc1.default_disposition(document_type) in _TEXT_PROCESSED
