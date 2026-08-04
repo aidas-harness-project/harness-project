@@ -7,6 +7,7 @@ import copy
 
 import pytest
 
+import _cross_contract
 from _validation import load_registry, validate_instance
 
 
@@ -374,3 +375,99 @@ def test_verified_policy_match_requires_verification_evidence(
     bad = copy.deepcopy(synthetic_full_phase2_fixture["validation"])
     bad["validations"][0]["policy_match_validations"][0]["evidence_references"] = []
     assert errors(bad, "denial_validation_result.schema.json", validator)
+
+
+# --- v0.5: a split outcome (some coverage denied, another accepted) ----------
+#
+# `decision_type`/`payment_status` were always scoped to "one claim coverage or
+# claim item", but nothing recorded WHICH one -- so CASE_907's insurer denying
+# 배상책임 while paying 2,000,000원 구내치료비 could only be recorded as the
+# denial, and `payment_status: unpaid` read as "nothing was paid".
+
+def _split_outcome():
+    return {
+        "case_id": "CASE_907", "component": "denial-response",
+        "status": "success",
+        "denial_reasons": [{
+            "reason_id": "DR_1",
+            "decided_coverage": "배상책임",
+            "decision_type": "denial", "payment_status": "unpaid",
+            "taxonomy_code": "R04", "candidate_codes": [
+                {"taxonomy_code": "R04", "confidence": 0.8}],
+            "raw_reason_text": "법률상 배상책임 불성립",
+            "insurer_claim_summary": "시설 하자 없음",
+            "grounds": {"contractual_basis": [], "medical_or_factual_basis": [],
+                        "calculation_basis": []},
+            "amounts": {"claimed_amount": None, "payable_amount": None,
+                        "denied_amount": None, "reduction_amount": None,
+                        "reduction_rate": None},
+            "requested_documents": [], "policy_matches": [],
+            "confidence": 0.8, "review_required": True,
+            "reviewer_role": "손해사정사",
+            "evidence_references": [
+                {"document_id": "DOC_002", "page": 1, "quote": "불성립"}],
+        }],
+        "accepted_coverages": [{
+            "accepted_coverage_id": "AC_1",
+            "coverage_name": "구내치료비",
+            "payment_status": "paid",
+            "accepted_amount": 2000000,
+            "confidence": 0.9, "review_required": False,
+            "evidence_references": [
+                {"document_id": "DOC_002", "page": 5, "quote": "구내치료비"}],
+        }],
+    }
+
+
+def test_a_split_outcome_records_both_sides(validator):
+    assert errors(
+        _split_outcome(), "denial_reason_result.schema.json", validator) == []
+    assert _cross_contract.check_denial_reason_result(_split_outcome()) == []
+
+
+def test_a_contract_predating_the_split_fields_still_validates(validator):
+    """Both fields are additive; every pre-2026-08-04 contract must still pass."""
+    legacy = _split_outcome()
+    del legacy["accepted_coverages"]
+    del legacy["denial_reasons"][0]["decided_coverage"]
+    assert errors(
+        legacy, "denial_reason_result.schema.json", validator) == []
+
+
+def test_one_coverage_cannot_be_both_denied_and_accepted():
+    """A response cannot pay and refuse the same coverage.
+
+    Far likelier than a real contradiction is one decision filed twice, which
+    would show a reader a split outcome that never happened.
+    """
+    bad = _split_outcome()
+    bad["accepted_coverages"][0]["coverage_name"] = "배상책임"
+    found = _cross_contract.check_denial_reason_result(bad)
+    assert any("cannot be both accepted and denied" in e for e in found), found
+
+
+def test_policy_match_ids_are_unique_across_reasons_and_acceptances():
+    """The two lists share one id namespace -- downstream resolves an id
+    without knowing which side it came from."""
+    bad = _split_outcome()
+    match = {"policy_match_id": "PM_1", "document_id": "DOC_004",
+             "clause_id": "C-1", "match_source": "agent_inferred",
+             "relevance_note": "x",
+             "insurer_citation_evidence_references": [],
+             "policy_clause_evidence_references": [
+                 {"document_id": "DOC_004", "page": 1, "quote": "q"}],
+             "confidence": 0.7, "review_required": True}
+    bad["denial_reasons"][0]["policy_matches"] = [match]
+    bad["accepted_coverages"][0]["policy_matches"] = [dict(match)]
+    found = _cross_contract.check_denial_reason_result(bad)
+    assert any("duplicate policy_match_id" in e for e in found), found
+
+
+def test_an_acceptance_does_not_disturb_an_existing_upstream_hash():
+    """Adding the field must not mark real, unchanged downstream work stale."""
+    without = _split_outcome()
+    del without["accepted_coverages"]
+    baseline = _cross_contract.upstream_hash(without)
+    without["accepted_coverages"] = []
+    assert _cross_contract.upstream_hash(without) == baseline
+    assert _cross_contract.upstream_hash(_split_outcome()) != baseline

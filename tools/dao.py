@@ -1516,11 +1516,24 @@ def _downstream_policy_ref_errors(
             if requirement.get("clause_ref") is not None
         ]
     elif schema_name == "denial_reason_result.schema.json":
+        # Both sides of a split outcome. An accepted coverage's policy_matches
+        # bind to the policy layer exactly as a denial's do, so they owe the
+        # same snapshot and the same canonical-UID state; leaving them out
+        # would let an acceptance cite a stale or legacy policy document that a
+        # denial in the same file could not.
         refs = [
             (f"denial_reasons[{reason_index}].policy_matches[{match_index}]",
              match)
             for reason_index, reason in enumerate(data.get("denial_reasons") or [])
             for match_index, match in enumerate(reason.get("policy_matches") or [])
+        ]
+        refs += [
+            (f"accepted_coverages[{accepted_index}]"
+             f".policy_matches[{match_index}]", match)
+            for accepted_index, accepted in enumerate(
+                data.get("accepted_coverages") or [])
+            for match_index, match in enumerate(
+                accepted.get("policy_matches") or [])
         ]
 
     if not refs:

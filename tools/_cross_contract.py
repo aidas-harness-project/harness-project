@@ -1262,6 +1262,29 @@ def upstream_hash(data: dict) -> str:
         for r in (data.get("denial_reasons") or [])
     ]
     material.sort(key=lambda item: item["reason_id"] or "")
+    # Acceptances are part of the meaning too: adding, dropping, or repricing
+    # one changes whether the outcome was total or split, which a screening
+    # report states outright. Appended as a separate keyed element rather than
+    # mixed into the reason list, and omitted entirely when there are none, so
+    # every contract written before accepted_coverages existed keeps its exact
+    # digest -- a compatibility break here would mark real, unchanged
+    # downstream work stale for a field it never had.
+    accepted = [
+        {
+            "accepted_coverage_id": a.get("accepted_coverage_id"),
+            "coverage_name": a.get("coverage_name"),
+            "payment_status": a.get("payment_status"),
+            "accepted_amount": a.get("accepted_amount"),
+            "policy_match_ids": sorted(
+                m.get("policy_match_id")
+                for m in (a.get("policy_matches") or [])
+                if m.get("policy_match_id") is not None),
+        }
+        for a in (data.get("accepted_coverages") or [])
+    ]
+    if accepted:
+        accepted.sort(key=lambda item: item["accepted_coverage_id"] or "")
+        material = {"denial_reasons": material, "accepted_coverages": accepted}
     canonical = json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -1325,11 +1348,39 @@ def check_denial_reason_result(data: dict) -> list[str]:
     # no address to collide on -- reporting several of them as "duplicate None"
     # would flag a legacy shape as corruption. Same carve-out as the
     # validation path below; the schema requires the id on new writes.
-    match_ids = [m.get("policy_match_id") for r in reasons for m in (r.get("policy_matches") or [])
+    # Acceptances carry policy_matches too, and their ids share one namespace
+    # with the reasons' -- a downstream contract resolves a policy_match_id
+    # without knowing which side of the outcome it came from, so a collision
+    # across the two lists is exactly as ambiguous as one within either.
+    accepted = data.get("accepted_coverages") or []
+    match_ids = [m.get("policy_match_id")
+                 for owner in (*reasons, *accepted)
+                 for m in (owner.get("policy_matches") or [])
                  if m.get("policy_match_id") is not None]
     for dupe in _duplicates(match_ids):
         errors.append(f"policy_matches: duplicate policy_match_id {dupe!r} -- ids must be unique "
                       "across the whole contract, not just within one reason")
+
+    for dupe in _duplicates([a.get("accepted_coverage_id") for a in accepted]):
+        errors.append(
+            f"accepted_coverages: duplicate accepted_coverage_id {dupe!r} -- "
+            "ids must be unique")
+
+    # An acceptance and a denial naming the same coverage is a contradiction in
+    # the same breath: the response cannot both pay and refuse one coverage.
+    # Far likelier is that the agent filed one decision twice, which would show
+    # a reader a split outcome that never happened.
+    denied_coverages = {
+        (r.get("decided_coverage") or "").strip()
+        for r in reasons if (r.get("decided_coverage") or "").strip()}
+    for entry in accepted:
+        name = (entry.get("coverage_name") or "").strip()
+        if name and name in denied_coverages:
+            errors.append(
+                f"accepted_coverages: {name!r} is also the decided_coverage of "
+                "a denial/reduction reason -- one coverage cannot be both "
+                "accepted and denied; split it into distinct coverages or "
+                "record it as a reduction with the amount actually paid")
 
     for reason in reasons:
         rid = reason.get("reason_id", "?")
@@ -1524,8 +1575,15 @@ def check_policy_matches(data: dict, case_dir: Path,
     check_denial_validation_result) -- CASE_021 predates the field.
     """
     errors = []
-    for reason in data.get("denial_reasons") or []:
-        rid = reason.get("reason_id", "?")
+    # Acceptances carry policy_matches on the same terms as reasons do. An
+    # acceptance grounded in a clause that does not exist is no better than a
+    # denial grounded that way, so both go through the identical check rather
+    # than the accepted side being trusted for being good news.
+    owners = [(r.get("reason_id", "?"), r)
+              for r in data.get("denial_reasons") or []]
+    owners += [(a.get("accepted_coverage_id", "?"), a)
+               for a in data.get("accepted_coverages") or []]
+    for rid, reason in owners:
         for match in reason.get("policy_matches") or []:
             mid = match.get("policy_match_id")
             if mid is None:

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "denial_reason_result.schema.json",
-  "title": "denial_reason_result.json -- insurer's stated position, grounds, and policy matches v0.4",
-  "description": "Produced by denial-response. Each materially distinct insurer decision is a separate reason. decision_type records denial versus reduction; payment_status records the observed payment outcome independently. Every stated or inferred ground and every policy match carries source locations. The optional upstream_policy_snapshot binds any policy-referencing result to the exact policy-layer digest set it consumed; the DAO requires and verifies it whenever a clause reference exists. Judgment-type output; include the safety fields from common_component_output.schema.json.",
+  "title": "denial_reason_result.json -- insurer's stated position, grounds, and policy matches v0.5",
+  "description": "Produced by denial-response. Each materially distinct insurer decision is a separate reason. decision_type records denial versus reduction; payment_status records the observed payment outcome independently. Every stated or inferred ground and every policy match carries source locations. v0.5 makes a SPLIT outcome expressible: decision_type/payment_status were always scoped to one claim coverage, but nothing recorded WHICH one, so a response denying one coverage while paying another could record only the denial -- and payment_status: unpaid then read as 'nothing was paid'. decided_coverage names the coverage a reason decides; accepted_coverages records what the same response accepted (an acceptance is neither a denial nor a reduction, so it cannot be a denial_reason). Both additive -- pre-2026-08-04 contracts validate unchanged, and a contract with no acceptances hashes identically to before. The optional upstream_policy_snapshot binds any policy-referencing result to the exact policy-layer digest set it consumed; the DAO requires and verifies it whenever a clause reference exists. Judgment-type output; include the safety fields from common_component_output.schema.json.",
   "allOf": [
     {
       "$ref": "common_component_output.schema.json"
@@ -15,6 +15,13 @@
           "description": "Extracted reasons. Empty array means no denial/reduction found.",
           "items": {
             "$ref": "#/$defs/denial_reason"
+          }
+        },
+        "accepted_coverages": {
+          "type": "array",
+          "description": "owner: denial-response. Coverages the insurer ACCEPTED, recorded only when the same response also denies or reduces something else. An acceptance is neither a denial nor a reduction, so it has no decision_type and cannot be filed as a denial_reason -- but leaving it out is what makes a partial outcome read as a total one. CASE_907: the insurer denied 배상책임 and paid 2,000,000원 구내치료비, and the contract could record only the denial. Absent/empty means the response contained no acceptance, the ordinary case for a pure denial notice. Not a payout ledger: record only what the insurer's own response states, with the quote that states it.",
+          "items": {
+            "$ref": "#/$defs/accepted_coverage"
           }
         },
         "upstream_policy_snapshot": {
@@ -60,6 +67,49 @@
     }
   ],
   "$defs": {
+    "accepted_coverage": {
+      "type": "object",
+      "description": "One coverage the insurer accepted in a response that denies or reduces something else. Deliberately thin: this exists to stop a partial outcome reading as a total one, not to become a second decision record. It carries no taxonomy_code (the taxonomy classifies denial/reduction grounds, and an acceptance has none) and no grounds/rebuttal surface, because nothing here is disputed.",
+      "properties": {
+        "accepted_coverage_id": { "type": "string", "pattern": "^AC_[0-9]+$" },
+        "coverage_name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The coverage in the insurer's own wording, e.g. '구내치료비'. Matches the vocabulary decided_coverage uses on a denial reason so the two sides of a split outcome can be read together."
+        },
+        "payment_status": {
+          "$ref": "common_component_output.schema.json#/$defs/payment_status",
+          "description": "The observed outcome for THIS coverage. 'paid' or 'partially_paid' is the normal case here; 'unknown' is legitimate when the insurer states acceptance but no payment confirmation appears in the response."
+        },
+        "accepted_amount": {
+          "type": ["number", "null"],
+          "description": "The amount the insurer states it pays for this coverage, or null when the response accepts without naming a figure. Never inferred, computed, or carried over from a claim document -- if the insurer did not state it, it is null."
+        },
+        "insurer_stated_basis": {
+          "type": ["string", "null"],
+          "description": "The insurer's own stated reason for accepting, when it gives one (e.g. that the clause pays irrespective of legal liability). null when it simply pays without explanation."
+        },
+        "policy_matches": {
+          "type": "array",
+          "description": "The clause the acceptance rests on, when identifiable. Same shape and same verification as a denial reason's matches -- an acceptance grounded in a clause that does not exist is no better than a denial grounded that way. Empty is fine; an unsupported link must not be invented.",
+          "items": { "$ref": "#/$defs/policy_match" }
+        },
+        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Where in the insurer's response the acceptance is stated. Required: an acceptance nobody can locate in the source is exactly the unverifiable claim P1 forbids.",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference" }
+        },
+        "review_required": { "type": "boolean" },
+        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+      },
+      "required": [
+        "accepted_coverage_id", "coverage_name", "payment_status",
+        "accepted_amount", "confidence", "evidence_references", "review_required"
+      ],
+      "additionalProperties": false
+    },
     "basis_item": {
       "type": "object",
       "properties": {
@@ -182,6 +232,11 @@
       "type": "object",
       "properties": {
         "reason_id": { "type": "string", "pattern": "^DR_[0-9]+$" },
+        "decided_coverage": {
+          "type": "string",
+          "minLength": 1,
+          "description": "owner: denial-response. WHICH claim coverage or claim item this decision is about, in the insurer's own wording (e.g. '배상책임', '구내치료비'). decision_type and payment_status have always been scoped to 'one claim coverage or claim item', never to the case -- but nothing recorded which one, so a reader had to assume the reason covered the whole claim. That assumption misreads the ordinary case where an insurer denies one coverage and pays another: CASE_907's insurer denied 배상책임 while paying 2,000,000원 구내치료비 under a clause that pays '보통약관 제3조의 규정에도 불구하고', i.e. independently of legal liability. Recording only the denial left payment_status: unpaid to be read as 'nothing was paid'. Required for every new reason; absent on pre-2026-08-04 contracts, which were written when a case was implicitly assumed to be single-coverage."
+        },
         "decision_type": { "$ref": "common_component_output.schema.json#/$defs/decision_type" },
         "payment_status": { "$ref": "common_component_output.schema.json#/$defs/payment_status" },
         "taxonomy_code": { "$ref": "common_component_output.schema.json#/$defs/taxonomy_code" },
