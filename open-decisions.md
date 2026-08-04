@@ -76,3 +76,57 @@ This does not resolve mixed text/image documents. The whole-document command ref
 - Ground truth for locations may not exist in comparable form: the real adjuster's report cites its own documents, not the case's `DOC_XXX`/page coordinates.
 
 **To resolve:** a deliberate evaluation design pass, deciding the scoring rules above before implementing them. Explicitly not built at gate-building time -- inventing a metric to fill the gap would produce a number nobody could interpret, which is worse than a documented absence.
+
+## 7. Should segmentation move after OCR, merging Stage 1 into Stage 2?
+
+**Where:** `tools/segment_case.py` (Stage 1, `document_segmentation`) and
+`tools/run_checkpoint1.py` (Stage 2, `document_processing`).
+
+**Current:** Stage 1 decides document boundaries from the raw PDF -- vision
+contact sheets, or the deterministic text-anchor path for a born-digital
+bundle -- and Stage 2 then OCRs whatever documents that produced. Stage 1
+strictly precedes Stage 2 and blocks it case-wide until every PDF is human-
+cleared or split.
+
+**What prompted this:** two things stopped holding.
+
+The first is that Stage 1's original cost argument was "cut the bundle so OCR
+runs on right-sized documents". Once `ocr_extract.py` began using embedded PDF
+text (2026-08-03), a born-digital bundle takes no OCR at all, so that saving is
+zero for exactly the documents Stage 1 was hardest at.
+
+The second is that boundary evidence is better after extraction than before it.
+The text-anchor path already reads the text layer to find titles, and reaches
+precision 1.0000 against the human baseline in 0.75s with no model calls --
+against ~10 vision calls for the same bundle. Doing that work in Stage 2, on
+text that has been extracted once, would let a scan get the same treatment: OCR
+the pages, then split on the transcribed titles, instead of guessing boundaries
+from downsampled contact sheets.
+
+The concrete failure that made this visible: CASE_907's DOC_005 is 19 scanned
+pages containing a 진단서, an English lab REPORT, an 입퇴원확인서, and two
+진료비 명세서. It was intaken `segmentation_status: not_required`, so Stage 2
+classified all 19 pages as one `diagnosis_certificate` -- the first page's type.
+Every downstream stage now sees four documents' worth of pages under one wrong
+label. Nothing in Stage 1 could have caught it cheaply, because the boundaries
+are legible in the page text and not in the page images.
+
+**Against merging:** Stage 1's human approval gate is the only point where a
+person confirms document structure before any downstream work rests on it, and
+it is deliberately separate from Stage 2's P8 gate (structure vs transcription
+fidelity -- two different judgments by two different reviewers). Merging risks
+collapsing them into one "approve everything" moment. Re-OCR after a split is
+also not free unless page text is reused, which the current split path does not
+do. And Stage 1 currently produces `superseded_bundle` lineage that Stage 2's
+preflight relies on; that ordering would have to be rebuilt.
+
+**Note:** policy bundles are excluded from this question -- they are not split
+at all (see `loss-adjustment-pipeline`'s segmentation check for why). This is
+about medical/mixed scan bundles, where per-document `document_type` is the
+thing splitting exists to get right.
+
+**To resolve:** decide whether Stage 1 becomes (a) unchanged, (b) a
+post-extraction step inside Stage 2 operating on transcribed text, or (c)
+split by source kind -- text-anchor stays pre-OCR for born-digital bundles,
+scans defer to post-OCR. Measure (c) against CASE_907's DOC_005 before
+choosing, since it is the only real mis-split on record.
