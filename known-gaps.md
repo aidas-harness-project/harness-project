@@ -2857,3 +2857,57 @@ re-dispatched. Also not done: no retroactive review of whether either of the
 two 106/102-segment parents actually contains a 별표-style table that this
 override is now knowingly proceeding past unverified -- the risk is accepted
 in the abstract, not confirmed absent.
+
+
+## 38. An untagged claim is invisible to the evidence-tag checker -- OPEN 2026-08-04 (CASE_907)
+
+`dao.py read-evidence-tags` verifies that the `[E#]` tags in a rendered draft
+and the entries in its `.evidence.json` sidecar agree: no orphaned tag, no
+unused citation. On CASE_907's draft v1 it returned
+`{"consistent": true, "orphaned_tags": [], "unused_citations": []}` -- 93 tags,
+93 citations, every quote independently confirmed verbatim on its cited page.
+
+The draft nonetheless contained a fabricated claim, in a paragraph carrying
+**zero tags**:
+
+> 상법 제724조 제2항 및 **약관상 손해배상청구권자의 직접청구 규정**에 따른
+> 직접청구가 가능한 유형의 담보이나 ...
+
+Verified across all five of the case's processed documents: `직접청구` 0 hits,
+`손해배상청구권자` 0 hits. `724` appears exactly once, in DOC_001 p6 -- inside a
+**different case quoted as precedent** (a supermarket moving-walkway fall,
+롯데쇼핑 as the liable party), not this case's contract or facts. The phrase
+"약관상 ... 규정" asserts that such a clause exists in the case's own policy
+booklet; DOC_004 has 0 hits for both terms. The draft supplied a clause's
+existence from general legal knowledge.
+
+**The gap is structural, not a bug in the checker.** `read-evidence-tags`
+answers "are the tags that ARE present consistent?" It cannot answer "is there
+a sentence that should carry a tag and does not," because nothing declares
+which sentences owe evidence. A fabrication that skips tagging entirely is
+therefore invisible to it -- and *more* invisible than a fabrication that tags
+badly, which is the wrong incentive gradient.
+
+Caught here by the `critic` agent reading the draft (finding CF-1, medium,
+binding for v2). That is the designed semantic layer working, but it means the
+only defence against this shape is model judgment: there is no deterministic
+floor, unlike `check-forbidden-expressions`, which backs the critic's semantic
+P3 pass with a literal-phrase scan.
+
+**Not fixed, and not obviously fixable as stated.** Deciding which sentences
+owe evidence is the hard part: a draft legitimately contains transitions,
+section headers, and statements of absence ("자료에 포함되어 있지 아니함") that
+have no quote to cite. Candidate directions, none evaluated:
+
+  * flag paragraphs in analytical sections (IV/V/VI) that contain a statutory
+    or clause reference (`제N조`, `상법`, `민법`, `약관상`) yet carry no tag --
+    narrow, deterministic, and aimed at exactly this shape;
+  * have `document_assembly.py` report per-section tag density so an untagged
+    analytical paragraph is at least visible in the metadata;
+  * require the drafting agent to mark deliberate no-citation paragraphs
+    explicitly, converting silence into a positive claim that can be checked.
+
+The first is the cheapest and would have caught CF-1 (`상법 제724조` + `약관상`,
+zero tags). Recorded rather than built: one real instance is thin evidence for
+a rule that could produce false positives across every future draft, and the
+critic did catch it.
