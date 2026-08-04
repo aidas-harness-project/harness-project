@@ -130,3 +130,185 @@ post-extraction step inside Stage 2 operating on transcribed text, or (c)
 split by source kind -- text-anchor stays pre-OCR for born-digital bundles,
 scans defer to post-OCR. Measure (c) against CASE_907's DOC_005 before
 choosing, since it is the only real mis-split on record.
+
+## 8. Adjuster-supplied case type at intake (phase 1 BUILT 2026-08-04; phase 2 open)
+
+**Where:** `tools/intake_case.py` (Stage 1), `claim-analysis` checkpoint 3
+(`case_type_result.json`), `evaluation` (`case_type_accuracy`).
+
+**Current:** `case_type` is *inferred* by claim-analysis checkpoint 3 from
+extracted claim fields plus coverage, and `evaluation` scores that inference
+against ground truth via `case_type_accuracy`. The adjuster has no way to state
+the case type at intake even though, in real practice, they know it at the
+moment they accept the engagement.
+
+**The argument for supplying it (user, 2026-08-04):** `case_type` is not the
+same kind of field as 진단명 or KCD code. Those are written on a document and
+are genuinely extractable. Case type is *not written anywhere* -- no document
+says "this is a 후유장해 case". The harness reverse-infers it from document
+character, while the adjuster already holds it as a reliable practice fact.
+Inferring what is already known is a self-imposed handicap, and the cost is on
+record: CASE_022's `case_type` scored `correct=false` **not through a reasoning
+error** but because the ground truth was a 배상책임 quantum whose claim
+documents were never in the pack (`known-gaps.md` item 14 addendum). An adjuster
+input would have made that value correct by construction, and -- more valuable
+-- would have exposed the missing documents at intake.
+
+**Two objections raised and withdrawn:**
+
+- *"It bypasses P1"* -- withdrawn. P1 exists to stop a **model** asserting
+  ungrounded facts. A reviewed human input is not the failure mode P1 guards;
+  it is a verified non-model source. What is needed is not prohibition but
+  **provenance recorded distinctly**, so an adjuster-supplied value is never
+  silently indistinguishable from an inferred one.
+- *"It invalidates `case_type_accuracy`"* -- withdrawn. That metric is only
+  meaningful while case type is the harness's task. If it becomes an input, the
+  metric is not corrupted, it is **out of scope**, and the schema can already
+  say so honestly: `evaluation_result.schema.json`'s `applicable: false` +
+  `na_reason`. What the PoC must measure is the layer beneath -- clause
+  matching, R-code classification, draft quality -- not type-guessing.
+
+**Objections that survive:**
+
+- `template_id`: 실손/기타 have no registry contract
+  (`templates/registry.json` has exactly three keys: `배상책임_후유장해형`,
+  `진단수술비형`, `screening_report`). An adjuster entering "실손" makes
+  `document_assembly.py --template` fail at render. This is a pre-existing gap
+  surfacing *earlier and louder*, which is an improvement, but it must be
+  handled before the input is accepted for those types.
+- Adjuster typo / mis-entry: real but cheap to cover with a cross-check, and
+  not an argument that inference is more reliable.
+
+**Design, and what is BUILT as of 2026-08-04 (phase 1):**
+
+1. **BUILT.** Case type is adjuster input on two axes (see #8a); checkpoint 3
+   no longer infers when input is present. `intake_case.py` takes
+   `--coverage-basis/--loss-type/--non-claim-case/--supplied-by/--case-type-note`,
+   and `document_manifest` carries an optional `adjuster_case_type`.
+2. **BUILT.** `case_type_source: "adjuster_input" | "inferred"` added to
+   `case_type_result.schema.json` (v0.2) -- **additive**, so every pre-existing
+   output (CASE_021/024/112) and the in-flight CASE_907 still validate
+   untouched.
+3. **BUILT.** `evidence_references` for an adjuster-supplied type cites the
+   recorded intake input, not a document quote; `supplied_by` is schema-required
+   because that attribution is the provenance standing in for the quote.
+4. **BUILT.** Checkpoint 3 is repurposed as a cross-check, not deleted. It
+   still forms its own view; on contradiction it records `axis_cross_check`
+   (schema-required whenever the source is `adjuster_input`, so a disagreement
+   cannot be silently dropped) and sets `review_required: true` rather than
+   overriding. This catches both mis-entry and the CASE_022 shape ("adjuster
+   says 배상책임, but no 배상 claim documents are in the pack").
+5. **NOT BUILT -- phase 2.** `evaluation` should record
+   `case_type_accuracy.applicable: false` with
+   `na_reason: "case type supplied by adjuster at intake"` when the source is
+   `adjuster_input`. The schema already permits this shape
+   (`evaluation_result.schema.json`'s `applicable`/`na_reason`), but neither
+   `evaluation.md` nor `evaluation_summary`'s aggregate has been updated, so
+   today an adjuster-supplied type would still be scored as if the harness had
+   predicted it. Must land before any case with adjuster input reaches
+   evaluation.
+
+**Relationship to #7 (Stage 1/2 merge): none -- these are independent.** #7 is
+about *where document boundaries are decided*. Case type is **case-level
+metadata**, not document-level, so its attachment point is identical under all
+three of #7's options (a/b/c). Supplying it need not wait on that decision.
+
+**One constraint to preserve:** the type hint must **not** feed Stage 1's
+boundary decision. The text-anchor path is deterministic at precision 1.0000
+(2026-08-03); injecting an expectation like "this is a 후유장해 case, so a
+장해진단서 should exist" converts a deterministic rule into a biased guess. The
+hint is for **post-split reconciliation only**.
+
+**To resolve:** the taxonomy question below (whether the current 5-value enum is
+the right vocabulary to hand an adjuster) should be settled first, since it
+determines what the input field can accept. Then the 4 change points: an
+`intake_case.py` argument, the schema field, checkpoint 3's rewording, and
+evaluation's applicability handling.
+
+### 8a. The current case_type enum is NOT the right vocabulary for adjuster input
+
+`case_type_result.schema.json` defines five values: `후유장해`, `진단·수술비`,
+`실손`, `배상책임`, `기타`. A survey of the raw corpus
+(`docs/case-type-inventory-2026-08-04.md`, read under user authorization) found
+this vocabulary cannot express what the corpus contains.
+
+**The corpus is ~4x larger than `outputs/` reflects:** 45 PDFs across 8 folders,
+of which **~37 have never been intaken**, plus 2 unexpanded `.zip` archives.
+The unprocessed material is two coherent series the enum was never designed
+against:
+
+- **개인보험1-20 + 개인보험16 (21 files)** -- verified by reading each `I. 사정
+  요약`: every one is **상해후유장해보험금**, a first-party personal-accident
+  disability claim (5.5M-50M원). This is the user's "개인보험형".
+- **TA1-16 (16 files)** -- **자동차보험 대인배상**, computed on 자동차보험약관
+  지급기준 with 소득 and 과실상계. This basis **does not exist anywhere in the
+  taxonomy**: it is not 배상책임 as the enum uses that value (시설소유자/영업
+  배상책임), not a first-party benefit claim, and has its own computation
+  regime. It is the single largest series in the corpus.
+
+**Root finding: the enum conflates two orthogonal axes.** Every multi-type case
+straddles in the same direction (배상책임 × 후유장해), because `배상책임`
+answers *who pays and on what legal basis* while `후유장해`/`진단·수술비`/`실손`
+answer *what kind of loss is computed*. `secondary_case_types` is absorbing that
+structure as if it were uncertainty. The registry key `배상책임_후유장해형` is
+already a compound of both axes -- the template layer conceded what the enum has
+not.
+
+Also found: `실손` has never occurred in any real case (only ever a 0.02-0.15
+losing candidate) and has no registry template; `기타` is doing double duty for
+"unusual claim" and "not a claim at all" (CASE_030 is policy/증권/청약 only);
+and the registry's three keys cover neither large unprocessed series -- though
+unlike 실손, both now have real reports on disk to derive structure from, which
+is what #2 said was missing.
+
+**DECIDED (user, 2026-08-04): split into two axes.** What the adjuster records
+at intake is the *real-world case type* -- 개인보험/후유장해 and the like -- not
+the document composition of the pack (약관+손해사정서 etc.), which is a separate
+thing the manifest already describes.
+
+| Axis | Field | Values |
+|---|---|---|
+| 보상 근거 (who pays, on what legal basis) | `coverage_basis` | `배상책임` / `개인보험` / `자동차보험` |
+| 손해 유형 (what loss is computed) | `loss_type` | `후유장해` / `진단·수술비` / `실손` |
+
+Both are adjuster-supplied at intake per #8. The pair replaces the flat
+`case_type` enum + `secondary_case_types` hedge: the recurring
+배상책임 × 후유장해 "straddle" becomes one value on each axis, which is what it
+always was.
+
+**Design consequences to work through when implementing:**
+
+1. **One definition point, several consumers.** `case_type` is defined once in
+   `case_type_result.schema.json#/$defs/case_type` and `$ref`'d by
+   `draft_report_metadata` and others, so the enum itself changes in one place
+   -- but `screening_report`, `evaluation_result` (`case_type_accuracy`),
+   `evaluation_summary` (`case_type_correct`, aggregate `case_type_accuracy`),
+   and 5 agent specs each name the field and need review.
+2. **`기타` disappears as a value** and must be re-expressed. It was doing two
+   jobs: a genuinely unusual claim, and CASE_030's "not a claim at all". The
+   second is not a case type -- see (4).
+3. **Migration for the 4 existing outputs** (CASE_021/024/112/908). The mapping
+   is mechanical given the survey: CASE_021 → 개인보험/진단·수술비;
+   CASE_024 → primary 후유장해 + secondary 배상책임 becomes
+   배상책임/후유장해; CASE_112/908 → 배상책임/후유장해. They must stay
+   readable, so `case_type` should be retained as a deprecated-but-valid field
+   for one version rather than deleted outright (the same one-version
+   compatibility approach used for the denial/reduction split on 2026-07-22).
+4. **Policy-only, non-claim cases** (CASE_030: 약관/증권/청약, no claim, no
+   accident, no insurer response) get no case type at all. Represent as
+   nullable-with-reason or an explicit non-claim scope marker -- not as a value
+   inside either axis.
+5. **`실손` stays in the enum but has no template and no real case.** Accepting
+   it as adjuster input means `document_assembly.py --template` fails at render.
+   Acceptable only if that failure is explicit at intake rather than at draft
+   time.
+6. **Template registry must grow to match the axes.** Today's three keys cover
+   배상책임×후유장해 and 진단·수술비 only. The corpus now supplies real completed
+   reports for 자동차보험 (TA1-16) and first-party 개인보험×후유장해
+   (개인보험1-20) -- so unlike 실손, these two can be derived from ground-truth
+   structure exactly as #2 did for the original two. `template_id` likely
+   becomes derivable from the axis pair rather than being a third
+   independently-asserted field.
+7. **Not every pair is meaningful.** 자동차보험×실손 or 개인보험×실손 may not
+   correspond to real practice. Decide whether to constrain valid combinations
+   (a matrix) or accept any pair and let the template lookup fail.

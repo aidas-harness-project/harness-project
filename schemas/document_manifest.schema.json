@@ -19,6 +19,59 @@
     "documents": {
       "type": "array",
       "items": { "$ref": "#/$defs/document_entry" }
+    },
+    "adjuster_case_type": {
+      "type": "object",
+      "description": "owner: Case Intake (Stage 1). OPTIONAL and additive as of 2026-08-04 -- absent on every pre-existing case, and on any case whose adjuster did not supply a type. The loss adjuster's own classification, recorded at intake alongside the input material. This is a practice fact the adjuster holds at engagement time, not something extractable from any document (no document states a case's type), so it is provenance-labelled rather than evidence-quoted -- see open-decisions.md #8. claim-analysis reads it as the source for case_type_result's coverage_basis/loss_type, still forms its own independent view, and routes a contradiction to review rather than overriding it. Must NOT influence Stage 1 boundary detection: the text-anchor path is deterministic, and an expectation like 'a 후유장해 case should have a 장해진단서' would turn it into a biased guess.",
+      "properties": {
+        "coverage_basis": { "$ref": "case_type_result.schema.json#/$defs/coverage_basis" },
+        "loss_type": { "$ref": "case_type_result.schema.json#/$defs/loss_type" },
+        "is_claim_case": {
+          "type": "boolean",
+          "description": "False when the intaken material carries no claim at all (policy/증권/청약 only, as in CASE_030). Both axes must then be null."
+        },
+        "supplied_by": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Who supplied it -- the adjuster's name or identifier. This provenance stands in for the document quote P1 would otherwise require, so it is mandatory."
+        },
+        "supplied_at": { "type": "string", "format": "date-time" },
+        "note": {
+          "type": "string",
+          "description": "Optional free-text context from the adjuster (e.g. which insurer's coverage is disputed, or why the case straddles)."
+        }
+      },
+      "required": ["coverage_basis", "loss_type", "supplied_by", "supplied_at"],
+      "allOf": [
+        {
+          "description": "Rule: a non-claim case carries no type on either axis.",
+          "if": {
+            "properties": { "is_claim_case": { "const": false } },
+            "required": ["is_claim_case"]
+          },
+          "then": {
+            "properties": {
+              "coverage_basis": { "type": "null" },
+              "loss_type": { "type": "null" }
+            }
+          }
+        },
+        {
+          "description": "Rule: a claim case must name both axes -- a half-classified claim would select a template from one axis alone.",
+          "if": {
+            "not": {
+              "properties": { "is_claim_case": { "const": false } },
+              "required": ["is_claim_case"]
+            }
+          },
+          "then": {
+            "properties": {
+              "coverage_basis": { "type": "string" },
+              "loss_type": { "type": "string" }
+            }
+          }
+        }
+      ]
     }
   },
   "required": ["case_id", "documents"],

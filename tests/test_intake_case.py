@@ -314,3 +314,154 @@ def test_execute_blocks_when_classification_drifts_from_ledger(isolated_intake, 
                                 "RUN_20260713_001", "--ground-truth", "*does-not-match*"])
     raw_dir = isolated_intake / "data" / "raw" / "CASE_009"
     assert not raw_dir.exists() or not list(raw_dir.glob("*"))
+
+
+# ------------------------------------ adjuster-supplied case type (#8/#8a) --
+
+def _case_type_args(**kw):
+    """A stand-in for the parsed argparse namespace, carrying only the fields
+    build_adjuster_case_type reads."""
+    class _Args:
+        pass
+    args = _Args()
+    for field in ("coverage_basis", "loss_type", "supplied_by", "case_type_note"):
+        setattr(args, field, kw.get(field))
+    args.non_claim_case = kw.get("non_claim_case", False)
+    return args
+
+
+def test_axis_values_come_from_the_schema_not_a_copy():
+    """The CLI's accepted values are derived from case_type_result.schema.json
+    rather than restated. A hand-copied list is exactly the drift shape that
+    hit the forbidden-expression table (CLAUDE.md, 2026-07-17)."""
+    assert intake_case.COVERAGE_BASIS_VALUES == ["배상책임", "개인보험", "자동차보험"]
+    assert intake_case.LOSS_TYPE_VALUES == ["후유장해", "진단·수술비", "실손"]
+    assert None not in intake_case.COVERAGE_BASIS_VALUES
+
+
+def test_build_adjuster_case_type_returns_none_when_nothing_supplied():
+    assert intake_case.build_adjuster_case_type(_case_type_args()) is None
+
+
+def test_build_adjuster_case_type_accepts_both_axes():
+    result = intake_case.build_adjuster_case_type(_case_type_args(
+        coverage_basis="자동차보험", loss_type="후유장해", supplied_by="Kim TY"))
+
+    assert result["coverage_basis"] == "자동차보험"
+    assert result["loss_type"] == "후유장해"
+    assert result["is_claim_case"] is True
+    assert result["supplied_by"] == "Kim TY"
+    assert "supplied_at" in result
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"coverage_basis": "배상책임", "supplied_by": "Kim TY"},
+    {"loss_type": "후유장해", "supplied_by": "Kim TY"},
+])
+def test_half_classified_claim_is_rejected(kwargs):
+    """Both axes or neither: one alone would let the draft stage pick a
+    template from half a classification."""
+    with pytest.raises(SystemExit):
+        intake_case.build_adjuster_case_type(_case_type_args(**kwargs))
+
+
+def test_case_type_without_supplier_is_rejected():
+    """supplied_by is the provenance standing in for the document quote P1
+    would otherwise require -- no document states a case's type."""
+    with pytest.raises(SystemExit):
+        intake_case.build_adjuster_case_type(_case_type_args(
+            coverage_basis="배상책임", loss_type="후유장해"))
+
+
+def test_supplier_without_a_case_type_is_rejected():
+    with pytest.raises(SystemExit):
+        intake_case.build_adjuster_case_type(_case_type_args(supplied_by="Kim TY"))
+
+
+def test_non_claim_case_nulls_both_axes():
+    result = intake_case.build_adjuster_case_type(_case_type_args(
+        non_claim_case=True, supplied_by="Kim TY"))
+
+    assert result["is_claim_case"] is False
+    assert result["coverage_basis"] is None
+    assert result["loss_type"] is None
+
+
+def test_non_claim_case_cannot_also_carry_an_axis():
+    with pytest.raises(SystemExit):
+        intake_case.build_adjuster_case_type(_case_type_args(
+            non_claim_case=True, coverage_basis="배상책임", supplied_by="Kim TY"))
+
+
+def test_non_claim_case_still_needs_a_supplier():
+    with pytest.raises(SystemExit):
+        intake_case.build_adjuster_case_type(_case_type_args(non_claim_case=True))
+
+
+def test_loss_type_without_a_template_warns_but_is_accepted(capsys):
+    """실손 has no templates/registry.json contract, so its draft cannot
+    render. Intake records it and says so now, rather than failing silently
+    at draft time (open-decisions.md #8a)."""
+    result = intake_case.build_adjuster_case_type(_case_type_args(
+        coverage_basis="개인보험", loss_type="실손", supplied_by="Kim TY"))
+
+    assert result["loss_type"] == "실손"
+    assert "no templates/registry.json contract" in capsys.readouterr().err
+
+
+def _manifest_documents():
+    return [{
+        "document_id": "DOC_001", "file_name": "DOC_001.pdf",
+        "file_path": "data/raw/CASE_009/DOC_001.pdf", "file_format": "pdf",
+        "file_size_bytes": 100, "pre_flagged_type": None, "pages": None, "ocr_status": "pending",
+        "ocr_text_path": None, "ocr_quality": None, "uncertain_region_count": None,
+        "cross_validation_status": None, "redacted_text_path": None,
+        "document_type": None, "classification_confidence": None,
+    }]
+
+
+def test_manifest_omits_the_field_entirely_when_no_case_type_supplied(isolated_intake):
+    """CASE_907 compatibility: a manifest written without an adjuster case
+    type must be indistinguishable from one written before the field existed."""
+    target = intake_case.write_manifest("CASE_009", "RUN_20260804_001", _manifest_documents())
+
+    assert "adjuster_case_type" not in json.loads(target.read_text(encoding="utf-8"))
+
+
+def test_manifest_carries_the_adjuster_case_type_when_supplied(isolated_intake):
+    supplied = intake_case.build_adjuster_case_type(_case_type_args(
+        coverage_basis="개인보험", loss_type="후유장해", supplied_by="Kim TY",
+        case_type_note="개인보험 series"))
+
+    target = intake_case.write_manifest(
+        "CASE_009", "RUN_20260804_001", _manifest_documents(), supplied)
+
+    stored = json.loads(target.read_text(encoding="utf-8"))["adjuster_case_type"]
+    assert stored["coverage_basis"] == "개인보험"
+    assert stored["loss_type"] == "후유장해"
+    assert stored["note"] == "개인보험 series"
+
+
+def test_manifest_rejects_a_half_classified_case_type(isolated_intake):
+    """The schema is the backstop for anything that bypasses the CLI helper."""
+    with pytest.raises(SystemExit):
+        intake_case.write_manifest("CASE_009", "RUN_20260804_001", _manifest_documents(), {
+            "coverage_basis": "배상책임", "loss_type": None,
+            "supplied_by": "Kim TY", "supplied_at": "2026-08-04T10:00:00+09:00",
+        })
+
+
+def test_manifest_rejects_a_non_claim_case_carrying_an_axis(isolated_intake):
+    with pytest.raises(SystemExit):
+        intake_case.write_manifest("CASE_009", "RUN_20260804_001", _manifest_documents(), {
+            "coverage_basis": "배상책임", "loss_type": "후유장해", "is_claim_case": False,
+            "supplied_by": "Kim TY", "supplied_at": "2026-08-04T10:00:00+09:00",
+        })
+
+
+def test_manifest_rejects_an_unknown_coverage_basis(isolated_intake):
+    with pytest.raises(SystemExit):
+        intake_case.write_manifest("CASE_009", "RUN_20260804_001", _manifest_documents(), {
+            "coverage_basis": "산재보험", "loss_type": "후유장해",
+            "supplied_by": "Kim TY", "supplied_at": "2026-08-04T10:00:00+09:00",
+        })
