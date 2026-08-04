@@ -90,6 +90,26 @@
           "deprecated": true,
           "description": "Deprecated compatibility field retained for one schema version. Must equal has_denial OR has_reduction; consumers should migrate to the two explicit fields."
         },
+        "has_acceptance": {
+          "type": "boolean",
+          "description": "Whether the insurer's response ACCEPTED any coverage. Optional and additive: absent means the report predates this field, NOT that nothing was accepted. Without it a split outcome was structurally invisible -- CASE_907's report correctly said in prose that 배상책임 was denied while 구내치료비 ₩2,000,000 was notified, but insurer_position read has_denial:true/has_reduction:false and nothing else, which a structural consumer takes as a total denial. That is the exact misreading denial_reason_result's accepted_coverages exists to prevent, so the report that summarizes it must carry the axis too."
+        },
+        "acceptance": {
+          "type": "object",
+          "description": "Which coverages the insurer accepted, mirroring the denial/reduction summaries. Sourced from denial_reason_result.accepted_coverages; ids must be exactly that contract's accepted_coverage_ids.",
+          "properties": {
+            "accepted_coverage_ids": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^AC_[0-9]+$" }
+            },
+            "total_amount": {
+              "type": ["number", "null"],
+              "description": "Sum of stated accepted amounts, or null when no figure is stated. An amount the insurer merely NOTIFIED is still recorded here -- payment_status on the source contract carries whether it was actually paid, and this field must never be read as proof of payment."
+            }
+          },
+          "required": ["accepted_coverage_ids"],
+          "additionalProperties": false
+        },
         "denial": { "$ref": "#/$defs/decision_summary" },
         "reduction": { "$ref": "#/$defs/decision_summary" },
         "main_reason_code": {

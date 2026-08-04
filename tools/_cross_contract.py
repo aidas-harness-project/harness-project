@@ -1830,6 +1830,42 @@ def check_screening_report(data: dict, case_dir: Path) -> list[str]:
         errors.append(f"insurer_position: reason_id {rid!r} appears under BOTH denial and "
                       "reduction -- a reason has exactly one decision_type")
 
+    # The acceptance side, on the same terms. A report that summarizes a
+    # contract carrying accepted_coverages but stays silent about them shows a
+    # structural reader has_denial:true and nothing else, i.e. a total denial --
+    # which is the misreading the upstream field exists to prevent.
+    accepted = reasons_doc.get("accepted_coverages") or []
+    known_accepted = [a.get("accepted_coverage_id") for a in accepted]
+    listed = ((position.get("acceptance") or {}).get("accepted_coverage_ids")
+              or [])
+    for aid in listed:
+        if aid not in known_accepted:
+            errors.append(
+                f"insurer_position.acceptance lists {aid!r}, which does not "
+                f"exist in {DENIAL_REASONS} (known: {known_accepted})")
+    for dupe in _duplicates(listed):
+        errors.append(
+            f"insurer_position.acceptance lists {dupe!r} more than once")
+    if accepted and "has_acceptance" in position:
+        # Only checked when the report opts into the field at all, so a report
+        # written before it existed is not retroactively wrong.
+        missing = [a for a in known_accepted if a not in listed]
+        if missing:
+            errors.append(
+                f"{DENIAL_REASONS} records accepted coverages {missing} that "
+                "insurer_position.acceptance omits -- a partial outcome "
+                "summarized as if only the denial happened reads as a total "
+                "denial")
+        if not position.get("has_acceptance"):
+            errors.append(
+                "insurer_position.has_acceptance is false but "
+                f"{DENIAL_REASONS} records {len(accepted)} accepted "
+                "coverage(s)")
+    elif listed and not accepted:
+        errors.append(
+            "insurer_position.acceptance lists coverages but "
+            f"{DENIAL_REASONS} records none")
+
     return errors
 
 

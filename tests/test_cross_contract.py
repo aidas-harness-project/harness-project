@@ -1473,3 +1473,85 @@ def test_dao_write_contract_refuses_and_does_not_persist(isolated_dao, make_args
     assert "cross-contract validation errors" in out
     assert (case / "denial_reason_result.json").read_text(encoding="utf-8") == good
     assert not list(case.glob("*.lock")), "the lock must be released even when the write is refused"
+
+
+# ---- screening_report: the acceptance side ---------------------------------
+#
+# `denial_reason_result` gained `accepted_coverages` so a response that denies
+# one coverage and accepts another stops reading as a total denial. The report
+# that SUMMARIZES that contract has to carry the axis too -- CASE_907's first
+# run described the split correctly in prose while `insurer_position` still
+# showed only has_denial:true, which a structural consumer takes as a total
+# denial: the exact misreading the upstream field exists to prevent.
+
+@pytest.fixture
+def split_outcome_case(tmp_path):
+    """DR_1 denies one coverage; AC_1 records another that was accepted."""
+    reasons = {
+        "denial_reasons": [dict(_reason("DR_1", code="R04"),
+                                decision_type="denial",
+                                decided_coverage="배상책임")],
+        "accepted_coverages": [{
+            "accepted_coverage_id": "AC_1",
+            "coverage_name": "구내치료비",
+            "payment_status": "unknown",
+            "accepted_amount": 2000000,
+        }],
+    }
+    d = tmp_path / "CASE_SPLIT"
+    d.mkdir()
+    (d / "denial_reason_result.json").write_text(
+        json.dumps(reasons, ensure_ascii=False), encoding="utf-8")
+    return d
+
+
+def _split_position(accepted_ids, has_acceptance=True):
+    position = {"insurer_position": {
+        "denial": {"reason_ids": ["DR_1"]},
+        "reduction": {"reason_ids": []},
+        "has_acceptance": has_acceptance,
+    }}
+    if accepted_ids is not None:
+        position["insurer_position"]["acceptance"] = {
+            "accepted_coverage_ids": list(accepted_ids)}
+    return position
+
+
+def test_a_report_carrying_the_acceptance_passes(split_outcome_case):
+    assert check("screening_report.json",
+                 _derived(split_outcome_case, _split_position(["AC_1"])),
+                 split_outcome_case) == []
+
+
+def test_omitting_a_recorded_acceptance_is_rejected(split_outcome_case):
+    """Silence about an acceptance is what makes a split outcome read total."""
+    errors = check("screening_report.json",
+                   _derived(split_outcome_case, _split_position([])),
+                   split_outcome_case)
+    assert any("omits" in e for e in errors), errors
+
+
+def test_denying_an_acceptance_happened_is_rejected(split_outcome_case):
+    errors = check("screening_report.json",
+                   _derived(split_outcome_case,
+                            _split_position(["AC_1"], has_acceptance=False)),
+                   split_outcome_case)
+    assert any("has_acceptance is false" in e for e in errors), errors
+
+
+def test_an_unknown_accepted_coverage_id_is_rejected(split_outcome_case):
+    errors = check("screening_report.json",
+                   _derived(split_outcome_case, _split_position(["AC_9"])),
+                   split_outcome_case)
+    assert any("AC_9" in e for e in errors), errors
+
+
+def test_a_report_predating_the_acceptance_field_is_not_retro_failed(
+        split_outcome_case):
+    """Additive: a report written before the field existed opts out by absence,
+    and must not be failed for a field it never had."""
+    legacy = {"insurer_position": {
+        "denial": {"reason_ids": ["DR_1"]}, "reduction": {"reason_ids": []}}}
+    assert check("screening_report.json",
+                 _derived(split_outcome_case, legacy),
+                 split_outcome_case) == []
