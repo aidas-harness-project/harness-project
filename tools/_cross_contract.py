@@ -1726,7 +1726,27 @@ def check_denial_validation_result(data: dict, case_dir: Path) -> list[str]:
                              if m.get("policy_match_id") is not None]
         for r in reasons
     }
-    owner_of_match = {mid: rid for rid, mids in matches_by_reason.items() for mid in mids}
+
+    # An accepted coverage owns policy_matches on the same terms a reason does,
+    # and check_policy_matches (same module) already verifies both sides
+    # identically. This layer did not: owner_of_match was built from
+    # denial_reasons alone, so an acceptance-owned match could not be recorded
+    # under a reason (reason_id is ^DR_[0-9]+$, the write was rejected) and
+    # raised nothing at all when omitted -- the contract reported every match
+    # verified while one had never been checked. That is the failure mode the
+    # completeness message below names, allowed by the check that prints it.
+    # upstream_hash() folds accepted_coverages in, so the two layers of this
+    # same file disagreed about whether acceptances are part of the contract.
+    accepted = reasons_doc.get("accepted_coverages") or []
+    matches_by_acceptance = {
+        a.get("accepted_coverage_id"): [m.get("policy_match_id")
+                                        for m in (a.get("policy_matches") or [])
+                                        if m.get("policy_match_id") is not None]
+        for a in accepted
+    }
+    owner_of_match = {mid: oid
+                      for mids_by_owner in (matches_by_reason, matches_by_acceptance)
+                      for oid, mids in mids_by_owner.items() for mid in mids}
 
     validations = data.get("validations") or []
     seen_reason_ids = [v.get("reason_id") for v in validations]
@@ -1772,6 +1792,54 @@ def check_denial_validation_result(data: dict, case_dir: Path) -> list[str]:
             for missing in [m for m in owned if m not in verified_here]:
                 errors.append(f"{rid}: policy match {missing!r} has no verification -- "
                               "an unverified match must not be presentable as checked")
+
+    # Acceptance side: same ownership and completeness rules, own array.
+    acceptance_entries = data.get("acceptance_match_validations") or []
+    seen_acceptance_ids = [a.get("accepted_coverage_id") for a in acceptance_entries]
+
+    for orphan in [i for i in seen_acceptance_ids if i not in matches_by_acceptance]:
+        errors.append(f"acceptance_match_validations: accepted_coverage_id {orphan!r} does not exist "
+                      f"in {DENIAL_REASONS} (known: {sorted(matches_by_acceptance)})")
+    for dupe in _duplicates(seen_acceptance_ids):
+        errors.append(f"acceptance_match_validations: accepted_coverage_id {dupe!r} appears more than "
+                      "once -- exactly one entry per accepted coverage")
+
+    for entry in acceptance_entries:
+        aid = entry.get("accepted_coverage_id")
+        owned = matches_by_acceptance.get(aid, [])
+        verified_here = [pmv.get("policy_match_id")
+                         for pmv in (entry.get("policy_match_validations") or [])
+                         if pmv.get("policy_match_id") is not None]
+        seen_match_ids.extend(verified_here)
+
+        for mid in verified_here:
+            if mid in owned:
+                continue
+            owner = owner_of_match.get(mid)
+            if owner is None:
+                errors.append(f"{aid}: policy_match_id {mid!r} does not exist in {DENIAL_REASONS} "
+                              f"(all known: {sorted(owner_of_match)})")
+            else:
+                errors.append(f"{aid}: policy_match_id {mid!r} belongs to {owner!r}, not {aid!r} -- "
+                              "a match may only be verified under the owner that holds it")
+
+        for dupe in _duplicates(verified_here):
+            errors.append(f"{aid}: policy_match_id {dupe!r} verified more than once within this entry")
+
+        if aid in matches_by_acceptance:
+            for missing in [m for m in owned if m not in verified_here]:
+                errors.append(f"{aid}: policy match {missing!r} has no verification -- "
+                              "an unverified match must not be presentable as checked")
+
+    # An acceptance owning matches but having no entry at all is the exact
+    # silent-omission case: nothing above fires, because every loop is driven
+    # by what the validation contract chose to include.
+    for aid, owned in matches_by_acceptance.items():
+        if owned and aid not in seen_acceptance_ids:
+            errors.append(f"accepted coverage {aid!r} owns policy matches {sorted(owned)} but has no "
+                          "acceptance_match_validations entry -- an acceptance's policy basis must be "
+                          "verified on the same terms as a denial's, and omitting it would let the "
+                          "contract report full verification while this match was never checked")
 
     # Cross-validation duplicates (the same match verified under two different
     # reasons) are caught here; the per-validation loop above only sees one.

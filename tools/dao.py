@@ -144,6 +144,7 @@ import secrets
 import shutil
 import sys
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -413,6 +414,155 @@ def cmd_read_document_text(args):
     return 1
 
 
+def _normalize_for_absence(text: str) -> str:
+    """Fold away every difference that separates two spellings of one Korean term.
+
+    This is the mirror image of _cross_contract._normalize_ws, and the
+    asymmetry between them is what this function exists to end. That one
+    collapses whitespace RUNS to a single space, which is right for proving a
+    quote is PRESENT: it keeps word boundaries, so a verbatim check stays
+    exact. Proving a term is ABSENT needs the opposite tolerance, because
+    Korean legal text spells one term several ways -- `직접청구` / `직접 청구`
+    -- and extraction adds mid-word line breaks on top (DOC_004 alone had 722).
+    A search that folds neither reports 0 hits for a term printed on the page.
+
+    So: NFKC (fullwidth/compatibility forms), then ALL whitespace removed --
+    not collapsed. `직접 청구`, `직접\\n청구` and `직접청구` become one string.
+
+    This deliberately over-matches. Removing spaces can join two unrelated
+    words across a boundary, so a hit here is a CANDIDATE, not a finding --
+    cmd_search_document_text returns surrounding context and never renders a
+    verdict. Judging the context is the caller's job; the floor this provides
+    is only that a negative claim can no longer rest on a spelling variant.
+    """
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text))
+
+
+def _search_one_document(case_id: str, doc_id: str, needle_norm: str,
+                         context: int) -> tuple[list[dict], str | None]:
+    """Find needle_norm in one document's processed text. Returns (hits, error).
+
+    Matching runs on the normalized text, but every hit reports the SOURCE
+    spelling from the original page -- an agent that has to write the quote
+    down needs what the document actually prints, not the folded form.
+    """
+    redacted = DATA / "processed" / case_id / doc_id / "redacted_text.md"
+    if not redacted.exists():
+        return [], (f"NOT_EXTRACTED: {doc_id} has no processed text yet")
+    try:
+        pages = _cross_contract.split_pages(redacted.read_text(encoding="utf-8"))
+    except Exception as exc:  # SourceUnavailable and friends -- fail loud, never silently 0-hit
+        return [], f"UNREADABLE: {doc_id}: {exc}"
+
+    hits = []
+    for page_no in sorted(pages):
+        raw = pages[page_no]
+        # Map each normalized character back to its index in the raw page, so
+        # a normalized match can be reported as the raw substring it came from.
+        # Normalize PER RAW CHARACTER, not over the whole page. NFKC can change
+        # a string's length (a compatibility char may expand to several), so
+        # indices into a wholesale-normalized page do not line up with the raw
+        # page -- an earlier version built the map that way and reported spans
+        # shifted by one, surfacing `연현상으` for a `자연현상` match. Mapping each
+        # raw char to the run of normalized chars it produces keeps every
+        # normalized index traceable to the exact raw character it came from.
+        norm_chars, back = [], []
+        for i, ch in enumerate(raw):
+            if ch.isspace():
+                continue
+            folded = unicodedata.normalize("NFKC", ch)
+            for piece in folded:
+                if piece.isspace():
+                    continue
+                norm_chars.append(piece)
+                back.append(i)
+        norm_page = "".join(norm_chars)
+
+        start = norm_page.find(needle_norm)
+        while start != -1:
+            end = start + len(needle_norm) - 1
+            raw_start, raw_end = back[start], back[end] + 1
+            hits.append({
+                "document_id": doc_id,
+                "page": page_no,
+                "matched_source_text": raw[raw_start:raw_end],
+                "context": " ".join(raw[max(0, raw_start - context):raw_end + context].split()),
+            })
+            start = norm_page.find(needle_norm, start + 1)
+    return hits, None
+
+
+def cmd_search_document_text(args):
+    """Whitespace/NFKC-insensitive search over processed text -- the floor under
+    a negative claim.
+
+    An agent asserting a clause/term is ABSENT ("no such provision exists in
+    this policy") previously had only a raw substring search, which finds one
+    spelling. On CASE_907 that produced three wrong absence findings in one
+    day, one of which was recorded as a fabrication finding against a draft
+    sentence that was in fact correct -- the policy DID grant a 직접 청구 right,
+    spelled with a space.
+
+    Output is deliberately shaped for the record: `searched_normalized` states
+    what was actually looked for, so a 0-hit result documents the search rather
+    than just asserting a conclusion. A reviewer can see which variant space
+    was covered instead of taking the absence on faith.
+    """
+    needle_norm = _normalize_for_absence(args.term)
+    if not needle_norm:
+        print("EMPTY_TERM: search term normalizes to nothing")
+        return 2
+
+    _require_safe_id("case id", args.case_id)
+    if args.all_docs and args.doc_id:
+        print("error: pass either DOC_ID or --all-docs, not both")
+        return 2
+
+    if args.all_docs:
+        manifest = read_contract_data(args.case_id, "document_manifest.json")
+        if manifest is None:
+            print(f"NOT_FOUND: no document_manifest.json for {args.case_id}")
+            return 1
+        # An expert_review_only document has no processed text by design; it is
+        # not a searchable surface, and listing it as "unsearchable" every time
+        # would train readers to skim past the field that matters.
+        doc_ids = [d.get("document_id") for d in manifest.get("documents", [])
+                   if d.get("downstream_disposition") != "expert_review_only"]
+    elif args.doc_id:
+        doc_ids = [args.doc_id]
+    else:
+        print("error: pass a DOC_ID or --all-docs")
+        return 2
+
+    hits, unsearched = [], []
+    for doc_id in doc_ids:
+        if not doc_id:
+            continue
+        _require_safe_id("document id", doc_id)
+        doc_hits, error = _search_one_document(args.case_id, doc_id, needle_norm, args.context)
+        hits.extend(doc_hits)
+        if error:
+            unsearched.append({"document_id": doc_id, "reason": error})
+
+    print(json.dumps({
+        "term": args.term,
+        "searched_normalized": needle_norm,
+        "normalization": "NFKC + all whitespace removed (matches 직접청구 / 직접 청구 / line-split)",
+        "documents_searched": [d for d in doc_ids
+                               if d not in {u["document_id"] for u in unsearched}],
+        "documents_unsearched": unsearched,
+        "hit_count": len(hits),
+        "hits": hits,
+        "note": ("hits are CANDIDATES -- whitespace folding can join unrelated words, so read "
+                 "the context before concluding. 0 hits covers only this normalized form: it is "
+                 "evidence about this spelling space, not proof the concept is absent."),
+    }, ensure_ascii=False))
+    # 0 = searched cleanly with hits, 1 = searched cleanly with none, 2 = could not search.
+    if unsearched and not hits:
+        return 2
+    return 0 if hits else 1
+
+
 PAGE_TEXT_ALLOWED_STAGES = frozenset({"document-pipeline"})
 
 PAGE_TEXT_CAPABILITY_ENV = "HARNESS_CHECKPOINT2_CAPABILITY"
@@ -567,6 +717,69 @@ def human_review_complete_any(case_id: str) -> bool:
     )
 
 
+def _transcribe_ground_truth_ephemeral(path: Path, args) -> int:
+    """Vision-read a SCANNED ground-truth PDF and return text without storing it.
+
+    A scanned answer key had no sanctioned read path at all. The OCR pipeline
+    is deliberately closed to ground truth (it writes into data/processed,
+    which non-evaluation stages can read), and the 2026-07-22 Read deny-glob
+    closed direct opening -- correct, but together they left the one stage D1
+    exempts unable to read a scan by any legitimate means. On CASE_907 that
+    forced a workaround: rendering the pages to .tmp/ and reading them there,
+    which escaped the deny-glob (it is bound to a PATH, so copying out defeats
+    it), passed no gate, and left no record.
+
+    The cache-directory alternative was rejected for reproducing exactly that:
+    a new persistent location holding answer-key content, protected only by
+    the same path-bound convention that had already failed. Here the rendered
+    pages live in a TemporaryDirectory removed in a finally, so no persistent
+    artifact exists even if transcription raises. The value delivered is not
+    access -- the workaround already had access -- but that the access is
+    gated, attributable and logged, and leaves nothing behind to leak later.
+
+    Authorization is NOT rechecked here: the caller already enforced
+    caller_stage == evaluation and the human-review flag before any bytes were
+    touched, and this runs strictly inside that branch.
+    """
+    import tempfile
+    from llm_providers import build_provider, ProviderConfigError
+    from ocr_extract import TRANSCRIBE_PROMPT, OCR_PROMPT_VERSION, split_to_page_images
+
+    tmp_root = tempfile.mkdtemp(prefix="gt_transcribe_")
+    try:
+        page_images = split_to_page_images(path, Path(tmp_root))
+        if not page_images:
+            print(f"RENDER_FAILED: {path.name} produced no page images")
+            return 1
+
+        # transcribe_image confines the child's Read to the image's own parent
+        # directory, and that directory here holds nothing but this one file's
+        # rendered pages -- so the reader cannot reach the rest of
+        # data/ground_truth even if the prompt is subverted.
+        try:
+            provider = build_provider()
+        except ProviderConfigError as exc:
+            print(f"PROVIDER_ERROR: {exc}")
+            return 1
+
+        print(f"<<<GROUND_TRUTH file={path.name} pages={len(page_images)} "
+              f"method=ephemeral_vision>>>")
+        for i, image_path in enumerate(page_images, start=1):
+            result = provider.transcribe_image(image_path, TRANSCRIBE_PROMPT, OCR_PROMPT_VERSION)
+            text = (getattr(result, "text", None) or "").strip()
+            if not text:
+                # Fail loud per page rather than emitting a silent blank that
+                # an evaluator could read as "this page says nothing".
+                print(f"<<<PAGE page={i}>>>")
+                print(f"TRANSCRIPTION_FAILED: provider returned no text for page {i}")
+                continue
+            print(f"<<<PAGE page={i}>>>")
+            print(text)
+        return 0
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
 def cmd_read_ground_truth(args):
     if args.caller_stage != "evaluation":
         print(f"DENIED: ground truth may only be read by the evaluation stage (harness-guardrails-dev D1). "
@@ -622,12 +835,15 @@ def cmd_read_ground_truth(args):
         from ocr_extract import pdf_embedded_page_texts
         pages = pdf_embedded_page_texts(path)
         if pages is None:
-            print(f"NO_TEXT_LAYER: {path.name} has no whole-document embedded text layer. "
-                  f"Ground truth is read-only reference material and is deliberately NOT "
-                  f"put through the OCR pipeline (that would write it into data/processed, "
-                  f"where non-evaluation stages can read it). Transcribe it out-of-band and "
-                  f"record how, or evaluate only what other ground-truth files support.")
-            return 1
+            if not getattr(args, "transcribe", False):
+                print(f"NO_TEXT_LAYER: {path.name} has no whole-document embedded text layer. "
+                      f"Ground truth is read-only reference material and is deliberately NOT "
+                      f"put through the OCR pipeline (that would write it into data/processed, "
+                      f"where non-evaluation stages can read it). Re-run with --transcribe for "
+                      f"the sanctioned ephemeral vision read, which returns text without "
+                      f"persisting the answer key anywhere on disk.")
+                return 1
+            return _transcribe_ground_truth_ephemeral(path, args)
         for i, text in enumerate(pages, start=1):
             print(f"<<<PAGE page={i}>>>")
             print(text)
@@ -7679,6 +7895,17 @@ def build_parser():
     p = sub.add_parser("read-document-text"); p.add_argument("case_id"); p.add_argument("doc_id")
     p.set_defaults(fn=cmd_read_document_text)
 
+    p = sub.add_parser("search-document-text",
+                       help="Whitespace/NFKC-insensitive search over processed text. Required "
+                            "before asserting a term is ABSENT -- a raw search finds one spelling.")
+    p.add_argument("case_id"); p.add_argument("doc_id", nargs="?")
+    p.add_argument("term")
+    p.add_argument("--all-docs", action="store_true",
+                   help="Search every processed document in the case instead of one.")
+    p.add_argument("--context", type=int, default=60,
+                   help="Characters of surrounding source text per hit (default 60).")
+    p.set_defaults(fn=cmd_search_document_text)
+
     p = sub.add_parser("read-page-text"); p.add_argument("case_id"); p.add_argument("doc_id")
     p.add_argument("page", type=int)
     p.add_argument("--caller-stage", required=True,
@@ -7694,6 +7921,11 @@ def build_parser():
                                   "agent is permitted to open directly.")
     p.add_argument("--list", action="store_true",
                    help="List available ground-truth file ids, names and sizes.")
+    p.add_argument("--transcribe", action="store_true",
+                   help="For a SCANNED ground-truth PDF (no embedded text): render pages to a "
+                        "temporary directory, vision-transcribe them, and return the text without "
+                        "persisting anything. The pages are deleted on exit, so no answer-key "
+                        "artifact is left on disk for a later stage to read.")
     p.set_defaults(fn=cmd_read_ground_truth)
 
     p = sub.add_parser("read-contract"); p.add_argument("case_id"); p.add_argument("filename")

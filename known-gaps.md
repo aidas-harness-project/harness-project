@@ -2912,6 +2912,25 @@ zero tags). Recorded rather than built: one real instance is thin evidence for
 a rule that could produce false positives across every future draft, and the
 critic did catch it.
 
+> **Correction 2026-08-04 -- the worked example above is wrong, the structural
+> finding is not.** The `직접청구 0 hits / DOC_004 has 0 hits for both terms`
+> evidence was produced by a raw substring search, which is exactly the failure
+> mode later recorded as §1 of `docs/pipeline-findings-2026-08-04.md`. DOC_004
+> p15 **does** carry the clause, spelled with a space: 보통약관 제12조 제1항
+> "…보험금의 지급을 **직접 청구**할 수 있습니다". Re-checked with the
+> whitespace-insensitive searcher built for that finding:
+> `dao.py search-document-text CASE_907 DOC_004 직접청구` returns 1 hit at p15.
+> So draft v1's sentence was an **uncited but true** claim, not a fabrication,
+> and critic v1's CF-1 was a false positive.
+>
+> This does not weaken the item -- it sharpens it. The paragraph still carried
+> zero tags, and that is still invisible to `read-evidence-tags`. What changes
+> is the reading of the incentive gradient: an untagged paragraph is not only
+> where a fabrication hides, it is also where a *correct* claim goes unverified
+> and then gets misjudged as fabricated, because the reviewer has no citation to
+> check and falls back on a search that under-reports. Both directions argue for
+> the same cheap fix.
+
 ---
 
 ## 39. An acceptance-owned `policy_match` is unverifiable by omission -- OPEN 2026-08-04 (CASE_907)
@@ -2955,14 +2974,39 @@ directly rather than assuming it, verified PM_3 by hand anyway (DOC_004 p38
 flagged as unrepresentable. Independently confirmed here at `_cross_contract.py`
 line 15/30.
 
-**Not fixed.** The shape is now on its fourth appearance -- `denial_reason_result`
-(fixed), `screening_report` (fixed), `templates/draft-report.md` 변형 A (open),
-and now the verification layer -- which is itself the finding: adding an axis to a
-contract does not propagate to the contracts that consume it, and nothing detects
-the omission. A fix needs a validation slot addressable by `accepted_coverage_id`
-(not `reason_id`), plus the completeness check widened to both lists. Deferred
-because it changes the Phase 2 contract shape mid-run; CASE_907's remaining
-stages proceed with PM_3 verified-in-`warnings`.
+The shape is now on its fourth appearance -- `denial_reason_result` (fixed),
+`screening_report` (fixed), `templates/draft-report.md` 변형 A (open), and now
+the verification layer -- which is itself the finding: adding an axis to a
+contract does not propagate to the contracts that consume it, and nothing
+detects the omission.
+
+**FIXED 2026-08-04.** Both halves, as diagnosed:
+
+- `denial_validation_result.schema.json` gains `acceptance_match_validations`,
+  an array keyed by `^AC_[0-9]+$` reusing the existing `policy_match_validation`
+  def. Kept separate from `validations` rather than widening `reason_id` to
+  `^(DR|AC)_[0-9]+$`, because a `validation` also carries `verdict` /
+  `verdict_explanation` -- a judgement on the insurer's *reasoning*. An
+  acceptance has no reasoning to rebut (it carries no `decision_type` and
+  cannot be a reason), so filing one there would have forced a meaningless
+  verdict on every acceptance. Optional field: a case with no acceptances omits
+  it and every pre-2026-08-04 contract still validates.
+- `_cross_contract.check_denial_validation_result` builds `owner_of_match` from
+  both lists, enforces ownership in both directions (an acceptance's match can
+  no longer be laundered through a denial reason to look checked), and flags an
+  acceptance that owns matches but has no entry at all -- the silent-omission
+  case that previously raised nothing.
+
+Verified against the shipped contract, not only fixtures: re-running the check
+over `outputs/` reports CASE_112 clean (backward compatibility) and CASE_907
+failing on exactly `AC_1`/`PM_3` -- the real unverified match this item was
+opened for. 9 tests in `tests/test_acceptance_match_validation.py`.
+
+Residual: CASE_907's `denial_validation_result.json` still lacks the entry, so
+it now fails the check it previously passed. That is the correct state -- the
+contract was always wrong and is now honest about it -- but the file needs
+rewriting with PM_3's verification (the agent already verified it by hand:
+DOC_004 p38 구내치료비 추가특별약관 제1조) before that stage can re-finalize.
 
 ---
 
@@ -3019,14 +3063,30 @@ contaminated as an evaluator. The comparison was handed to a fresh evaluation
 agent with the contamination disclosed in its briefing and in
 `evaluation_result_v2.json`'s warnings.
 
-**Not fixed.** A real fix needs a ground-truth-only extraction path whose output
-lands somewhere no other stage can read -- not `data/processed/`. Candidates:
-an evaluation-scoped cache under `outputs/{case}/_gt_cache/` with a DAO read
-gate mirroring `read-ground-truth`'s; or having `--file` do the vision call
-in-process and return text without ever persisting it. Neither is built. Until
-one is, a scanned answer key means either a manual transcription recorded as
-such, or the bypass above -- and if it is the bypass, it must be recorded, not
-quietly repeated.
+**FIXED 2026-08-04** via the second candidate: `read-ground-truth --transcribe`
+renders the scan's pages into a `TemporaryDirectory`, vision-transcribes them,
+and returns text on stdout with the directory removed in a `finally`.
+
+The cache-directory candidate was rejected on the strength of this item's own
+diagnosis: `outputs/{case}/_gt_cache/` would be a new *persistent* location
+holding answer-key content, protected by the same path-bound convention that
+had just failed. The value the fix delivers is not access -- the bypass already
+had access -- but that the access is gated, attributable and logged, and leaves
+nothing behind to leak later.
+
+Properties tested (8 tests, `tests/test_dao_ground_truth_transcribe.py`):
+`--transcribe` grants nothing to a caller the gate denies, and denial happens
+before any render; the render directory is gone afterwards *including when
+transcription raises partway through*; an empty transcription prints
+`TRANSCRIPTION_FAILED` rather than a blank page an evaluator could read as "this
+page says nothing"; the default stays closed (the ephemeral read is opt-in).
+The child reader inherits `transcribe_image`'s existing confinement to the
+image's own parent directory, which here holds nothing but that one file's
+pages, so a subverted reader cannot reach the rest of `data/ground_truth`.
+
+Verified end-to-end on the real scanned GT_001 (12 pages, real vision calls, no
+mocks): exit 0, all 12 pages transcribed, 0 leftover temp directories, nothing
+written to `data/processed/`, no new tracked artifacts.
 
 Also observed while reading: GT_001 p2 carries an un-redacted adjuster name and
 mobile number. That is the answer key's own state, not a pipeline leak, but it

@@ -12,6 +12,11 @@
           "type": "array",
           "items": { "$ref": "#/$defs/validation" }
         },
+        "acceptance_match_validations": {
+          "type": "array",
+          "description": "Verification records for policy_matches owned by an accepted_coverage rather than a denial reason. Separate from `validations` because an acceptance has no insurer reasoning to rebut -- it carries no decision_type and cannot be a reason -- so it has no `verdict`, only matches needing the same verification a denial's matches get. Before this array existed, an acceptance-owned match had nowhere to go: `validations.reason_id` is `^DR_[0-9]+$`, so recording it was rejected, and omitting it raised no error at all -- the contract reported full verification while that match was never checked. Optional: a case with no accepted_coverages omits it, and every pre-2026-08-04 contract still validates.",
+          "items": { "$ref": "#/$defs/acceptance_match_validation" }
+        },
         "source_denial_contract_hash": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
@@ -22,6 +27,24 @@
     }
   ],
   "$defs": {
+    "acceptance_match_validation": {
+      "type": "object",
+      "description": "One accepted coverage's policy-match verifications. Held to the identical standard as a denial's -- an acceptance grounded in a clause that does not exist is no better than a denial grounded that way.",
+      "properties": {
+        "accepted_coverage_id": {
+          "type": "string",
+          "pattern": "^AC_[0-9]+$",
+          "description": "References denial_reason_result.json's accepted_coverages[].accepted_coverage_id."
+        },
+        "policy_match_validations": {
+          "type": "array",
+          "description": "One verification record per policy match owned by this acceptance.",
+          "items": { "$ref": "#/$defs/policy_match_validation" }
+        }
+      },
+      "required": ["accepted_coverage_id", "policy_match_validations"],
+      "additionalProperties": false
+    },
     "validation": {
       "type": "object",
       "properties": {
