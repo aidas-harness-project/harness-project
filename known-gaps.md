@@ -26,7 +26,6 @@ the same pass.
 | 34 | OPEN | Contact-sheet verdicts can self-contradict their evidence |
 | 35 | OPEN | Redundant P8 vision calls on formatting-only variance |
 | 37 | RISK ACCEPTED | P0-8 table-boundary verification on OCR-sourced policy docs |
-| 39 | OPEN (residual) | CASE_907's own contract still needs the AC_1/PM_3 entry written |
 | 43 | OPEN | Policy reference-table reading order |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
@@ -3006,7 +3005,7 @@ the critic's semantic pass remains the ceiling.
 
 ---
 
-## 39. An acceptance-owned `policy_match` is unverifiable by omission -- RESOLVED 2026-08-04 (CASE_907), CASE_907 contract rewrite OPEN
+## 39. An acceptance-owned `policy_match` is unverifiable by omission -- RESOLVED 2026-08-04 (CASE_907)
 
 `denial_reason_result.json` gained `accepted_coverages` on 2026-08-04 so a split
 denial/acceptance outcome could be recorded. An accepted coverage carries
@@ -3075,11 +3074,27 @@ over `outputs/` reports CASE_112 clean (backward compatibility) and CASE_907
 failing on exactly `AC_1`/`PM_3` -- the real unverified match this item was
 opened for. 9 tests in `tests/test_acceptance_match_validation.py`.
 
-Residual: CASE_907's `denial_validation_result.json` still lacks the entry, so
-it now fails the check it previously passed. That is the correct state -- the
-contract was always wrong and is now honest about it -- but the file needs
-rewriting with PM_3's verification (the agent already verified it by hand:
-DOC_004 p38 구내치료비 추가특별약관 제1조) before that stage can re-finalize.
+**Residual CLOSED 2026-08-04.** CASE_907's contract now carries the entry and
+passes. Worth being precise about what this migration was: the verification was
+**already done** during the real run. denial-validation compared DOC_004 p38
+against the processed text, found an exact match, concluded PM_3 was
+`verified` on the same terms as PM_1/PM_2 -- and recorded all of it in
+`warnings`, because the schema had no slot. It also diagnosed the missing slot
+itself, naming both the `^DR_[0-9]+$` pattern and the `owner_of_match`
+construction. So the fix above closed a gap the agent had already written up
+from inside the run, and this step only moved a recorded conclusion from prose
+into the field that now exists.
+
+Two things preserved rather than flattened in the move: the agent's own limit
+(the clause location is verified, but whether this coverage was attached to
+*this* contract is unconfirmed -- no 보험증권 in the pack), carried into
+`verification_explanation` with `review_required: true`; and the original
+warnings, kept as the record of why the contract had that shape, with a note
+appended rather than a rewrite. The quote was independently re-checked against
+`data/processed` before writing (exact substring, not just whitespace-normalized).
+Written through `dao.py write-contract`. Purely additive -- `validations` and
+`source_denial_contract_hash` byte-identical, so nothing downstream was
+invalidated and all 12 stages stayed `passed`. CASE_907: 43 contracts PASS, 0 FAIL.
 
 ---
 
