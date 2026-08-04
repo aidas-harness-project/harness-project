@@ -3976,6 +3976,163 @@ def cmd_check_forbidden_expressions(args):
     return 0 if clean else 1
 
 
+TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
+
+# A numbered item: "1) ...". Deliberately NOT 가./나./다., which head sub-blocks
+# rather than assert anything -- including them made every sub-heading a hit.
+_NUMBERED_ITEM_RE = re.compile(r"^(\s*)[0-9]+\)\s")
+
+# A bare 가./나./다. sub-heading -- a label with no predicate, e.g.
+# "- 나. 특별약관의 적정성 여부". Only when nothing follows the topic: the same
+# marker introducing a full sentence ("가. ... 특별약관은 ... 정한다") IS an
+# assertion and stays in scope. Found on CASE_021 v2, where the bare form was
+# the check's one clear false positive.
+_BARE_SUBHEADING_RE = re.compile(r"^[-*\s]*[가-힣]\.\s*[^:.——]{0,40}$")
+
+# A statutory or policy-clause reference. An untagged sentence naming one
+# asserts that a specific provision exists and says something -- the shape of
+# CASE_907's CF-1 paragraph.
+_STATUTORY_REF_RE = re.compile(r"제\s*\d+\s*조|상법|민법|약관상|판례|특별약관|보통약관")
+
+# Sentences that legitimately owe no citation: internal cross-references, P3
+# hedges routing a question to a human, and explicit statements of
+# indeterminacy. Without these the sibling rule flags the draft's own
+# disciplined hedging, which would train the critic to ignore the check.
+_NO_CITATION_OWED_RE = re.compile(
+    r"참조|요함|따름|미확정|확인\s*불가|검토\s*의견이며|아래|위\s*\d+항|해당\s*없음|미확인")
+
+
+def _analytical_patterns(template_key: str | None) -> list[str] | None:
+    """Heading patterns for the sections that argue toward a conclusion.
+
+    Section structure is the registry's job (open-decisions.md #2), so the
+    scope of this check is declared there rather than hardcoded here -- a
+    template that renames or renumbers its analysis sections updates one file.
+    Returns None when the key is unknown or declares nothing, which the caller
+    reports as a setup failure rather than silently scanning everything.
+    """
+    if not template_key:
+        return None
+    try:
+        registry = json.loads(TEMPLATE_REGISTRY.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    entry = (registry.get("templates") or {}).get(template_key) or {}
+    return entry.get("analytical_heading_patterns") or None
+
+
+def find_untagged_claims(text: str, analytical_patterns: list[str]) -> list[dict]:
+    """Lines in analytical sections that assert something but cite nothing.
+
+    read-evidence-tags compares the tags PRESENT against the sidecar, so a
+    paragraph with zero tags is in neither set and is structurally invisible to
+    it -- making an untagged fabrication *less* detectable than a badly-tagged
+    one (known-gaps item 38). This is the deterministic floor under that layer,
+    the way check-forbidden-expressions floors the semantic P3 pass.
+
+    Two signals, both measured against CASE_907's real drafts:
+
+      statutory_ref_no_citation -- an untagged line naming a statute or policy
+        clause. Precise: 2 hits on v1, one of them exactly the CF-1 paragraph.
+
+      untagged_among_cited_siblings -- an untagged numbered item whose siblings
+        at the same indent are cited (>=2 of them). This catches what the
+        keyword signal cannot: CASE_907's IV-1-나 3) restated the insurer's
+        argument with no citation and contains no statutory word at all, so the
+        cheap keyword rule that known-gaps item 38 proposed would have MISSED
+        it. The sibling asymmetry is the stronger signal -- a list whose other
+        items all cite evidence declares by its own structure what the
+        uncited one owes.
+
+    Record-only, and hits are candidates: a hit means "a human should look",
+    never an automatic failure. Sentences that legitimately owe no citation
+    (cross-references, hedges, statements of absence) are excluded, because a
+    check that flags the draft's own P3 discipline teaches the critic to
+    ignore it.
+    """
+    compiled = [re.compile(p) for p in analytical_patterns]
+    in_scope = False
+    candidates = []          # (line_no, indent, text, tagged)
+    for line_no, line in enumerate(text.split("\n"), start=1):
+        if line.startswith("#"):
+            heading = line.lstrip("#").strip()
+            in_scope = any(rx.search(heading) for rx in compiled)
+            continue
+        if not in_scope or not line.strip():
+            continue
+        # Bold run-in headings ("**1. 손해배상책임**") label a block; they assert
+        # nothing on their own.
+        if line.strip().startswith("**") and line.strip().endswith("**"):
+            continue
+        if _BARE_SUBHEADING_RE.match(line.strip()):
+            continue
+        tagged = bool(TAG_RE.search(line))
+        item = _NUMBERED_ITEM_RE.match(line)
+        candidates.append((line_no, item.group(1) if item else None, line.strip(), tagged))
+
+    findings = []
+    for line_no, _indent, body, tagged in candidates:
+        # The exemptions do NOT apply to this signal. They are line-wide, so a
+        # sentence that both invokes a statute and refers to another section
+        # would be excused by the cross-reference -- which is exactly what
+        # happened to CASE_907's CF-1 line: "상법 제724조 제2항 및 약관상 ...
+        # 직접청구 규정에 따른 ... 위 1항의 ... 따라 달라짐" was suppressed by
+        # `위 1항`, silently dropping the single most important hit. Pointing at
+        # another section does not discharge the duty to cite a provision you
+        # assert the content of.
+        if not tagged and _STATUTORY_REF_RE.search(body):
+            findings.append({"line": line_no, "signal": "statutory_ref_no_citation",
+                             "text": body[:200]})
+
+    # Sibling asymmetry, grouped by indent among numbered items only.
+    groups: dict[str, list[tuple]] = {}
+    for line_no, indent, body, tagged in candidates:
+        if indent is not None:
+            groups.setdefault(indent, []).append((line_no, body, tagged))
+    already = {f["line"] for f in findings}
+    for _indent, group in groups.items():
+        cited = [g for g in group if g[2]]
+        if len(cited) < 2:
+            # One cited sibling is too thin to call a norm for the list.
+            continue
+        for line_no, body, tagged in group:
+            if tagged or line_no in already or _NO_CITATION_OWED_RE.search(body):
+                continue
+            findings.append({"line": line_no, "signal": "untagged_among_cited_siblings",
+                             "text": body[:200]})
+
+    return sorted(findings, key=lambda f: f["line"])
+
+
+def cmd_check_untagged_claims(args):
+    """Deterministic floor for the untagged-claim shape read-evidence-tags
+    cannot see. Record-only -- the critic decides `passed`."""
+    doc_path = Path(args.doc_path)
+    if not doc_path.exists():
+        print(f"NOT_FOUND: {doc_path}")
+        return 1
+    patterns = _analytical_patterns(args.template)
+    if patterns is None:
+        # Never fall back to scanning the whole document: a silent whole-file
+        # scan would flood the caller with headings and facts sections and
+        # read as "the check ran".
+        print(f"NO_ANALYTICAL_SECTIONS: template {args.template!r} declares no "
+              f"analytical_heading_patterns in {TEMPLATE_REGISTRY.name}")
+        return 2
+
+    findings = find_untagged_claims(doc_path.read_text(encoding="utf-8"), patterns)
+    print(json.dumps({
+        "clean": not findings,
+        "template": args.template,
+        "analytical_sections": patterns,
+        "findings": findings,
+        "note": ("candidates, not verdicts -- an untagged line may legitimately owe no citation. "
+                 "Scope is the analytical sections only; this is a floor under the critic's "
+                 "reading, not a replacement for it."),
+    }, ensure_ascii=False))
+    return 0 if not findings else 1
+
+
 def cmd_read_evidence_tags(args):
     doc_path = Path(args.doc_path)
     sidecar_path = doc_path.with_suffix(".evidence.json")
@@ -7894,6 +8051,15 @@ def build_parser():
 
     p = sub.add_parser("read-document-text"); p.add_argument("case_id"); p.add_argument("doc_id")
     p.set_defaults(fn=cmd_read_document_text)
+
+    p = sub.add_parser("check-untagged-claims",
+                       help="Flag analytical-section lines that assert something but carry no "
+                            "[E#] citation -- the shape read-evidence-tags cannot see.")
+    p.add_argument("doc_path")
+    p.add_argument("--template", required=True,
+                   help="Registry key (e.g. 배상책임_후유장해형) whose analytical_heading_patterns "
+                        "scope the scan.")
+    p.set_defaults(fn=cmd_check_untagged_claims)
 
     p = sub.add_parser("search-document-text",
                        help="Whitespace/NFKC-insensitive search over processed text. Required "

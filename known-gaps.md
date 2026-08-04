@@ -2931,6 +2931,44 @@ critic did catch it.
 > check and falls back on a search that under-reports. Both directions argue for
 > the same cheap fix.
 
+**FIXED 2026-08-04** -- `dao.py check-untagged-claims DOC_PATH --template KEY`,
+record-only, mirroring `check-forbidden-expressions`. Scope comes from a new
+`analytical_heading_patterns` in `templates/registry.json` rather than a
+hardcoded section list, so a template that renumbers its analysis sections
+updates one file; an unknown key returns `NO_ANALYTICAL_SECTIONS` rather than
+falling back to a whole-file scan that would read as "the check ran".
+
+**The cheap keyword rule proposed above would have caught only ONE of the two
+instances.** Measured, not assumed: IV-1-나 3) ("시설 이용자에게는 도로 상황에
+알맞은 보행방법을 선택하여...") restates the insurer's argument uncited and
+contains no statutory word at all, so `제N조|상법|민법|약관상` does not match it.
+That is why there are two signals:
+
+  * `statutory_ref_no_citation` -- an untagged line naming a statute or clause;
+  * `untagged_among_cited_siblings` -- an untagged numbered item whose siblings
+    at the same indent are cited (>=2 of them). A list whose other items all
+    cite evidence declares by its own structure what the uncited one owes.
+
+Two real bugs found while measuring against actual drafts, both fixed:
+the exemption list (cross-references, hedges) was applied line-wide, so `위 1항`
+suppressed the CF-1 line itself -- the single most important hit; exemptions now
+never override the statutory signal. And a bare `- 나. 특별약관의 적정성 여부`
+sub-heading was flagged as a claim (CASE_021 v2), while the same marker
+introducing a full sentence legitimately is one.
+
+Measured on every real draft on disk: CASE_907 v1 **3** (both target instances
+among them), v2 **2**, CASE_021 v1 **0**, v2 **3** (2 genuine uncited clause
+assertions + 1 borderline). Low volume, and the v1-to-v2 drop of the two target
+lines is the intended signal. `critic_result` gains an optional
+`untagged_claim_candidate_count` (additive, matching `forbidden_literal_hit_count`
+-- pre-2026-08-04 outputs still validate); `critic.md` must run the tool, record
+the count, and promote only what survives its own reading -- a non-zero count
+with no finding is a valid outcome, skipping the tool is not. 16 tests.
+
+Deliberately NOT done: the tool sees two shapes, not "every sentence that owes
+evidence". Deciding that in general is the hard part this item opened with, and
+the critic's semantic pass remains the ceiling.
+
 ---
 
 ## 39. An acceptance-owned `policy_match` is unverifiable by omission -- OPEN 2026-08-04 (CASE_907)

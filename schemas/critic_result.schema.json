@@ -31,6 +31,11 @@
           "minimum": 0,
           "description": "Count of listed literal forbidden phrases found in the draft by dao.py check-forbidden-expressions. Optional/additive (deliberately NOT in required) -- critic outputs written before 2026-07-18 legitimately omit it. Floor only: the listed literal phrases, not the semantic P3 pass."
         },
+        "untagged_claim_candidate_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of analytical-section lines dao.py check-untagged-claims flagged as asserting something while carrying no [E#] citation. Optional/additive (deliberately NOT in required, matching forbidden_literal_hit_count) -- critic outputs written before 2026-08-04 legitimately omit it. Candidates, not findings: a flagged line may legitimately owe no citation, so record the count and promote to a finding only what survives your reading. A non-zero count with no corresponding finding is a valid outcome; leaving the field absent when the tool ran is not."
+        },
         "findings": {
           "type": "array",
           "items": { "$ref": "#/$defs/finding" }
