@@ -79,25 +79,59 @@
             "object",
             "null"
           ],
-          "description": "Pointer into policy-pipeline's normalized_policy_clause.json. null if no clause could be matched (record why in warnings).",
-          "properties": {
-            "document_id": {
-              "$ref": "common_component_output.schema.json#/$defs/document_id"
+          "description": "The policy clause this coverage rests on, addressed in one of two ways. UID form ({document_id, clause_uid, display_clause_id?}) points into policy-pipeline's normalized_policy_clause_{document_id}.json and is the stronger address: clause_uid is recomputed from source, so a fabricated one is refused. It requires the document to have been normalized. SOURCE form ({document_id, page, quote, display_clause_id?}) addresses the clause by its verbatim location in the processed text, and is the form to use for a text_only_no_normalization document -- normalization is opt-in, so most policy documents have no clause contract. The DAO verifies the source form as strictly as the UID form: the page must exist and the quote must appear verbatim on it. null now means only what it says -- no clause could be matched (record why in warnings) -- and must NOT be used for a clause that was found but seemed unaddressable; that conflation is exactly what the source form removes.",
+          "oneOf": [
+            {
+              "type": "null"
             },
-            "clause_uid": {
-              "type": "string",
-              "pattern": "^PC-[a-f0-9]{16,64}$"
+            {
+              "type": "object",
+              "properties": {
+                "document_id": {
+                  "$ref": "common_component_output.schema.json#/$defs/document_id"
+                },
+                "clause_uid": {
+                  "type": "string",
+                  "pattern": "^PC-[a-f0-9]{16,64}$"
+                },
+                "display_clause_id": {
+                  "type": "string",
+                  "pattern": "^C-[0-9]+$"
+                }
+              },
+              "required": [
+                "document_id",
+                "clause_uid"
+              ],
+              "additionalProperties": false
             },
-            "display_clause_id": {
-              "type": "string",
-              "pattern": "^C-[0-9]+$"
+            {
+              "type": "object",
+              "properties": {
+                "document_id": {
+                  "$ref": "common_component_output.schema.json#/$defs/document_id"
+                },
+                "page": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "quote": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "display_clause_id": {
+                  "type": "string",
+                  "pattern": "^C-[0-9]+$"
+                }
+              },
+              "required": [
+                "document_id",
+                "page",
+                "quote"
+              ],
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "document_id",
-            "clause_uid"
-          ],
-          "additionalProperties": false
+          ]
         },
         "confidence": {
           "$ref": "common_component_output.schema.json#/$defs/confidence"

@@ -96,30 +96,76 @@
             "object",
             "null"
           ],
-          "description": "Pointer into policy-pipeline's normalized_policy_clause.json. null if the requirement couldn't be tied to a specific clause.",
-          "properties": {
-            "document_id": {
-              "$ref": "common_component_output.schema.json#/$defs/document_id"
-            },
-            "clause_uid": {
-              "type": "string",
-              "pattern": "^PC-[a-f0-9]{16,64}$"
-            },
-            "condition_uid": {
-              "type": "string",
-              "pattern": "^CI-[a-f0-9]{16,64}$"
-            },
-            "display_clause_id": {
-              "type": "string",
-              "pattern": "^C-[0-9]+$"
+          "description": "The policy condition this requirement is drawn from, addressed in one of two ways. UID form ({document_id, clause_uid, condition_uid, display_clause_id?}) points into policy-pipeline's normalized_policy_clause_{document_id}.json; both UIDs are recomputed from source, so it is the stronger address and it addresses one CONDITION inside a clause, which is the granularity requirement matching wants. It requires the document to have been normalized. SOURCE form ({document_id, page, quote, display_clause_id?}) addresses the condition by its verbatim location in the processed text, for a text_only_no_normalization document (normalization is opt-in, so most policy documents have no clause contract). The source form is honestly coarser -- a page+quote names the text a requirement rests on, not a pre-parsed condition item -- so quote the specific condition sentence, not the whole clause. The DAO verifies it as strictly: the page must exist and the quote must appear verbatim on it. null means the requirement could not be tied to a specific clause at all, and must NOT be used for a condition that was found but seemed unaddressable.",
+          "allOf": [
+            {
+              "description": "A UID-form reference names one CONDITION, so clause_uid without condition_uid is incomplete rather than a source-form reference. Stated separately from the oneOf below so the error names the missing field instead of only reporting that no branch matched.",
+              "if": {
+                "type": "object",
+                "required": ["clause_uid"]
+              },
+              "then": {
+                "required": ["condition_uid"]
+              }
             }
-          },
-          "required": [
-            "document_id",
-            "clause_uid",
-            "condition_uid"
           ],
-          "additionalProperties": false
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "document_id": {
+                  "$ref": "common_component_output.schema.json#/$defs/document_id"
+                },
+                "clause_uid": {
+                  "type": "string",
+                  "pattern": "^PC-[a-f0-9]{16,64}$"
+                },
+                "condition_uid": {
+                  "type": "string",
+                  "pattern": "^CI-[a-f0-9]{16,64}$"
+                },
+                "display_clause_id": {
+                  "type": "string",
+                  "pattern": "^C-[0-9]+$"
+                }
+              },
+              "required": [
+                "document_id",
+                "clause_uid",
+                "condition_uid"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "document_id": {
+                  "$ref": "common_component_output.schema.json#/$defs/document_id"
+                },
+                "page": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "quote": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "display_clause_id": {
+                  "type": "string",
+                  "pattern": "^C-[0-9]+$"
+                }
+              },
+              "required": [
+                "document_id",
+                "page",
+                "quote"
+              ],
+              "additionalProperties": false
+            }
+          ]
         },
         "status": {
           "enum": [

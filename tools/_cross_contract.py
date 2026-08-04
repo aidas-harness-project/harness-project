@@ -1438,24 +1438,68 @@ def _policy_match_source_errors(label, doc_id, match, redacted_text_for):
         return [f"{label}: {exc}"]
     normalized_pages = {n: _normalize_ws(t) for n, t in pages.items()}
     for ref in refs:
-        page, quote = ref.get("page"), ref.get("quote")
-        if page is None or not quote or not quote.strip():
-            errors.append(
-                f"{label}: policy_clause_evidence_references entry is missing "
-                "page or quote -- a match on a non-normalized document is "
-                "grounded by its location, so both are required")
-            continue
-        if page not in normalized_pages:
-            errors.append(
-                f"{label}: page {page} does not exist in the processed text for "
-                f"{doc_id} (pages present: {sorted(normalized_pages)})")
-            continue
-        if _normalize_ws(quote) not in normalized_pages[page]:
-            errors.append(
-                f"{label}: quote not found on page {page} of {doc_id}'s "
-                "processed text -- the cited quote does not appear verbatim on "
-                f"the page it claims (quote={quote[:60]!r}...)")
+        errors.extend(
+            f"{label}: {error}" for error in
+            _location_errors(doc_id, ref.get("page"), ref.get("quote"),
+                             normalized_pages,
+                             "policy_clause_evidence_references entry"))
     return errors
+
+
+def _location_errors(doc_id, page, quote, normalized_pages, what):
+    """Does this page+quote actually name a place in the processed text?
+
+    The one verification both source-addressed forms rest on -- a
+    `policy_match`'s clause evidence and a `matched_clause_ref`/`clause_ref` in
+    source form. Shared so the two can never drift into checking the same claim
+    to different standards.
+    """
+    if page is None or not quote or not quote.strip():
+        return [f"{what} is missing page or quote -- a reference to a "
+                "non-normalized document is grounded by its location, so both "
+                "are required"]
+    if page not in normalized_pages:
+        return [f"page {page} does not exist in the processed text for "
+                f"{doc_id} (pages present: {sorted(normalized_pages)})"]
+    if _normalize_ws(quote) not in normalized_pages[page]:
+        return [f"quote not found on page {page} of {doc_id}'s processed text "
+                "-- the cited quote does not appear verbatim on the page it "
+                f"claims (quote={quote[:60]!r}...)"]
+    return []
+
+
+def source_addressed_ref_errors(ref, redacted_text_for) -> list[str]:
+    """Verify a source-addressed clause reference against the processed text.
+
+    `matched_clause_ref` (coverage_result) and `clause_ref`
+    (requirement_matching_result) accept two forms: a canonical UID into a
+    normalized clause contract, or -- for a `text_only_no_normalization`
+    document -- a `{document_id, page, quote}` location. The UID form is
+    verified by recomputing UIDs from source; this is the source form's
+    equivalent, and it is deliberately the same check
+    `_policy_match_source_errors` applies to a denial policy match.
+
+    Fails closed: no reader and no processed text both mean nothing can be
+    verified, which for a reference whose page+quote IS its address is the
+    unresolvable state the fail-safe rule refuses.
+    """
+    doc_id = (ref or {}).get("document_id")
+    if redacted_text_for is None:
+        return ["no processed-text reader was supplied, so this "
+                "source-addressed reference cannot be verified against "
+                "anything"]
+    redacted_text = redacted_text_for(doc_id)
+    if redacted_text is None:
+        return [f"no processed/redacted text found for {doc_id} -- the policy "
+                "document this reference cites has not been processed, so no "
+                "source location can be verified"]
+    try:
+        pages = split_pages(redacted_text)
+    except SourceUnavailable as exc:
+        return [str(exc)]
+    normalized_pages = {n: _normalize_ws(t) for n, t in pages.items()}
+    return _location_errors(doc_id, ref.get("page"), ref.get("quote"),
+                            normalized_pages, "the reference")
 
 
 def check_policy_matches(data: dict, case_dir: Path,

@@ -1475,14 +1475,20 @@ def _parent_coverage_current_errors(case_id: str, doc_id: str) -> list[str]:
 def _uid_addressed_ref(ref: dict) -> bool:
     """Does this reference address a clause by canonical UID?
 
-    The two reference shapes have different upstream requirements.
-    `matched_clause_ref`/`clause_ref` carry a `clause_uid` (schema-required),
-    which exists ONLY inside a normalized clause contract -- so those need one.
-    A `denial_reason_result` `policy_match` carries no `clause_uid` at all: it
-    addresses the clause by `document_id` + `page` + verbatim `quote` in its
-    `policy_clause_evidence_references`, verified against the processed source.
-    Treating both shapes alike is what made a citation of a non-normalized
-    policy document impossible.
+    The two addressing forms have different upstream requirements, and which
+    one a reference uses is decided by whether it actually carries a
+    `clause_uid` -- not by which contract it appears in.
+
+    UID form requires a normalized clause contract, because that is the only
+    place a `PC-<hex>` exists. Source form addresses the clause by
+    `document_id` + `page` + verbatim `quote` and needs no contract; it is
+    verified against the processed text instead. `matched_clause_ref` and
+    `clause_ref` accept either (schema `oneOf`); a `denial_reason_result`
+    `policy_match` is always source form -- it has no `clause_uid` field at
+    all and grounds itself in `policy_clause_evidence_references`.
+
+    Treating every reference as UID form is what made citing a
+    `text_only_no_normalization` policy document impossible.
     """
     return bool((ref or {}).get("clause_uid"))
 
@@ -1541,7 +1547,14 @@ def _downstream_policy_ref_errors(
     checked_docs = {}
     for loc, ref in refs:
         doc_id = ref.get("document_id")
-        if doc_id not in checked_docs:
+        # Keyed by (document, addressing form), not by document alone. The
+        # per-document work below is shared, but part of its verdict depends on
+        # which form the reference uses -- so caching on the document alone let
+        # one UID-form reference's "normalized contract is missing" attach
+        # itself to every source-form reference on the same document, failing
+        # references that were perfectly well grounded.
+        cache_key = (doc_id, _uid_addressed_ref(ref))
+        if cache_key not in checked_docs:
             normalized = read_contract_data(
                 case_id, f"normalized_policy_clause_{doc_id}.json")
             audit = read_contract_data(
@@ -1559,6 +1572,9 @@ def _downstream_policy_ref_errors(
             # opt-in exists to lift.
             if _uid_addressed_ref(ref):
                 if normalized is None:
+                    # One cause, one error. Reporting a missing audit too
+                    # would name a consequence of the same absence and bury
+                    # the actionable line under a second, undiagnostic one.
                     doc_errors.append(
                         "normalized policy contract is missing -- this "
                         "reference addresses a clause by canonical UID, which "
@@ -1567,7 +1583,7 @@ def _downstream_policy_ref_errors(
                         "promote this document with "
                         "`dao.py promote-policy-document` and re-run the "
                         "policy stage")
-                if audit is None:
+                elif audit is None:
                     doc_errors.append("policy audit is missing")
             elif normalized is not None and audit is None:
                 # It IS normalized, so the audit still governs those bytes.
@@ -1591,15 +1607,33 @@ def _downstream_policy_ref_errors(
             # source here, so a fabricated PC/CI written identically into both
             # the clause contract and the artifact citing it is refused rather
             # than mutually confirmed (P0-2).
-            doc_errors.extend(
-                f"canonical UID: {error}"
-                for error in _canonical_uid_errors(
-                    case_id, f"normalized_policy_clause_{doc_id}.json",
-                    _cross_contract.NORMALIZED_POLICY_CLAUSE_SCHEMA,
-                    normalized or {}))
-            checked_docs[doc_id] = (normalized, doc_errors)
-        normalized, doc_errors = checked_docs[doc_id]
+            #
+            # Only meaningful when a normalized contract exists: this recomputes
+            # the UIDs *in that contract*. With no contract there are no UIDs to
+            # recompute, and running it anyway demanded a boundary inventory
+            # from a document that legitimately owes neither -- failing a
+            # source-addressed reference for missing an artifact it never uses.
+            if normalized is not None:
+                doc_errors.extend(
+                    f"canonical UID: {error}"
+                    for error in _canonical_uid_errors(
+                        case_id, f"normalized_policy_clause_{doc_id}.json",
+                        _cross_contract.NORMALIZED_POLICY_CLAUSE_SCHEMA,
+                        normalized))
+            checked_docs[cache_key] = (normalized, doc_errors)
+        normalized, doc_errors = checked_docs[cache_key]
         errors.extend(f"{loc}: {error}" for error in doc_errors)
+        if not _uid_addressed_ref(ref):
+            # Source form: the page+quote IS the address, so it gets verified
+            # against the processed text here. Without this branch a
+            # source-form reference would fall through the `normalized is
+            # None` guard below and be persisted unverified -- the exact
+            # unresolvable-reference state the UID path refuses.
+            errors.extend(
+                f"{loc}: {error}" for error in
+                _cross_contract.source_addressed_ref_errors(
+                    ref, lambda d: _redacted_text_for_doc(case_id, d)))
+            continue
         if normalized is None:
             continue
         clause = next(
