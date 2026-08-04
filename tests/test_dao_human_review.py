@@ -207,3 +207,109 @@ def test_full_handoff_sequence(isolated_dao, make_args):
     assert dao.cmd_read_ground_truth(make_args(caller_stage="evaluation", version="v1")) == 0
     state = dao.load_run_state("CASE_009")
     assert state["human_input_status"][0]["status"] == "received"
+
+
+# ------------------------------- read-ground-truth content path (D1's read) --
+# The 2026-07-22 fleet review added a Read deny-glob over data/ground_truth,
+# correctly stopping a NON-evaluation agent from opening the answer key. But it
+# gave the evaluation stage no replacement, and read-ground-truth returned only
+# a directory path -- so the one stage D1 exempts was authorized-but-unable.
+# CASE_907 hit it live. These pin the content path AND that adding it did not
+# weaken the gate: authorization is still checked before any byte is read.
+
+def _open_gate(isolated_dao, make_args, version="v1"):
+    _write_expert_review(isolated_dao, version)
+    dao.cmd_mark_human_review_complete(make_args(version=version, reviewer="Dev"))
+
+
+def _gt_file(isolated_dao, name="GT_001.txt", text="사정 결론: 지급"):
+    d = isolated_dao / "data" / "ground_truth" / "CASE_009"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_read_ground_truth_file_returns_content(isolated_dao, make_args, capsys):
+    _open_gate(isolated_dao, make_args)
+    _gt_file(isolated_dao, text="사정 결론: 지급")
+
+    rc = dao.cmd_read_ground_truth(
+        make_args(caller_stage="evaluation", version="v1", file="GT_001", list=False))
+    assert rc == 0
+    assert "사정 결론: 지급" in capsys.readouterr().out
+
+
+def test_read_ground_truth_list_enumerates_ids(isolated_dao, make_args, capsys):
+    _open_gate(isolated_dao, make_args)
+    _gt_file(isolated_dao, "GT_001.txt")
+    _gt_file(isolated_dao, "GT_002.txt")
+
+    rc = dao.cmd_read_ground_truth(
+        make_args(caller_stage="evaluation", version="v1", file=None, list=True))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "GT_001" in out and "GT_002" in out
+
+
+def test_content_read_still_denied_for_non_evaluation_caller(isolated_dao, make_args, capsys):
+    """The content path must not become a side door around the caller check."""
+    _open_gate(isolated_dao, make_args)
+    _gt_file(isolated_dao, text="답안지 내용")
+
+    rc = dao.cmd_read_ground_truth(
+        make_args(caller_stage="critic", version="v1", file="GT_001", list=False))
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "DENIED" in out
+    assert "답안지 내용" not in out, "content leaked to an unauthorized caller"
+
+
+def test_content_read_still_denied_before_review_complete(isolated_dao, make_args, capsys):
+    """No flag -> no bytes, even though the file exists and the caller is right."""
+    _gt_file(isolated_dao, text="답안지 내용")
+
+    rc = dao.cmd_read_ground_truth(
+        make_args(caller_stage="evaluation", version="v1", file="GT_001", list=False))
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "DENIED" in out
+    assert "답안지 내용" not in out
+
+
+def test_content_read_refuses_path_traversal(isolated_dao, make_args):
+    """--file is a bare id; a traversal must not escape the ground-truth dir."""
+    _open_gate(isolated_dao, make_args)
+    _gt_file(isolated_dao)
+    secret = isolated_dao / "data" / "raw" / "CASE_009"
+    secret.mkdir(parents=True, exist_ok=True)
+    (secret / "DOC_001.txt").write_text("raw source", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        dao.cmd_read_ground_truth(make_args(
+            caller_stage="evaluation", version="v1",
+            file="../../raw/CASE_009/DOC_001", list=False))
+
+
+def test_bare_call_still_works_without_a_ground_truth_dir(isolated_dao, make_args, capsys):
+    """The bare form answers 'am I authorized, and where' -- a real answer even
+    for a case whose ground truth has not been placed yet. Requiring the dir
+    here would conflate 'not authorized' with 'no files', which broke two
+    pre-existing tests when this content path was first added."""
+    _open_gate(isolated_dao, make_args)
+
+    rc = dao.cmd_read_ground_truth(
+        make_args(caller_stage="evaluation", version="v1", file=None, list=False))
+    assert rc == 0
+    assert "ground_truth" in capsys.readouterr().out
+
+
+def test_unknown_file_id_reports_known_ids(isolated_dao, make_args, capsys):
+    _open_gate(isolated_dao, make_args)
+    _gt_file(isolated_dao, "GT_001.txt")
+
+    rc = dao.cmd_read_ground_truth(
+        make_args(caller_stage="evaluation", version="v1", file="GT_999", list=False))
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "NOT_FOUND" in out and "GT_001" in out

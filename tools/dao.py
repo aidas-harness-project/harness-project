@@ -37,6 +37,7 @@ Subcommands:
     read-document-text CASE_ID DOC_ID
     read-page-text CASE_ID DOC_ID PAGE --caller-stage STAGE
     read-ground-truth CASE_ID --caller-stage STAGE --version {v1|v2}
+        [--file GT_ID | --list]
     read-contract CASE_ID FILENAME
     check-segmentation-ready CASE_ID [--doc-id DOC_ID]
     set-segmentation-status CASE_ID DOC_ID {required|not_required}
@@ -578,7 +579,66 @@ def cmd_read_ground_truth(args):
               f"see dao.py mark-human-review-complete.")
         return 1
     gt_dir = DATA / "ground_truth" / args.case_id
-    print(str(gt_dir))
+
+    # Without --file/--list this prints the directory path and stops, which is
+    # all it ever did. That was a real hole rather than a design: the 2026-07-22
+    # fleet review added a Read deny-glob over data/ground_truth (correctly --
+    # it stops a NON-evaluation agent reading the answer key), but gave the
+    # evaluation stage no sanctioned replacement. So the one stage D1 exempts
+    # was left authorized-but-unable: the gate says yes and hands back a path
+    # it is separately forbidden to open. CASE_021 evaluated before that glob
+    # landed; CASE_907 is the first case to hit it. --file/--list close it by
+    # making this command carry CONTENT, so the authorization and the read are
+    # the same logged event instead of two mechanisms that disagree.
+    wants_content = getattr(args, "list", False) or getattr(args, "file", None)
+    if wants_content and not gt_dir.is_dir():
+        # Only the content forms need the directory to exist. The bare form
+        # answers "am I authorized, and where", which is a real answer even for
+        # a case whose ground truth has not been placed yet -- callers depend on
+        # the gate's verdict being about authorization, not about file presence.
+        print(f"NOT_FOUND: no ground-truth directory for {args.case_id} at {gt_dir}")
+        return 1
+
+    files = sorted(p for p in gt_dir.iterdir() if p.is_file()) if gt_dir.is_dir() else []
+    if getattr(args, "list", False):
+        for p in files:
+            print(f"{p.stem}\t{p.name}\t{p.stat().st_size}")
+        return 0
+
+    target = getattr(args, "file", None)
+    if not target:
+        print(str(gt_dir))
+        return 0
+
+    _require_safe_id("ground-truth file id", target)
+    matches = [p for p in files if p.stem == target]
+    if not matches:
+        print(f"NOT_FOUND: no ground-truth file with id {target!r} in {gt_dir}. "
+              f"Known ids: {[p.stem for p in files]}")
+        return 1
+    path = matches[0]
+
+    if path.suffix.lower() == ".pdf":
+        from ocr_extract import pdf_embedded_page_texts
+        pages = pdf_embedded_page_texts(path)
+        if pages is None:
+            print(f"NO_TEXT_LAYER: {path.name} has no whole-document embedded text layer. "
+                  f"Ground truth is read-only reference material and is deliberately NOT "
+                  f"put through the OCR pipeline (that would write it into data/processed, "
+                  f"where non-evaluation stages can read it). Transcribe it out-of-band and "
+                  f"record how, or evaluate only what other ground-truth files support.")
+            return 1
+        for i, text in enumerate(pages, start=1):
+            print(f"<<<PAGE page={i}>>>")
+            print(text)
+        return 0
+
+    from ocr_extract import decode_text_file
+    text, _encoding = decode_text_file(path)  # returns (text, encoding_used)
+    if not (text or "").strip():
+        print(f"EMPTY: {path.name} decoded to no content")
+        return 1
+    print(text)
     return 0
 
 
@@ -7628,6 +7688,12 @@ def build_parser():
 
     p = sub.add_parser("read-ground-truth"); p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)
     p.add_argument("--version", required=True, choices=["v1", "v2"])
+    p.add_argument("--file", help="Ground-truth file id (stem, e.g. GT_001). Prints its "
+                                  "text content -- the sanctioned read path. Without this "
+                                  "the command prints only the directory path, which no "
+                                  "agent is permitted to open directly.")
+    p.add_argument("--list", action="store_true",
+                   help="List available ground-truth file ids, names and sizes.")
     p.set_defaults(fn=cmd_read_ground_truth)
 
     p = sub.add_parser("read-contract"); p.add_argument("case_id"); p.add_argument("filename")
