@@ -2911,3 +2911,55 @@ The first is the cheapest and would have caught CF-1 (`상법 제724조` + `약�
 zero tags). Recorded rather than built: one real instance is thin evidence for
 a rule that could produce false positives across every future draft, and the
 critic did catch it.
+
+---
+
+## 39. An acceptance-owned `policy_match` is unverifiable by omission -- OPEN 2026-08-04 (CASE_907)
+
+`denial_reason_result.json` gained `accepted_coverages` on 2026-08-04 so a split
+denial/acceptance outcome could be recorded. An accepted coverage carries
+`policy_matches` held to the *identical* verification standard as a denial
+reason's -- that was deliberate, and the write path enforces it.
+
+The Phase 2 verification layer never got the same treatment.
+`_cross_contract.check_denial_validation_result` builds its match universe from
+`denial_reasons` alone:
+
+```python
+reasons = reasons_doc.get("denial_reasons") or []
+matches_by_reason = {r.get("reason_id"): [...] for r in reasons}
+owner_of_match = {mid: rid for rid, mids in matches_by_reason.items() for mid in mids}
+```
+
+`accepted_coverages` never enters, so an acceptance-owned match is in no
+completeness set. Both branches fail:
+
+  * recording it under a denial reason is **rejected** --
+    `DR_1: policy_match_id 'PM_3' does not exist in denial_reason_result.json
+    (all known: ['PM_1', 'PM_2'])`, because `validations[].reason_id` is pinned
+    to `^DR_[0-9]+$` and no acceptance id fits;
+  * omitting it produces **no error at all**.
+
+So the contract reports full success with PM_3 never checked. This is worse than
+a missing field: the omission check exists precisely so that "an unverified match
+must not be presentable as checked," and here it certifies exactly that.
+
+The two layers already disagree with each other. `upstream_hash` *does* fold
+`accepted_coverages` in, including their `policy_match_ids` -- so staleness
+detection treats acceptance matches as load-bearing while verification treats
+them as nonexistent.
+
+Found by the `denial-validation` agent on CASE_907, which probed the failure
+directly rather than assuming it, verified PM_3 by hand anyway (DOC_004 p38
+구내치료비 추가특별약관 제1조, exact match), and recorded the result in `warnings`
+flagged as unrepresentable. Independently confirmed here at `_cross_contract.py`
+line 15/30.
+
+**Not fixed.** The shape is now on its fourth appearance -- `denial_reason_result`
+(fixed), `screening_report` (fixed), `templates/draft-report.md` 변형 A (open),
+and now the verification layer -- which is itself the finding: adding an axis to a
+contract does not propagate to the contracts that consume it, and nothing detects
+the omission. A fix needs a validation slot addressable by `accepted_coverage_id`
+(not `reason_id`), plus the completeness check widened to both lists. Deferred
+because it changes the Phase 2 contract shape mid-run; CASE_907's remaining
+stages proceed with PM_3 verified-in-`warnings`.
