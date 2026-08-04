@@ -45,6 +45,8 @@ Subcommands:
         [--run-id RUN_ID] [--stage STAGE]
     patch-manifest-document CASE_ID DOC_ID --fields-file PATH --held-by NAME --run-id RUN_ID
         [--stage STAGE]
+    promote-policy-document CASE_ID DOC_ID --policy-processing-role ROLE
+        --disputed-by TEXT --held-by NAME --run-id RUN_ID
     write-page-text CASE_ID DOC_ID PAGE --text-file PATH --held-by NAME --run-id RUN_ID
     write-redacted-text CASE_ID DOC_ID --text-file PATH --held-by NAME --run-id RUN_ID
     write-text CASE_ID FILENAME --text-file PATH --held-by NAME --run-id RUN_ID
@@ -1470,6 +1472,21 @@ def _parent_coverage_current_errors(case_id: str, doc_id: str) -> list[str]:
     return errors
 
 
+def _uid_addressed_ref(ref: dict) -> bool:
+    """Does this reference address a clause by canonical UID?
+
+    The two reference shapes have different upstream requirements.
+    `matched_clause_ref`/`clause_ref` carry a `clause_uid` (schema-required),
+    which exists ONLY inside a normalized clause contract -- so those need one.
+    A `denial_reason_result` `policy_match` carries no `clause_uid` at all: it
+    addresses the clause by `document_id` + `page` + verbatim `quote` in its
+    `policy_clause_evidence_references`, verified against the processed source.
+    Treating both shapes alike is what made a citation of a non-normalized
+    policy document impossible.
+    """
+    return bool((ref or {}).get("clause_uid"))
+
+
 def _downstream_policy_ref_errors(
         case_id: str, schema_name: str, data: dict) -> list[str]:
     """Resolve downstream policy UIDs only against current, clear audits."""
@@ -1530,9 +1547,30 @@ def _downstream_policy_ref_errors(
             audit = read_contract_data(
                 case_id, f"policy_audit_result_{doc_id}.json")
             doc_errors = []
-            if normalized is None:
-                doc_errors.append("normalized policy contract is missing")
-            if audit is None:
+            # A reference that addresses a clause BY canonical UID can only be
+            # resolved against a normalized contract -- there is nowhere else
+            # the UID exists, so a missing contract is a genuine unresolvable
+            # reference. A reference that addresses a clause by
+            # document/page/verbatim quote does not need one: normalization is
+            # opt-in, and the quote is verified against the processed source by
+            # `strict_evidence_reference` at this same write. Demanding a
+            # contract for THAT shape made normalization mandatory for anyone
+            # who merely cites a policy document, which is the obligation the
+            # opt-in exists to lift.
+            if _uid_addressed_ref(ref):
+                if normalized is None:
+                    doc_errors.append(
+                        "normalized policy contract is missing -- this "
+                        "reference addresses a clause by canonical UID, which "
+                        "only a normalized contract defines. Either cite the "
+                        "clause by document_id + page + verbatim quote, or "
+                        "promote this document with "
+                        "`dao.py promote-policy-document` and re-run the "
+                        "policy stage")
+                if audit is None:
+                    doc_errors.append("policy audit is missing")
+            elif normalized is not None and audit is None:
+                # It IS normalized, so the audit still governs those bytes.
                 doc_errors.append("policy audit is missing")
             if normalized is not None and audit is not None:
                 hashes, current_normalized, inventory, reference = \
@@ -2509,7 +2547,8 @@ def cmd_write_contract(args):
         # sibling-comparing field rules. Same fail/don't-persist contract as
         # schema validation above -- see tools/_cross_contract.py.
         cross_errors = _cross_contract.check(
-            args.filename, data, case_dir(args.case_id))
+            args.filename, data, case_dir(args.case_id),
+            redacted_text_for=lambda d: _redacted_text_for_doc(args.case_id, d))
         if cross_errors:
             print(f"FAIL: cross-contract validation errors for {target}:")
             for e in cross_errors:
@@ -2686,6 +2725,112 @@ def cmd_patch_manifest_document(args):
     fields = json.loads(Path(args.fields_file).read_text(encoding="utf-8"))
     ok, message = patch_manifest_document(args.case_id, args.doc_id, fields, args.held_by, args.run_id,
                                            stage=args.stage, purpose=args.purpose)
+    print(message)
+    return 0 if ok else 1
+
+
+def promote_policy_document(case_id: str, document_id: str, policy_processing_role: str,
+                            disputed_by: str, held_by: str, run_id: str,
+                            purpose: str | None = None):
+    """Move ONE policy document from `text_only_no_normalization` to
+    `automated_text_pipeline` -- the opt-IN that makes it owe a normalized
+    clause contract before `policy_clause_processing` may finalize.
+
+    This is the missing half of making normalization opt-in. Defaulting an
+    `insurance_policy` to `text_only_no_normalization` (run_checkpoint1's
+    `default_disposition`) is only sound if something can later say "this
+    specific document IS disputed, normalize it". Without that, the default
+    is not an opt-in, it is a permanent exemption, and the policy gate clears
+    every case at 0/0 for the uninteresting reason that nothing ever asks.
+
+    Who asks: `denial-response`, which is the stage that learns which clauses
+    a case actually turns on. Its `policy_match.document_id` names them. So
+    `disputed_by` records the denial reason (or policy_match) that motivated
+    the promotion -- a promotion with no stated dispute is how the opt-in
+    would quietly drift back into "normalize everything".
+
+    `policy_processing_role` is REQUIRED here, not optional. Promotion without
+    it produces a manifest that `check_policy_processing_roles` rejects at
+    finalize time -- technically safe (it blocks) but the failure surfaces one
+    stage later than the mistake, against a document whose role the promoting
+    caller knew and the finalizing caller does not. Demanding it here fails
+    at the point of the decision.
+
+    Deliberately NOT idempotent-silent on a document already promoted: that
+    means two different reasons dispute the same document, which is ordinary,
+    but it must not silently overwrite the first `disputed_by` record. The
+    existing note is appended to, never replaced.
+
+    Returns (ok, message). The cascade is inherited, not reimplemented:
+    `downstream_disposition` is already a `_PROVENANCE_MANIFEST_FIELDS` entry,
+    so `patch_manifest_document` invalidates `document_processing`'s dependents
+    -- which includes `policy_clause_processing`. That matters because
+    `denial_response` is a SIBLING of the policy stage in the dependency graph
+    (both depend only on `document_processing`), so a promotion can legitimately
+    arrive AFTER the policy stage already recorded `passed` at 0/0. Without the
+    cascade that stale pass would stand over a document that now owes a
+    contract; with it, the stage is demoted and must re-finalize.
+    """
+    if policy_processing_role not in policy_roles.POLICY_ROLES:
+        return False, (
+            f"FAIL: policy_processing_role must be one of "
+            f"{sorted(policy_roles.POLICY_ROLES)}, got {policy_processing_role!r}")
+    if not (disputed_by or "").strip():
+        return False, (
+            "FAIL: --disputed-by is required -- promotion is the claim that "
+            "this case actually disputes this document, and an unexplained "
+            "promotion turns the opt-in back into normalize-everything")
+
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        return False, f"FAIL: no document_manifest.json for {case_id}"
+    doc = next((d for d in manifest.get("documents", [])
+                if d.get("document_id") == document_id), None)
+    if doc is None:
+        return False, f"FAIL: document_id {document_id} not found in document_manifest.json"
+    if doc.get("document_type") != "insurance_policy":
+        return False, (
+            f"FAIL: {document_id} is document_type "
+            f"{doc.get('document_type')!r}, not 'insurance_policy' -- only a "
+            "policy document owes a normalized clause contract")
+    current = doc.get("downstream_disposition")
+    if current not in ("text_only_no_normalization", "automated_text_pipeline"):
+        return False, (
+            f"FAIL: {document_id} is {current!r}; only a "
+            "'text_only_no_normalization' document may be promoted. "
+            "expert_review_only and superseded_bundle are excluded from text "
+            "processing entirely -- promoting one would claim a normalized "
+            "contract can be built from text the pipeline never extracted")
+
+    note = f"disputed by {disputed_by.strip()}"
+    existing = (doc.get("normalization_dispute_note") or "").strip()
+    merged = f"{existing}; {note}" if existing and note not in existing else (existing or note)
+    fields = {
+        "downstream_disposition": "automated_text_pipeline",
+        "policy_processing_role": policy_processing_role,
+        "normalization_dispute_note": merged,
+    }
+    ok, message = patch_manifest_document(
+        case_id, document_id, fields, held_by, run_id,
+        stage="document_processing",
+        purpose=purpose or f"promote {document_id} to normalization ({disputed_by.strip()})")
+    if not ok:
+        return ok, message
+    if current == "automated_text_pipeline":
+        return True, (f"{message}\nNOTE: {document_id} was already promoted; "
+                      f"recorded the additional dispute ({disputed_by.strip()}) "
+                      "and left the existing record intact.")
+    return True, (
+        f"{message}\n{document_id}: text_only_no_normalization -> "
+        f"automated_text_pipeline (role={policy_processing_role}). It now owes "
+        "a normalized clause contract; policy_clause_processing must "
+        "re-finalize.")
+
+
+def cmd_promote_policy_document(args):
+    ok, message = promote_policy_document(
+        args.case_id, args.doc_id, args.policy_processing_role,
+        args.disputed_by, args.held_by, args.run_id, purpose=args.purpose)
     print(message)
     return 0 if ok else 1
 
@@ -7227,18 +7372,60 @@ def cmd_policy_snapshot(args):
     convenience, never the authority.
     """
     doc_ids = sorted(set(args.document_id))
-    missing = [
+    manifest = read_contract_data(args.case_id, "document_manifest.json") or {}
+    entries = {
+        d.get("document_id"): d for d in manifest.get("documents", [])}
+
+    # What a snapshot requires is PROCESSED TEXT, not a normalized contract.
+    # It used to require the contract, which silently made normalization
+    # mandatory for anyone who merely CITES a policy document: with
+    # normalization opt-IN (`text_only_no_normalization`), that gate blocked
+    # claim-analysis and denial-response from citing a perfectly well-processed
+    # policy document, for want of an artifact nothing downstream reads. The
+    # digest itself never needed it -- `_policy_audit_context` hashes a missing
+    # normalized contract as JSON null, which is a real, distinguishable state
+    # ("no contract exists") and not a hole. What genuinely cannot be cited is
+    # a document whose text the pipeline never extracted.
+    blocked = []
+    for doc_id in doc_ids:
+        entry = entries.get(doc_id)
+        if entry is None:
+            blocked.append(f"{doc_id}: not in document_manifest.json")
+            continue
+        disposition = entry.get("downstream_disposition")
+        if disposition not in policy_completeness._TEXT_PROCESSED:
+            blocked.append(
+                f"{doc_id}: downstream_disposition is {disposition!r} -- only a "
+                "text-processed document may be cited; expert_review_only and "
+                "superseded_bundle are excluded from text extraction entirely")
+    if blocked:
+        print("BLOCKED: a snapshot may only be issued for documents whose text "
+              "the pipeline actually processed:\n"
+              + "\n".join(f"  - {reason}" for reason in blocked))
+        return 1
+
+    snapshot = policy_snapshot_for(args.case_id, doc_ids)
+    print(json.dumps(snapshot, ensure_ascii=False, indent=2))
+    # Advisory, on stderr so it never contaminates the JSON an agent pastes in
+    # verbatim. Citing a non-normalized document is a supported path, not a
+    # warning -- but which documents were normalized changes what the citation
+    # can be addressed BY (canonical clause_uid vs document/page/quote), and
+    # that is worth stating at the point of use.
+    plain = [
         doc_id for doc_id in doc_ids
         if read_contract_data(
             args.case_id, f"normalized_policy_clause_{doc_id}.json") is None
     ]
-    if missing:
-        print(f"BLOCKED: no normalized policy contract for {', '.join(missing)} -- "
-              "a snapshot may only be issued for documents the policy layer has "
-              "actually produced")
-        return 1
-    print(json.dumps(policy_snapshot_for(args.case_id, doc_ids),
-                     ensure_ascii=False, indent=2))
+    if plain:
+        print(
+            f"NOTE: {', '.join(plain)} has no normalized clause contract "
+            "(normalization is opt-in). The snapshot is valid and records that "
+            "absence as a real state. Address clauses in these documents by "
+            "document_id + page + verbatim quote, resolved against "
+            "policy_boundary_inventory_{DOC}.json and the processed text -- "
+            "canonical clause_uid exists only for normalized documents. If this "
+            "case actually disputes one, promote it with "
+            "`dao.py promote-policy-document`.", file=sys.stderr)
     return 0
 
 
@@ -7412,6 +7599,17 @@ def build_parser():
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.add_argument("--purpose"); p.add_argument("--stage")
     p.set_defaults(fn=cmd_patch_manifest_document)
+
+    p = sub.add_parser("promote-policy-document")
+    p.add_argument("case_id"); p.add_argument("doc_id")
+    p.add_argument("--policy-processing-role", required=True,
+                   choices=list(policy_roles.POLICY_ROLES),
+                   help="what kind of policy processing this document owes once promoted")
+    p.add_argument("--disputed-by", required=True,
+                   help="the denial reason / policy_match that disputes this document (e.g. R04 / PM-2)")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.add_argument("--purpose")
+    p.set_defaults(fn=cmd_promote_policy_document)
 
     p = sub.add_parser("replace-manifest-documents")
     p.add_argument("case_id"); p.add_argument("bundle_id")

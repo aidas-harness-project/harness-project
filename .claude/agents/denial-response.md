@@ -22,19 +22,41 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. P
 4. Classify each reason against R01-R21/R99 using `common_component_output.schema.json`'s `taxonomy_code.x-codebook`, including `candidate_codes` for Top-3 evaluation — schema-required and non-empty, ranked best-first, with `candidate_codes[0].taxonomy_code` equal to the assigned `taxonomy_code`, distinct codes, and non-increasing confidence (the DAO rejects the write otherwise). `taxonomy_label`, if you set it, must match the codebook's `label_ko` for that code. Enforce the reviewed decision-type mapping: reduction-only and denial-only codes cannot cross types; R15/R99 may use either; R12/R14 remain unclassified and always set `review_required: true`, routed to `손해사정사`. Use the most specific supported code and use R99 only when no specific code fits.
 5. Extract the insurer's grounds into all three required arrays: `contractual_basis`, `medical_or_factual_basis`, and `calculation_basis`. Each basis item has its own `evidence_references`. If the response states no ground of a category, write an empty array. Never invent a missing ground. Keep `insurer_stated` and `agent_inferred` items separate; every inferred item requires expert review.
 6. Record the explicit amount object (`claimed_amount`, `payable_amount`, `denied_amount`, `reduction_amount`, `reduction_rate`). Use `null` whenever the insurer response does not state enough information; never calculate or infer a missing amount here.
-7. Match each reason to every relevant normalized policy clause (`normalized_policy_clause_{document_id}.json`, one file per policy document). A match is valid only if its `document_id`, canonical `clause_uid` (and `condition_uid` when condition-specific), and clause source location exist in the normalized policy output you read via the DAO immediately before writing. `display_clause_id` is optional display metadata, never a join key. The referenced normalized bytes must have a current clear `policy_audit_result_{document_id}.json`; stale or open-finding audits block the write. Every match gets a stable `policy_match_id` and:
+7. Match each reason to every relevant policy clause. **Where you read the clause from depends on whether that document was normalized, and both paths are normal** — normalization is opt-in, so most policy documents will not have a clause contract:
+
+   | | normalized (`automated_text_pipeline`) | not normalized (`text_only_no_normalization`) |
+   |---|---|---|
+   | clause text | `normalized_policy_clause_{document_id}.json` | `data/processed/{CASE}/{DOC}/redacted_text.md` via `read-document-text` |
+   | clause boundaries/location | same contract | **`policy_boundary_inventory_{document_id}.json`** |
+   | how you address a clause | canonical `clause_uid` (+ `condition_uid`) | `document_id` + `page` + verbatim `quote` |
+   | audit precondition | current clear `policy_audit_result_{document_id}.json` | not applicable (no normalized bytes to audit) |
+
+   For a **normalized** document a match is valid only if its `document_id`, canonical `clause_uid` (and `condition_uid` when condition-specific), and clause source location exist in the normalized policy output you read via the DAO immediately before writing, and the referenced normalized bytes have a current clear audit; stale or open-finding audits block the write. For a **non-normalized** document, the match rests on `policy_clause_evidence_references` alone — `document_id`, `page` and an exactly-verbatim `quote`, checked against the processed text. That is not a weaker link: `strict_evidence_reference` verifies the quote against the real source byte-for-byte at write time, which is the same check that makes a normalized citation trustworthy. What you lose without normalization is the stable join key, not the verification. `display_clause_id` is optional display metadata in both cases, never a join key. Every match gets a stable `policy_match_id` and:
    - `match_source: insurer_cited` when the insurer itself identifies the clause, with both `insurer_citation_evidence_references` and `policy_clause_evidence_references` populated.
    - `match_source: agent_inferred` when you independently find a potentially relevant clause, with an empty insurer-citation array, populated clause evidence, and `review_required: true` routed to `손해사정사`.
    - no match at all when the link is unsupported. An empty `policy_matches` array plus a specific warning is safer than a plausible but wrong link.
 
-**Expected future role: naming which policy documents get normalized.** Policy
-documents are classified into `text_only_no_normalization` and owe no clause
-contract unless promoted (see `policy-pipeline`). You are the stage that reads
-the insurer's own citations, so you are the natural place to identify which
-policy document a case actually turns on and promote it. That wiring does not
-exist yet — today promotion is an operator decision — so for now match against
-whatever normalized contracts exist, and cite the processed source text
-directly when none does. Do not promote a document yourself.
+**You name which policy documents get normalized.** A policy document is
+classified `text_only_no_normalization` and owes no clause contract unless
+promoted (see `policy-pipeline`). You read the insurer's own citations, so you
+are the stage that learns which policy document a case actually turns on.
+Promote exactly those, and only after you have identified a real dispute:
+
+```
+python tools/dao.py promote-policy-document CASE_ID DOC_ID \
+    --policy-processing-role {standalone_policy|segmented_parent|clause_segment|reference_table_only|mixed_clause_and_table} \
+    --disputed-by "R04 / PM-1" --held-by denial-response --run-id RUN_ID
+```
+
+`--disputed-by` records which denial reason or `policy_match` motivates it.
+Promoting is not how you get a citable document — you can already cite any
+text-processed policy document (below) — it is how a document that the case
+genuinely disputes acquires a normalized clause contract for downstream
+addressing. Promotion demotes `policy_clause_processing` to `failed`, because
+the document now owes a contract it does not yet have; the policy stage must
+re-run and re-finalize. So do not promote speculatively: promoting every
+policy document you happen to cite would restore exactly the normalize-everything
+cost the opt-in exists to avoid.
 
 Every extraction carries source locations (P1), classification confidence, and review routing. A location is not decorative: do not write a basis or policy match unless its cited document/page/quote was checked against the processed source available through the DAO. This contract's evidence references are `strict_evidence_reference` — `document_id`, `page`, and `quote` are all required, so a quote with no resolvable location is rejected at the write rather than accepted as grounded.
 
@@ -46,7 +68,7 @@ The taxonomy's frequency and applicable-decision-type fields are operational met
 
 `denial_reason_result.json` (separate denial/reduction findings + payment status + three ground categories + explicit amounts + source-verifiable policy matches).
 
-Whenever any denial reason carries a `policy_matches` entry, the file must also carry `upstream_policy_snapshot` — fetch it with `python tools/dao.py policy-snapshot CASE_ID --document-id DOC_ID [--document-id ...]` for exactly the policy documents you matched against, and paste the printed object in verbatim. It records which version of the policy layer your matches were made against, so a later renormalization makes this file provably stale instead of silently agreeing with bytes it never read. The DAO also requires `policy_clause_processing` to be currently `passed` before any `policy_matches` entry is writable; if it is not, extract the denial reasons without policy matches rather than citing an uncleared policy stage.
+Whenever any denial reason carries a `policy_matches` entry, the file must also carry `upstream_policy_snapshot` — fetch it with `python tools/dao.py policy-snapshot CASE_ID --document-id DOC_ID [--document-id ...]` for exactly the policy documents you matched against, and paste the printed object in verbatim. It records which version of the policy layer your matches were made against, so a later renormalization makes this file provably stale instead of silently agreeing with bytes it never read. **A non-normalized document has a snapshot too** — the digest covers the boundary inventory, processed source text and manifest entry, and records the absent normalized contract as a real, distinguishable state rather than a hole, so staleness detection works identically on both paths. The command prints an advisory on stderr naming any document with no clause contract; that is information, not an error, and it is not part of the JSON you paste in. The DAO also requires `policy_clause_processing` to be currently `passed` before any `policy_matches` entry is writable; if it is not, extract the denial reasons without policy matches rather than citing an uncleared policy stage. Note that promoting a document (above) demotes that stage by design, so promote *after* you have written your matches, or expect to re-finalize the policy stage before this contract is writable.
 
 # Consumers
 

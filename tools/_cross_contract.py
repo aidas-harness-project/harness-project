@@ -1398,7 +1398,68 @@ def _normalized_policy_filename(document_id: str) -> str:
     return f"normalized_policy_clause_{document_id}.json"
 
 
-def check_policy_matches(data: dict, case_dir: Path) -> list[str]:
+def _policy_match_source_errors(label, doc_id, match, redacted_text_for):
+    """Verify a policy match against the processed source text directly.
+
+    The non-normalized half of `check_policy_matches` step 2. A match on a
+    `text_only_no_normalization` document has no clause contract to resolve
+    against, so its `policy_clause_evidence_references` ARE the link: the page
+    must exist in the processed text and the quote must appear verbatim on it.
+
+    Fails closed in both directions that matter. No processed text at all means
+    the document was never processed, so nothing can be verified and the match
+    is refused -- the same outcome as before this path existed, for the case
+    that genuinely warranted it. No clause evidence references at all is also
+    refused: without them there is neither a clause contract nor a location,
+    which is precisely the unverifiable link the fail-safe rule forbids.
+    """
+    errors = []
+    if redacted_text_for is None:
+        return [
+            f"{label}: {_normalized_policy_filename(doc_id)} does not exist and "
+            "no processed-text reader was supplied, so this match cannot be "
+            "verified against anything"]
+    refs = [ref for ref in match.get("policy_clause_evidence_references") or []
+            if ref.get("document_id") == doc_id]
+    if not refs:
+        return [
+            f"{label}: {doc_id} has no normalized clause contract, so the match "
+            "must be grounded by policy_clause_evidence_references on that "
+            "document -- none are present, leaving the link unverifiable"]
+    redacted_text = redacted_text_for(doc_id)
+    if redacted_text is None:
+        return [
+            f"{label}: no processed/redacted text found for {doc_id} -- the "
+            "policy document this match cites has not been processed, so no "
+            "source location can be verified"]
+    try:
+        pages = split_pages(redacted_text)
+    except SourceUnavailable as exc:
+        return [f"{label}: {exc}"]
+    normalized_pages = {n: _normalize_ws(t) for n, t in pages.items()}
+    for ref in refs:
+        page, quote = ref.get("page"), ref.get("quote")
+        if page is None or not quote or not quote.strip():
+            errors.append(
+                f"{label}: policy_clause_evidence_references entry is missing "
+                "page or quote -- a match on a non-normalized document is "
+                "grounded by its location, so both are required")
+            continue
+        if page not in normalized_pages:
+            errors.append(
+                f"{label}: page {page} does not exist in the processed text for "
+                f"{doc_id} (pages present: {sorted(normalized_pages)})")
+            continue
+        if _normalize_ws(quote) not in normalized_pages[page]:
+            errors.append(
+                f"{label}: quote not found on page {page} of {doc_id}'s "
+                "processed text -- the cited quote does not appear verbatim on "
+                f"the page it claims (quote={quote[:60]!r}...)")
+    return errors
+
+
+def check_policy_matches(data: dict, case_dir: Path,
+                         redacted_text_for=None) -> list[str]:
     """Every policy match must resolve to a real clause in a real policy file,
     at the location it claims.
 
@@ -1441,13 +1502,26 @@ def check_policy_matches(data: dict, case_dir: Path) -> list[str]:
             if doc_id is None or clause_id is None:
                 continue
 
-            # 2. The policy document must have been normalized at all.
+            # 2. Where the link gets verified depends on whether this document
+            #    was normalized. Normalization is opt-IN
+            #    (`text_only_no_normalization`), so most policy documents have
+            #    no clause contract, and requiring one here would have made
+            #    citing an ordinary processed policy document impossible.
+            #
+            #    The fail-safe principle in this function's docstring is
+            #    unchanged: an unresolvable match is still an error. What
+            #    changes is that "resolvable" has two forms. A normalized
+            #    document is verified against its clause contract (steps 3-4
+            #    below). A non-normalized one is verified against the PROCESSED
+            #    TEXT -- the cited page must exist and the cited quote must
+            #    appear verbatim on it. That is the same check step 4 performs,
+            #    against the same bytes the normalized clause's own locations
+            #    were themselves verified against; it is not a weaker standard,
+            #    it just skips the intermediary.
             policy_doc = _load(case_dir, _normalized_policy_filename(doc_id))
             if policy_doc is None:
-                errors.append(
-                    f"{label}: no {_normalized_policy_filename(doc_id)} in this case -- the match "
-                    "names a policy document whose clauses were never extracted, so the link "
-                    "cannot be verified (a missing link is safer than an unverified one)")
+                errors.extend(_policy_match_source_errors(
+                    label, doc_id, match, redacted_text_for))
                 continue
 
             # 3. The clause must exist in it.
@@ -1675,12 +1749,20 @@ def _collect_reason_ids(node) -> list[str]:
     return found
 
 
-def check(filename: str, data: dict, case_dir: Path) -> list[str]:
+def check(filename: str, data: dict, case_dir: Path,
+          redacted_text_for=None) -> list[str]:
     """Dispatch for dao.write-contract. Unknown filenames return [] -- this
-    layer is additive, never a gate a new contract has to register with."""
+    layer is additive, never a gate a new contract has to register with.
+
+    `redacted_text_for` is a doc_id -> processed text reader supplied by the
+    DAO (which owns processed-path resolution; this module must not read
+    `data/processed` itself). Needed to verify a policy match on a document
+    with no normalized clause contract.
+    """
     base = Path(filename).name
     if base == DENIAL_REASONS:
-        return check_denial_reason_result(data) + check_policy_matches(data, case_dir)
+        return check_denial_reason_result(data) + check_policy_matches(
+            data, case_dir, redacted_text_for)
     if base == DENIAL_VALIDATION:
         return check_denial_validation_result(data, case_dir)
     if base.startswith("screening_report"):
