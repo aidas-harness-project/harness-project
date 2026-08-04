@@ -24,6 +24,13 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Still undecided:**
 - `실손형`/`기타형` `template_id`s have no ground-truth basis yet -- no case in `data/ground_truth/` is that case type. `templates/draft-report.md` flags this as TODO; 변형 A is the interim fallback with a `warnings` entry from draft-report until real material arrives.
+- **Per-coverage split slots in 변형 A -- DEFERRED 2026-08-04, current behaviour kept deliberately.** CASE_907's insurer denied 배상책임 while accepting 구내치료비 ₩2,000,000, and 변형 A has no slot for writing a split outcome coverage-by-coverage, so draft v2 expressed it in prose instead. This was one of four places the `accepted_coverages` axis failed to propagate (findings §2); the other three are closed -- `denial_reason_result` and `screening_report` gained the axis, and the verification gap became `known-gaps.md` item 39's fix -- but this one is a **domain question, not a structural defect**, so it is recorded rather than guessed at:
+
+  The prose workaround is working and was verified, not assumed: critic v2 read draft v2 and found no dependency misreading, and the split is recorded structurally upstream anyway (`decided_coverage` + `accepted_coverages` in `denial_reason_result.json`, with acceptance-side `policy_matches` now held to the same verification as denials). So nothing downstream is reading a wrong value, and no output states anything false -- unlike the other three instances of this shape.
+
+  The reason not to just add the slot: `templates/` is not a design of ours. Its section structure was extracted from **4 real completed 손해사정서** (CASE_003/004/005/006), and none of them splits its assessment section per coverage -- a real adjuster handling a split outcome writes it as narrative. Adding a slot would make the harness emit a document shape that working adjusters do not produce, trading fidelity to real practice for structural tidiness. Since the deliverable is submitted to Korean-speaking professionals, that is their call, not ours.
+
+  **To resolve:** ask a 손해사정사 how a split denial/acceptance is actually laid out in practice (one narrative assessment section, or a per-담보 breakdown). If per-담보 is real practice, add the slot to 변형 A and a matching `heading_patterns` entry in `templates/registry.json` in the same commit (D4). If not, this stays closed and the prose form is correct. Until then, do not add the slot to make the template "complete" -- the absence is evidence about real reports, not an oversight.
 
 **To resolve fully:** obtain or construct ground-truth-backed structure for 실손형/기타형.
 

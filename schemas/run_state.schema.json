@@ -51,8 +51,25 @@
       "properties": {
         "stage_name": { "$ref": "#/$defs/stage_name" },
         "status": { "enum": ["pending", "in_progress", "passed", "failed", "skipped"] },
-        "started_at": { "type": ["string", "null"], "format": "date-time" },
-        "completed_at": { "type": ["string", "null"], "format": "date-time" },
+        "started_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "When this stage FIRST went in_progress -- set once and never overwritten, so on a retried stage it is the first attempt's start, not the current one's. This is a MARKER-MOVEMENT time, not a measure of work: it is null when a stage passed without ever being marked in_progress, and the span to completed_at includes human review, overnight gaps, and orchestrator delay. Do NOT use (completed_at - started_at) as a cost figure -- CASE_907 recorded 998 minutes for document_processing (an overnight wall-clock gap) and 0.0 for draft_report_v2 (finalize called right after the marker moved). Use current_attempt_started_at for the latest attempt's span; for real cost, measure the work itself, not this field."
+        },
+        "completed_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "When this stage was last marked passed/failed/skipped. Overwritten on each such transition, so it reflects the most recent outcome. Marker-movement time, same caveat as started_at."
+        },
+        "current_attempt_started_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "When the CURRENT (most recent) attempt went in_progress -- overwritten on every in_progress transition, unlike started_at. Present so a retried stage's latest run is distinguishable from its first: with only started_at, a stage retried the next morning reports the whole overnight span as its duration. Still a marker-movement time, and still includes any gate wait inside the attempt. Optional/additive -- run-state files written before 2026-08-04 omit it and remain valid."
+        },
+        "timing_note": {
+          "type": ["string", "null"],
+          "description": "Set by the DAO when this stage reached a terminal status with no start marker ever recorded, so the gap is stated rather than left as a hole that reads like missing data. No start time can be invented after the fact. Optional/additive."
+        },
         "attempt_count": {
           "type": "integer",
           "minimum": 0,

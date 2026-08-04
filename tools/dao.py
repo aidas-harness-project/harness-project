@@ -4296,10 +4296,26 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
                 and status in ("failed", "pending", "in_progress")):
             demoted_from = "passed"
         if status == "in_progress":
-            entry["started_at"] = entry["started_at"] or now_iso()
+            # started_at keeps the FIRST attempt (unchanged behaviour -- it is
+            # the stage's own origin). current_attempt_started_at tracks the
+            # latest, because with only the former a stage retried the next
+            # morning reports the entire overnight gap as its duration:
+            # CASE_907's document_processing showed 998 minutes that way.
+            now = now_iso()
+            entry["started_at"] = entry["started_at"] or now
+            entry["current_attempt_started_at"] = now
             entry["attempt_count"] += 1
         if status in ("passed", "failed", "skipped"):
             entry["completed_at"] = now_iso()
+            # A stage can reach a terminal status without ever having been
+            # marked in_progress (CASE_907's policy_clause_processing ended
+            # with started_at: null). Saying so is better than leaving a hole
+            # that reads as missing data: the marker genuinely was never
+            # moved, and no start time can be invented after the fact.
+            if not entry.get("started_at"):
+                entry["timing_note"] = ("no start marker was ever recorded for this stage -- "
+                                        "completed_at is the only timestamp, and no duration "
+                                        "can be derived from it")
         entry["status"] = status
         if backup_path:
             entry["backup_path"] = backup_path
