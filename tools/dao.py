@@ -4104,6 +4104,69 @@ def find_untagged_claims(text: str, analytical_patterns: list[str]) -> list[dict
     return sorted(findings, key=lambda f: f["line"])
 
 
+def split_core_field_accuracy(field_comparisons: list[dict]) -> dict:
+    """Split core_field_accuracy into fact-extraction vs discretionary agreement.
+
+    A single accuracy number silently measures different things depending on
+    what the answer key happens to be. CASE_907's ground truth was a 손해액
+    산정서, so normative values (과실률, which figure counts as 손해액) landed in
+    the denominator and BOTH of its misses came from there -- its 8 fact fields
+    matched 8/8. Reported as one number, 0.80 reads as worse than CASE_022's
+    0.875 when the two are not measuring the same capability.
+
+    Computed here rather than by hand: the CASE_112 run notes record a
+    core_field_accuracy that was first assembled as 13/16 and corrected to
+    12/16 before writing. Arithmetic over a list is not where judgment belongs.
+
+    Unclassified comparisons (pre-2026-08-04 files, which have no field_kind)
+    are counted in `unclassified` and excluded from BOTH sub-scores rather than
+    being guessed into one -- an inferred classification would silently move
+    the very numbers this split exists to keep honest.
+    """
+    buckets: dict[str, list[dict]] = {"fact": [], "discretionary": [], "unclassified": []}
+    for comparison in field_comparisons or []:
+        kind = comparison.get("field_kind")
+        buckets[kind if kind in ("fact", "discretionary") else "unclassified"].append(comparison)
+
+    def rate(items):
+        if not items:
+            return None
+        return round(sum(1 for i in items if i.get("match")) / len(items), 4)
+
+    return {
+        "fact_extraction_score": rate(buckets["fact"]),
+        "discretionary_agreement_score": rate(buckets["discretionary"]),
+        "overall_score": rate(field_comparisons or []),
+        "counts": {
+            "fact": len(buckets["fact"]),
+            "fact_matched": sum(1 for i in buckets["fact"] if i.get("match")),
+            "discretionary": len(buckets["discretionary"]),
+            "discretionary_matched": sum(1 for i in buckets["discretionary"] if i.get("match")),
+            "unclassified": len(buckets["unclassified"]),
+            "total": len(field_comparisons or []),
+        },
+    }
+
+
+def cmd_split_core_field_accuracy(args):
+    """Recompute a written evaluation_result's accuracy split from its own
+    field_comparisons. Read-only -- prints, never writes."""
+    _require_safe_id("case id", args.case_id)
+    data = read_contract_data(args.case_id, args.filename)
+    if data is None:
+        print(f"NOT_FOUND: {args.filename} for {args.case_id}")
+        return 1
+    cfa = data.get("core_field_accuracy") or {}
+    result = split_core_field_accuracy(cfa.get("field_comparisons") or [])
+    result["recorded_score"] = cfa.get("score")
+    if result["overall_score"] is not None and cfa.get("score") is not None:
+        # A recorded score that disagrees with its own comparison list is a
+        # counting error, the exact kind CASE_112's notes caught by hand.
+        result["recorded_score_matches"] = abs(result["overall_score"] - cfa["score"]) < 0.005
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
 def cmd_check_untagged_claims(args):
     """Deterministic floor for the untagged-claim shape read-evidence-tags
     cannot see. Record-only -- the critic decides `passed`."""
@@ -8051,6 +8114,14 @@ def build_parser():
 
     p = sub.add_parser("read-document-text"); p.add_argument("case_id"); p.add_argument("doc_id")
     p.set_defaults(fn=cmd_read_document_text)
+
+    p = sub.add_parser("split-core-field-accuracy",
+                       help="Recompute an evaluation_result's fact-extraction vs discretionary "
+                            "sub-scores from its own field_comparisons. Read-only.")
+    p.add_argument("case_id")
+    p.add_argument("--filename", default="evaluation_result_v2.json",
+                   help="Which evaluation_result file to read (default evaluation_result_v2.json).")
+    p.set_defaults(fn=cmd_split_core_field_accuracy)
 
     p = sub.add_parser("check-untagged-claims",
                        help="Flag analytical-section lines that assert something but carry no "
