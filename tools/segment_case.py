@@ -599,6 +599,64 @@ def boundaries_from_page_texts(page_texts: list[str]) -> dict[int, str | None] |
     ])
 
 
+def processed_text_boundaries(
+    case_id: str, doc_id: str, page_count: int
+) -> dict[int, str | None] | None:
+    """Boundaries from a bundle's already-processed text, or None if absent.
+
+    Prefers `redacted_text.md` over the raw `page_NNN.md` files. Raw page text
+    still carries claimant PII -- dao.read-page-text guards it behind
+    checkpoint 2's one-shot capability precisely so no analysis stage reads it
+    -- and preferring the redacted layer costs nothing: across CASE_112's 217
+    split children the document title line survived redaction in every case.
+
+    Returns None when the text does not cover the whole bundle, so the caller
+    falls back to the PDF layer and then to vision. Partial coverage is exactly
+    the state where a deterministic verdict would be silently blind to part of
+    the document.
+    """
+    processed = ROOT / "data" / "processed" / case_id / doc_id
+    redacted = processed / "redacted_text.md"
+    if redacted.exists():
+        try:
+            pages = _split_page_markers(redacted.read_text(encoding="utf-8"))
+        except OSError:
+            return None
+        if len(pages) == page_count:
+            return boundaries_from_page_texts(pages)
+        return None
+
+    page_files = [processed / f"page_{n:03d}.md" for n in range(1, page_count + 1)]
+    if not page_files or not all(p.exists() for p in page_files):
+        return None
+    try:
+        return boundaries_from_page_texts(
+            [p.read_text(encoding="utf-8") for p in page_files])
+    except OSError:
+        return None
+
+
+def _split_page_markers(text: str) -> list[str]:
+    """Split combined redacted text on the `<<<PAGE page=N>>>` markers.
+
+    Checkpoint 2 embeds these so page boundaries stay recoverable from the
+    single combined file; chunk_text.py relies on the same markers."""
+    pages: list[str] = []
+    current: list[str] = []
+    started = False
+    for line in text.splitlines():
+        if line.startswith("<<<PAGE"):
+            if started:
+                pages.append("\n".join(current))
+            current = []
+            started = True
+            continue
+        current.append(line)
+    if started:
+        pages.append("\n".join(current))
+    return pages
+
+
 def _boundaries_from_page_lines(
     pages: list[list[str]],
 ) -> dict[int, str | None] | None:
@@ -659,10 +717,14 @@ def segments_from_boundaries(
             "provisional_document_type": None,
             "provisional_type_label": title,
             "confidence": None,
+            # Says "text layer", not "embedded text layer": the same rule now
+            # runs over the PDF's own layer, raw OCR output, or redacted
+            # processed text, and all three were measured to produce the
+            # identical boundary set. Naming one source would be wrong for two.
             "boundary_evidence": (
                 "page 1 of the bundle"
                 if start == 1
-                else f"embedded text layer: page begins with the title line {title!r}"
+                else f"text layer: page begins with the title line {title!r}"
             ),
             "review_status": "pending",
             "needs_full_page": False,
@@ -1469,14 +1531,29 @@ def propose_boundaries(
     # rendered or any provider call is made, so a born-digital bundle spends no
     # tokens at all. Returns None for a scan, and the vision path runs unchanged.
     if prefer_text_anchor:
-        anchored = text_anchor_boundaries(pdf_path, page_count)
-        if anchored is not None:
-            if progress:
+        # Processed text first, then the PDF's own layer. A scan has no embedded
+        # text, so text_anchor_boundaries returns None for it and the whole
+        # corpus of scanned bundles used to fall through to vision -- but once
+        # checkpoint 1 has read the bundle, that same scan HAS page text, and
+        # the boundary rule does not care which reader produced it (CASE_112:
+        # embedded, raw OCR and redacted text all yield the identical 173
+        # boundaries across 323 pages).
+        anchored = processed_text_boundaries(case_id, doc_id, page_count)
+        if anchored is not None and progress:
+            progress(
+                f"processed text covers all {page_count} page(s): deriving "
+                f"{len(anchored)} boundary/boundaries deterministically "
+                f"(0 model calls, vision path skipped)"
+            )
+        if anchored is None:
+            anchored = text_anchor_boundaries(pdf_path, page_count)
+            if anchored is not None and progress:
                 progress(
                     f"text layer covers all {page_count} page(s): deriving "
                     f"{len(anchored)} boundary/boundaries deterministically "
                     f"(0 model calls, vision path skipped)"
                 )
+        if anchored is not None:
             return _text_anchor_proposal(
                 anchored, page_count=page_count, geometry=geometry
             )

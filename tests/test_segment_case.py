@@ -2544,3 +2544,102 @@ def test_boundaries_from_page_texts_ignores_running_footers():
         f"제2조(준용규정)\n이 특별약관에 정하지 않은 사항은 보통약관을 따릅니다.\n{footer}",
     ]
     assert set(sc.boundaries_from_page_texts(pages)) == {1, 2}
+
+
+# --- propose_boundaries prefers already-processed text ------------------------
+
+
+class _never_called_provider:
+    """Any provider call is a failure: the deterministic path must spend zero."""
+    provider_name = "must-not-be-called"
+    model_name = "must-not-be-called"
+
+    def analyze_image_structured(self, *a, **k):
+        raise AssertionError("provider called on the deterministic text path")
+
+
+def _processed_bundle(root, case_id, doc_id, pages, *, redacted=True):
+    """Write a bundle's processed text the way checkpoint 1/2 leaves it."""
+    d = root / "data" / "processed" / case_id / doc_id
+    d.mkdir(parents=True, exist_ok=True)
+    if redacted:
+        body = "".join(f"<<<PAGE page={n}>>>\n{t}\n" for n, t in enumerate(pages, 1))
+        (d / "redacted_text.md").write_text(body, encoding="utf-8")
+    else:
+        for n, t in enumerate(pages, 1):
+            (d / f"page_{n:03d}.md").write_text(t, encoding="utf-8")
+    return d
+
+
+def test_propose_uses_redacted_processed_text_when_it_exists(tmp_path):
+    """A scan with processed text takes the deterministic path, not vision.
+
+    This is what the inverted order buys: text_anchor_boundaries reads the
+    PDF's embedded layer, so a scan (zero embedded characters) always fell
+    through to a model reading contact-sheet crops. Once OCR has run, the same
+    deterministic rule applies to a scan too.
+    """
+    pdf = _bundle_pdf(tmp_path, 3)  # no text layer -- a "scan"
+    _processed_bundle(tmp_path, "CASE_900", "DOC_001", [
+        "영업배상책임보험\n보통약관",
+        "제1조(목적)\n이 계약은 다음과 같이 보상합니다",
+        "구내치료비 추가특별약관",
+    ])
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        result = sc.propose_boundaries(
+            pdf, case_id="CASE_900", doc_id="DOC_001",
+            provider=_never_called_provider(), resume=False,
+        )
+    finally:
+        sc.ROOT = orig_root
+    assert result["method"]["mode"] == "text_anchor"
+    assert {s["page_start"] for s in result["segments"]} == {1, 3}
+
+
+def test_propose_falls_back_to_vision_when_no_processed_text_exists(tmp_path):
+    """Unchanged behaviour for a bundle that has not been OCR'd yet."""
+    pdf = _bundle_pdf(tmp_path, 3)
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        result = sc.propose_boundaries(
+            pdf, case_id="CASE_900", doc_id="DOC_001",
+            provider=_StructuredSequencedProvider([
+                {"boundaries": [], "continuations": [2, 3], "needs_full_page": []}]),
+            resume=False,
+        )
+    finally:
+        sc.ROOT = orig_root
+    assert result["method"]["mode"] == "vision_proposal"
+
+
+def test_propose_prefers_redacted_text_over_raw_page_text(tmp_path):
+    """Segmentation reads the redacted layer when both exist.
+
+    Raw page_NNN.md still carries claimant PII; dao.read-page-text guards it
+    behind checkpoint 2's one-shot capability precisely so no analysis stage
+    reads it. Measured on CASE_112's 217 split children, every document title
+    survived redaction, so preferring the redacted text costs no accuracy.
+    """
+    pdf = _bundle_pdf(tmp_path, 3)
+    # p2's title differs between the two layers, so which one was read is
+    # visible in the recorded label. Page 1 is a boundary by position and
+    # carries no title, which is why the assertion targets p2.
+    _processed_bundle(tmp_path, "CASE_900", "DOC_001",
+                      ["표지", "구내치료비 추가특별약관", "계속되는 본문"], redacted=True)
+    _processed_bundle(tmp_path, "CASE_900", "DOC_001",
+                      ["표지", "환자명 홍길동 특별약관", "계속되는 본문"], redacted=False)
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        result = sc.propose_boundaries(
+            pdf, case_id="CASE_900", doc_id="DOC_001",
+            provider=_never_called_provider(), resume=False,
+        )
+    finally:
+        sc.ROOT = orig_root
+    assert result["method"]["mode"] == "text_anchor"
+    titles = [s.get("provisional_type_label") for s in result["segments"]]
+    assert "구내치료비 추가특별약관" in titles
