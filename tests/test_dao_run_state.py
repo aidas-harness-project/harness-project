@@ -55,18 +55,17 @@ def _finalize(make_args, run_id, stage):
 
 def test_get_last_passed_stage_returns_the_latest_passed_only(isolated_dao, make_args, run_id):
     _finalize(make_args, run_id, "intake")
-    _finalize(make_args, run_id, "document_segmentation")
     _finalize(make_args, run_id, "document_processing")
+    _finalize(make_args, run_id, "indexing")
     dao.cmd_update_run_state(make_args(run_id=run_id, stage="policy_clause_processing", status="in_progress"))
 
     state = dao.load_run_state("CASE_009")
     passed = [s["stage_name"] for s in state["stages"] if s["status"] == "passed"]
-    assert passed == ["intake", "document_segmentation", "document_processing"]
+    assert passed == ["intake", "document_processing", "indexing"]
 
 
 def test_get_last_passed_stage_prints_the_actual_stage_name(isolated_dao, make_args, run_id, capsys):
     _finalize(make_args, run_id, "intake")
-    _finalize(make_args, run_id, "document_segmentation")
     _finalize(make_args, run_id, "document_processing")
     capsys.readouterr()  # discard the "OK: ..." lines above
 

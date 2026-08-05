@@ -27,7 +27,7 @@
   "required": ["case_id", "run_id", "stages"],
   "$defs": {
     "stage_name": {
-      "description": "Canonical stage names -- the ONLY values any producer (tool or agent) may write. Snake_case, versioned where the pipeline genuinely runs the stage once per draft version. If a new stage is added to the pipeline, it gets added here in the same change (D4).",
+      "description": "Canonical stage names -- the ONLY values any producer (tool or agent) may write. Snake_case, versioned where the pipeline genuinely runs the stage once per draft version. If a new stage is added to the pipeline, it gets added here in the same change (D4). 'document_segmentation' is DEPRECATED and must not be written by anything new: once OCR moved ahead of the split (2026-08-05), segmentation stopped being a stage that runs before document processing and became a checkpoint inside it -- the bundle is OCR'd and redacted, THEN split, then its children are classified and redacted, so a run that recorded the two as separate stages could not say which was in progress. The value is retained only so runs written before that change (CASE_112) still validate; their record is accurate for how they actually executed and is deliberately not rewritten.",
       "enum": [
         "intake",
         "document_segmentation",

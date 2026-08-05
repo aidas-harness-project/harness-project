@@ -65,8 +65,16 @@ SKIPPABLE_STAGES = frozenset({
 _REQUIRES = {
     # --- Phase 1 ---------------------------------------------------------
     "intake": (),
+    # DEPRECATED, retained so a run written before 2026-08-05 (CASE_112) still
+    # resolves. Nothing new records it -- see the schema's stage_name note.
     "document_segmentation": ("intake",),
-    "document_processing": ("intake", "document_segmentation"),
+    # Segmentation is a CHECKPOINT inside this stage, not a stage before it.
+    # With OCR ahead of the split, the bundle is OCR'd and redacted, then split,
+    # then its children are classified and redacted -- so document_processing
+    # runs on both sides of segmentation and cannot wait on it. The human bundle
+    # decision and the boundary-approval gate are enforced on the manifest
+    # (check_segmentation_ready, segment_case.split readiness), not here.
+    "document_processing": ("intake",),
     "indexing": ("document_processing",),
     "policy_clause_processing": ("document_processing",),
     "claim_analysis": ("policy_clause_processing",),
@@ -178,19 +186,6 @@ def _intake_present(state: dict) -> bool:
     return "intake" in _stage_status_map(state)
 
 
-def _segmentation_required_for_run(state: dict) -> bool:
-    """Whether this run must record the Stage-1 segmentation checkpoint.
-
-    New runs that record intake must also record the genuine-human
-    segmentation decision before document processing. Legacy forks and direct
-    document-processing harnesses may contain neither stage; those remain
-    compatible and are still protected by the manifest-level segmentation
-    preflight in ``run_checkpoint1.py``.
-    """
-    statuses = _stage_status_map(state)
-    return "intake" in statuses or "document_segmentation" in statuses
-
-
 def check_dependencies(stage: str, target_status: str, state: dict,
                         human_review_complete: bool | None = None) -> list:
     """Return blocker strings for advancing `stage` to `target_status`.
@@ -237,13 +232,6 @@ def check_dependencies(stage: str, target_status: str, state: dict,
     for dep in requires(stage):
         # The one conditional prerequisite: intake only gates when it exists.
         if dep == "intake" and not _intake_present(state):
-            continue
-        # Runs created before Stage 1 was split out have neither intake nor a
-        # segmentation stage entry. Preserve that legacy/direct-harness path,
-        # but once either Stage-1 entry exists the segmentation checkpoint is
-        # mandatory and must pass before document processing.
-        if dep == "document_segmentation" and \
-                not _segmentation_required_for_run(state):
             continue
         dep_status = status_map.get(dep)
         ok_statuses = {"passed"}

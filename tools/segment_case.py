@@ -3087,7 +3087,12 @@ def split_bundle(
 
     ok, message = dao.replace_manifest_documents(
         case_id, bundle_id, bundle_fields, new_documents, held_by, run_id,
-        stage="document_segmentation",
+        # Segmentation is a checkpoint inside document_processing, not a stage
+        # before it: the bundle is OCR'd and redacted, split here, and its
+        # children are then classified and redacted. Recording a separate
+        # document_segmentation stage would claim a boundary the execution does
+        # not have (see run_state.schema.json's deprecation note).
+        stage="document_processing",
         purpose=f"split {source_file_name} into {len(new_documents)} document(s)",
     )
     if not ok:

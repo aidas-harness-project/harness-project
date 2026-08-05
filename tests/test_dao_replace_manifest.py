@@ -142,13 +142,19 @@ def test_replace_reads_fresh_after_the_lock(isolated_dao, monkeypatch):
 
 
 def test_replace_with_stage_updates_run_state(isolated_dao):
+    """The stage a split records is document_processing, not a stage of its own.
+
+    Segmentation runs between two halves of document processing (bundle OCR and
+    redaction before it, per-child classification and redaction after), so a
+    separate stage entry would claim a boundary the execution does not have.
+    """
     _seed_manifest(isolated_dao)
     ok, message = dao.replace_manifest_documents(
         "CASE_900", "DOC_001", _SUPERSEDE, [_new_doc("DOC_002", 1, 12)],
-        "tester", "RUN_20260721_001", stage="document_segmentation")
+        "tester", "RUN_20260721_001", stage="document_processing")
     assert ok, message
     state = dao.load_run_state("CASE_900")
-    assert state["stages"][0]["stage_name"] == "document_segmentation"
+    assert state["stages"][0]["stage_name"] == "document_processing"
     assert state["stages"][0]["status"] == "passed"
 
 

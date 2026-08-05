@@ -84,16 +84,48 @@ This does not resolve mixed text/image documents. The whole-document command ref
 
 **To resolve:** a deliberate evaluation design pass, deciding the scoring rules above before implementing them. Explicitly not built at gate-building time -- inventing a metric to fill the gap would produce a number nobody could interpret, which is worse than a documented absence.
 
-## 7. Should segmentation move after OCR, merging Stage 1 into Stage 2?
+## 7. Should segmentation move after OCR, merging Stage 1 into Stage 2? -- RESOLVED 2026-08-05: (b), merged
 
-**Where:** `tools/segment_case.py` (Stage 1, `document_segmentation`) and
-`tools/run_checkpoint1.py` (Stage 2, `document_processing`).
+**Resolution:** option (b). Segmentation is now a checkpoint inside
+`document_processing`, operating on extracted -- and redacted -- text. The
+separate `document_segmentation` run-state stage is deprecated (kept in the
+schema enum only so CASE_112's pre-merge record still validates; it is
+deliberately not rewritten, because that run really did execute split-then-OCR).
 
-**Current:** Stage 1 decides document boundaries from the raw PDF -- vision
+Option (c) -- keeping text-anchor pre-OCR for born-digital bundles and
+deferring only scans -- was rejected once measured. The premise for splitting
+by source kind was that the two paths would behave differently, and they do
+not: on CASE_112's two policy bundles the boundaries derived from the embedded
+layer, from raw OCR text, and from redacted OCR text are byte-identical, all
+173 of them, precision 1.0000. One code path serves both, so (c) would have
+bought two paths and two sets of failure modes for no accuracy difference.
+
+**What it measured on the case that prompted it.** CASE_907's DOC_005, forked
+to CASE_908, is the 19-page scan that had been classified as one
+`diagnosis_certificate`. Deterministic title rule alone: precision 1.0000,
+recall 0.9091. With the LLM tier over the 5 pages (26%) it could not settle:
+precision 1.0000, recall 1.0000 with a stub, and 0.9167/1.0000 with the real
+provider -- the single miss being a page whose body text is absent from the
+source material this corpus was supplied with, flagged by the model itself at
+the run's only low confidence.
+
+**How the objections below were answered, not waived.** The human approval gate
+did not collapse into Stage 2's P8 gate: they remain distinct judgments at
+distinct moments (`segment_case.py split` still refuses without case-level and
+per-segment approval; P8 still hard-halts on a disagreement). Re-OCR after the
+split is free because `split_bundle` now redistributes the bundle's pages to
+its children -- renumbered from 1, P8 verdicts intact -- so children are never
+re-read. `superseded_bundle` lineage is unchanged; what moved is only *when*
+the split runs, not what it records.
+
+**Where:** `tools/segment_case.py` and `tools/run_checkpoint1.py`, both now
+under `document_processing`.
+
+**Was:** Stage 1 decided document boundaries from the raw PDF -- vision
 contact sheets, or the deterministic text-anchor path for a born-digital
-bundle -- and Stage 2 then OCRs whatever documents that produced. Stage 1
-strictly precedes Stage 2 and blocks it case-wide until every PDF is human-
-cleared or split.
+bundle -- and Stage 2 then OCR'd whatever documents that produced. Stage 1
+strictly preceded Stage 2 and blocked it case-wide until every PDF was human-
+cleared or split. The reasoning that follows is the record of why that changed.
 
 **What prompted this:** two things stopped holding.
 

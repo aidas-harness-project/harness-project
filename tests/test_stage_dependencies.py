@@ -10,24 +10,44 @@ def _state(*stage_status_pairs):
     return {"stages": [{"stage_name": n, "status": s} for n, s in stage_status_pairs]}
 
 
-def test_document_processing_requires_intake_and_segmentation_for_new_runs():
-    # No Stage-1 entries -> both prerequisites are dropped for legacy
-    # fork/direct-harness flows; the manifest preflight remains authoritative.
+def test_document_processing_requires_only_intake():
+    """Segmentation is a checkpoint inside document_processing, not before it.
+
+    Once OCR moved ahead of the split (2026-08-05), the bundle is OCR'd and
+    redacted, THEN split, then its children are classified and redacted -- so
+    document_processing runs on both sides of segmentation. Requiring a
+    separate document_segmentation stage to PASS first became unsatisfiable:
+    the work it names cannot finish until document_processing has already
+    started. The human bundle decision and the boundary-approval gate are
+    unaffected; they are enforced on the manifest by check_segmentation_ready
+    and by segment_case.py's split readiness, not by this graph.
+    """
+    # No intake entry -> dropped for legacy fork/direct-harness flows; the
+    # manifest preflight remains authoritative there.
     assert sd.check_dependencies("document_processing", "in_progress", _state()) == []
     # intake present but not passed -> blocked.
     blockers = sd.check_dependencies("document_processing", "in_progress",
                                      _state(("intake", "in_progress")))
     assert any("intake" in b for b in blockers)
-    # A new run with passed intake still needs its human segmentation decision.
-    blockers = sd.check_dependencies("document_processing", "in_progress",
-                                     _state(("intake", "passed")))
-    assert any("document_segmentation" in b for b in blockers)
-    # Both Stage-1 checkpoints passed -> allowed.
+    # Passed intake is now sufficient -- no second Stage-1 stage to wait on.
     assert sd.check_dependencies("document_processing", "in_progress",
-                                 _state(
-                                     ("intake", "passed"),
-                                     ("document_segmentation", "passed"),
-                                 )) == []
+                                 _state(("intake", "passed"))) == []
+
+
+def test_a_legacy_run_recording_document_segmentation_still_advances():
+    """CASE_112 recorded the two as separate stages; its record is not rewritten.
+
+    That run really did execute split-then-OCR, so the entry is accurate
+    history. Nothing new may write the value (the schema marks it deprecated),
+    but a run that already carries it must not become un-resumable.
+    """
+    assert sd.check_dependencies("document_processing", "in_progress",
+                                 _state(("intake", "passed"),
+                                        ("document_segmentation", "passed"))) == []
+    # Even mid-flight, an old segmentation entry does not gate anything now.
+    assert sd.check_dependencies("document_processing", "in_progress",
+                                 _state(("intake", "passed"),
+                                        ("document_segmentation", "in_progress"))) == []
 
 
 def test_policy_requires_document_processing_passed():
