@@ -20,6 +20,13 @@ __pycache__/
 
 # Pipeline execution data (copy of source-cases/ + intermediate outputs -- originals version-controlled in source-cases/)
 data/
+*.pdf
+*.zip
+*.txt
+*.pptx
+CASE_112_pipeline_walkthrough/
+docs/
+.tmp/
 
 # Workspace Data with each run's report written by agent
 _workspace/
