@@ -902,3 +902,54 @@ def test_bundle_ocr_mode_still_refuses_a_superseded_bundle(tmp_path, monkeypatch
         reader_a=object(), reader_b=object(), comparator=object(),
     )
     assert result["status"] == "blocked_segmentation"
+
+
+def test_resolving_a_bundles_disagreement_does_not_classify_it(tmp_path, monkeypatch):
+    """P8 resolution must not smuggle in the classification --bundle-ocr withheld.
+
+    Found on the real CASE_909 run: DOC_005's bundle OCR correctly wrote no
+    document_type, then resolving its 8 disagreed pages classified the whole
+    19-page bundle as `diagnosis_certificate` -- its first page's type, applied
+    to a bundle that also holds two imaging REPORTs, an 입퇴원확인서 and two
+    진료비 명세서. That is precisely the failure the flag exists to prevent, and
+    the resolve path reached the shared tail without the flag.
+    """
+    _pending_bundle_manifest(tmp_path)
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    proc = tmp_path / "data" / "processed" / "CASE_009" / "DOC_001"
+    proc.mkdir(parents=True, exist_ok=True)
+    (proc / "page_001.md").write_text("bundle page one", encoding="utf-8")
+    dao.atomic_write_json(out_dir / "ocr_result_DOC_001.json", {
+        "case_id": "CASE_009", "run_id": "RUN_20260721_001",
+        "component": "document-pipeline", "status": "success",
+        "created_at": dao.now_iso(),
+        "model_info": {"model_name": "reader_a=x; reader_b=x", "prompt_version": "ocr_extraction_v0.1"},
+        "document_id": "DOC_001", "ocr_engine": "x", "vision_model_name": "y",
+        "uncertain_confidence_threshold": 1.0, "extraction_method": "ocr",
+        "ocr_status": "completed", "ocr_quality": "low",
+        "cross_validation_status": "disagreed_pending_review",
+        "cross_validation_mode": "single_technology_weak_p8_poc",
+        "cross_validation_note": "test", "review_required": True,
+        "pages": [{
+            "page": 1, "text_path": None, "mean_confidence": None,
+            "uncertain_regions": [],
+            "cross_validation": {"agreement": "disagreed", "vision_model_reading": "b",
+                                  "disagreement_details": ["DISAGREE: mock"]},
+        }],
+    })
+    raw_ocr = {
+        "document_path": "fake.pdf",
+        "pages": [{"page": 1, "reading_a": "bundle page one", "reading_b": "b",
+                   "agreement": "disagreed", "disagreement_details": ["x"]}],
+    }
+    monkeypatch.setattr(
+        rc1, "classify_document",
+        lambda *a, **k: pytest.fail("a bundle must never be classified as one document"))
+
+    result = rc1.resolve_from_raw_ocr(
+        "CASE_009", "DOC_001", raw_ocr, page=1, chosen_reading="reading_a",
+        resolved_by="tester", note="verification", held_by="document-pipeline",
+        run_id="RUN_20260721_001", classify=False)
+
+    assert result["status"] == "bundle_ocr_complete"
+    assert not (out_dir / "classification_result_DOC_001.json").exists()

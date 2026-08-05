@@ -845,7 +845,8 @@ def resolve_as_non_text(
 
 def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, chosen_reading: str | None,
                           resolved_by: str, note: str, held_by: str, run_id: str,
-                          classifier=None, corrected_text: str | None = None) -> dict:
+                          classifier=None, corrected_text: str | None = None,
+                          classify: bool = True) -> dict:
     """Resolves one disagreed page using the original run_ocr() result
     (which has both reading_a and reading_b) plus a human's decision of
     which one is correct and why. Writes that page's text, updates
@@ -904,6 +905,19 @@ def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, c
     ocr_result["review_reason"] = "All disagreements resolved -- see each page's cross_validation.resolution."
     _write_contract(case_id, f"ocr_result_{doc_id}.json", ocr_result, "ocr_result.schema.json", held_by, run_id)
 
+    if not classify:
+        # A bundle's disagreements being resolved does not make it one document.
+        # Reaching the shared tail here would write the very document_type
+        # --bundle-ocr withheld -- found on CASE_909, where resolving DOC_005's
+        # 8 pages labelled a 19-page bundle `diagnosis_certificate` from its
+        # first page, over two imaging REPORTs, an 입퇴원확인서 and two
+        # 진료비 명세서.
+        _dao._update_run_state(case_id, run_id, "document_processing", "in_progress", held_by)
+        return {"status": "bundle_ocr_complete", "case_id": case_id, "doc_id": doc_id,
+                "pages": len(ocr_result["pages"]),
+                "cross_validation_status": ocr_result["cross_validation_status"],
+                "next_action": "derive boundaries from this text, then split; children classify individually"}
+
     first_page_agreed_or_resolved = ocr_result["pages"][0]
     first_page_text = Path(ROOT / first_page_agreed_or_resolved["text_path"]).read_text(encoding="utf-8")
     return _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, classifier=classifier)
@@ -961,7 +975,7 @@ def _resolve_from_args(args):
         sys.exit(f"error: could not read raw dual-read dump {raw_path}: {exc}")
 
     try:
-        classifier = build_classifier_provider(
+        classifier = None if args.bundle_ocr else build_classifier_provider(
             classifier_provider_name=args.classifier_provider,
             classifier_model=args.classifier_model,
         )
@@ -984,6 +998,7 @@ def _resolve_from_args(args):
             note=args.note,
             held_by=args.held_by,
             run_id=args.run_id,
+            classify=not args.bundle_ocr,
             classifier=classifier,
             corrected_text=corrected_text,
         )
@@ -1072,6 +1087,12 @@ def main(argv=None):
     resolve_parser.add_argument("--note", required=True, help="Why this reading is correct")
     resolve_parser.add_argument("--held-by", required=True)
     resolve_parser.add_argument("--run-id", required=True)
+    resolve_parser.add_argument(
+        "--bundle-ocr", action="store_true",
+        help="This document is an unsplit bundle: resolve its page(s) but do "
+             "not classify it. Resolving a disagreement does not make a bundle "
+             "one document -- without this the shared tail writes the very "
+             "document_type the bundle OCR withheld.")
     resolve_parser.add_argument(
         "--classifier-provider",
         choices=SUPPORTED_PROVIDERS,
