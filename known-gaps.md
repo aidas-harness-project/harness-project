@@ -27,6 +27,7 @@ the same pass.
 | 35 | OPEN | Redundant P8 vision calls on formatting-only variance |
 | 37 | RISK ACCEPTED | P0-8 table-boundary verification on OCR-sourced policy docs |
 | 43 | OPEN | Policy reference-table reading order |
+| 44 | OPEN | Stage 4 validators defined but never called |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
@@ -3179,3 +3180,49 @@ written to `data/processed/`, no new tracked artifacts.
 Also observed while reading: GT_001 p2 carries an un-redacted adjuster name and
 mobile number. That is the answer key's own state, not a pipeline leak, but it
 means ground-truth material is not safe to quote wholesale into outputs.
+
+## 44. Stage 4 has validators nothing calls -- OPEN 2026-08-05
+
+Found by auditing for implemented-but-unreachable code after three such
+gaps landed in one day on `feature/stage-inversion` (the medical title
+rule, the LLM boundary tier, and `undecided_pages` were each written,
+tested, and never wired to a caller). The same audit over the rest of
+`tools/` turns up five public functions with no production caller. Four
+are Stage 4's, and they share a shape: each is a *verifier*, and the
+thing it would verify is currently taken on trust.
+
+The clearest is `policy_uid.verify_uid`. Its docstring states the posture
+plainly -- "a submitted UID is evidence of a claim, never the claim's
+authority" -- and it recomputes the UID and compares. Nothing calls it.
+`policy_uid_resolver` calls `compute_uid` directly, and `dao.py` carries
+`import policy_uid` while using `policy_uid.` zero times: a dead import
+beside a live one for the resolver. Whether that is a real hole depends on
+something this audit could not settle from reading alone -- if the
+resolver always *derives* the UID it uses, there may be no submitted value
+left to verify. Deciding that needs Stage 4 run on a real case.
+
+The others, with what was and was not established:
+
+* `policy_roles.role_exempts_own_normalization` -- says it is "used by the
+  completion gate", and is not. `dao.py` compares the role strings inline
+  instead. **Probably not a defect:** the two exempt roles take genuinely
+  different branches there (`segmented_parent` continues, so its segments
+  carry the obligation; `reference_table_only` still owes a boundary
+  inventory and a schema-valid reference table), and one boolean cannot
+  express that. The stale docstring is the real problem.
+* `source_provenance.revision_history_errors` -- "the revision list is
+  append-only and its prefix is immutable". `dao.py` touches
+  `_revision_index` in 9 places without calling this. Not established
+  whether the immutability check happens some other way.
+* `table_region_provenance.classify_bands` -- assigns a structural kind to
+  each detected band. `dao.py` has band-adjacent logic; overlap unchecked.
+
+`extract_embedded_segment`'s three functions are NOT in this category: it
+is a standalone CLI with its own `main()`, so nothing importing it is
+expected.
+
+Not fixed here. Wiring a verifier that has never run is a change to what
+Stage 4 refuses, and this branch's scope was Stage 1/2 -- doing it blind
+would risk breaking a stage on evidence I did not gather. What this item
+records is that the audit found them and what each one's status actually
+is, so the next Stage 4 pass starts from a list rather than a suspicion.
