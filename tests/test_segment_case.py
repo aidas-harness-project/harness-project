@@ -3068,3 +3068,34 @@ def test_redistributed_pages_keep_the_schema_s_integer_page_numbers():
         ["DOC_006", "DOC_007"])
     for child in children:
         assert [p["page"] for p in child["pages"]] == [1, 2]
+
+
+def test_a_judge_undecided_boundary_is_flagged_for_the_human_gate():
+    """A boundary the LLM tier could not settle must be visible to a reviewer.
+
+    It splits (the fail-safe direction) but there is no evidence on the page a
+    reviewer can check, unlike a title match. `needs_full_page` already carries
+    exactly that meaning for the vision path -- "this segment's boundary needed
+    more than the default look" -- so the same flag is reused rather than adding
+    a second field meaning the same thing.
+    """
+    pages = ["진 단 서\n환자의 성명", "REPORT\nReading"]
+
+    class _Unusable:
+        provider_name = "x"
+        model_name = "x"
+
+        def classify_document(self, prompt, prompt_version):
+            from llm_providers import ProviderResult
+            return ProviderResult("x", "x", prompt_version, "not json at all")
+
+    result = sc.propose_from_page_texts(pages, medical="auto", judge=_Unusable())
+    assert {s["page_start"] for s in result["segments"]} == {1, 2}
+    flagged = {s["page_start"] for s in result["segments"] if s["needs_full_page"]}
+    assert flagged == {2}, "only the undecided boundary is flagged"
+
+
+def test_a_deterministic_boundary_is_not_flagged():
+    pages = ["진 단 서\n환자의 성명", "진료비 내역서(외래)\n금액"]
+    result = sc.propose_from_page_texts(pages, medical="auto")
+    assert not any(s["needs_full_page"] for s in result["segments"])

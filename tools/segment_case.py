@@ -754,6 +754,39 @@ def boundaries_from_page_texts(
     return medical_result if len(medical_result) > len(policy) else policy
 
 
+def processed_undecided_pages(
+    case_id: str, doc_id: str, page_count: int, judge=None
+) -> list[int]:
+    """Pages the LLM tier could not settle, for the same text the boundaries came
+    from. Empty when no judge ran or no processed text exists."""
+    if judge is None:
+        return []
+    texts = _processed_page_texts(case_id, doc_id, page_count)
+    if texts is None:
+        return []
+    return undecided_pages(texts, medical="auto", judge=judge)
+
+
+def _processed_page_texts(case_id: str, doc_id: str, page_count: int) -> list[str] | None:
+    """A document's processed page text, redacted layer preferred. None if the
+    text does not cover the whole document."""
+    processed = ROOT / "data" / "processed" / case_id / doc_id
+    redacted = processed / "redacted_text.md"
+    if redacted.exists():
+        try:
+            pages = _split_page_markers(redacted.read_text(encoding="utf-8"))
+        except OSError:
+            return None
+        return pages if len(pages) == page_count else None
+    page_files = [processed / f"page_{n:03d}.md" for n in range(1, page_count + 1)]
+    if not page_files or not all(p.exists() for p in page_files):
+        return None
+    try:
+        return [p.read_text(encoding="utf-8") for p in page_files]
+    except OSError:
+        return None
+
+
 class _LazyJudge:
     """Builds the provider on first use, so an unused judge costs nothing.
 
@@ -799,26 +832,10 @@ def processed_text_boundaries(
     the state where a deterministic verdict would be silently blind to part of
     the document.
     """
-    processed = ROOT / "data" / "processed" / case_id / doc_id
-    redacted = processed / "redacted_text.md"
-    if redacted.exists():
-        try:
-            pages = _split_page_markers(redacted.read_text(encoding="utf-8"))
-        except OSError:
-            return None
-        if len(pages) == page_count:
-            return boundaries_from_page_texts(pages, medical="auto", judge=judge)
+    texts = _processed_page_texts(case_id, doc_id, page_count)
+    if texts is None:
         return None
-
-    page_files = [processed / f"page_{n:03d}.md" for n in range(1, page_count + 1)]
-    if not page_files or not all(p.exists() for p in page_files):
-        return None
-    try:
-        return boundaries_from_page_texts(
-            [p.read_text(encoding="utf-8") for p in page_files],
-            medical="auto", judge=judge)
-    except OSError:
-        return None
+    return boundaries_from_page_texts(texts, medical="auto", judge=judge)
 
 
 def _split_page_markers(text: str) -> list[str]:
@@ -1903,6 +1920,9 @@ def propose_boundaries(
         # title at all), reading the page text rather than a contact sheet.
         anchored = processed_text_boundaries(
             case_id, doc_id, page_count, judge=provider)
+        anchored_undecided = (
+            processed_undecided_pages(case_id, doc_id, page_count, judge=provider)
+            if anchored is not None and provider is not None else [])
         if anchored is not None and progress:
             progress(
                 f"processed text covers all {page_count} page(s): deriving "
@@ -1919,7 +1939,8 @@ def propose_boundaries(
                 )
         if anchored is not None:
             return _text_anchor_proposal(
-                anchored, page_count=page_count, geometry=geometry
+                anchored, page_count=page_count, geometry=geometry,
+                undecided=anchored_undecided,
             )
 
     batches = plan_sheets(page_count, geometry["pages_per_sheet"])
@@ -2170,21 +2191,50 @@ def propose_boundaries(
     }
 
 
+def propose_from_page_texts(
+    page_texts: list[str], *, medical="auto", judge=None, geometry: dict | None = None
+) -> dict:
+    """A deterministic proposal built from page text, with uncertainty recorded.
+
+    The single place that pairs the boundary set with the pages the LLM tier
+    could not settle, so a caller cannot get one without the other -- which is
+    how `undecided_pages` ended up computed but never surfaced.
+    """
+    geometry = geometry or compute_sheet_geometry()
+    boundaries = boundaries_from_page_texts(page_texts, medical=medical, judge=judge)
+    if boundaries is None:
+        return {}
+    undecided = (undecided_pages(page_texts, medical=medical, judge=judge)
+                 if judge is not None else [])
+    return _text_anchor_proposal(
+        boundaries, page_count=len(page_texts), geometry=geometry, undecided=undecided)
+
+
 def _text_anchor_proposal(
-    boundaries: set[int], *, page_count: int, geometry: dict
+    boundaries: set[int], *, page_count: int, geometry: dict,
+    undecided: list[int] | None = None,
 ) -> dict:
     """The propose_boundaries return shape for a deterministic, no-model run.
 
     Mirrors the vision path's contract exactly so build_proposal_document and
     _write_proposal need no branch. The model-specific fields are null/empty
-    because no model ran -- that absence is the honest record, not a gap: the
-    schema's `text_anchor` mode says so explicitly. needs_full_page is empty and
-    the fallback is untriggered for the same reason (nothing was ambiguous; the
-    text either named a title or it did not)."""
+    because no model ran on the SHEETS -- that absence is the honest record,
+    not a gap: the schema's `text_anchor` mode says so explicitly.
+
+    `undecided` names pages the LLM tier was asked about and could not answer.
+    Those boundaries split (the fail-safe direction) but carry no evidence a
+    reviewer can check on the page, unlike a title match, so they are surfaced
+    through needs_full_page -- which already means "this segment's boundary
+    needed more than the default look" on the vision path. Reusing it keeps one
+    flag for one meaning instead of two fields a reviewer has to learn."""
+    undecided = set(undecided or ())
     return {
-        "segments": segments_from_boundaries(boundaries, page_count),
+        "segments": [
+            {**seg, "needs_full_page": seg["page_start"] in undecided}
+            for seg in segments_from_boundaries(boundaries, page_count)
+        ],
         "unassigned_pages": [],
-        "needs_full_page": [],
+        "needs_full_page": sorted(undecided),
         "warnings": [],
         "method": {
             "ocr_performed": False,
@@ -3341,12 +3391,17 @@ def _cmd_propose(args):
         # The judge is built lazily -- only if an undecided page actually needs
         # one -- so a bundle the title rules fully answer still constructs no
         # provider and renders no sheet.
+        cli_judge = _LazyJudge(lambda: build_provider(parse_provider_config(args)))
         anchored = processed_text_boundaries(
-            args.case_id, args.doc_id, page_count,
-            judge=_LazyJudge(lambda: build_provider(parse_provider_config(args))))
+            args.case_id, args.doc_id, page_count, judge=cli_judge)
+        anchored_undecided = (
+            processed_undecided_pages(args.case_id, args.doc_id, page_count,
+                                       judge=cli_judge)
+            if anchored is not None else [])
         source = "processed text"
         if anchored is None:
             anchored = text_anchor_boundaries(pdf_path, page_count)
+            anchored_undecided = []
             source = "text layer"
         if anchored is not None:
             _stderr(
@@ -3355,7 +3410,8 @@ def _cmd_propose(args):
                 f"(no contact sheets rendered)"
             )
             result = _text_anchor_proposal(
-                anchored, page_count=page_count, geometry=geometry
+                anchored, page_count=page_count, geometry=geometry,
+                undecided=anchored_undecided,
             )
             proposal = build_proposal_document(
                 result, case_id=args.case_id, source_document_id=args.doc_id,
