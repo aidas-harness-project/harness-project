@@ -2737,3 +2737,101 @@ def test_policy_mode_is_unchanged_by_the_medical_rule():
     """
     pages = ["영업배상책임보험\n보통약관", "등 록 번 호\n성명\n나이\n과\n수 술 기 록"]
     assert set(sc.boundaries_from_page_texts(pages)) == {1}
+
+
+def test_form_title_survives_a_stamp_annotation_after_it():
+    """CASE_907 DOC_005 p2: a 원본대조필 stamp is printed beside the title.
+
+    The policy rule anchors titles to end-of-line because a 약관 name always
+    ends its line. A medical form's title shares its line with whatever the
+    clinic stamped there, so anchoring to the line end drops a real boundary.
+    """
+    assert sc.medical_form_title("후유장애 진단서(Mc Bride)          원본대조필 인")
+    assert sc.medical_form_title("진 단 서    사본")
+
+
+def test_form_title_accepts_the_내역_family():
+    """CASE_907 DOC_005 p9/p16: 진료비 세부산정내역(퇴원) / (외래).
+
+    Found by running the rule on a second bundle -- CASE_112 happened to use
+    내역서 for the same kind of document, and a vocabulary derived from one
+    bundle encoded that bundle's word ending rather than the form family.
+    """
+    assert sc.medical_form_title("진료비 세부산정내역(퇴원)")
+    assert sc.medical_form_title("진료비 세부산정내역(외래)")
+    assert sc.medical_form_title("진료비 내역서(외래)")
+
+
+def test_a_stamp_suffix_does_not_turn_prose_into_a_title():
+    """The relaxed anchor must not open the rule to body sentences."""
+    assert sc.medical_form_title("위 진단서를 첨부하여 제출하였습니다") is None
+    assert sc.medical_form_title("진단서 발급 사유는 다음과 같이 기재되어 있습니다") is None
+
+
+def test_consecutive_pages_repeating_one_title_stay_one_document():
+    """A multi-page form reprints its title on every page; that is one document.
+
+    CASE_907 DOC_005 p9-15 is a single 7-page 진료비 세부산정내역(퇴원) whose
+    title is a running page header -- the human baseline records it as one
+    document (DOC_221). Treating each reprint as a document start scored
+    precision 0.6250 on that bundle; merging identical consecutive titles
+    scores 1.0000.
+
+    This narrows the split-biased rule settled 2026-07-21 (known-gaps item 31),
+    which said a repeated title still starts a document. That rule was written
+    for the VISION path, where the evidence is a cropped thumbnail and the
+    reader cannot tell a reprint from a new form of the same kind. Reading the
+    text, "the previous page carried this exact title" is directly observable,
+    so the ambiguity the rule was hedging against is not present here.
+    """
+    pages = [
+        "진료비 세부산정내역(퇴원)\n환자등록번호 :\n항목 | 일자 | 금액",
+        "진료비 세부산정내역(퇴원)\n항목 | 일자 | 금액\n01. 진찰료",
+        "진료비 세부산정내역 (퇴원)\n항목 | 일자 | 금액\n02. 입원료",
+        "진료비 세부산정내역(외래)\n항목 | 일자 | 금액",
+    ]
+    found = sc.boundaries_from_page_texts(pages, medical=True)
+    # p2/p3 are reprints of p1's header -- spacing differs, the title does not.
+    # p4 is a DIFFERENT form (외래 vs 퇴원) and does start a new document.
+    assert set(found) == {1, 4}
+
+
+def test_a_different_form_of_the_same_family_still_starts_a_document():
+    """Merging is on the title itself, not on the form family."""
+    pages = [
+        "진 단 서\n환자의 성명",
+        "후유장애 진단서(Mc Bride)\n병록번호 :",
+    ]
+    assert set(sc.boundaries_from_page_texts(pages, medical=True)) == {1, 2}
+
+
+def test_a_title_returning_after_another_document_starts_a_new_one():
+    """Merging applies to CONSECUTIVE repeats only.
+
+    The same form recurring later in a bundle is a genuinely separate
+    submission, not a continuation of the earlier one.
+    """
+    pages = [
+        "진료비 내역서(외래)\n금액",
+        "진 단 서\n환자의 성명",
+        "진료비 내역서(외래)\n금액",
+    ]
+    assert set(sc.boundaries_from_page_texts(pages, medical=True)) == {1, 2, 3}
+
+
+def test_a_generic_title_does_not_merge_two_documents():
+    """CASE_907/CASE_112 DOC_005 p6-p7: two imaging reports both titled REPORT.
+
+    p6 reads an MR HAND, p7 a Right Wrist AP/Lateral -- separate studies, each
+    with its own patient block and Conclusion, and the human baseline records
+    them as two documents. A generic form-kind word is not a document NAME, so
+    a repeat of one is no evidence of a reprint; merging on it turned a real
+    boundary into a continuation on both bundles measured.
+
+    Titles that name the form ("진료비 세부산정내역(퇴원)") still merge. The
+    distinction is whether the title identifies the document or only its type,
+    which is exactly the judgement the LLM tier exists for -- this list is the
+    deterministic floor under it, not a substitute.
+    """
+    pages = ["REPORT\nReading | MR | HAND", "REPORT\nReading | Right Wrist AP"]
+    assert set(sc.boundaries_from_page_texts(pages, medical=True)) == {1, 2}

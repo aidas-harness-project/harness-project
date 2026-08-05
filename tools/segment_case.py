@@ -438,10 +438,18 @@ DOCUMENT_TITLE_RE = re.compile(
 # publisher's set), so the rule leans on shape rather than an exhaustive list: a
 # short, bare line ending in a form-name suffix. Measured across the real corpus
 # -- CASE_003/005/024/112/907 -- these are the endings that actually occur.
+# `내역` rather than `내역서`: CASE_112 writes 진료비 내역서(외래) and CASE_907
+# writes 진료비 세부산정내역(외래) for the same kind of document. A vocabulary
+# taken from one bundle encodes that bundle's word ending, not the form family.
 _MEDICAL_TITLE_RE = re.compile(
-    r"(진단서|확인서|내역서|명세서|소견서|의뢰서|처방전|기록지|기록|증명서|보고서"
+    r"(진단서|확인서|내역서?|명세서|소견서|의뢰서|처방전|기록지|기록|증명서|보고서"
     r"|REPORT|SUMMARY)"
-    r"\s*(?:\([^)]*\))?\s*(?:\d+\s*/\s*\d+)?\s*$"
+    r"\s*(?:\([^)]*\))?\s*(?:\d+\s*/\s*\d+)?"
+    # A clinic stamps its own annotation beside the title ("원본대조필 인",
+    # "사본"), so unlike a 약관 name the title does not always end its line.
+    # Only a short bare token may follow -- a sentence continuing past the
+    # title still fails, which is what keeps body prose out.
+    r"(?:\s+[가-힣A-Za-z]{1,6}){0,3}\s*$"
 )
 
 # A form's field labels sit above its name (DOC_216 "병록 번호", DOC_217
@@ -474,12 +482,34 @@ def medical_form_title(line: str) -> str | None:
     the line is compared with all whitespace and interpuncts removed while the
     ORIGINAL is returned -- downstream records the publisher's own words.
     """
-    if not line or len(line) > _MEDICAL_TITLE_MAX_CHARS:
+    if not line:
         return None
     collapsed = re.sub(r"[\s·ㆍ・]+", "", line)
+    # Length is judged on the collapsed form: a title and its stamp are often
+    # separated by a wide run of spaces used as layout ("후유장애 진단서(Mc
+    # Bride)" + 40 spaces + "원본대조필 인"), which says nothing about how much
+    # text is on the line.
+    if len(collapsed) > _MEDICAL_TITLE_MAX_CHARS:
+        return None
     if not collapsed or _MEDICAL_FIELD_LABEL_RE.match(collapsed):
         return None
-    return line if _MEDICAL_TITLE_RE.search(collapsed) else None
+    # Two readings, because letter-spacing and word-spacing are the same
+    # character. Collapsing everything makes "진 단 서" matchable but also glues
+    # a stamp annotation onto the title ("진단서원본대조필인"); keeping the
+    # spaces makes the stamp a separate token but leaves "진 단 서" unmatchable.
+    # A line is a title if EITHER reading says so.
+    if _MEDICAL_TITLE_RE.search(collapsed):
+        return line
+    squeezed = re.sub(r"[ \t·ㆍ・]+", " ", line).strip()
+    if _MEDICAL_TITLE_RE.search(squeezed):
+        return line
+    # Letter-spaced title AND a stamp beside it ("진 단 서    사본"): neither
+    # reading alone works -- collapsing glues the stamp on, squeezing leaves the
+    # title unmatchable. Rejoin only runs of single characters, which is what
+    # letter-spacing is, and leave real words as separate tokens.
+    unspaced = re.sub(r"(?:(?<=\s)|^)((?:[가-힣] ){1,}[가-힣])(?=\s|$)",
+                      lambda m: m.group(1).replace(" ", ""), squeezed)
+    return line if _MEDICAL_TITLE_RE.search(unspaced) else None
 
 
 # A TOC page is recognised by density, not by a keyword: at least this many lines
@@ -739,11 +769,13 @@ def _boundaries_from_page_lines(
         toc.append(flagged)
 
     boundaries: dict[int, str | None] = {1: None}
+    previous_title: str | None = None
     if medical:
         # Page 1 starts a document by position, but its title is still worth
         # recording -- unlike the policy path, where line 1 IS the title and a
         # null on page 1 loses nothing.
         boundaries[1] = _medical_header_title(pages[0])
+        previous_title = _title_key(boundaries[1])
     for index, lines in enumerate(pages):
         page = index + 1
         if page == 1 or toc[index]:
@@ -751,7 +783,16 @@ def _boundaries_from_page_lines(
         if medical:
             title = _medical_header_title(lines)
             if title is not None:
-                boundaries[page] = title
+                key = _title_key(title)
+                # key is None for a generic form-kind word, which never equals
+                # the previous key -- so such a page always starts a document.
+                if key is None or key != previous_title:
+                    boundaries[page] = title
+                previous_title = key
+            # A page with no title of its own continues the preceding document
+            # and does NOT reset the run: the reprint check compares against the
+            # last title seen, so an untitled continuation page in the middle of
+            # a multi-page form does not make the next reprint look new.
             continue
         if toc[index - 1]:
             # First real page after the contents block always starts a document.
@@ -759,6 +800,34 @@ def _boundaries_from_page_lines(
         elif DOCUMENT_TITLE_RE.search(lines[0]):
             boundaries[page] = lines[0]
     return boundaries
+
+
+# Titles that name a form's KIND rather than the document itself. A repeat of
+# one is no evidence of a reprint: CASE_907/CASE_112 DOC_005 p6 and p7 are both
+# headed "REPORT" but read different studies (MR HAND vs Right Wrist AP), each
+# with its own patient block and Conclusion, and the human baseline records two
+# documents. Merging on such a title turned a real boundary into a continuation
+# on both bundles measured. Deliberately a short list of bare form-kind words --
+# deciding this in general is the LLM tier's job, and this is the floor under it.
+_GENERIC_FORM_TITLES = frozenset({"report", "summary", "결과지", "판독지", "기록지"})
+
+
+def _title_key(title: str | None) -> str | None:
+    """Comparison form for deciding whether two pages carry the SAME title.
+
+    Whitespace is ignored: OCR reads the same printed header as "진료비
+    세부산정내역 (퇴원)" on one page and "진료비 세부산정내역(퇴원)" on the next,
+    and a reprint differing by a space is still a reprint.
+
+    Returns None for a generic form-kind word, which makes it un-mergeable --
+    None never equals the previous key, so such a page always starts a document.
+    """
+    if title is None:
+        return None
+    collapsed = re.sub(r"\s+", "", title)
+    if collapsed.lower() in _GENERIC_FORM_TITLES:
+        return None
+    return collapsed
 
 
 def _medical_header_title(lines: list[str]) -> str | None:
