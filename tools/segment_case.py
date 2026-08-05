@@ -30,6 +30,7 @@ Two measurements from the real corpus drive the design (see the plan doc):
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -2430,6 +2431,81 @@ def proposal_with_assignments(proposal: dict, document_ids: list[str]) -> dict:
     for segment, document_id in zip(updated["segments"], document_ids):
         segment["assigned_document_id"] = document_id
     return updated
+
+
+def redistribute_ocr_pages(
+    parent_ocr: dict, segments: list[dict], document_ids: list[str]
+) -> list[dict]:
+    """Hand each child segment the parent bundle's OCR pages it now owns.
+
+    Pure -- no I/O, no provider call. When OCR runs BEFORE segmentation (so
+    boundaries come from real page text rather than a contact-sheet crop), the
+    text is produced against the bundle. Every downstream stage addresses a
+    document by its own id and its own 1-based page numbers, so the split has
+    to re-file those pages under the children.
+
+    What is preserved verbatim: each page's `cross_validation` verdict. A P8
+    result is a property of the physical page, so it follows the page to its
+    new owner -- splitting must never invent agreement for a page that
+    disagreed, nor spread one page's disagreement onto its siblings.
+
+    What changes: `page` is renumbered from 1 within each child, and
+    `text_path` is rewritten to the child's own directory. A child that kept
+    the bundle's numbering would cite page numbers it does not have.
+
+    Fails loud if the ranges do not account for every parent page exactly once.
+    split_readiness_errors already refuses a proposal with an unassigned page,
+    so a mismatch here means the approved ranges and the OCR record disagree
+    about how long the bundle is -- truncating a document silently is exactly
+    the corruption this raises instead.
+    """
+    if len(segments) != len(document_ids):
+        raise SegmentationError(
+            f"cannot assign {len(document_ids)} document id(s) to {len(segments)} segment(s)"
+        )
+    pages = parent_ocr.get("pages", [])
+    covered = sum(seg["page_end"] - seg["page_start"] + 1 for seg in segments)
+    if covered != len(pages):
+        raise SegmentationError(
+            f"segments cover {covered} page(s) but the OCR record for "
+            f"{parent_ocr.get('document_id')} has {len(pages)}; refusing to "
+            "redistribute a partial or overlapping set"
+        )
+
+    children: list[dict] = []
+    for segment, doc_id in zip(segments, document_ids):
+        start, end = segment["page_start"], segment["page_end"]
+        if start < 1 or end > len(pages) or start > end:
+            raise SegmentationError(
+                f"segment p{start}-{end} is outside the OCR record's "
+                f"1-{len(pages)} page range"
+            )
+        child_pages = []
+        for offset, source_page in enumerate(pages[start - 1:end], start=1):
+            page = copy.deepcopy(source_page)
+            page["page"] = str(offset)
+            case_id = parent_ocr.get("case_id") or _case_id_from_text_path(
+                source_page.get("text_path"))
+            page["text_path"] = (
+                f"data/processed/{case_id}/{doc_id}/page_{offset:03d}.md"
+            )
+            child_pages.append(page)
+        child = copy.deepcopy(parent_ocr)
+        child["document_id"] = doc_id
+        child["pages"] = child_pages
+        children.append(child)
+    return children
+
+
+def _case_id_from_text_path(text_path: str | None) -> str:
+    """The case id embedded in a processed-text path, for rewriting sibling paths.
+
+    Read back from the parent's own recorded path rather than passed in, so the
+    child's path is built from the same value the parent was actually written
+    under -- a mismatch would point the child at a directory that does not
+    exist."""
+    parts = (text_path or "").split("/")
+    return parts[2] if len(parts) > 2 else "UNKNOWN_CASE"
 
 
 def split_bundle(

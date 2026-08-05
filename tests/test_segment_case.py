@@ -2257,3 +2257,102 @@ def test_propose_boundaries_can_be_forced_back_onto_the_vision_path(tmp_path):
         prefer_text_anchor=False, resume=False,
     )
     assert result["method"]["mode"] == "vision_proposal"
+
+
+# --- OCR redistribution: parent bundle -> child documents --------------------
+#
+# When OCR runs BEFORE segmentation (so that boundaries are derived from real
+# page text rather than from a contact-sheet image), the text lands on the
+# bundle. Every downstream stage -- redaction, chunking, citation verification
+# -- addresses a document by its own id and its own page numbers, so the split
+# has to hand each child the pages it now owns. No OCR re-runs: this is a
+# redistribution of text already read, which is also why it is strictly cheaper
+# than the old order (145 bundle pages read once, not once per child document).
+
+
+def _ocr_result(doc_id, page_count, *, disagreed=()):
+    """A minimal ocr_result payload shaped like run_checkpoint1 writes it."""
+    return {
+        "document_id": doc_id,
+        "extraction_method": "ocr",
+        "ocr_status": "completed",
+        "pages": [
+            {
+                "page": str(n),
+                "text_path": f"data/processed/CASE_900/{doc_id}/page_{n:03d}.md",
+                "mean_confidence": None,
+                "uncertain_regions": [],
+                "cross_validation": {
+                    "agreement": "disagreed" if n in disagreed else "agreed",
+                },
+            }
+            for n in range(1, page_count + 1)
+        ],
+    }
+
+
+def test_redistribute_gives_each_child_only_its_own_pages(tmp_path):
+    """A child owns exactly the bundle pages its approved range covers."""
+    parent = _ocr_result("DOC_003", 5)
+    segments = [
+        {"page_start": 1, "page_end": 1},
+        {"page_start": 2, "page_end": 4},
+        {"page_start": 5, "page_end": 5},
+    ]
+    got = sc.redistribute_ocr_pages(parent, segments, ["DOC_006", "DOC_007", "DOC_008"])
+    assert [len(r["pages"]) for r in got] == [1, 3, 1]
+    assert [r["document_id"] for r in got] == ["DOC_006", "DOC_007", "DOC_008"]
+
+
+def test_redistribute_renumbers_pages_from_one_within_each_child(tmp_path):
+    """Bundle p2-p4 becomes the child's p1-p3.
+
+    Every downstream citation is (document_id, page); a child that kept the
+    bundle's numbering would cite a page it does not have.
+    """
+    parent = _ocr_result("DOC_003", 5)
+    segments = [{"page_start": 1, "page_end": 1},
+                {"page_start": 2, "page_end": 4},
+                {"page_start": 5, "page_end": 5}]
+    child = sc.redistribute_ocr_pages(
+        parent, segments, ["DOC_006", "DOC_007", "DOC_008"])[1]
+    assert [p["page"] for p in child["pages"]] == ["1", "2", "3"]
+    assert [p["text_path"] for p in child["pages"]] == [
+        "data/processed/CASE_900/DOC_007/page_001.md",
+        "data/processed/CASE_900/DOC_007/page_002.md",
+        "data/processed/CASE_900/DOC_007/page_003.md",
+    ]
+
+
+def test_redistribute_carries_each_page_cross_validation_to_its_new_owner(tmp_path):
+    """A P8 disagreement follows its page, and lands on the right child.
+
+    The verdict is a property of the physical page, so splitting must neither
+    invent agreement nor spread one page's disagreement across siblings -- the
+    document-level rollup that blocks downstream use is computed from these.
+    """
+    parent = _ocr_result("DOC_003", 5, disagreed={4})
+    segments = [{"page_start": 1, "page_end": 3}, {"page_start": 4, "page_end": 5}]
+    first, second = sc.redistribute_ocr_pages(parent, segments, ["DOC_006", "DOC_007"])
+    assert all(p["cross_validation"]["agreement"] == "agreed" for p in first["pages"])
+    assert second["pages"][0]["cross_validation"]["agreement"] == "disagreed"
+    assert second["pages"][1]["cross_validation"]["agreement"] == "agreed"
+
+
+def test_redistribute_accounts_for_every_parent_page(tmp_path):
+    """No page may be dropped or duplicated across the children.
+
+    split_readiness_errors already refuses a proposal with an unassigned page,
+    so a mismatch here means the ranges and the OCR record disagree about how
+    long the bundle is -- fail loud rather than silently truncate a document.
+    """
+    parent = _ocr_result("DOC_003", 5)
+    with pytest.raises(sc.SegmentationError):
+        sc.redistribute_ocr_pages(parent, [{"page_start": 1, "page_end": 3}], ["DOC_006"])
+
+
+def test_redistribute_rejects_a_range_past_the_end_of_the_ocr_record(tmp_path):
+    parent = _ocr_result("DOC_003", 3)
+    with pytest.raises(sc.SegmentationError):
+        sc.redistribute_ocr_pages(
+            parent, [{"page_start": 1, "page_end": 4}], ["DOC_006"])

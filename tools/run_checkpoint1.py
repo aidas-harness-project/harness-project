@@ -210,10 +210,19 @@ def inherited_classification(case_id: str, doc_id: str, manifest: dict | None = 
       * the parent's type being `insurance_policy` -- the only type whose
         subdivisions are the same type by construction. A 진단서 bundle sliced
         into per-patient documents is NOT self-similar this way, so it still
-        pays for its own classification, and
-      * this document being `embedded_text`. A vision-OCR'd slice may have come
-        from a scan whose boundaries are a model's reading, so it is classified
-        on its own evidence.
+        pays for its own classification.
+
+    It deliberately does NOT require the slice to be `embedded_text`. That
+    condition was standing in for "the boundary was not a model's guess", which
+    `mode == 'text_anchor'` already establishes directly -- those cuts are made
+    on printed 약관 title lines, never by a model. Where the TEXT came from does
+    not decide how the BOUNDARY was found. Measured on CASE_112's two policy
+    bundles (323 pages): boundaries derived from the OCR-produced page text are
+    identical to those from the embedded text layer, same 173 boundaries,
+    precision 1.0000 against the human-approved baseline for both.
+
+    P8 is untouched -- each slice still carries its own cross-validation. The
+    only thing skipped is the classifier call.
 
     Anything else returns None and the normal provider call runs.
     """
@@ -225,7 +234,7 @@ def inherited_classification(case_id: str, doc_id: str, manifest: dict | None = 
 
     by_id = {d.get("document_id"): d for d in manifest.get("documents", [])}
     child = by_id.get(doc_id)
-    if not child or child.get("extraction_method") != "embedded_text":
+    if not child:
         return None
     parent_name = child.get("source_file_name")
     proposal_rel = child.get("segmentation_proposal_path")

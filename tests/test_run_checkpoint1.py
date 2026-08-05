@@ -675,9 +675,28 @@ def test_inherited_classification_uses_the_split_evidence_not_the_parent_type(is
     assert got["_inherited_from"] == "DOC_003"
 
 
-def test_inherited_classification_refuses_a_vision_ocr_slice(isolated_roots):
+def test_inherited_classification_accepts_an_ocr_sourced_text_anchor_slice(isolated_roots):
+    """Where the TEXT came from does not decide how the BOUNDARY was found.
+
+    This condition used to require extraction_method == 'embedded_text', on the
+    reasoning that a vision-OCR'd slice might come from a scan whose boundaries
+    are a model's reading. But `mode == 'text_anchor'` already excludes exactly
+    that: those boundaries are cut on printed 약관 title lines, never by a
+    model. extraction_method was standing in for a question it cannot answer.
+
+    Measured on CASE_112's two policy bundles (323 pages): boundaries derived
+    from the OCR-produced page text are IDENTICAL to those derived from the
+    embedded text layer -- same 173 boundaries, precision 1.0000 against the
+    human-approved baseline for both. A text-anchor slice is therefore the same
+    evidence whichever reader produced the text it was cut from.
+
+    P8 is untouched: the slice still carries its own cross-validation. What is
+    skipped is only the classifier call.
+    """
     m = _inherit_case(isolated_roots, child={"extraction_method": "ocr"})
-    assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None
+    got = rc1.inherited_classification("CASE_905", "DOC_007", m)
+    assert got["predicted_document_type"] == "insurance_policy"
+    assert got["_inherited_from"] == "DOC_003"
 
 
 def test_inherited_classification_refuses_a_vision_mode_proposal(isolated_roots):
