@@ -322,6 +322,12 @@ def synthetic_full_phase2_fixture(synthetic_policy_and_denial_fixture):
                 "policy_match_validations": [{
                     "policy_match_id": "PM_1",
                     "verification_status": "verified",
+                    # Must agree with this match's match_source upstream
+                    # (synthetic_policy_and_denial_fixture records
+                    # "insurer_cited"): `verified` alone says the clause exists
+                    # where claimed, not that the insurer cited it, and the
+                    # cross-contract check rejects a copy that disagrees.
+                    "match_source": "insurer_cited",
                     "verification_explanation": "합성 약관 조항과 기록 위치가 일치함",
                     "evidence_references": [evidence("DOC_001", 2, "보험금 지급요건")],
                     "review_required": False,

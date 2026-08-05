@@ -1748,6 +1748,21 @@ def check_denial_validation_result(data: dict, case_dir: Path) -> list[str]:
                       for mids_by_owner in (matches_by_reason, matches_by_acceptance)
                       for oid, mids in mids_by_owner.items() for mid in mids}
 
+    # `match_source` is duplicated into the validation contract (schema v0.3)
+    # so a consumer reading only that file can tell what `verified` means:
+    # the clause exists where claimed, NOT that the insurer cited it. A copied
+    # field is a field that can drift, and a validation claiming
+    # `insurer_cited` for a match the insurer never made would invert exactly
+    # the distinction the duplication exists to preserve -- so the copy is
+    # checked against its source rather than trusted.
+    source_of_match = {}
+    for owner_matches in (
+            [m for r in reasons for m in (r.get("policy_matches") or [])],
+            [m for a in accepted for m in (a.get("policy_matches") or [])]):
+        for m in owner_matches:
+            if m.get("policy_match_id") is not None:
+                source_of_match[m["policy_match_id"]] = m.get("match_source")
+
     validations = data.get("validations") or []
     seen_reason_ids = [v.get("reason_id") for v in validations]
 
@@ -1840,6 +1855,26 @@ def check_denial_validation_result(data: dict, case_dir: Path) -> list[str]:
                           "acceptance_match_validations entry -- an acceptance's policy basis must be "
                           "verified on the same terms as a denial's, and omitting it would let the "
                           "contract report full verification while this match was never checked")
+
+    # The duplicated match_source must still agree with its source. Driven off
+    # every validation in the contract, denial- and acceptance-side alike,
+    # since both carry the field through the same $ref.
+    for owner_entry in [*validations, *acceptance_entries]:
+        oid = owner_entry.get("reason_id") or owner_entry.get("accepted_coverage_id")
+        for pmv in (owner_entry.get("policy_match_validations") or []):
+            mid = pmv.get("policy_match_id")
+            if mid is None or mid not in source_of_match:
+                continue  # orphan/unknown id already reported above
+            upstream = source_of_match[mid]
+            claimed = pmv.get("match_source")
+            if upstream is not None and claimed != upstream:
+                errors.append(
+                    f"{oid}: policy_match_id {mid!r} records match_source "
+                    f"{claimed!r} but {DENIAL_REASONS} says {upstream!r} -- "
+                    "this field says whether the INSURER cited the clause or "
+                    "an agent proposed it, so a mismatch either credits the "
+                    "insurer with an argument it never made or discards one it "
+                    "did. Copy it from the upstream contract; do not restate it")
 
     # Cross-validation duplicates (the same match verified under two different
     # reasons) are caught here; the per-validation loop above only sees one.

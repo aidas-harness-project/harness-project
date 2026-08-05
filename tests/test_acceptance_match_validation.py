@@ -152,3 +152,86 @@ def test_schema_accepts_acceptance_array_and_rejects_bad_owner_id():
     bad["acceptance_match_validations"][0]["accepted_coverage_id"] = "DR_1"
     errors2 = validate_instance(bad, schema, schemas, registry)
     assert any("acceptance_match_validations" in str(e) for e in errors2), errors2
+
+
+# ------------------------------------------------------------ match_source ---
+# Duplicated into the validation contract (schema v0.3) so a consumer reading
+# only that file can tell what `verified` means: the clause exists where
+# claimed, NOT that the insurer cited it. Those come apart completely -- on
+# CASE_909 all three matches verified byte-exact while the insurer cited no
+# policy clause anywhere. A copied field can drift, so it is checked.
+
+def _case_with_sources(tmp_path, denial_source="agent_inferred",
+                       acceptance_source="agent_inferred"):
+    reasons = {
+        "denial_reasons": [{
+            "reason_id": "DR_1",
+            "decision_type": "denial",
+            "policy_matches": [{"policy_match_id": "PM_1",
+                                "match_source": denial_source}],
+        }],
+        "accepted_coverages": [{
+            "accepted_coverage_id": "AC_1",
+            "coverage_name": "구내치료비",
+            "policy_matches": [{"policy_match_id": "PM_3",
+                                "match_source": acceptance_source}],
+        }],
+    }
+    (tmp_path / "denial_reason_result.json").write_text(
+        json.dumps(reasons, ensure_ascii=False), encoding="utf-8")
+    return tmp_path
+
+
+def _full(denial_claim, acceptance_claim):
+    return {
+        "validations": [{
+            "reason_id": "DR_1",
+            "policy_match_validations": [
+                {"policy_match_id": "PM_1", "match_source": denial_claim}],
+        }],
+        "acceptance_match_validations": [{
+            "accepted_coverage_id": "AC_1",
+            "policy_match_validations": [
+                {"policy_match_id": "PM_3", "match_source": acceptance_claim}],
+        }],
+    }
+
+
+def test_matching_match_source_passes(tmp_path):
+    case = _case_with_sources(tmp_path)
+    assert _errors(_full("agent_inferred", "agent_inferred"), case) == []
+
+
+def test_claiming_insurer_cited_for_an_inferred_match_is_rejected(tmp_path):
+    """The inversion that matters: crediting the insurer with a policy
+    argument it never made. A rebuttal built on it attacks nothing, and the
+    insurer can simply disown the position."""
+    case = _case_with_sources(tmp_path)
+    errors = _errors(_full("insurer_cited", "agent_inferred"), case)
+    assert any("PM_1" in e and "insurer_cited" in e and "agent_inferred" in e
+               for e in errors), errors
+
+
+def test_discarding_a_real_insurer_citation_is_rejected(tmp_path):
+    """The opposite drift -- the insurer DID cite the clause and the
+    validation records otherwise, dropping a rebuttable argument."""
+    case = _case_with_sources(tmp_path, denial_source="insurer_cited")
+    errors = _errors(_full("agent_inferred", "agent_inferred"), case)
+    assert any("PM_1" in e for e in errors), errors
+
+
+def test_acceptance_side_match_source_is_checked_too(tmp_path):
+    """Both sides carry the field through the same $ref, so both are checked
+    -- an acceptance's basis gets no exemption for being good news."""
+    case = _case_with_sources(tmp_path)
+    errors = _errors(_full("agent_inferred", "insurer_cited"), case)
+    assert any("AC_1" in e and "PM_3" in e for e in errors), errors
+
+
+def test_legacy_contract_without_match_source_upstream_is_not_retro_failed(tmp_path):
+    """A pre-v0.3 upstream contract records no match_source; demanding
+    agreement with a value that never existed would report a legacy shape as
+    corruption. The schema requires it on new writes."""
+    case = _case(tmp_path)  # no match_source anywhere upstream
+    data = _full("agent_inferred", "agent_inferred")
+    assert _errors(data, case) == []
