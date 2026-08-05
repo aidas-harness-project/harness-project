@@ -744,16 +744,42 @@ def classify_existing(case_id: str, doc_id: str, *, held_by: str, run_id: str,
         sys.exit(f"error: {ocr_path} does not exist -- this document has no "
                   f"extracted text yet, so run checkpoint 1 for it first")
     ocr_result = json.loads(ocr_path.read_text(encoding="utf-8"))
+    first_page_text, text_source = _classification_input_text(case_id, doc_id, ocr_result)
+    return _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text,
+                                classifier=classifier, text_source=text_source)
+
+
+def _classification_input_text(case_id: str, doc_id: str, ocr_result: dict) -> tuple[str, str]:
+    """Page 1's text for classification, redacted layer preferred.
+
+    `page_NNN.md` still carries claimant PII -- dao.read-page-text guards it
+    behind checkpoint 2's one-shot capability precisely so no analysis stage
+    reads it -- and following ocr_result's text_path walked straight past that.
+    A split child inherits the bundle's redaction, so the redacted text is
+    normally already there.
+
+    The raw fallback stays, because a document not yet redacted still has to be
+    classifiable, but it is never silent: the caller records which source was
+    used on the contract, so reading unredacted text is visible afterwards
+    rather than being an invisible default.
+    """
+    redacted = ROOT / "data" / "processed" / case_id / doc_id / "redacted_text.md"
+    if redacted.exists():
+        pages = [block for block in redacted.read_text(encoding="utf-8").split("<<<PAGE")
+                  if block.strip()]
+        if pages:
+            first = pages[0].split(">>>", 1)[-1].strip()
+            if first:
+                return first, "redacted_text"
     first_page = ocr_result["pages"][0]
     text_path = first_page.get("text_path")
     if not text_path:
         sys.exit(f"error: {doc_id} page 1 has no text_path; nothing to classify from")
-    first_page_text = (ROOT / text_path).read_text(encoding="utf-8")
-    return _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text,
-                                classifier=classifier)
+    return (ROOT / text_path).read_text(encoding="utf-8"), "raw_page_text"
 
 
-def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, classifier=None):
+def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, classifier=None,
+                         text_source: str = "raw_page_text"):
     """Shared tail: classify from page 1's text, write
     classification_result_{doc_id}.json, update document_manifest.json.
     Called both by run_checkpoint1() (no disagreement) and
@@ -778,6 +804,19 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         "evidence_references": [{"page": 1, "quote": classification.get("quote", "")}],
         "review_required": False,
     }
+    classification_result["classification_text_source"] = text_source
+    if text_source == "raw_page_text":
+        # Not an error -- a document not yet redacted still has to be
+        # classifiable -- but reading unredacted text is a fact a reviewer
+        # should see rather than an invisible default.
+        classification_result["review_required"] = True
+        classification_result["reviewer_role"] = "손해사정사"
+        classification_result["review_reason"] = (
+            "classified from raw page text: no redacted_text.md existed for this "
+            "document at classification time, so the input still carried any PII "
+            "the page holds"
+        )
+
     title_classified = classification.get("_title_classified")
     if title_classified:
         # Record that no classifier ran and what decided instead, so an audit
@@ -829,6 +868,7 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
 
     return {"status": "passed", "case_id": case_id, "doc_id": doc_id,
             "document_type": classification["predicted_document_type"],
+            "classification_text_source": text_source,
             "cross_validation_status": ocr_result["cross_validation_status"]}
 
 

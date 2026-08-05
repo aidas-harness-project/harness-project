@@ -1366,6 +1366,7 @@ def build_manifest_entries(
     proposal_path: str,
     start_index: int,
     file_sizes: dict[int, int] | None = None,
+    redaction_redistributed: bool = False,
 ) -> list[dict]:
     """Builds document_manifest.json entries for approved segments.
 
@@ -1414,7 +1415,13 @@ def build_manifest_entries(
             "ocr_quality": None,
             "uncertain_region_count": None,
             "cross_validation_status": None,
-            "redacted_text_path": None,
+            # Set when the bundle was redacted before the split and its text
+            # was cut into per-child files: downstream stages (chunking above
+            # all) locate a document's redacted text through this field, so a
+            # child that owns the file but not the path is invisible to them.
+            "redacted_text_path": (
+                f"data/processed/{case_id}/{doc_id}/redacted_text.md"
+                if redaction_redistributed else None),
             "document_type": None,
             "classification_confidence": None,
         })
@@ -3041,6 +3048,65 @@ def _case_id_from_text_path(text_path: str | None) -> str:
     return parts[2] if len(parts) > 2 else "UNKNOWN_CASE"
 
 
+def _redistribute_parent_redaction(
+    *, case_id: str, bundle_id: str, segments: list[dict],
+    document_ids: list[str], progress=None,
+) -> bool:
+    """Cut the bundle's redacted text into per-child files. Returns whether it ran.
+
+    False means the bundle has no redacted text yet -- a split before redaction
+    is a valid order, not an error, so nothing is invented. Deterministic: the
+    `<<<PAGE page=N>>>` markers checkpoint 2 embeds make the page boundaries
+    exact, and each child's markers are renumbered from 1 to match its own pages.
+    """
+    source = ROOT / "data" / "processed" / case_id / bundle_id / "redacted_text.md"
+    if not source.exists():
+        return False
+    parent_contract_path = ROOT / "outputs" / case_id / f"redaction_result_{bundle_id}.json"
+    parent_contract = None
+    if parent_contract_path.exists():
+        try:
+            parent_contract = json.loads(parent_contract_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            parent_contract = None
+    try:
+        pages = _split_page_markers(source.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+    covered = sum(seg["page_end"] - seg["page_start"] + 1 for seg in segments)
+    if len(pages) != covered:
+        raise SegmentationError(
+            f"{source} holds {len(pages)} page(s) but the approved segments cover "
+            f"{covered}; refusing to redistribute a mismatched redaction"
+        )
+    for segment, doc_id in zip(segments, document_ids):
+        child_pages = pages[segment["page_start"] - 1:segment["page_end"]]
+        body = "".join(
+            f"<<<PAGE page={offset}>>>\n{text}\n"
+            for offset, text in enumerate(child_pages, start=1)
+        )
+        child_dir = ROOT / "data" / "processed" / case_id / doc_id
+        child_dir.mkdir(parents=True, exist_ok=True)
+        (child_dir / "redacted_text.md").write_text(body, encoding="utf-8")
+        if parent_contract is not None:
+            # Downstream stages find a document's redacted text through the
+            # manifest's redacted_text_path, and chunking reads that field, so
+            # the file alone leaves the child invisible to them.
+            child_contract = copy.deepcopy(parent_contract)
+            child_contract["document_id"] = doc_id
+            child_contract["redacted_text_path"] = (
+                f"data/processed/{case_id}/{doc_id}/redacted_text.md")
+            # The parent's count describes the parent. Attributing it to each
+            # child would multiply one redaction into twelve.
+            child_contract["items_redacted"] = None
+            child_contract["redistributed_from_document_id"] = bundle_id
+            (ROOT / "outputs" / case_id / f"redaction_result_{doc_id}.json").write_text(
+                json.dumps(child_contract, ensure_ascii=False, indent=2), encoding="utf-8")
+        if progress:
+            progress(f"redistributed {len(child_pages)} redacted page(s) to {doc_id}")
+    return True
+
+
 def _redistribute_parent_ocr(
     *, case_id: str, bundle_id: str, segments: list[dict],
     document_ids: list[str], progress=None,
@@ -3224,6 +3290,18 @@ def split_bundle(
         document_ids=document_ids,
         progress=progress,
     )
+    # The bundle is redacted BEFORE the split (segmentation reads that text), so
+    # its children inherit the redaction too. Without this each child would be
+    # redacted again -- repeating work the bundle already paid for -- and would
+    # have no redacted text for classification to read, leaving raw page text as
+    # the only available input.
+    redistributed_redaction = _redistribute_parent_redaction(
+        case_id=case_id,
+        bundle_id=bundle_id,
+        segments=segments,
+        document_ids=document_ids,
+        progress=progress,
+    )
 
     new_documents = build_manifest_entries(
         segments,
@@ -3232,6 +3310,7 @@ def split_bundle(
         proposal_path=proposal_path,
         start_index=start_index,
         file_sizes=file_sizes,
+        redaction_redistributed=redistributed_redaction,
     )
 
     # Mark the bundle superseded rather than deleting it: deleting orphans the
@@ -3273,6 +3352,7 @@ def split_bundle(
         "new_document_ids": [d["document_id"] for d in new_documents],
         "new_pdf_paths": [str(p) for p in written_paths],
         "redistributed_ocr": redistributed,
+        "redistributed_redaction": redistributed_redaction,
         "updated_proposal": proposal_with_assignments(
             proposal, [d["document_id"] for d in new_documents]
         ),

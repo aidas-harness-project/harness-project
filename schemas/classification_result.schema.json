@@ -73,6 +73,14 @@
         "inherited_from_document_id": {
           "$ref": "common_component_output.schema.json#/$defs/document_id",
           "description": "The parent bundle whose classification was inherited. Required when classification_source is inherited_from_parent_bundle."
+        },
+        "classification_text_source": {
+          "type": "string",
+          "enum": [
+            "redacted_text",
+            "raw_page_text"
+          ],
+          "description": "Which text the classifier actually read. 'redacted_text' is the normal case and the one the pipeline arranges for: a split child inherits its bundle's redaction, so the redacted layer exists before the type is needed. 'raw_page_text' means no redacted_text.md existed yet and page_NNN.md was read instead -- still carrying whatever PII the page holds. That fallback is deliberate (a document not yet redacted must remain classifiable) but never silent: it sets review_required so a reviewer sees that unredacted text reached an analysis stage."
         }
       },
       "required": [

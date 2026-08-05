@@ -1094,3 +1094,61 @@ def test_a_genre_naming_title_still_calls_the_model(tmp_path, monkeypatch):
         "CASE_009", "DOC_006", held_by="document-pipeline", run_id="RUN_20260805_002")
 
     assert result["document_type"] == "imaging_report"
+
+
+def test_classification_reads_the_redacted_text_when_it_exists(tmp_path, monkeypatch):
+    """Classification must prefer redacted text over the raw page.
+
+    `page_NNN.md` still carries claimant PII -- dao.read-page-text guards it
+    behind checkpoint 2's one-shot capability precisely so no analysis stage
+    reads it -- and classification reaching it by following ocr_result's
+    text_path bypassed that. A split child inherits the bundle's redaction, so
+    the redacted text is normally there.
+    """
+    out_dir = _child_with_inherited_pages(tmp_path)
+    proc = tmp_path / "data" / "processed" / "CASE_009" / "DOC_006"
+    (proc / "page_001.md").write_text("환자 홍길동 진 단 서", encoding="utf-8")
+    (proc / "redacted_text.md").write_text(
+        "<<<PAGE page=1>>>\n환자 [REDACTED] 진 단 서\n", encoding="utf-8")
+    seen = {}
+
+    def fake_classify(text, classifier=None):
+        seen["text"] = text
+        return {"predicted_document_type": "diagnosis_certificate",
+                "document_type_label": "진단서", "confidence": 0.9, "quote": text[:20]}
+
+    monkeypatch.setattr(rc1, "classify_document", fake_classify)
+
+    result = rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline",
+        run_id="RUN_20260805_002")
+
+    assert "[REDACTED]" in seen["text"]
+    assert "홍길동" not in seen["text"]
+    assert result["classification_text_source"] == "redacted_text"
+    written = json.loads(
+        (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
+    assert written.get("classification_text_source") == "redacted_text"
+
+
+def test_falling_back_to_raw_page_text_is_recorded(tmp_path, monkeypatch):
+    """The fallback stays, but never silently.
+
+    A document redacted after classification (or one whose redaction failed)
+    still has to be classifiable. What must not happen is reading raw PII
+    without that being visible afterwards, so the source is recorded on the
+    contract either way.
+    """
+    out_dir = _child_with_inherited_pages(tmp_path)
+    _mock_classify(monkeypatch, doc_type="medical_record", label="의무기록")
+
+    result = rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline",
+        run_id="RUN_20260805_002")
+
+    assert result["classification_text_source"] == "raw_page_text"
+    written = json.loads(
+        (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
+    assert written["classification_text_source"] == "raw_page_text"
+    assert written["review_required"] is True, \
+        "reading unredacted text is a fact a reviewer should see"

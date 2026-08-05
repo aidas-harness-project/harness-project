@@ -3099,3 +3099,120 @@ def test_a_deterministic_boundary_is_not_flagged():
     pages = ["진 단 서\n환자의 성명", "진료비 내역서(외래)\n금액"]
     result = sc.propose_from_page_texts(pages, medical="auto")
     assert not any(s["needs_full_page"] for s in result["segments"])
+
+
+def test_split_redistributes_the_bundles_redacted_text_too(tmp_path):
+    """The bundle is redacted BEFORE the split, so its children inherit that too.
+
+    Without this each child would have to be redacted again -- 12 more model
+    calls on CASE_909 for work the bundle already did -- and, worse, would have
+    no redacted text for classification to read, leaving the raw page text as
+    the only available input.
+    """
+    pdf = _bundle_pdf(tmp_path, 4)
+    _write_parent_ocr(tmp_path, "CASE_900", "DOC_001", 4)
+    proc = tmp_path / "data" / "processed" / "CASE_900" / "DOC_001"
+    (proc / "redacted_text.md").write_text(
+        "".join(f"<<<PAGE page={n}>>>\nredacted page {n}\n" for n in range(1, 5)),
+        encoding="utf-8")
+    prop = _proposal([_seg(0, 1, 1, status="approved"),
+                      _seg(1, 2, 4, status="approved")],
+                     review_status="approved")
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        out = sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_1",
+            dao=_FakeDao(),
+        )
+    finally:
+        sc.ROOT = orig_root
+
+    assert out["redistributed_redaction"] is True
+    base = tmp_path / "data" / "processed" / "CASE_900"
+    first = (base / "DOC_002" / "redacted_text.md").read_text(encoding="utf-8")
+    second = (base / "DOC_003" / "redacted_text.md").read_text(encoding="utf-8")
+    # Page numbers restart at 1 within each child, matching its own pages.
+    assert "<<<PAGE page=1>>>" in first and "redacted page 1" in first
+    assert "page=2" not in first
+    assert second.count("<<<PAGE page=") == 3
+    assert "redacted page 2" in second and "redacted page 4" in second
+    assert "<<<PAGE page=3>>>" in second
+
+
+def test_split_without_parent_redaction_reports_it_rather_than_inventing_one(tmp_path):
+    """A bundle split before redaction is a valid state, not an error."""
+    pdf = _bundle_pdf(tmp_path, 2)
+    _write_parent_ocr(tmp_path, "CASE_900", "DOC_001", 2)
+    prop = _proposal([_seg(0, 1, 2, status="approved")], review_status="approved")
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        out = sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_1",
+            dao=_FakeDao(),
+        )
+    finally:
+        sc.ROOT = orig_root
+    assert out["redistributed_redaction"] is False
+    assert not (tmp_path / "data" / "processed" / "CASE_900" / "DOC_002"
+                / "redacted_text.md").exists()
+
+
+def test_redistributed_redaction_writes_each_childs_contract(tmp_path):
+    """A child needs its own redaction_result and manifest path, not just text.
+
+    Downstream stages find a document's redacted text through the manifest's
+    `redacted_text_path`; chunking reads that field. A child with the file but
+    no contract is invisible to them, which is the same shape of gap as having
+    the OCR pages without an ocr_result.
+    """
+    pdf = _bundle_pdf(tmp_path, 3)
+    _write_parent_ocr(tmp_path, "CASE_900", "DOC_001", 3)
+    proc = tmp_path / "data" / "processed" / "CASE_900" / "DOC_001"
+    (proc / "redacted_text.md").write_text(
+        "".join(f"<<<PAGE page={n}>>>\nredacted {n}\n" for n in (1, 2, 3)),
+        encoding="utf-8")
+    out = tmp_path / "outputs" / "CASE_900"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "redaction_result_DOC_001.json").write_text(json.dumps({
+        "case_id": "CASE_900", "run_id": "RUN_20260805_002",
+        "component": "document-pipeline", "status": "success",
+        "created_at": "2026-08-05T00:00:00+09:00",
+        "model_info": {"model_name": "llm_span_redaction:x",
+                        "prompt_version": "pii_redaction_v0.3"},
+        "document_id": "DOC_001", "method": "llm_span_redaction",
+        "redacted_text_path": "data/processed/CASE_900/DOC_001/redacted_text.md",
+        "items_redacted": 4, "review_required": False,
+    }, ensure_ascii=False), encoding="utf-8")
+
+    dao = _FakeDao()
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        sc.split_bundle(
+            prop := _proposal([_seg(0, 1, 1, status="approved"),
+                               _seg(1, 2, 3, status="approved")],
+                              review_status="approved"),
+            case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_20260805_002",
+            dao=dao,
+        )
+    finally:
+        sc.ROOT = orig_root
+
+    child = json.loads(
+        (out / "redaction_result_DOC_002.json").read_text(encoding="utf-8"))
+    assert child["document_id"] == "DOC_002"
+    assert child["redacted_text_path"] == "data/processed/CASE_900/DOC_002/redacted_text.md"
+    # The parent's item count describes the parent, not this child.
+    assert child["items_redacted"] is None or isinstance(child["items_redacted"], int)
+    # And the manifest entry points at it, so chunking can find it.
+    written = {d["document_id"]: d for d in dao.calls[0]["new_documents"]}
+    assert written["DOC_002"]["redacted_text_path"] == \
+        "data/processed/CASE_900/DOC_002/redacted_text.md"
