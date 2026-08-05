@@ -509,6 +509,13 @@ def _search_one_document(case_id: str, doc_id: str, needle_norm: str,
     return hits, None
 
 
+# Documents that are not searchable surfaces. expert_review_only has no
+# processed text by design; superseded_bundle has text but every page of it
+# is also a page of one of its children, so searching both reports one
+# occurrence twice and inflates apparent corroboration.
+_SEARCH_EXCLUDED = {"expert_review_only", "superseded_bundle"}
+
+
 def cmd_search_document_text(args):
     """Whitespace/NFKC-insensitive search over processed text -- the floor under
     a negative claim.
@@ -547,20 +554,43 @@ def cmd_search_document_text(args):
         # very much exists, but every page of it is also a page of one of its
         # children, so searching both reports one hit twice and inflates the
         # apparent corroboration for whatever the caller is checking.
-        _EXCLUDED = {"expert_review_only", "superseded_bundle"}
         doc_ids = [d.get("document_id") for d in manifest.get("documents", [])
-                   if d.get("downstream_disposition") not in _EXCLUDED]
+                   if d.get("downstream_disposition") not in _SEARCH_EXCLUDED]
     elif args.doc_id:
         doc_ids = [args.doc_id]
     else:
         print("error: pass a DOC_ID or --all-docs")
         return 2
 
+    # The disposition check has to run per document, not only when building the
+    # --all-docs list: filtering the sweep alone left `search-document-text
+    # CASE_ID DOC_005 <term>` serving the retained bundle in full (4 real hits
+    # on CASE_909), so the double-count this exclusion exists to prevent was
+    # still one explicit doc_id away. A caller naming the bundle directly gets
+    # the reason rather than silence.
+    excluded_dispositions = {}
+    manifest_for_scope = read_contract_data(args.case_id, "document_manifest.json")
+    if manifest_for_scope is not None:
+        excluded_dispositions = {
+            d.get("document_id"): d.get("downstream_disposition")
+            for d in manifest_for_scope.get("documents", [])
+            if d.get("downstream_disposition") in _SEARCH_EXCLUDED}
+
     hits, unsearched = [], []
     for doc_id in doc_ids:
         if not doc_id:
             continue
         _require_safe_id("document id", doc_id)
+        if doc_id in excluded_dispositions:
+            unsearched.append({
+                "document_id": doc_id,
+                "reason": f"{excluded_dispositions[doc_id]} -- not a searchable "
+                          "surface. A superseded_bundle's every page is also a "
+                          "page of one of its children, so searching it "
+                          "alongside them reports one occurrence twice; an "
+                          "expert_review_only document has no processed text "
+                          "by design. Search the children instead."})
+            continue
         doc_hits, error = _search_one_document(args.case_id, doc_id, needle_norm, args.context)
         hits.extend(doc_hits)
         if error:

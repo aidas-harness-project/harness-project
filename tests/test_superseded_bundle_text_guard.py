@@ -93,3 +93,34 @@ def test_a_normal_bundle_before_splitting_is_still_readable(
     must stay readable -- segmentation reads its text to place boundaries."""
     _seed(isolated_dao, bundle_disposition="automated_text_pipeline")
     assert dao.cmd_read_document_text(make_args(doc_id="DOC_005")) == 0
+
+
+def test_explicit_doc_id_search_also_refuses_the_bundle(
+        isolated_dao, make_args, capsys):
+    """The first fix filtered only the --all-docs list, so naming the bundle
+    directly still searched it -- 4 real hits on CASE_909's DOC_005. The
+    double-count this exclusion prevents was one explicit doc_id away."""
+    _seed(isolated_dao)
+    rc = dao.cmd_search_document_text(
+        make_args(all_docs=False, doc_id="DOC_005", term="골절상", context=40))
+    # 2 = could not search, which is the honest code here and NOT 1 ("searched,
+    # found nothing"). A caller that reads 0 hits as "the term is absent" would
+    # be drawing a conclusion from a search that never ran.
+    assert rc == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result["hit_count"] == 0
+    assert result["documents_searched"] == []
+    unsearched = {u["document_id"]: u["reason"]
+                  for u in result["documents_unsearched"]}
+    assert "DOC_005" in unsearched
+    # It must say WHY, or a caller reads zero hits as "the term is absent".
+    assert "superseded_bundle" in unsearched["DOC_005"]
+
+
+def test_explicit_doc_id_search_still_works_for_a_child(
+        isolated_dao, make_args, capsys):
+    _seed(isolated_dao)
+    assert dao.cmd_search_document_text(
+        make_args(all_docs=False, doc_id="DOC_007", term="골절상",
+                  context=40)) == 0
+    assert json.loads(capsys.readouterr().out)["hit_count"] == 1
