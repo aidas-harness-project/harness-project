@@ -674,14 +674,66 @@ def boundaries_from_page_texts(
     """
     if not page_texts:
         return None
-    return _boundaries_from_page_lines([
+    lines = [
         _page_content_lines([line.strip() for line in text.splitlines() if line.strip()])
         for text in page_texts
-    ], medical=medical, judge=judge, page_texts=page_texts)
+    ]
+    if medical != "auto":
+        return _boundaries_from_page_lines(
+            lines, medical=medical, judge=judge, page_texts=page_texts)
+
+    # `propose` runs BEFORE classification -- document_type is per-document and
+    # cannot be known until after the split -- so the rule cannot be chosen by
+    # type. Try both and keep the one that found something: the vocabularies do
+    # not overlap, so the wrong rule reports nothing. Measured on real bundles:
+    # CASE_909/DOC_005 (medical) gives 1 boundary under the policy rule and 10
+    # under the medical one; CASE_112's DOC_003/DOC_004 (policy) give 84 and 89
+    # under the policy rule and 1 each under the medical one.
+    #
+    # The results are NOT unioned. Merging would import the medical rule's
+    # 5-line header window into policy text, where the strict first-line rule is
+    # what measured precision 1.0000 across 173 boundaries.
+    policy = _boundaries_from_page_lines(lines, page_texts=page_texts)
+    medical_result = _boundaries_from_page_lines(
+        lines, medical=True, judge=judge, page_texts=page_texts)
+    if policy is None or medical_result is None:
+        # None is "no verdict, fall through to vision" and is not comparable to
+        # a boundary count; if either reader declined, so does this.
+        return policy if medical_result is None else medical_result
+    return medical_result if len(medical_result) > len(policy) else policy
+
+
+class _LazyJudge:
+    """Builds the provider on first use, so an unused judge costs nothing.
+
+    The deterministic path's whole claim is that it constructs no provider and
+    renders no sheet; passing an eagerly-built provider as the LLM tier's judge
+    would quietly break that for every bundle, including the ones whose titles
+    answer every page."""
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._provider = None
+
+    def _resolve(self):
+        if self._provider is None:
+            self._provider = self._factory()
+        return self._provider
+
+    @property
+    def provider_name(self):
+        return self._resolve().provider_name
+
+    @property
+    def model_name(self):
+        return self._resolve().model_name
+
+    def classify_document(self, prompt, prompt_version):
+        return self._resolve().classify_document(prompt, prompt_version)
 
 
 def processed_text_boundaries(
-    case_id: str, doc_id: str, page_count: int
+    case_id: str, doc_id: str, page_count: int, judge=None
 ) -> dict[int, str | None] | None:
     """Boundaries from a bundle's already-processed text, or None if absent.
 
@@ -704,7 +756,7 @@ def processed_text_boundaries(
         except OSError:
             return None
         if len(pages) == page_count:
-            return boundaries_from_page_texts(pages)
+            return boundaries_from_page_texts(pages, medical="auto", judge=judge)
         return None
 
     page_files = [processed / f"page_{n:03d}.md" for n in range(1, page_count + 1)]
@@ -712,7 +764,8 @@ def processed_text_boundaries(
         return None
     try:
         return boundaries_from_page_texts(
-            [p.read_text(encoding="utf-8") for p in page_files])
+            [p.read_text(encoding="utf-8") for p in page_files],
+            medical="auto", judge=judge)
     except OSError:
         return None
 
@@ -1794,7 +1847,11 @@ def propose_boundaries(
         # the boundary rule does not care which reader produced it (CASE_112:
         # embedded, raw OCR and redacted text all yield the identical 173
         # boundaries across 323 pages).
-        anchored = processed_text_boundaries(case_id, doc_id, page_count)
+        # The provider doubles as the LLM tier's judge: it decides the pages
+        # the title rules cannot settle (a generic heading like REPORT, or no
+        # title at all), reading the page text rather than a contact sheet.
+        anchored = processed_text_boundaries(
+            case_id, doc_id, page_count, judge=provider)
         if anchored is not None and progress:
             progress(
                 f"processed text covers all {page_count} page(s): deriving "
@@ -3222,12 +3279,25 @@ def _cmd_propose(args):
     # propose_boundaries because the CLI renders sheets and builds a provider up
     # front, and both are pure waste when the text layer already answers this.
     if not args.no_text_anchor:
-        anchored = text_anchor_boundaries(pdf_path, page_count)
+        # Processed text first, then the PDF's own layer. A scan has none of the
+        # latter, which is why the deterministic path used to reach almost none
+        # of this corpus; once checkpoint 1 has read the bundle, that same scan
+        # has page text and the boundary rules apply to it unchanged.
+        # The judge is built lazily -- only if an undecided page actually needs
+        # one -- so a bundle the title rules fully answer still constructs no
+        # provider and renders no sheet.
+        anchored = processed_text_boundaries(
+            args.case_id, args.doc_id, page_count,
+            judge=_LazyJudge(lambda: build_provider(parse_provider_config(args))))
+        source = "processed text"
+        if anchored is None:
+            anchored = text_anchor_boundaries(pdf_path, page_count)
+            source = "text layer"
         if anchored is not None:
             _stderr(
-                f"text layer covers all {page_count} page(s): deriving "
+                f"{source} covers all {page_count} page(s): deriving "
                 f"{len(anchored)} boundary/boundaries deterministically "
-                f"(0 model calls, no contact sheets rendered)"
+                f"(no contact sheets rendered)"
             )
             result = _text_anchor_proposal(
                 anchored, page_count=page_count, geometry=geometry

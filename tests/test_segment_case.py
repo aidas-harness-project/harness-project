@@ -2550,12 +2550,25 @@ def test_boundaries_from_page_texts_ignores_running_footers():
 
 
 class _never_called_provider:
-    """Any provider call is a failure: the deterministic path must spend zero."""
+    """No VISION call may happen on the deterministic text path.
+
+    The provider also serves as the LLM tier's judge, which reads page TEXT for
+    the pages the title rules cannot settle -- that is expected and cheap, and
+    is not what this double is guarding. What must never happen is rendering a
+    contact sheet and asking a model to look at it.
+    """
     provider_name = "must-not-be-called"
     model_name = "must-not-be-called"
 
     def analyze_image_structured(self, *a, **k):
-        raise AssertionError("provider called on the deterministic text path")
+        raise AssertionError("vision call made on the deterministic text path")
+
+    def classify_document(self, prompt, prompt_version):
+        from llm_providers import ProviderResult
+        # Undecided pages default to "continues", which keeps these tests about
+        # the deterministic boundaries they are actually asserting.
+        return ProviderResult(self.provider_name, self.model_name, prompt_version,
+                              '{"starts_new_document": false, "confidence": 0.9, "title": null}')
 
 
 def _processed_bundle(root, case_id, doc_id, pages, *, redacted=True):
@@ -2933,3 +2946,58 @@ def test_without_a_judge_the_deterministic_result_is_unchanged():
     """The tier is additive: no judge, exactly the behaviour measured before."""
     pages = ["REPORT\nReading | MR", "REPORT\nReading | Wrist"]
     assert set(sc.boundaries_from_page_texts(pages, medical=True)) == {1, 2}
+
+
+# --- picking a title rule without knowing the document type -------------------
+#
+# `propose` runs BEFORE classification (document_type is per-document, so it
+# cannot be known until after the split), yet the policy and medical title rules
+# are different. Rather than guess the type, try both and take the one that
+# actually found boundaries: the two vocabularies do not overlap, so the wrong
+# rule reports nothing. Measured on real bundles -- CASE_909/DOC_005 (medical):
+# policy rule 1 boundary, medical rule 10; CASE_112 DOC_003/DOC_004 (policy):
+# policy rule 84 and 89, medical rule 1 each.
+
+
+def test_a_medical_bundle_is_read_by_the_medical_rule():
+    pages = [
+        "진 단 서\n환자의 성명",
+        "계속되는 진단 내용",
+        "진료비 내역서(외래)\n금액",
+    ]
+    assert set(sc.boundaries_from_page_texts(pages, medical="auto")) == {1, 3}
+
+
+def test_a_policy_bundle_is_read_by_the_policy_rule():
+    pages = [
+        "영업배상책임보험\n보통약관",
+        "제1조(목적)\n이 계약은 다음과 같이 보상합니다",
+        "구내치료비 추가특별약관\n제1조",
+    ]
+    assert set(sc.boundaries_from_page_texts(pages, medical="auto")) == {1, 3}
+
+
+def test_auto_does_not_let_the_wrong_rule_weaken_the_right_one():
+    """The rules are not unioned -- the losing one contributes nothing.
+
+    Merging both would import the medical rule's 5-line header window into
+    policy text, where the strict first-line rule is what measured precision
+    1.0000 across 173 boundaries.
+    """
+    pages = [
+        "영업배상책임보험\n보통약관",
+        # A policy page whose body happens to mention a medical form name.
+        "제3조(서류)\n회사는 진단서를 요구할 수 있습니다\n진 단 서",
+        "구내치료비 추가특별약관",
+    ]
+    assert set(sc.boundaries_from_page_texts(pages, medical="auto")) == {1, 3}
+
+
+def test_auto_falls_back_to_the_policy_result_when_neither_fires():
+    """A bundle neither rule recognises still returns page 1, not None.
+
+    None means "no verdict, fall through to vision"; a single boundary means
+    "one document". Those are different answers and must stay so.
+    """
+    pages = ["표지입니다", "본문이 이어집니다"]
+    assert set(sc.boundaries_from_page_texts(pages, medical="auto")) == {1}
