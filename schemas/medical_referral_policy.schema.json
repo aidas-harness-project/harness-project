@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "medical_referral_policy.schema.json",
+  "title": "Medical-referral policy v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "medical_referral_policy.v0.1" },
+    "policy_version": { "type": "string", "pattern": "^medical_referral_policy\\.v[0-9]+\\.[0-9]+$" },
+    "policy_enabled": { "type": "boolean" },
+    "approval": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/approval" }] },
+    "anomaly_kinds": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } },
+    "severity_definitions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "label": { "type": "string", "minLength": 1 },
+          "definition": { "type": "string", "minLength": 1 }
+        },
+        "required": ["code", "label", "definition"]
+      }
+    },
+    "referral_rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "rule_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "description": { "type": "string", "minLength": 1 },
+          "allowed_severity_codes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
+        },
+        "required": ["rule_id", "description", "allowed_severity_codes"]
+      }
+    }
+  },
+  "required": ["schema_version", "policy_version", "policy_enabled", "approval", "anomaly_kinds", "severity_definitions", "referral_rules"],
+  "allOf": [{
+    "if": { "properties": { "policy_enabled": { "const": true } }, "required": ["policy_enabled"] },
+    "then": { "properties": { "approval": { "$ref": "medical_review_common.schema.json#/$defs/approval" }, "severity_definitions": { "minItems": 1 }, "referral_rules": { "minItems": 1 } } }
+  }]
+}

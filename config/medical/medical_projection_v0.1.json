@@ -1,0 +1,12 @@
+{
+  "schema_version": "medical_projection_config.v0.1",
+  "config_version": "medical_projection.v0.1",
+  "projection_enabled": false,
+  "approval": null,
+  "field_rules": [],
+  "primary_diagnosis_rule": {
+    "rule_id": "legacy_document_character_priority",
+    "enabled": false,
+    "reason_disabled": "Medical variable kinds, document-role taxonomy, projection confidence, and clinical approval remain deferred in MED-DEF-003, MED-DEF-008, and MED-DEF-018."
+  }
+}

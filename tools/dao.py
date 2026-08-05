@@ -71,6 +71,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import time
 from datetime import datetime, timezone, timedelta
@@ -79,12 +80,32 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
 from _validation import load_registry, validate_instance
+import medical_repository
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
 DATA = ROOT / "data"
 FORBIDDEN_TEMPLATE = ROOT / "templates" / "forbidden-expressions.md"
+MEDICAL_STRUCTURING_CONFIG = (
+    ROOT / "config" / "medical" / "medical_structuring_v0.1.json"
+)
+MEDICAL_PROJECTION_CONFIG = (
+    ROOT / "config" / "medical" / "medical_projection_v0.1.json"
+)
+MEDICAL_REVIEW_ROLE_CONFIG = (
+    ROOT / "config" / "medical" / "medical_review_roles_v0.1.json"
+)
+MEDICAL_REVIEW_REQUEST_CONFIG = (
+    ROOT / "config" / "medical" / "medical_review_request_v0.1.json"
+)
+MEDICAL_REFERRAL_POLICY = (
+    ROOT / "config" / "medical" / "medical_referral_policy_v0.1.json"
+)
 KST = timezone(timedelta(hours=9))
+
+
+class AtomicWriteCommittedError(OSError):
+    """The destination was replaced, but directory durability was not confirmed."""
 
 
 def now_iso() -> str:
@@ -130,17 +151,400 @@ def load_json(path: Path):
 
 def atomic_write_json(path: Path, obj) -> None:
     """Write to a temp file in the same directory, then atomically replace."""
+    atomic_write_bytes(
+        path,
+        json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+
+
+def atomic_create_json(path: Path, obj) -> bool:
+    """Durably create a JSON file once; return False if it already exists."""
+    return atomic_create_bytes(
+        path,
+        json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+
+
+def atomic_create_bytes(path: Path, content: bytes) -> bool:
+    """Durably create exact bytes once without following an existing symlink."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
-    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        if path.is_symlink():
+            raise ValueError(f"refusing existing symlink at managed path: {path}")
+        return False
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return True
+
+
+def atomic_create_bytes_in_directory(
+    directory: Path,
+    filename: str,
+    content: bytes,
+) -> bool:
+    """Create or compare exact bytes relative to one no-follow directory handle."""
+    if not filename or Path(filename).name != filename:
+        raise ValueError(f"unsafe descriptor-relative filename: {filename!r}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        directory_fd = os.open(directory, flags)
+    except FileNotFoundError:
+        try:
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            pass
+        try:
+            directory_fd = os.open(directory, flags)
+        except OSError as exc:
+            raise ValueError(
+                f"cannot open managed directory without following links: {directory}"
+            ) from exc
+    except OSError as exc:
+        raise ValueError(
+            f"cannot open managed directory without following links: {directory}"
+        ) from exc
+
+    created = False
+    created_identity = None
+    try:
+        directory_metadata = os.fstat(directory_fd)
+        try:
+            file_fd = os.open(
+                filename,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory_fd,
+            )
+        except FileExistsError:
+            try:
+                file_fd = os.open(
+                    filename,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=directory_fd,
+                )
+            except OSError as exc:
+                raise ValueError(
+                    f"cannot inspect existing managed file: {directory / filename}"
+                ) from exc
+            try:
+                file_metadata = os.fstat(file_fd)
+                if (
+                    not stat.S_ISREG(file_metadata.st_mode)
+                    or file_metadata.st_nlink != 1
+                ):
+                    raise ValueError(
+                        f"existing managed file is not a private regular file: "
+                        f"{directory / filename}"
+                    )
+                with os.fdopen(file_fd, "rb") as stream:
+                    file_fd = -1
+                    existing = stream.read()
+            finally:
+                if file_fd >= 0:
+                    os.close(file_fd)
+            if existing != content:
+                raise ValueError(
+                    f"existing managed file content mismatch: {directory / filename}"
+                )
+        except OSError as exc:
+            raise ValueError(
+                f"cannot create managed file: {directory / filename}"
+            ) from exc
+        else:
+            try:
+                created_metadata = os.fstat(file_fd)
+            except BaseException:
+                os.close(file_fd)
+                raise
+            created = True
+            created_identity = (created_metadata.st_dev, created_metadata.st_ino)
+            with os.fdopen(file_fd, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.fsync(directory_fd)
+
+        try:
+            path_metadata = directory.lstat()
+        except OSError as exc:
+            raise ValueError(
+                f"managed directory identity changed during publication: {directory}"
+            ) from exc
+        if (
+            not stat.S_ISDIR(path_metadata.st_mode)
+            or path_metadata.st_dev != directory_metadata.st_dev
+            or path_metadata.st_ino != directory_metadata.st_ino
+        ):
+            raise ValueError(
+                f"managed directory identity changed during publication: {directory}"
+            )
+        try:
+            verification_fd = os.open(directory, flags)
+        except OSError as exc:
+            raise ValueError(
+                f"managed directory identity changed during publication: {directory}"
+            ) from exc
+        try:
+            verification_metadata = os.fstat(verification_fd)
+        finally:
+            os.close(verification_fd)
+        if (
+            verification_metadata.st_dev != directory_metadata.st_dev
+            or verification_metadata.st_ino != directory_metadata.st_ino
+        ):
+            raise ValueError(
+                f"managed directory identity changed during publication: {directory}"
+            )
+        return created
+    except BaseException:
+        if created and created_identity is not None:
+            try:
+                current_fd = os.open(
+                    filename,
+                    os.O_PATH | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=directory_fd,
+                )
+            except OSError:
+                pass
+            else:
+                try:
+                    try:
+                        current_metadata = os.fstat(current_fd)
+                    except OSError:
+                        current_identity = None
+                    else:
+                        current_identity = (
+                            current_metadata.st_dev,
+                            current_metadata.st_ino,
+                        )
+                finally:
+                    os.close(current_fd)
+                if current_identity == created_identity:
+                    try:
+                        os.unlink(filename, dir_fd=directory_fd)
+                        os.fsync(directory_fd)
+                    except OSError:
+                        pass
+        raise
+    finally:
+        os.close(directory_fd)
+
+
+def remove_managed_file_if_content(
+    directory: Path,
+    filename: str,
+    expected: bytes,
+) -> bool:
+    """Remove one private regular child only while its exact bytes still match."""
+    if not filename or Path(filename).name != filename:
+        raise ValueError(f"unsafe descriptor-relative filename: {filename!r}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        directory_fd = os.open(directory, flags)
+    except OSError:
+        return False
+    try:
+        try:
+            file_fd = os.open(
+                filename,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory_fd,
+            )
+        except OSError:
+            return False
+        try:
+            metadata = os.fstat(file_fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                return False
+            with os.fdopen(file_fd, "rb") as stream:
+                file_fd = -1
+                existing = stream.read()
+        finally:
+            if file_fd >= 0:
+                os.close(file_fd)
+        if existing != expected:
+            return False
+        try:
+            current = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError:
+            return False
+        if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+            return False
+        try:
+            os.unlink(filename, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        except OSError:
+            return False
+        return True
+    finally:
+        os.close(directory_fd)
 
 
 def atomic_write_text(path: Path, text: str) -> None:
+    atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def _open_parent_directory_beneath(
+    directory: Path,
+    relative_path: str,
+) -> tuple[int, str]:
+    """Open a relative target's real parent without following any ancestor."""
+    relative = Path(relative_path)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError("target path must be a safe relative path")
+    directory.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current_fd = os.open(directory, flags)
+    try:
+        for part in relative.parts[:-1]:
+            try:
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    pass
+                try:
+                    next_fd = os.open(part, flags, dir_fd=current_fd)
+                except OSError as exc:
+                    raise ValueError(
+                        f"target ancestor is not a real directory: {part}"
+                    ) from exc
+            except OSError as exc:
+                raise ValueError(
+                    f"target ancestor is not a real directory: {part}"
+                ) from exc
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd, relative.parts[-1]
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def atomic_write_bytes_beneath(
+    directory: Path,
+    relative_path: str,
+    content: bytes,
+    expected_parent_identity: tuple[int, int] | None = None,
+) -> None:
+    """Atomically write below a real directory without following ancestors."""
+    current_fd, leaf = _open_parent_directory_beneath(directory, relative_path)
+    try:
+        current_metadata = os.fstat(current_fd)
+        current_identity = (current_metadata.st_dev, current_metadata.st_ino)
+        if (
+            expected_parent_identity is not None
+            and current_identity != expected_parent_identity
+        ):
+            raise ValueError("target parent identity changed after lock acquisition")
+        temporary = f".{leaf}.tmp.{os.getpid()}.{time.time_ns()}"
+        temporary_created = False
+        try:
+            temporary_fd = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=current_fd,
+            )
+            temporary_created = True
+            with os.fdopen(temporary_fd, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(
+                temporary,
+                leaf,
+                src_dir_fd=current_fd,
+                dst_dir_fd=current_fd,
+            )
+            temporary_created = False
+            os.fsync(current_fd)
+            if expected_parent_identity is not None:
+                verification_fd, verification_leaf = _open_parent_directory_beneath(
+                    directory,
+                    relative_path,
+                )
+                try:
+                    verification_metadata = os.fstat(verification_fd)
+                    verification_identity = (
+                        verification_metadata.st_dev,
+                        verification_metadata.st_ino,
+                    )
+                    if (
+                        verification_leaf != leaf
+                        or verification_identity != expected_parent_identity
+                    ):
+                        raise ValueError(
+                            "target parent identity changed during generic write"
+                        )
+                finally:
+                    os.close(verification_fd)
+        finally:
+            if temporary_created:
+                try:
+                    os.unlink(temporary, dir_fd=current_fd)
+                except OSError:
+                    pass
+    finally:
+        os.close(current_fd)
+
+
+def atomic_write_text_beneath(
+    directory: Path,
+    relative_path: str,
+    text: str,
+    expected_parent_identity: tuple[int, int] | None = None,
+) -> None:
+    atomic_write_bytes_beneath(
+        directory,
+        relative_path,
+        text.encode("utf-8"),
+        expected_parent_identity,
+    )
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Durably publish exact bytes without reformatting or a trailing newline."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as exc:
+            raise AtomicWriteCommittedError(
+                f"{path} was replaced but parent-directory durability was not confirmed: {exc}"
+            ) from exc
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def processed_dir(case_id: str, doc_id: str) -> Path:
@@ -218,6 +622,145 @@ def acquire_lock_blocking(target: Path, held_by: str, run_id: str, purpose: str)
             return existing
         time.sleep(LOCK_POLL_INTERVAL_SECONDS)
         waited += LOCK_POLL_INTERVAL_SECONDS
+
+
+class _AnchoredLock:
+    """Owned generic lock retained by parent descriptor and inode identity."""
+
+    def __init__(self, parent_fd: int, name: str, identity: tuple[int, int]):
+        self.parent_fd = parent_fd
+        self.name = name
+        self.identity = identity
+        parent_metadata = os.fstat(parent_fd)
+        self.parent_identity = (parent_metadata.st_dev, parent_metadata.st_ino)
+
+
+def _read_lock_beneath(parent_fd: int, name: str) -> dict:
+    placeholder = {
+        "held_by": "unknown",
+        "run_id": "unknown",
+        "started_at": "unknown",
+        "purpose": "already held",
+    }
+    try:
+        fd = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent_fd,
+        )
+    except OSError:
+        return placeholder
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            return placeholder
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            fd = -1
+            try:
+                value = json.load(stream)
+            except (json.JSONDecodeError, ValueError):
+                return placeholder
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if not isinstance(value, dict):
+        return placeholder
+    return {**placeholder, **value}
+
+
+def acquire_lock_beneath(
+    directory: Path,
+    relative_path: str,
+    held_by: str,
+    run_id: str,
+    purpose: str,
+) -> tuple[_AnchoredLock | None, dict | None]:
+    """Acquire a compatible target lock without following target ancestors."""
+    parent_fd, leaf = _open_parent_directory_beneath(directory, relative_path)
+    name = leaf + ".lock"
+    try:
+        try:
+            fd = os.open(
+                name,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                0o644,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            existing = _read_lock_beneath(parent_fd, name)
+            os.close(parent_fd)
+            return None, existing
+        try:
+            metadata = os.fstat(fd)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                fd = -1
+                json.dump(
+                    {
+                        "held_by": held_by,
+                        "run_id": run_id,
+                        "started_at": now_iso(),
+                        "purpose": purpose,
+                    },
+                    stream,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        return _AnchoredLock(
+            parent_fd,
+            name,
+            (metadata.st_dev, metadata.st_ino),
+        ), None
+    except BaseException:
+        os.close(parent_fd)
+        raise
+
+
+def acquire_lock_beneath_blocking(
+    directory: Path,
+    relative_path: str,
+    held_by: str,
+    run_id: str,
+    purpose: str,
+) -> tuple[_AnchoredLock | None, dict | None]:
+    waited = 0.0
+    while True:
+        lock, existing = acquire_lock_beneath(
+            directory,
+            relative_path,
+            held_by,
+            run_id,
+            purpose,
+        )
+        if lock is not None:
+            return lock, None
+        if waited >= LOCK_MAX_WAIT_SECONDS:
+            return None, existing
+        time.sleep(LOCK_POLL_INTERVAL_SECONDS)
+        waited += LOCK_POLL_INTERVAL_SECONDS
+
+
+def release_lock_beneath(lock: _AnchoredLock) -> None:
+    """Release only the exact descriptor-owned lock created by this caller."""
+    try:
+        try:
+            current = os.stat(
+                lock.name,
+                dir_fd=lock.parent_fd,
+                follow_symlinks=False,
+            )
+        except OSError:
+            return
+        if (current.st_dev, current.st_ino) != lock.identity:
+            return
+        try:
+            os.unlink(lock.name, dir_fd=lock.parent_fd)
+        except OSError:
+            pass
+    finally:
+        os.close(lock.parent_fd)
 
 
 # ------------------------------------------------------------- run-state --
@@ -303,28 +846,287 @@ def cmd_read_ground_truth(args):
     return 0
 
 
+def _read_generic_contract_bytes(case_id: str, filename: str) -> bytes:
+    path = _require_within(case_dir(case_id), filename)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError(
+                f"{filename} is owned by a purpose-built medical DAO command"
+            )
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            return stream.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def cmd_read_contract(args):
+    try:
+        normalized = medical_repository.normalized_case_relative_target(
+            sys.modules[__name__], args.case_id, args.filename
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    try:
+        medical_repository.require_generic_read_allowed(
+            sys.modules[__name__], args.case_id, args.filename
+        )
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    if normalized == "extracted_claim_fields.json":
+        data, error = medical_repository.load_projection(
+            sys.modules[__name__], args.case_id
+        )
+        if error:
+            print(f"FAIL: {error}")
+            return 1
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    if normalized == "medical_variables.json":
+        data, error = _load_medical_revision(args.case_id, None)
+        if error:
+            print(f"FAIL: {error}")
+            return 1
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    if normalized == "_medical_review_ledger.json":
+        try:
+            data = load_medical_review_ledger(args.case_id)
+        except ValueError as exc:
+            print(f"FAIL: {exc}")
+            return 1
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    if Path(normalized).parts[:1] == ("_medical_variable_revisions",):
+        print("FAIL: immutable medical revisions require read-medical-variables")
+        return 1
     p = _require_within(case_dir(args.case_id), args.filename)
     if not p.exists():
         print(f"NOT_FOUND: {p}")
         return 1
-    print(p.read_text(encoding="utf-8"))
+    try:
+        payload = _read_generic_contract_bytes(args.case_id, args.filename)
+        text = payload.decode("utf-8")
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    print(text)
     return 0
 
 
 def read_contract_data(case_id: str, filename: str):
     """DAO-owned structured contract read for in-process pipeline tools."""
-    p = _require_within(case_dir(case_id), filename)
-    return load_json(p)
+    normalized = medical_repository.normalized_case_relative_target(
+        sys.modules[__name__], case_id, filename
+    )
+    medical_repository.require_generic_read_allowed(
+        sys.modules[__name__], case_id, filename
+    )
+    if normalized == "extracted_claim_fields.json":
+        data, error = medical_repository.load_projection(
+            sys.modules[__name__], case_id
+        )
+        if error:
+            raise ValueError(error)
+        return data
+    if normalized == "medical_variables.json":
+        data, error = _load_medical_revision(case_id, None)
+        if error:
+            raise ValueError(error)
+        return data
+    if normalized == "_medical_review_ledger.json":
+        return load_medical_review_ledger(case_id)
+    if Path(normalized).parts[:1] == ("_medical_variable_revisions",):
+        raise ValueError(
+            "immutable medical revisions require read-medical-variables"
+        )
+    try:
+        return json.loads(_read_generic_contract_bytes(case_id, filename))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"cannot read generic contract {filename}: {exc}") from exc
+
+
+def medical_variables_path(case_id: str) -> Path:
+    return medical_repository.medical_variables_path(sys.modules[__name__], case_id)
+
+
+def medical_variable_revisions_dir(case_id: str) -> Path:
+    return medical_repository.revisions_dir(sys.modules[__name__], case_id)
+
+
+def _canonical_json_bytes(data: dict) -> bytes:
+    return medical_repository.canonical_json_bytes(data)
+
+
+def cmd_write_medical_variables(args):
+    return medical_repository.publish(sys.modules[__name__], args)
+
+
+def _load_medical_revision(
+    case_id: str, revision_sha: str | None
+) -> tuple[dict | None, str | None]:
+    return medical_repository.load_revision(
+        sys.modules[__name__], case_id, revision_sha
+    )
+
+
+def cmd_read_medical_variables(args):
+    return medical_repository.cmd_read_variables(sys.modules[__name__], args)
+
+
+def cmd_read_medical_evidence(args):
+    return medical_repository.cmd_read_evidence(sys.modules[__name__], args)
+
+
+def medical_review_ledger_path(case_id: str) -> Path:
+    from medical_review_ledger import ledger_path
+
+    return ledger_path(sys.modules[__name__], case_id)
+
+
+def load_medical_review_ledger(case_id: str) -> dict:
+    from medical_review_ledger import load_ledger
+
+    return load_ledger(sys.modules[__name__], case_id)
+
+
+def cmd_check_medical_reviews_clear(args):
+    from medical_review_ledger import cmd_check_clear
+
+    return cmd_check_clear(sys.modules[__name__], args)
+
+
+def _run_medical_review_mutation(command, args):
+    result = command(sys.modules[__name__], args)
+    if result == 0:
+        from medical_review_ledger import reconcile_wait_projection
+
+        projected, _, error = reconcile_wait_projection(
+            sys.modules[__name__], args
+        )
+        if not projected:
+            print(
+                "WARNING: canonical medical-review mutation succeeded but "
+                f"run-state wait projection requires reconciliation: {error}"
+            )
+    return result
+
+
+def cmd_open_medical_review_item(args):
+    from medical_review_ledger import cmd_open
+
+    return _run_medical_review_mutation(cmd_open, args)
+
+
+def cmd_record_medical_referral_decision(args):
+    from medical_review_ledger import cmd_record_decision
+
+    return _run_medical_review_mutation(cmd_record_decision, args)
+
+
+def cmd_provide_medical_review_information(args):
+    from medical_review_ledger import cmd_provide_information
+
+    return _run_medical_review_mutation(cmd_provide_information, args)
+
+
+def cmd_transition_medical_review(args):
+    from medical_review_ledger import cmd_transition
+
+    return _run_medical_review_mutation(cmd_transition, args)
+
+
+def cmd_reconcile_medical_review_waits(args):
+    from medical_review_ledger import reconcile_wait_projection
+
+    projected, changed, error = reconcile_wait_projection(
+        sys.modules[__name__], args
+    )
+    if not projected:
+        print(f"FAIL: medical-review wait reconciliation failed: {error}")
+        return 1
+    print(json.dumps({
+        "case_id": args.case_id,
+        "changed": changed,
+        "reconciled": True,
+    }))
+    return 0
+
+
+def cmd_read_medical_review_ledger(args):
+    from medical_review_ledger import cmd_read_ledger
+
+    return cmd_read_ledger(sys.modules[__name__], args)
+
+
+def cmd_read_medical_review_evidence(args):
+    from medical_review_ledger import cmd_read_evidence
+
+    return cmd_read_evidence(sys.modules[__name__], args)
+
+
+def cmd_read_medical_review_outcomes(args):
+    from medical_review_ledger import cmd_read_outcomes
+
+    allowed_consumers = {
+        "screening_report",
+        "denial_validation",
+        "draft_report_v1",
+        "draft_report_v2",
+    }
+    if args.caller_stage not in allowed_consumers:
+        print("BLOCKED: caller stage is not authorized for medical-review outcomes")
+        return 1
+    state = load_run_state(args.case_id)
+    if state.get("run_id") != args.run_id:
+        print("BLOCKED: outcome read does not match the canonical run owner")
+        return 1
+    stage = next(
+        (
+            item
+            for item in state.get("stages", [])
+            if item.get("stage_name") == args.caller_stage
+        ),
+        None,
+    )
+    if stage is None or stage.get("status") != "in_progress":
+        print("BLOCKED: authorized outcome consumer stage is not in progress")
+        return 1
+    return cmd_read_outcomes(sys.modules[__name__], args)
 
 
 def cmd_write_contract(args):
+    try:
+        medical_repository.require_generic_target_allowed(
+            sys.modules[__name__], args.case_id, args.filename
+        )
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
     target = _require_within(case_dir(args.case_id), args.filename)
-    existing_lock = acquire_lock_blocking(target, args.held_by, args.run_id, args.purpose or f"write {args.filename}")
+    try:
+        owned_lock, existing_lock = acquire_lock_beneath_blocking(
+            case_dir(args.case_id),
+            args.filename,
+            args.held_by,
+            args.run_id,
+            args.purpose or f"write {args.filename}",
+        )
+    except (OSError, ValueError) as exc:
+        print(f"FAIL: unsafe generic lock target: {exc}")
+        return 1
     if existing_lock is not None:
         print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return 1
+    assert owned_lock is not None
     try:
         data = json.loads(Path(args.data_file).read_text(encoding="utf-8"))
         schemas, registry = load_registry()
@@ -338,7 +1140,16 @@ def cmd_write_contract(args):
             for e in errors:
                 print(f"  - {e}")
             return 1
-        atomic_write_json(target, data)
+        try:
+            atomic_write_bytes_beneath(
+                case_dir(args.case_id),
+                args.filename,
+                json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
+                owned_lock.parent_identity,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"FAIL: unsafe generic write target: {exc}")
+            return 1
         print(f"PASS: wrote {target}")
         if args.stage:
             # A different target (_run_state.json, not this contract file) --
@@ -349,7 +1160,7 @@ def cmd_write_contract(args):
                       "run-state may now lag behind actual progress; retry the run-state update.")
         return 0
     finally:
-        release_lock(target)
+        release_lock_beneath(owned_lock)
 
 
 def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_by: str, run_id: str,
@@ -455,19 +1266,46 @@ def _write_text_locked(case_id, filename, text_file, held_by, run_id, purpose=No
     against. Shared by cmd_write_text and cmd_write_reviewed_draft, same
     pattern as _update_run_state being shared by cmd_update_run_state and
     cmd_snapshot_backup."""
+    try:
+        medical_repository.require_generic_target_allowed(
+            sys.modules[__name__], case_id, filename
+        )
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
     target = _require_within(case_dir(case_id), filename)
-    existing_lock = acquire_lock_blocking(target, held_by, run_id, purpose or f"write {filename}")
+    try:
+        owned_lock, existing_lock = acquire_lock_beneath_blocking(
+            case_dir(case_id),
+            filename,
+            held_by,
+            run_id,
+            purpose or f"write {filename}",
+        )
+    except (OSError, ValueError) as exc:
+        print(f"FAIL: unsafe generic lock target: {exc}")
+        return 1
     if existing_lock is not None:
         print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return 1
+    assert owned_lock is not None
     try:
         text = Path(text_file).read_text(encoding="utf-8")
-        atomic_write_text(target, text)
+        try:
+            atomic_write_text_beneath(
+                case_dir(case_id),
+                filename,
+                text,
+                owned_lock.parent_identity,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"FAIL: unsafe generic write target: {exc}")
+            return 1
         print(f"PASS: wrote {target}")
         return 0
     finally:
-        release_lock(target)
+        release_lock_beneath(owned_lock)
 
 
 def cmd_write_text(args):
@@ -987,6 +1825,84 @@ def main():
 
     p = sub.add_parser("read-contract"); p.add_argument("case_id"); p.add_argument("filename")
     p.set_defaults(fn=cmd_read_contract)
+
+    p = sub.add_parser("write-medical-variables")
+    p.add_argument("case_id"); p.add_argument("data_file")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.add_argument("--purpose")
+    p.set_defaults(fn=cmd_write_medical_variables)
+
+    p = sub.add_parser("read-medical-variables")
+    p.add_argument("case_id"); p.add_argument("--revision-sha")
+    p.set_defaults(fn=cmd_read_medical_variables)
+
+    p = sub.add_parser("check-medical-reviews-clear")
+    p.add_argument("case_id")
+    p.set_defaults(fn=cmd_check_medical_reviews_clear)
+
+    p = sub.add_parser("reconcile-medical-review-waits")
+    p.add_argument("case_id")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_reconcile_medical_review_waits)
+
+    p = sub.add_parser("open-medical-review-item")
+    p.add_argument("case_id"); p.add_argument("--issue-id", required=True)
+    p.add_argument("--decision-owner", required=True, choices=["policy", "human"])
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_open_medical_review_item)
+
+    p = sub.add_parser("record-medical-referral-decision")
+    p.add_argument("case_id"); p.add_argument("review_item_id")
+    p.add_argument("decision_file")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_record_medical_referral_decision)
+
+    p = sub.add_parser("provide-medical-review-information")
+    p.add_argument("case_id"); p.add_argument("review_item_id")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_provide_medical_review_information)
+
+    p = sub.add_parser("transition-medical-review")
+    p.add_argument("case_id"); p.add_argument("review_item_id")
+    p.add_argument(
+        "--action",
+        required=True,
+        choices=[
+            "provide_information",
+            "assign",
+            "request_information",
+            "supplement_package",
+            "reassign",
+            "submit_response",
+            "amend_response",
+            "withdraw_response",
+            "flag_conflict",
+            "adjudicate",
+            "cancel",
+            "close",
+            "reopen",
+        ],
+    )
+    p.add_argument("--data-file")
+    p.add_argument("--reason")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_transition_medical_review)
+
+    p = sub.add_parser("read-medical-review-ledger")
+    p.add_argument("case_id")
+    p.set_defaults(fn=cmd_read_medical_review_ledger)
+
+    p = sub.add_parser("read-medical-review-evidence")
+    p.add_argument("case_id"); p.add_argument("review_item_id")
+    p.add_argument("request_id"); p.add_argument("request_version", type=int)
+    p.add_argument("locator_id")
+    p.set_defaults(fn=cmd_read_medical_review_evidence)
+
+    p = sub.add_parser("read-medical-review-outcomes")
+    p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)
+    p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_read_medical_review_outcomes)
 
     p = sub.add_parser("write-contract")
     p.add_argument("case_id"); p.add_argument("filename")

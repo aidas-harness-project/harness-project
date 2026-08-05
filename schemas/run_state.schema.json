@@ -63,15 +63,49 @@
       "type": "object",
       "properties": {
         "stage_name": { "$ref": "#/$defs/stage_name" },
-        "status": { "enum": ["waiting", "received"] },
+        "status": { "enum": ["waiting", "received", "no_longer_required"] },
         "description": {
           "type": "string",
           "description": "What input is/was pending -- e.g. 'expert review of draft_report_v1'."
         },
         "requested_at": { "type": "string", "format": "date-time" },
-        "received_at": { "type": ["string", "null"], "format": "date-time" }
+        "received_at": { "type": ["string", "null"], "format": "date-time" },
+        "input_kind": { "enum": ["referral_decision", "medical_evidence", "expert_assignment", "expert_response", "coordinator_disposition", "medical_adjudication"] },
+        "human_input_id": { "$ref": "medical_review_common.schema.json#/$defs/human_input_id" },
+        "review_item_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" }] },
+        "related_review_item_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" } },
+        "request_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/request_id" }] },
+        "adjudication_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/adjudication_id" }] },
+        "wait_cycle": { "type": "integer", "minimum": 1 },
+        "resolved_at": { "type": ["string", "null"], "format": "date-time" },
+        "resolution": { "type": ["string", "null"], "minLength": 1 }
       },
-      "required": ["stage_name", "status", "description", "requested_at"]
+      "required": ["stage_name", "status", "description", "requested_at"],
+      "allOf": [{
+        "if": { "required": ["human_input_id"] },
+        "then": {
+          "required": ["input_kind", "human_input_id", "review_item_id", "related_review_item_ids", "request_id", "adjudication_id", "wait_cycle", "resolved_at", "resolution"],
+          "oneOf": [
+            {
+              "properties": {
+                "input_kind": { "not": { "const": "medical_adjudication" } },
+                "review_item_id": { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" },
+                "related_review_item_ids": { "maxItems": 0 },
+                "adjudication_id": { "type": "null" }
+              }
+            },
+            {
+              "properties": {
+                "input_kind": { "const": "medical_adjudication" },
+                "review_item_id": { "type": "null" },
+                "related_review_item_ids": { "minItems": 2 },
+                "request_id": { "type": "null" },
+                "adjudication_id": { "$ref": "medical_review_common.schema.json#/$defs/adjudication_id" }
+              }
+            }
+          ]
+        }
+      }]
     }
   }
 }

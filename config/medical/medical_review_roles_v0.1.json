@@ -1,0 +1,9 @@
+{
+  "schema_version": "medical_review_role_config.v0.1",
+  "config_version": "medical_review_roles.v0.1",
+  "operations_enabled": false,
+  "approval": null,
+  "specialty_codes": ["unspecified"],
+  "named_actors": [],
+  "action_permissions": []
+}

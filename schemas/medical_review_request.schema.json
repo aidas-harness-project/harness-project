@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "medical_review_request.schema.json",
+  "title": "Focused medical review request v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "request_id": { "$ref": "medical_review_common.schema.json#/$defs/request_id" },
+    "request_version": { "type": "integer", "minimum": 1 },
+    "issue_id": { "$ref": "medical_common.schema.json#/$defs/issue_id" },
+    "issue_category": { "$ref": "medical_common.schema.json#/$defs/issue_category" },
+    "decision_id": { "$ref": "medical_review_common.schema.json#/$defs/decision_id" },
+    "referral_input_id": { "$ref": "medical_review_common.schema.json#/$defs/referral_input_id" },
+    "medical_variables_revision": { "$ref": "medical_review_common.schema.json#/$defs/medical_variables_revision" },
+    "source_reinspection_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "medical_review_common.schema.json#/$defs/source_reinspection_id" } },
+    "question": { "type": "string", "minLength": 1 },
+    "question_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scope_kind": { "const": "issue_only" },
+        "requested_interpretation": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "subject_variable_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/variable_id" } },
+        "subject_observation_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/observation_id" } },
+        "time_window": { "oneOf": [{ "type": "null" }, { "$ref": "medical_common.schema.json#/$defs/temporal_value" }] }
+      },
+      "required": ["scope_kind", "requested_interpretation", "subject_variable_ids", "subject_observation_ids", "time_window"]
+    },
+    "suggested_specialty_code": { "$ref": "medical_review_common.schema.json#/$defs/specialty_code" },
+    "case_summary": { "type": "string", "minLength": 1 },
+    "accident_summary": { "type": "string", "minLength": 1 },
+    "timeline_observation_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/observation_id" } },
+    "prior_condition_observation_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/observation_id" } },
+    "prognostic_observation_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/observation_id" } },
+    "included_issue_evidence_link_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/issue_evidence_link_id" } },
+    "included_evidence_locator_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/evidence_locator_id" } },
+    "omitted_supporting_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "issue_evidence_link_id": { "$ref": "medical_common.schema.json#/$defs/issue_evidence_link_id" },
+          "reason": { "type": "string", "minLength": 1 }
+        },
+        "required": ["issue_evidence_link_id", "reason"]
+      }
+    },
+    "uncertainties": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "source_coverage": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "schema_version": { "const": "medical_review_request.v0.1" },
+    "request_config_version": { "type": "string", "minLength": 1 },
+    "referral_policy_version": { "type": ["string", "null"] },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "required": ["request_id", "request_version", "issue_id", "issue_category", "decision_id", "referral_input_id", "medical_variables_revision", "source_reinspection_ids", "question", "question_scope", "suggested_specialty_code", "case_summary", "accident_summary", "timeline_observation_ids", "prior_condition_observation_ids", "prognostic_observation_ids", "included_issue_evidence_link_ids", "included_evidence_locator_ids", "omitted_supporting_links", "uncertainties", "source_coverage", "schema_version", "request_config_version", "referral_policy_version", "created_at"]
+}

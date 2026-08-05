@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "medical_referral_inputs.schema.json",
+  "title": "Medical referral-input snapshot v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "referral_input_id": { "$ref": "medical_review_common.schema.json#/$defs/referral_input_id" },
+    "issue_id": { "$ref": "medical_common.schema.json#/$defs/issue_id" },
+    "medical_variables_revision": { "$ref": "medical_review_common.schema.json#/$defs/medical_variables_revision" },
+    "anomalies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "anomaly_id": { "type": "string", "pattern": "^MA_[0-9]{4}$" },
+          "anomaly_kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "severity_state": { "enum": ["classified", "unclassified_pending_policy"] },
+          "severity_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "variable_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/variable_id" } },
+          "observation_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/observation_id" } },
+          "evidence_locator_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/evidence_locator_id" } },
+          "rationale": { "type": "string", "minLength": 1 }
+        },
+        "required": ["anomaly_id", "anomaly_kind", "severity_state", "variable_ids", "observation_ids", "evidence_locator_ids", "rationale"],
+        "allOf": [{
+          "if": { "properties": { "severity_state": { "const": "classified" } }, "required": ["severity_state"] },
+          "then": { "required": ["severity_code"] },
+          "else": { "not": { "required": ["severity_code"] } }
+        }]
+      }
+    },
+    "convergence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": { "enum": ["none", "single_signal", "multiple_signals"] },
+        "contributing_anomaly_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^MA_[0-9]{4}$" } },
+        "common_issue_id": { "$ref": "medical_common.schema.json#/$defs/issue_id" },
+        "rationale": { "type": "string", "minLength": 1 }
+      },
+      "required": ["status", "contributing_anomaly_ids", "common_issue_id", "rationale"]
+    },
+    "importance_assignment_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/importance_assignment_id" } },
+    "source_reinspection_id": { "$ref": "medical_review_common.schema.json#/$defs/source_reinspection_id" },
+    "source_coverage_statuses": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["consumed", "blocked_upstream", "unsupported_needs_configuration", "human_only_not_consumed"] } },
+    "schema_version": { "const": "medical_referral_inputs.v0.1" },
+    "config_version": { "$ref": "medical_common.schema.json#/$defs/config_version" }
+  },
+  "required": ["referral_input_id", "issue_id", "medical_variables_revision", "anomalies", "convergence", "importance_assignment_ids", "source_reinspection_id", "source_coverage_statuses", "schema_version", "config_version"]
+}

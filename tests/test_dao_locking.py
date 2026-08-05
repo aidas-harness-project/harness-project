@@ -5,6 +5,8 @@ every lock in the DAO now blocks instead of failing fast, per P5's
 already-documented 30s/15min cadence, now owned by the DAO itself).
 """
 import json
+import os
+from pathlib import Path
 import threading
 import time
 
@@ -50,6 +52,148 @@ def test_write_contract_success_writes_file_and_releases_lock(isolated_dao, make
     assert target.exists()
     assert json.loads(target.read_text(encoding="utf-8"))["coverages"][0]["coverage_name"] == "a"
     assert not target.with_name(target.name + ".lock").exists(), "lock must be released after a successful write"
+
+
+def test_write_contract_rejects_ancestor_swap_into_medical_revision_namespace(
+    isolated_dao,
+    make_args,
+    monkeypatch,
+    tmp_path,
+):
+    case_dir = dao.case_dir("CASE_009")
+    revision_directory = case_dir / "_medical_variable_revisions"
+    revision_directory.mkdir()
+    digest = "b" * 64
+    protected = revision_directory / f"{digest}.json"
+    escaped_lock = protected.with_name(protected.name + ".lock")
+    protected.write_bytes(b"immutable revision")
+    safe_alias = case_dir / "safe-alias"
+    safe_alias.mkdir()
+    repository = dao.sys.modules["medical_repository"]
+    real_guard = repository.require_generic_target_allowed
+    real_read_text = dao.Path.read_text
+    observed_escaped_lock = []
+
+    def swap_after_generic_guard(dao_module, case_id, filename):
+        real_guard(dao_module, case_id, filename)
+        safe_alias.rmdir()
+        safe_alias.symlink_to(
+            revision_directory.name,
+            target_is_directory=True,
+        )
+
+    def observe_lock_before_input_read(path, *args, **kwargs):
+        if path == Path(data_file):
+            observed_escaped_lock.append(escaped_lock.exists())
+        return real_read_text(path, *args, **kwargs)
+
+    data_file = _write_data_file(tmp_path, VALID_COVERAGE_RESULT)
+
+    monkeypatch.setattr(
+        repository,
+        "require_generic_target_allowed",
+        swap_after_generic_guard,
+    )
+    monkeypatch.setattr(dao.Path, "read_text", observe_lock_before_input_read)
+    result = dao.cmd_write_contract(make_args(
+        case_id="CASE_009",
+        filename=f"safe-alias/{digest}.json",
+        data_file=data_file,
+        schema_name="coverage_result.schema.json",
+    ))
+
+    assert result == 1
+    assert protected.read_bytes() == b"immutable revision"
+    assert not any(observed_escaped_lock)
+
+
+def test_write_contract_rejects_parent_replacement_after_lock(
+    isolated_dao,
+    make_args,
+    monkeypatch,
+    tmp_path,
+):
+    case_dir = dao.case_dir("CASE_009")
+    parent = case_dir / "safe-parent"
+    displaced = case_dir / "displaced-parent"
+    parent.mkdir()
+    data_file = _write_data_file(tmp_path, VALID_COVERAGE_RESULT)
+    real_read_text = dao.Path.read_text
+    swapped = False
+
+    def replace_parent_during_input_read(path, *args, **kwargs):
+        nonlocal swapped
+        if path == Path(data_file) and not swapped:
+            parent.rename(displaced)
+            parent.mkdir()
+            swapped = True
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(dao.Path, "read_text", replace_parent_during_input_read)
+    result = dao.cmd_write_contract(make_args(
+        case_id="CASE_009",
+        filename="safe-parent/coverage_result.json",
+        data_file=data_file,
+        schema_name="coverage_result.schema.json",
+    ))
+
+    assert swapped
+    assert result == 1
+    assert not (parent / "coverage_result.json").exists()
+    assert not (displaced / "coverage_result.json").exists()
+    assert not (displaced / "coverage_result.json.lock").exists()
+
+
+def test_anchored_lock_release_preserves_replacement_inode(isolated_dao):
+    case_dir = dao.case_dir("CASE_009")
+    target = case_dir / "nested" / "thing.json"
+    owned_lock, existing = dao.acquire_lock_beneath(
+        case_dir,
+        "nested/thing.json",
+        "original-holder",
+        "RUN_001",
+        "test replacement ownership",
+    )
+    assert existing is None
+    assert owned_lock is not None
+    lock_file = target.with_name(target.name + ".lock")
+    lock_file.unlink()
+    lock_file.write_text("foreign replacement", encoding="utf-8")
+
+    dao.release_lock_beneath(owned_lock)
+
+    assert lock_file.read_text(encoding="utf-8") == "foreign replacement"
+
+
+def test_anchored_lock_fifo_collision_returns_without_blocking(
+    isolated_dao,
+    monkeypatch,
+):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO is unavailable on this platform")
+    case_dir = dao.case_dir("CASE_009")
+    parent = case_dir / "nested"
+    parent.mkdir()
+    os.mkfifo(parent / "thing.json.lock")
+    monkeypatch.setattr(dao, "LOCK_MAX_WAIT_SECONDS", 0)
+
+    started = time.monotonic()
+    owned_lock, existing = dao.acquire_lock_beneath_blocking(
+        case_dir,
+        "nested/thing.json",
+        "new-holder",
+        "RUN_002",
+        "test FIFO collision",
+    )
+
+    assert time.monotonic() - started < 1
+    assert owned_lock is None
+    assert existing == {
+        "held_by": "unknown",
+        "run_id": "unknown",
+        "started_at": "unknown",
+        "purpose": "already held",
+    }
 
 
 def test_write_contract_rejects_when_already_locked(isolated_dao, make_args, tmp_path):

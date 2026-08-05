@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import pytest
 
 import dao
+import medical_review_ledger
 
 
 @pytest.fixture
@@ -25,6 +26,9 @@ def isolated_dao(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(dao, "OUTPUTS", tmp_path / "outputs")
     monkeypatch.setattr(dao, "DATA", tmp_path / "data")
+    monkeypatch.setattr(
+        medical_review_ledger, "MEDICAL_REVIEW_INGRESS_ROOT", tmp_path
+    )
     return tmp_path
 
 

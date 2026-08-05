@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "medical_review_ledger.schema.json",
+  "title": "Canonical medical-review ledger v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "event_id": { "$ref": "medical_review_common.schema.json#/$defs/event_id" },
+        "review_item_id": { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" },
+        "action": { "$ref": "medical_review_common.schema.json#/$defs/lifecycle_action" },
+        "from_state": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/lifecycle_state" }] },
+        "to_state": { "$ref": "medical_review_common.schema.json#/$defs/lifecycle_state" },
+        "actor": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/actor_assertion" }] },
+        "role_policy_snapshot": { "$ref": "medical_review_role_config.schema.json" },
+        "reason": { "type": ["string", "null"], "minLength": 1 },
+        "decision_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/decision_id" }] },
+        "request_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/request_id" }] },
+        "assignment_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/assignment_id" }] },
+        "adjudication_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/adjudication_id" }] },
+        "response_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/response_id" }] },
+        "medical_variables_revision": { "$ref": "medical_review_common.schema.json#/$defs/medical_variables_revision" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["event_id", "review_item_id", "action", "from_state", "to_state", "actor", "role_policy_snapshot", "reason", "medical_variables_revision", "created_at"]
+    },
+    "wait_episode": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "human_input_id": { "$ref": "medical_review_common.schema.json#/$defs/human_input_id" },
+        "input_kind": { "enum": ["referral_decision", "medical_evidence", "expert_assignment", "expert_response", "coordinator_disposition", "medical_adjudication"] },
+        "review_item_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" }] },
+        "related_review_item_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" } },
+        "request_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/request_id" }] },
+        "adjudication_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/adjudication_id" }] },
+        "wait_cycle": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["waiting", "received", "no_longer_required"] },
+        "created_at": { "type": "string", "format": "date-time" },
+        "resolved_at": { "type": ["string", "null"], "format": "date-time" },
+        "resolution": { "type": ["string", "null"], "minLength": 1 }
+      },
+      "required": ["human_input_id", "input_kind", "review_item_id", "related_review_item_ids", "request_id", "adjudication_id", "wait_cycle", "status", "created_at", "resolved_at", "resolution"]
+    },
+    "assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "assignment_id": { "$ref": "medical_review_common.schema.json#/$defs/assignment_id" },
+        "request_id": { "$ref": "medical_review_common.schema.json#/$defs/request_id" },
+        "request_version": { "type": "integer", "minimum": 1 },
+        "reviewer": { "$ref": "medical_review_common.schema.json#/$defs/actor_record" },
+        "role_policy_version": { "type": "string", "minLength": 1 },
+        "assigned_by_actor_id": { "type": "string", "minLength": 1 },
+        "package_review_attestation": { "$ref": "medical_review_common.schema.json#/$defs/package_review_attestation" },
+        "assignment_event_id": { "$ref": "medical_review_common.schema.json#/$defs/event_id" },
+        "assigned_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["assignment_id", "request_id", "request_version", "reviewer", "role_policy_version", "assigned_by_actor_id", "package_review_attestation", "assignment_event_id", "assigned_at"]
+    },
+    "request_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": { "$ref": "medical_review_common.schema.json#/$defs/request_id" },
+        "versions": { "type": "array", "minItems": 1, "items": { "$ref": "medical_review_request.schema.json" } },
+        "assignments": { "type": "array", "items": { "$ref": "#/$defs/assignment" } },
+        "responses": { "type": "array", "items": { "$ref": "medical_review_response.schema.json" } },
+        "current_assignment_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/assignment_id" }] },
+        "current_response_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/response_id" }] }
+      },
+      "required": ["request_id", "versions", "assignments", "responses", "current_assignment_id", "current_response_id"]
+    },
+    "review_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "review_item_id": { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" },
+        "issue_id": { "$ref": "medical_common.schema.json#/$defs/issue_id" },
+        "decision_owner": { "enum": ["policy", "human"] },
+        "state": { "$ref": "medical_review_common.schema.json#/$defs/lifecycle_state" },
+        "source_reinspection_records": { "type": "array", "items": { "$ref": "medical_source_reinspection.schema.json" } },
+        "decisions": { "type": "array", "items": { "$ref": "medical_referral_decision.schema.json" } },
+        "requests": { "type": "array", "items": { "$ref": "#/$defs/request_record" } },
+        "current_request_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/request_id" }] },
+        "current_adjudication_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/adjudication_id" }] },
+        "opened_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["review_item_id", "issue_id", "decision_owner", "state", "source_reinspection_records", "decisions", "requests", "current_request_id", "current_adjudication_id", "opened_at", "updated_at"]
+    },
+    "adjudication": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "adjudication_id": { "$ref": "medical_review_common.schema.json#/$defs/adjudication_id" },
+        "issue_id": { "$ref": "medical_common.schema.json#/$defs/issue_id" },
+        "review_item_ids": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" } },
+        "response_ids": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "$ref": "medical_review_common.schema.json#/$defs/response_id" } },
+        "status": { "enum": ["pending", "resolved", "cancelled"] },
+        "adjudicator": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/actor_assertion" }] },
+        "record": { "type": ["string", "null"], "minLength": 1 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "resolved_at": { "type": ["string", "null"], "format": "date-time" }
+      },
+      "required": ["adjudication_id", "issue_id", "review_item_ids", "response_ids", "status", "adjudicator", "record", "created_at", "resolved_at"]
+    }
+  },
+  "properties": {
+    "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
+    "schema_version": { "const": "medical_review_ledger.v0.1" },
+    "next_review_item_number": { "type": "integer", "minimum": 1 },
+    "next_request_number": { "type": "integer", "minimum": 1 },
+    "next_human_input_number": { "type": "integer", "minimum": 1 },
+    "next_adjudication_number": { "type": "integer", "minimum": 1 },
+    "next_event_number": { "type": "integer", "minimum": 1 },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "review_items": { "type": "array", "items": { "$ref": "#/$defs/review_item" } },
+    "wait_episodes": { "type": "array", "items": { "$ref": "#/$defs/wait_episode" } },
+    "adjudications": { "type": "array", "items": { "$ref": "#/$defs/adjudication" } },
+    "events": { "type": "array", "items": { "$ref": "#/$defs/event" } }
+  },
+  "required": ["case_id", "schema_version", "next_review_item_number", "next_request_number", "next_human_input_number", "next_adjudication_number", "next_event_number", "updated_at", "review_items", "wait_episodes", "adjudications", "events"]
+}

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "medical_review_common.schema.json",
+  "title": "Shared medical-review definitions v0.1",
+  "$defs": {
+    "review_item_id": { "type": "string", "pattern": "^MRI_[0-9]{4}$" },
+    "request_id": { "type": "string", "pattern": "^MRR_[0-9]{4}$" },
+    "human_input_id": { "type": "string", "pattern": "^MRH_[0-9]{6}$" },
+    "adjudication_id": { "type": "string", "pattern": "^MRA_[0-9]{6}$" },
+    "event_id": { "type": "string", "pattern": "^MRE_[0-9]{6}$" },
+    "assignment_id": { "type": "string", "pattern": "^MRR_[0-9]{4}-A[0-9]{2}$" },
+    "response_id": { "type": "string", "pattern": "^MRR_[0-9]{4}-R[0-9]{2}$" },
+    "referral_input_id": { "type": "string", "pattern": "^MRI_[0-9]{4}-I[0-9]{2}$" },
+    "decision_id": { "type": "string", "pattern": "^MRI_[0-9]{4}-D[0-9]{2}$" },
+    "source_reinspection_id": { "type": "string", "pattern": "^MRI_[0-9]{4}-S[0-9]{2}$" },
+    "specialty_code": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]*$" },
+    "reviewer_role": { "enum": ["system_router", "medical_coordinator", "medical_reviewer", "medical_adjudicator"] },
+    "actor_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$" },
+        "display_name": { "type": "string", "minLength": 1 },
+        "declared_role": { "$ref": "#/$defs/reviewer_role" },
+        "specialty_code": { "$ref": "#/$defs/specialty_code" },
+        "operator_actor_id": { "type": "string", "pattern": "^OP_[A-Z0-9_]{1,40}$" }
+      },
+      "required": ["actor_id", "display_name", "declared_role", "specialty_code"]
+    },
+    "actor_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$" },
+        "display_name": { "type": "string", "minLength": 1 },
+        "declared_role": { "$ref": "#/$defs/reviewer_role" },
+        "specialty_code": { "$ref": "#/$defs/specialty_code" },
+        "attested_at": { "type": "string", "format": "date-time" },
+        "assertion_source": { "enum": ["authenticated_operator_policy", "policy_engine", "system_derived"] },
+        "operator_actor_id": { "type": "string", "pattern": "^OP_[A-Z0-9_]{1,40}$" },
+        "operator_policy_version": { "const": "operator_auth_policy.v0.1" },
+        "authentication_method": { "const": "bearer_sha256_policy" }
+      },
+      "required": ["actor_id", "display_name", "declared_role", "specialty_code", "attested_at", "assertion_source"],
+      "allOf": [{
+        "if": { "properties": { "assertion_source": { "const": "authenticated_operator_policy" } }, "required": ["assertion_source"] },
+        "then": { "required": ["operator_actor_id", "operator_policy_version", "authentication_method"] }
+      }]
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "approved_by": { "type": "string", "minLength": 1 },
+        "authority_role": { "type": "string", "minLength": 1 },
+        "decision_record": { "type": "string", "minLength": 1 },
+        "approved_at": { "type": "string", "format": "date-time" },
+        "scope": { "type": "string", "minLength": 1 }
+      },
+      "required": ["approved_by", "authority_role", "decision_record", "approved_at", "scope"]
+    },
+    "medical_variables_revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "run_id": { "type": "string", "pattern": "^RUN_[A-Za-z0-9_-]+$" },
+        "schema_version": { "const": "medical_variables.v0.1" },
+        "config_version": { "$ref": "medical_common.schema.json#/$defs/config_version" }
+      },
+      "required": ["sha256", "run_id", "schema_version", "config_version"]
+    },
+    "lifecycle_state": { "enum": ["decision_pending", "do_not_refer", "needs_information", "package_ready", "awaiting_expert", "expert_needs_information", "answered", "adjudication_required", "cancelled", "closed"] },
+    "lifecycle_action": { "enum": ["open", "record_decision", "provide_information", "assign", "request_information", "supplement_package", "reassign", "submit_response", "amend_response", "withdraw_response", "flag_conflict", "adjudicate", "cancel", "close", "reopen"] },
+    "package_review_attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reviewed_by_actor_id": { "type": "string", "minLength": 1 },
+        "reviewed_at": { "type": "string", "format": "date-time" },
+        "source_reinspection_confirmed": { "const": true },
+        "focused_question_confirmed": { "const": true },
+        "no_verdict_confirmed": { "const": true }
+      },
+      "required": ["reviewed_by_actor_id", "reviewed_at", "source_reinspection_confirmed", "focused_question_confirmed", "no_verdict_confirmed"]
+    }
+  }
+}
