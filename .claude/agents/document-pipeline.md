@@ -12,6 +12,30 @@ Read and follow `harness-guardrails` (always) and `harness-guardrails-dev` (duri
 
 # Which documents you process
 
+A bundle marked `required` is OCR'd **before** it is split, so that
+segmentation can place boundaries by reading real page text instead of guessing
+from a downscaled contact-sheet crop. Run it with `--bundle-ocr`:
+
+```
+python tools/run_checkpoint1.py CASE_ID BUNDLE_DOC_ID <bundle pdf> --bundle-ocr \
+    --held-by document-pipeline --run-id RUN_ID
+```
+
+That mode does OCR only. It writes no `classification_result` and no
+`document_type`, because `document_type` is a per-document value and one label
+cannot be right for a bundle mixing a 진단서, a 검사 판독지 and a 진료비 명세서.
+Then run redaction (checkpoint 2) on the bundle, hand
+`data/processed/CASE_ID/BUNDLE_DOC_ID/redacted_text.md` to `segment_case.py`,
+and split. `split_bundle` redistributes the bundle's OCR pages to the children
+it creates, so **the children are not OCR'd again** — each already owns its
+pages, renumbered from 1, with its P8 verdicts carried over intact. Classify
+and redact the children as usual.
+
+Segmentation reads the REDACTED text, never `page_NNN.md`. Document titles
+survive redaction (verified across CASE_112's 217 split children), so nothing is
+lost, and the pre-redaction page text stays behind the capability gate where it
+belongs.
+
 Checkpoint 1 has a case-wide segmentation preflight built into
 `run_checkpoint1.py`. Before constructing a provider or opening a PDF, it calls
 the DAO's `check_segmentation_ready`: every PDF must be human-marked
@@ -22,9 +46,14 @@ status, or an attempt to process the retained `superseded_bundle` returns
 this gate. Record the human bundle decision with `dao.py
 set-segmentation-status`; an agent never supplies that decision itself.
 
+`--bundle-ocr` narrows that gate rather than bypassing it: a `pending_review` or
+`required` PDF may be OCR'd (that is the point), but a `superseded_bundle` is
+still refused — the same document is the only valid OCR target before a split
+and a forbidden one after it.
+
 You run on the case's per-document entries in `document_manifest.json` — the `DOC_XXX` entries that stage 1 (segmentation) produced by splitting each raw *bundle* into logical documents. **Skip any entry with `downstream_disposition: superseded_bundle`**: that is the original bundle PDF, retained only as a provenance record after segmentation replaced it with per-document entries. Its `ocr_status` is `not_applicable`; OCR/classify/redact/chunk its children, never the bundle.
 
-A split entry carries a `provisional_document_type` (and `provisional_type_label`) that segmentation guessed from a cropped, downscaled contact-sheet cell. **Never trust it and never copy it into `document_type`.** Unlike `pre_flagged_type` — which a human asserted, so classification trusts it and skips inference — `provisional_document_type` is model inference from a deliberately low-fidelity image. Checkpoint 1 still runs its own classification against the real OCR'd text; the provisional guess is at most a sanity cross-check, never a shortcut.
+A split entry may carry a `provisional_document_type` (and `provisional_type_label`). **Never trust it and never copy it into `document_type`.** Unlike `pre_flagged_type` — which a human asserted, so classification trusts it and skips inference — this is segmentation's own guess. On the vision path it comes from a deliberately low-fidelity cropped cell; on the text path it is the publisher's own title line, which is better evidence but still a title, not a classification. Checkpoint 1 still runs its own classification against the real OCR'd text; the provisional guess is at most a sanity cross-check, never a shortcut. The one exception is narrow and automatic: a text-anchor slice of an already-classified `insurance_policy` bundle inherits that type (`inherited_classification`), because the split cut on the publisher's printed 약관 title and every slice is part of the same booklet by construction.
 
 # Internal checkpoints
 
