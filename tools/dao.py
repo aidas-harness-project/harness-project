@@ -4269,11 +4269,37 @@ def cmd_check_untagged_claims(args):
               f"analytical_heading_patterns in {TEMPLATE_REGISTRY.name}")
         return 2
 
-    findings = find_untagged_claims(doc_path.read_text(encoding="utf-8"), patterns)
+    text = doc_path.read_text(encoding="utf-8")
+    # A known template whose headings appear nowhere in THIS document scans
+    # zero lines and returns clean -- indistinguishable from a real pass, and
+    # reported as one. Caught on CASE_909: rebuttal_points.md was checked with
+    # the 배상책임_후유장해형 patterns (IV/V/VI of a draft report), matched no
+    # section, and came back clean. NO_ANALYTICAL_SECTIONS already refuses an
+    # unknown template for exactly this reason; an inapplicable one is the same
+    # failure with a different cause, so it gets the same refusal rather than a
+    # pass nobody can distinguish from evidence.
+    # Match the scanner's own normalization -- it strips the markdown heading
+    # marker before testing (`line.lstrip("#").strip()`), so testing the raw
+    # line here would report every rendered document as unmatched.
+    headings = [line.lstrip("#").strip() for line in text.split("\n")]
+    matched = [p for p in patterns
+               if any(re.match(p, h) for h in headings)]
+    if not matched:
+        print(f"NO_MATCHING_SECTIONS: none of template {args.template!r}'s "
+              f"analytical headings appear in {doc_path.name} -- "
+              f"{patterns}. Zero lines were scanned, so this is not a clean "
+              "result. Pass the template this document was rendered from; a "
+              "document kind with no registry contract (e.g. rebuttal_points) "
+              "has no analytical scope to check and must not be reported as "
+              "having passed one.")
+        return 2
+
+    findings = find_untagged_claims(text, patterns)
     print(json.dumps({
         "clean": not findings,
         "template": args.template,
         "analytical_sections": patterns,
+        "sections_matched": matched,
         "findings": findings,
         "note": ("candidates, not verdicts -- an untagged line may legitimately owe no citation. "
                  "Scope is the analytical sections only; this is a floor under the critic's "

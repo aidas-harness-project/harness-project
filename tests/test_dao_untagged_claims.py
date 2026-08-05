@@ -183,3 +183,62 @@ def test_registry_declares_analytical_sections_for_every_draft_template():
     silently missing the key would make the check a no-op for it."""
     for key in ("배상책임_후유장해형", "진단수술비형"):
         assert dao._analytical_patterns(key), key
+
+
+def test_template_whose_headings_are_absent_is_refused(tmp_path, capsys):
+    """A KNOWN template whose sections appear nowhere in THIS document scans
+    zero lines and would otherwise return clean -- indistinguishable from a
+    real pass, and reported as one.
+
+    Caught on CASE_909: rebuttal_points.md was checked with the draft-report
+    template (IV/V/VI), matched no section, and came back clean. The tool
+    already refused an unknown template for this exact reason; an inapplicable
+    one is the same failure with a different cause.
+    """
+    doc = tmp_path / "rebuttal_points.md"
+    doc.write_text(
+        "# 반박 논거\n\n## RB-1\n민법 제758조에 관한 주장\n", encoding="utf-8")
+
+    class A:
+        doc_path, template = str(doc), "배상책임_후유장해형"
+
+    assert dao.cmd_check_untagged_claims(A()) == 2
+    out = capsys.readouterr().out
+    assert "NO_MATCHING_SECTIONS" in out
+    # It must say the scan did not happen, not merely that nothing was found.
+    assert "not a clean result" in out
+
+
+def test_markdown_heading_markers_do_not_defeat_scope_detection(tmp_path, capsys):
+    """The scope pre-check has to normalize headings the same way the scanner
+    does (`line.lstrip("#")`). Testing the raw line would report every rendered
+    document as unmatched -- every real draft carries `##` markers."""
+    draft = tmp_path / "d.md"
+    draft.write_text(
+        "## IV. 관계법규 및 보상책임\n민법 제758조가 적용됨 [E1]\n", encoding="utf-8")
+
+    class A:
+        doc_path, template = str(draft), "배상책임_후유장해형"
+
+    assert dao.cmd_check_untagged_claims(A()) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["sections_matched"] == [r"^IV\. 관계법규 및 보상책임"]
+
+
+def test_matched_sections_are_reported_so_scope_is_auditable(tmp_path, capsys):
+    """A caller must be able to see WHICH sections were scanned, not just that
+    the check returned clean -- that is what makes a vacuous pass visible."""
+    draft = tmp_path / "d.md"
+    draft.write_text(
+        "## IV. 관계법규 및 보상책임\n민법 제758조가 적용됨 [E1]\n"
+        "## V. 사정 기초\n노동능력상실률 13% [E2]\n", encoding="utf-8")
+
+    class A:
+        doc_path, template = str(draft), "배상책임_후유장해형"
+
+    assert dao.cmd_check_untagged_claims(A()) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert len(result["sections_matched"]) == 2
+    # VI is declared but absent from this document -- reported as declared,
+    # not as scanned.
+    assert len(result["analytical_sections"]) == 3
