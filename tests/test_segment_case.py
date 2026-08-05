@@ -2115,6 +2115,68 @@ def test_text_anchor_boundaries_suppresses_a_table_of_contents(tmp_path):
     assert found == {1, 3}
 
 
+def test_page_furniture_is_ignored_when_judging_a_contents_page(tmp_path):
+    """A running footer must not decide whether a page is contents.
+
+    Measured on CASE_112 DOC_004 p6: the embedded text layer holds the bare
+    title line, but the OCR of the same page also picks up the publisher's
+    running footer ("당신에게 좋은보험 삼성화재"), which the text layer omits.
+    That single extra line broke the short-page rule's `titles == len(lines)`
+    equality, flipping p6 from contents to a boundary and shifting the cut to
+    p6/p7 -- the only boundary disagreement in 323 pages between the two
+    readings. The footer is page furniture on 25 of the 28 short pages in this
+    bundle, appearing under body text, article headings and titles alike, so it
+    carries no information about what kind of page it sits on.
+    """
+    footer = "당신에게 좋은보험 삼성화재"
+    with_footer = sc._page_content_lines(["치료비 추가특별약관", footer])
+    assert with_footer == ["치료비 추가특별약관"]
+    # Same verdict with or without the footer -- that is the whole point.
+    assert sc._is_toc_page(with_footer) is sc._is_toc_page(["치료비 추가특별약관"])
+
+
+def test_a_body_page_is_not_contents_however_its_lines_are_wrapped():
+    """Rejoined body text must not read as a contents block.
+
+    CASE_112 DOC_004 p31 is a body page opening with a title line and carrying
+    two `제N조` headings. The embedded text layer breaks its one long clause into
+    many short lines (20 total); OCR rejoins them (9 total). Under a pure ratio
+    the OCR reading crossed the 0.6 share and the page became "contents",
+    swallowing a real boundary -- the page's content never changed, only the
+    reader's line wrapping. Length is what separates a contents entry from a
+    sentence that merely starts with one.
+    """
+    body_sentence = (
+        "회사는 보통약관 및 특별약관의 제조건·제규정에 불구하고, 피보험자의 소유여부에 "
+        "관계없이 컴퓨터, 자료처리기기, 마이크로칩, 운영체제, 마이크로프로세서, 집적회로 "
+        "및 이와 유사한 장치로 인해 발생되는 모든 형태의 직접 또는 간접손해를 보상하지 "
+        "않습니다."
+    )
+    rejoined = ["날짜인식오류 보상제외 특별약관", "제1조", body_sentence, "제2조"]
+    assert sc._is_toc_page(rejoined) is False
+    # A real contents page of the same line count is still recognised.
+    assert sc._is_toc_page([
+        "날짜인식오류 보상제외 특별약관",
+        "정보기술 추가특별약관",
+        "테러행위 면책 특별약관",
+        "시설소유(관리)자 특별약관",
+        "구내치료비 추가특별약관",
+    ]) is True
+
+
+def test_page_furniture_never_empties_a_page(tmp_path):
+    """A page that is ONLY furniture keeps its lines rather than becoming blank.
+
+    text_anchor_boundaries treats an empty page as "not fully born-digital" and
+    declines the whole bundle (returns None). Stripping a footer-only page down
+    to nothing would silently turn one boilerplate page into a scan verdict for
+    a 145-page bundle, so the strip is skipped when it would remove everything.
+    """
+    footer = "당신에게 좋은보험 삼성화재"
+    assert sc._page_content_lines([footer]) == [footer]
+    assert sc._page_content_lines([]) == []
+
+
 def test_text_anchor_boundaries_returns_none_for_a_scan(tmp_path):
     fitz = pytest.importorskip("fitz")
     path = tmp_path / "scan.pdf"

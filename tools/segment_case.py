@@ -437,6 +437,13 @@ DOCUMENT_TITLE_RE = re.compile(
 _TOC_MIN_LINES = 5
 _TOC_TITLE_SHARE = 0.6
 
+# The longest a line can be and still be a contents ENTRY rather than a body
+# sentence that happens to open with a title or a 제N조 heading. The longest real
+# title in CASE_112's two bundles is 38 chars ("티끌, 먼지 및 소음 특별약관(배상청구기준)");
+# the body sentences this separates them from run 150-400. Anywhere in that gap
+# behaves identically, so the exact value is not delicate.
+_TOC_MAX_ENTRY_CHARS = 60
+
 # "제3조", "제2관" -- an ARTICLE/SECTION heading, not a document start. Used only
 # to recognise a table of contents; deliberately NOT used as a boundary signal.
 # Measured on CASE_112: admitting these as boundaries drops precision 1.00 -> 0.91
@@ -444,16 +451,63 @@ _TOC_TITLE_SHARE = 0.6
 _ARTICLE_HEADING_RE = re.compile(r"^제\s*\d+\s*(?:관|조)")
 
 
+# A running header/footer the publisher prints on every page (a slogan, a call
+# centre number, a URL). It is page furniture, not content: on CASE_112 DOC_004
+# it appears on 25 of the 28 short pages, sitting under body text, article
+# headings and bare titles alike, so its presence says nothing about what kind
+# of page it is on. Matched on the whole line -- a line that merely CONTAINS a
+# company name is ordinary content ("회사는 삼성화재에 통지합니다").
+_PAGE_FURNITURE_RE = re.compile(
+    r"^(?:당신에게\s*좋은보험\s*삼성화재"
+    r"|(?:https?://)?www\.[\w.\-]+"
+    r"|(?:고객센터|고객상담실)\s*[\d\-\s]+"
+    r"|\d{4}-\d{4})$"
+)
+
+
+def _page_content_lines(lines: list[str]) -> list[str]:
+    """A page's lines with running headers/footers removed.
+
+    Why this exists: the same physical page yields different line counts
+    depending on who read it. CASE_112 DOC_004 p6's embedded text layer holds
+    only the title, while OCR of that page also captures the publisher's
+    running footer. `_is_toc_page`'s short-page rule requires EVERY line to be
+    a title, so that one extra line flipped the verdict and moved a boundary --
+    the single disagreement in 323 pages between the two readings.
+
+    A page consisting only of furniture is returned unchanged: callers treat an
+    empty page as evidence the bundle is not fully born-digital, and inventing
+    that verdict from a footer-only page would reject a whole bundle."""
+    kept = [line for line in lines if not _PAGE_FURNITURE_RE.match(line)]
+    return kept if kept else lines
+
+
 def _is_toc_page(lines: list[str]) -> bool:
     """A table-of-contents page: almost every line is a bare title or heading.
 
     A TOC lists the very titles this module keys on, so without this a 6-page TOC
     would emit ~60 spurious boundaries. Body pages fail the test because their
-    lines are sentences, not bare titles."""
+    lines are sentences, not bare titles.
+
+    "Bare" is enforced by length, and a contents page must carry no body prose
+    at all. Both guards exist because line COUNT is a property of the reader,
+    not of the page: CASE_112 DOC_004 p31 is 20 short lines in the embedded text
+    layer but 9 once OCR rejoins each wrapped sentence. Under a pure ratio that
+    page -- four `제N조` headings, each followed by its own clause -- scored
+    exactly at the 0.6 threshold and was read as contents, swallowing a real
+    boundary the human baseline also cut. What actually separates the two is not
+    a ratio: a contents ENTRY is short by construction and is never followed by
+    the text it points at, whereas a body page pairs each heading with a
+    sentence. So a page holding even one prose line is body, however many bare
+    headings sit above it."""
     if not lines:
         return False
-    titles = sum(1 for line in lines if DOCUMENT_TITLE_RE.search(line))
-    headings = sum(1 for line in lines if _ARTICLE_HEADING_RE.match(line))
+    titles = sum(1 for line in lines
+                 if len(line) <= _TOC_MAX_ENTRY_CHARS and DOCUMENT_TITLE_RE.search(line))
+    headings = sum(1 for line in lines
+                   if len(line) <= _TOC_MAX_ENTRY_CHARS and _ARTICLE_HEADING_RE.match(line))
+    if any(len(line) > _TOC_MAX_ENTRY_CHARS for line in lines):
+        return False
     if len(lines) >= _TOC_MIN_LINES:
         return (titles + headings) >= max(
             _TOC_MIN_LINES, int(len(lines) * _TOC_TITLE_SHARE)
@@ -498,11 +552,11 @@ def text_anchor_boundaries(pdf_path, page_count: int) -> dict[int, str | None] |
             if limit < 1:
                 return None
             pages = [
-                [
+                _page_content_lines([
                     line.strip()
                     for line in document[index].get_text().splitlines()
                     if line.strip()
-                ]
+                ])
                 for index in range(limit)
             ]
     except Exception:
