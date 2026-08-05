@@ -72,8 +72,15 @@ class FakeClassifier:
         return ProviderResult(self.provider_name, self.model_name, prompt_version, self.response)
 
 
-def test_checkpoint1_blocks_before_any_provider_or_pdf_work_when_segmentation_is_pending(
-        tmp_path, monkeypatch):
+def test_an_unreviewed_pdf_is_processed_rather_than_blocked(tmp_path, monkeypatch):
+    """Reading a bundle is the point of the inverted order, not a violation.
+
+    Checkpoint 1 used to refuse any PDF whose bundle question a human had not
+    answered. That protected an order where segmentation ran first and an
+    unsplit bundle would be classified as one document. With OCR first, whether
+    a PDF is a bundle is something segmentation ANSWERS from the text this run
+    produces -- it cannot be a precondition for producing it.
+    """
     out_dir = tmp_path / "outputs" / "CASE_009"
     out_dir.mkdir(parents=True, exist_ok=True)
     dao.atomic_write_json(out_dir / "document_manifest.json", {
@@ -85,20 +92,46 @@ def test_checkpoint1_blocks_before_any_provider_or_pdf_work_when_segmentation_is
             "segmentation_status": "pending_review",
         }],
     })
+    _mock_ocr(monkeypatch, [("page one", "page one b", "agreed")])
+    _mock_classify(monkeypatch)
+
+    result = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260721_001")
+
+    assert result["status"] == "passed"
+    assert (out_dir / "ocr_result_DOC_001.json").exists()
+
+
+def test_a_superseded_bundle_is_still_refused(tmp_path, monkeypatch):
+    """The one refusal that remains, and it applies in both modes.
+
+    After a split the parent represents nothing its children do not; reading it
+    again would duplicate every page. Unlike the bundle question, this is not a
+    judgement anyone has to make in advance -- the split itself records it.
+    """
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dao.atomic_write_json(out_dir / "document_manifest.json", {
+        "case_id": "CASE_009", "created_at": dao.now_iso(),
+        "documents": [{
+            "document_id": "DOC_001", "file_name": "DOC_001.pdf",
+            "file_path": "data/raw/CASE_009/DOC_001.pdf", "file_format": "pdf",
+            "file_size_bytes": 1000, "ocr_status": "not_applicable",
+            "segmentation_status": "completed",
+            "downstream_disposition": "superseded_bundle",
+        }],
+    })
     monkeypatch.setattr(
         rc1, "run_ocr",
-        lambda *args, **kwargs: pytest.fail("OCR must not run before segmentation clears"),
-    )
+        lambda *a, **k: pytest.fail("a superseded bundle must never be re-read"))
 
-    sentinel = object()
-    result = rc1.run_checkpoint1(
-        "CASE_009", "DOC_001", "missing.pdf", "tester", "RUN_20260721_001",
-        reader_a=sentinel, reader_b=sentinel, comparator=sentinel,
-        classifier=sentinel,
-    )
-
-    assert result["status"] == "blocked_segmentation"
-    assert result["blockers"][0]["segmentation_status"] == "pending_review"
+    for classify in (True, False):
+        result = rc1.run_checkpoint1(
+            "CASE_009", "DOC_001", "missing.pdf", "tester", "RUN_20260721_001",
+            classify=classify,
+            reader_a=object(), reader_b=object(), comparator=object(),
+            classifier=object())
+        assert result["status"] == "blocked_segmentation"
     assert not (out_dir / "ocr_result_DOC_001.json").exists()
 
 
@@ -817,21 +850,27 @@ def test_bundle_ocr_mode_is_allowed_while_segmentation_is_still_pending(
     assert not (out_dir / "classification_result_DOC_001.json").exists()
 
 
-def test_classification_is_still_blocked_while_segmentation_is_pending(
-        tmp_path, monkeypatch):
-    """The reason the gate exists is unchanged: one label cannot fit a bundle."""
-    out_dir = _pending_bundle_manifest(tmp_path)
+def test_bundle_ocr_mode_writes_no_classification(tmp_path, monkeypatch):
+    """What --bundle-ocr actually withholds is the document_type, not the read.
+
+    `document_type` is a per-document value, so one label cannot be right for a
+    bundle mixing a 진단서, a 검사 판독지 and a 진료비 명세서. That is the whole
+    content of the flag now that reading a bundle is unremarkable.
+    """
+    _pending_bundle_manifest(tmp_path)
+    _mock_ocr(monkeypatch, [("bundle page one", "bundle page one b", "agreed")])
     monkeypatch.setattr(
-        rc1, "run_ocr",
-        lambda *a, **k: pytest.fail("OCR must not run when classification is gated"),
-    )
+        rc1, "classify_document",
+        lambda *a, **k: pytest.fail("a bundle must never be classified as one document"))
+
     result = rc1.run_checkpoint1(
-        "CASE_009", "DOC_001", "missing.pdf", "tester", "RUN_20260721_001",
-        reader_a=object(), reader_b=object(), comparator=object(),
-        classifier=object(),
-    )
-    assert result["status"] == "blocked_segmentation"
-    assert not (out_dir / "ocr_result_DOC_001.json").exists()
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260721_001",
+        classify=False, reader_a=object(), reader_b=object(), comparator=object())
+
+    assert result["status"] == "bundle_ocr_complete"
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    assert (out_dir / "ocr_result_DOC_001.json").exists()
+    assert not (out_dir / "classification_result_DOC_001.json").exists()
 
 
 def test_bundle_ocr_mode_still_refuses_a_superseded_bundle(tmp_path, monkeypatch):

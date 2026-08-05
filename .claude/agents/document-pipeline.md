@@ -36,20 +36,18 @@ survive redaction (verified across CASE_112's 217 split children), so nothing is
 lost, and the pre-redaction page text stays behind the capability gate where it
 belongs.
 
-Checkpoint 1 has a case-wide segmentation preflight built into
-`run_checkpoint1.py`. Before constructing a provider or opening a PDF, it calls
-the DAO's `check_segmentation_ready`: every PDF must be human-marked
-`not_required` or be a `completed` logical child, and every identified bundle
-must already have been split. `pending_review`, `required`, a legacy PDF with no
-status, or an attempt to process the retained `superseded_bundle` returns
-`blocked_segmentation` and performs zero OCR/provider/output work. Do not bypass
-this gate. Record the human bundle decision with `dao.py
-set-segmentation-status`; an agent never supplies that decision itself.
+Checkpoint 1 refuses exactly one target, before constructing a provider or
+opening a PDF: the retained `superseded_bundle`. Its children already own every
+one of its pages, so reading it again would duplicate them under a document
+nothing else refers to. That returns `blocked_segmentation` with zero
+OCR/provider/output work, in both normal and `--bundle-ocr` mode.
 
-`--bundle-ocr` narrows that gate rather than bypassing it: a `pending_review` or
-`required` PDF may be OCR'd (that is the point), but a `superseded_bundle` is
-still refused — the same document is the only valid OCR target before a split
-and a forbidden one after it.
+**Do not decide in advance which PDFs are bundles.** There is no bundle
+question to answer before processing: whether a PDF holds several documents is
+what `propose` reports from the text this checkpoint produces, so it cannot be
+a precondition for producing it. Read every PDF; the proposal says what it is.
+The human judgement lives at the boundary-approval gate instead, where a
+reviewer sees the proposed ranges and the title line each cut is made on.
 
 You run on the case's per-document entries in `document_manifest.json` — the `DOC_XXX` entries that stage 1 (segmentation) produced by splitting each raw *bundle* into logical documents. **Skip any entry with `downstream_disposition: superseded_bundle`**: that is the original bundle PDF, retained only as a provenance record after segmentation replaced it with per-document entries. Its `ocr_status` is `not_applicable`; OCR/classify/redact/chunk its children, never the bundle.
 

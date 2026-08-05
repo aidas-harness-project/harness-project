@@ -189,7 +189,7 @@
         },
         "segmentation_status": {
           "enum": ["pending_review", "required", "not_required", "completed", "not_applicable"],
-          "description": "owner: Case Intake (segmentation). Stage-2 preflight gate. Every newly intaken PDF starts pending_review until a human marks it required (bundle; blocks until split) or not_required (already one logical document). Split marks the superseded bundle and every child completed. Non-PDF inputs are not_applicable. Legacy PDF entries missing this field are treated as pending_review by the DAO preflight, so absence never bypasses the gate."
+          "description": "owner: segmentation, as a RECORD of what happened -- no longer a gate. `completed` is set by the split on the superseded bundle and on every child; non-PDF inputs are `not_applicable`. `pending_review`/`required`/`not_required` are DEPRECATED as pre-decisions: they existed when segmentation ran before OCR, where an unsplit bundle would be read and classified as one document, so a human had to declare 'bundle or not' from a filename before anything could run. With OCR first that failure cannot occur (pages are pages; classification happens after the split), and whether a PDF is a bundle is an OUTPUT of `propose` -- one proposed boundary means one document -- so it cannot be a precondition for producing the text `propose` reads. The three values remain in the enum so pre-2026-08-05 manifests still validate; nothing new should write them, and the DAO preflight no longer blocks on any of them. The human judgement moved to the boundary-approval gate, where a reviewer sees the proposed ranges and the title line each cut is made on."
         },
         "segmentation_reviewed_by": {
           "type": ["string", "null"],

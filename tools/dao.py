@@ -894,12 +894,26 @@ def _effective_segmentation_status(document: dict) -> str:
 
 
 def check_segmentation_ready(case_id: str, target_doc_id: str | None = None) -> dict:
-    """Case-wide Stage-2 preflight read through the DAO.
+    """Refuse a document that is not a valid processing target.
 
-    Stage 2 is unsafe while even one PDF is awaiting the human bundle decision
-    or is known to require segmentation. The check is case-wide rather than
-    target-only because processing one logical-looking document while another
-    bundle remains unsplit would still mean the case entered Stage 2 early.
+    Only one thing is refused now: the retained `superseded_bundle`, whose
+    children replaced it. Processing it again would duplicate every page under
+    a document that no longer represents anything.
+
+    It used to also block any PDF awaiting a human bundle decision, or any
+    bundle not yet split, case-wide. That existed because segmentation ran
+    BEFORE OCR: an unsplit bundle would be read and classified as one document,
+    and undoing it meant paying for OCR twice, so a person had to declare
+    "bundle or not" before anything could run. With OCR first, a bundle is the
+    normal thing to read -- pages are pages -- and classification happens after
+    the split, so that failure cannot occur. Whether a PDF is a bundle is now an
+    OUTPUT of segmentation (one proposed boundary means one document), not an
+    input a human must supply in advance.
+
+    The human judgement did not disappear; it moved to where the evidence is.
+    A person approves the PROPOSED BOUNDARIES (`segment_case.py split` refuses
+    without case-level and per-segment approval), having seen the titles the
+    split would cut on, instead of guessing from a filename.
     """
     manifest = read_contract_data(case_id, "document_manifest.json")
     if manifest is None:
@@ -925,19 +939,6 @@ def check_segmentation_ready(case_id: str, target_doc_id: str | None = None) -> 
             }
 
     blockers = []
-    for document in documents:
-        status = _effective_segmentation_status(document)
-        if status in {"pending_review", "required"}:
-            blockers.append({
-                "document_id": document.get("document_id"),
-                "segmentation_status": status,
-                "reason": (
-                    "PDF bundle decision has not been reviewed"
-                    if status == "pending_review"
-                    else "document is marked as a bundle and has not been split"
-                ),
-            })
-
     if target is not None and target.get("downstream_disposition") == "superseded_bundle":
         blockers.append({
             "document_id": target_doc_id,

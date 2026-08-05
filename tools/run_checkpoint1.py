@@ -537,38 +537,30 @@ def run_checkpoint1(
     page_end: int | None = None,
     classify: bool = True,
 ) -> dict:
-    # Structural Stage-1 gate: evaluated before provider construction, PDF
-    # rendering, or any output write, so a blocked call cannot spend tokens.
+    # Evaluated before provider construction, PDF rendering, or any output
+    # write, so a blocked call cannot spend tokens. What it refuses is now only
+    # the retained superseded bundle -- reading it again would duplicate every
+    # page under a document its children replaced.
     #
-    # What it blocks depends on what this call intends to do, because the two
-    # halves of checkpoint 1 have different prerequisites. `document_type` is a
-    # PER-DOCUMENT value, so one label cannot be right for a bundle mixing a
-    # 진단서, a 검사보고서 and an 입퇴원확인서 -- classification genuinely
-    # requires the split to have happened. OCR is page-wise and assumes nothing
-    # about document identity, so it is safe on an unsplit bundle, and running
-    # it there is the point of the inverted order: boundaries derived from real
-    # page text are measurably better than from a downscaled contact-sheet crop
-    # (CASE_112, 323 pages, precision 1.0000 vs 0.84-0.95), and unlike the text
-    # layer they are available for a scan.
-    #
-    # `classify=False` is therefore a narrower request, not a bypass: it still
-    # refuses a superseded bundle, which after a split is a forbidden target
-    # even though the same document was the only valid one before it.
+    # A bundle awaiting its split is NOT refused: reading it is the point of the
+    # inverted order. Boundaries derived from real page text beat those read off
+    # a downscaled contact-sheet crop (CASE_112, 323 pages, precision 1.0000 vs
+    # 0.84-0.95), and unlike the embedded text layer they are available for a
+    # scan. What still must wait for the split is CLASSIFICATION, because
+    # `document_type` is a per-document value and one label cannot be right for
+    # a bundle mixing a 진단서, a 검사보고서 and an 입퇴원확인서 -- that is what
+    # `classify=False` expresses, and it is a narrower request, not a bypass.
     segmentation = _dao.check_segmentation_ready(case_id, doc_id)
-    blockers = segmentation["blockers"]
-    if not classify:
-        blockers = [b for b in blockers
-                    if b.get("segmentation_status") not in {"pending_review", "required"}]
-    if blockers or segmentation.get("error"):
+    if segmentation["blockers"] or segmentation.get("error"):
         return {
             "status": "blocked_segmentation",
             "case_id": case_id,
             "doc_id": doc_id,
-            "blockers": blockers,
+            "blockers": segmentation["blockers"],
             "error": segmentation.get("error"),
             "next_action": (
-                "Review each pending PDF with dao.py set-segmentation-status; "
-                "split every document marked required before retrying Stage 2."
+                "Process the bundle's logical children, not the retained "
+                "superseded bundle itself."
             ),
         }
 

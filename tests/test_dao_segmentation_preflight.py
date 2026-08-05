@@ -33,44 +33,29 @@ def _pdf(doc_id, **extra):
     return document
 
 
-def test_legacy_pdf_without_status_fails_closed(isolated_dao):
+def test_an_unreviewed_pdf_no_longer_blocks_processing(isolated_dao):
+    """There is nothing left to review before processing starts.
+
+    The pre-decision existed because segmentation ran BEFORE OCR: an unsplit
+    bundle would be OCR'd and classified as one document, and undoing that
+    meant paying for OCR twice. With OCR first, a bundle is the normal thing to
+    read -- pages are pages -- and classification happens after the split, so
+    the failure this gate prevented cannot occur. Whether a PDF is a bundle is
+    now an OUTPUT of segmentation (one proposed boundary means one document),
+    not an input a human has to supply before anything can run.
+    """
     _seed(isolated_dao, [_pdf("DOC_001")])
-    result = dao.check_segmentation_ready("CASE_930", "DOC_001")
-    assert result["clear"] is False
-    assert result["blockers"] == [{
-        "document_id": "DOC_001",
-        "segmentation_status": "pending_review",
-        "reason": "PDF bundle decision has not been reviewed",
-    }]
+    assert dao.check_segmentation_ready("CASE_930", "DOC_001")["clear"] is True
 
 
-def test_one_required_bundle_blocks_the_entire_case_stage2(isolated_dao):
+def test_an_unsplit_bundle_no_longer_blocks_the_case(isolated_dao):
+    """A bundle awaiting its split is not a reason to stop reading the case."""
     _seed(isolated_dao, [
-        _pdf("DOC_001", segmentation_status="not_required",
-             segmentation_reviewed_by="reviewer", segmentation_reviewed_at=dao.now_iso()),
-        _pdf("DOC_002", segmentation_status="required",
-             segmentation_reviewed_by="reviewer", segmentation_reviewed_at=dao.now_iso()),
+        _pdf("DOC_001", segmentation_status="not_required"),
+        _pdf("DOC_002", segmentation_status="required"),
     ])
-    result = dao.check_segmentation_ready("CASE_930", "DOC_001")
-    assert result["clear"] is False
-    assert [b["document_id"] for b in result["blockers"]] == ["DOC_002"]
-
-
-def test_human_not_required_decision_clears_preflight(isolated_dao):
-    manifest_path = _seed(
-        isolated_dao, [_pdf("DOC_001", segmentation_status="pending_review")]
-    )
-    ok, message = dao.set_segmentation_status(
-        "CASE_930", "DOC_001", "not_required", "Kim", "single form",
-        "tester", "RUN_20260721_001",
-    )
-    assert ok, message
-    result = dao.check_segmentation_ready("CASE_930", "DOC_001")
-    assert result["clear"] is True
-    document = json.loads(manifest_path.read_text(encoding="utf-8"))["documents"][0]
-    assert document["segmentation_status"] == "not_required"
-    assert document["segmentation_reviewed_by"] == "Kim"
-    assert document["segmentation_review_note"] == "single form"
+    assert dao.check_segmentation_ready("CASE_930", "DOC_001")["clear"] is True
+    assert dao.check_segmentation_ready("CASE_930", "DOC_002")["clear"] is True
 
 
 def test_split_children_are_ready_but_superseded_bundle_is_not_a_valid_target(isolated_dao):
