@@ -2356,3 +2356,122 @@ def test_redistribute_rejects_a_range_past_the_end_of_the_ocr_record(tmp_path):
     with pytest.raises(sc.SegmentationError):
         sc.redistribute_ocr_pages(
             parent, [{"page_start": 1, "page_end": 4}], ["DOC_006"])
+
+
+# --- split_bundle wiring: redistribute the parent's OCR when it exists --------
+
+
+def _write_parent_ocr(root, case_id, bundle_id, page_count):
+    """Puts a parent bundle's OCR record + page files on disk, as the
+    OCR-before-segmentation order produces them."""
+    out = root / "outputs" / case_id
+    out.mkdir(parents=True, exist_ok=True)
+    proc = root / "data" / "processed" / case_id / bundle_id
+    proc.mkdir(parents=True, exist_ok=True)
+    pages = []
+    for n in range(1, page_count + 1):
+        (proc / f"page_{n:03d}.md").write_text(f"bundle page {n}", encoding="utf-8")
+        pages.append({
+            "page": str(n),
+            "text_path": f"data/processed/{case_id}/{bundle_id}/page_{n:03d}.md",
+            "mean_confidence": None,
+            "uncertain_regions": [],
+            "cross_validation": {"agreement": "agreed"},
+        })
+    record = {"case_id": case_id, "document_id": bundle_id,
+              "extraction_method": "ocr", "ocr_status": "completed", "pages": pages}
+    (out / f"ocr_result_{bundle_id}.json").write_text(
+        json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    return record
+
+
+def test_split_hands_each_child_its_own_page_text_when_the_parent_was_ocrd(tmp_path):
+    """With OCR before segmentation, the split re-files the parent's pages.
+
+    Downstream stages address a document by its own id and its own 1-based
+    pages, so a child with no page text of its own would be invisible to
+    redaction, chunking and citation verification.
+    """
+    pdf = _bundle_pdf(tmp_path, 4)
+    _write_parent_ocr(tmp_path, "CASE_900", "DOC_001", 4)
+    prop = _proposal([_seg(0, 1, 1, status="approved"),
+                      _seg(1, 2, 4, status="approved")],
+                     review_status="approved")
+    dao = _FakeDao()
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        out = sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_1", dao=dao,
+        )
+    finally:
+        sc.ROOT = orig_root
+
+    assert out["status"] == "split"
+    assert out["redistributed_ocr"] is True
+    proc = tmp_path / "data" / "processed" / "CASE_900"
+    # DOC_002 owns bundle p1; DOC_003 owns bundle p2-4, renumbered 1-3.
+    assert (proc / "DOC_002" / "page_001.md").read_text(encoding="utf-8") == "bundle page 1"
+    assert (proc / "DOC_003" / "page_001.md").read_text(encoding="utf-8") == "bundle page 2"
+    assert (proc / "DOC_003" / "page_003.md").read_text(encoding="utf-8") == "bundle page 4"
+    assert not (proc / "DOC_003" / "page_004.md").exists()
+
+    child = json.loads((tmp_path / "outputs" / "CASE_900"
+                        / "ocr_result_DOC_003.json").read_text(encoding="utf-8"))
+    assert child["document_id"] == "DOC_003"
+    assert [p["page"] for p in child["pages"]] == ["1", "2", "3"]
+
+
+def test_split_keeps_the_parent_ocr_record_after_redistributing(tmp_path):
+    """The parent's OCR output is the original P8 record and is retained.
+
+    A child's cross_validation is inherited from it, so auditing that
+    inheritance later requires the source to still exist. The manifest marks
+    the bundle superseded; nothing downstream reads these files, and the
+    schema constrains only the manifest entry, not the artifacts on disk.
+    """
+    pdf = _bundle_pdf(tmp_path, 3)
+    _write_parent_ocr(tmp_path, "CASE_900", "DOC_001", 3)
+    prop = _proposal([_seg(0, 1, 3, status="approved")], review_status="approved")
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_1",
+            dao=_FakeDao(),
+        )
+    finally:
+        sc.ROOT = orig_root
+    assert (tmp_path / "outputs" / "CASE_900" / "ocr_result_DOC_001.json").exists()
+    assert (tmp_path / "data" / "processed" / "CASE_900" / "DOC_001"
+            / "page_001.md").exists()
+
+
+def test_split_without_a_parent_ocr_record_behaves_exactly_as_before(tmp_path):
+    """The old order still works: children get OCR'd individually afterwards.
+
+    Both orders must coexist -- already-processed cases are not reprocessed,
+    so a split with no parent OCR on disk must not fail or invent one.
+    """
+    pdf = _bundle_pdf(tmp_path, 4)
+    prop = _proposal([_seg(0, 1, 2, status="approved"),
+                      _seg(1, 3, 4, status="approved")],
+                     review_status="approved")
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        out = sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_1",
+            dao=_FakeDao(),
+        )
+    finally:
+        sc.ROOT = orig_root
+    assert out["status"] == "split"
+    assert out["redistributed_ocr"] is False
+    assert not (tmp_path / "outputs" / "CASE_900" / "ocr_result_DOC_002.json").exists()

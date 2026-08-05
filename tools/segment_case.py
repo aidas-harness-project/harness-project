@@ -2508,6 +2508,64 @@ def _case_id_from_text_path(text_path: str | None) -> str:
     return parts[2] if len(parts) > 2 else "UNKNOWN_CASE"
 
 
+def _redistribute_parent_ocr(
+    *, case_id: str, bundle_id: str, segments: list[dict],
+    document_ids: list[str], progress=None,
+) -> bool:
+    """Copy the parent bundle's OCR pages onto its children. Returns whether it ran.
+
+    False means there was no parent OCR record -- the split-first order, where
+    each child is OCR'd on its own afterwards. That is not an error and must
+    not become one: cases processed under the old order are not reprocessed, so
+    both orders coexist.
+
+    The parent's own record and page files are deliberately KEPT. A child's
+    cross_validation verdict is inherited from the parent's, so auditing that
+    inheritance later requires the source to still exist; the manifest marks the
+    bundle superseded and nothing downstream reads it. Text is cheap, and a
+    deleted original cannot be re-derived if a redistribution turns out wrong.
+    """
+    parent_record_path = ROOT / "outputs" / case_id / f"ocr_result_{bundle_id}.json"
+    if not parent_record_path.exists():
+        return False
+    try:
+        parent_ocr = json.loads(parent_record_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SegmentationError(
+            f"{parent_record_path} exists but could not be read ({exc}); refusing "
+            "to split as though the bundle had never been OCR'd, which would "
+            "silently leave every child without page text"
+        ) from exc
+
+    children = redistribute_ocr_pages(parent_ocr, segments, document_ids)
+
+    parent_pages = parent_ocr.get("pages", [])
+    for child, segment in zip(children, segments):
+        doc_id = child["document_id"]
+        child_dir = ROOT / "data" / "processed" / case_id / doc_id
+        child_dir.mkdir(parents=True, exist_ok=True)
+        # The child's own text_path already points at where the page WILL live,
+        # so the SOURCE is taken from the parent's approved page range instead
+        # -- the same 1-based inclusive range redistribute_ocr_pages sliced.
+        source_pages = parent_pages[segment["page_start"] - 1:segment["page_end"]]
+        for offset, source_page in enumerate(source_pages, start=1):
+            source = ROOT / source_page["text_path"]
+            if not source.exists():
+                raise SegmentationError(
+                    f"{doc_id}: parent page file {source} is missing; the OCR "
+                    "record and the processed tree disagree"
+                )
+            (child_dir / f"page_{offset:03d}.md").write_text(
+                source.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        (ROOT / "outputs" / case_id / f"ocr_result_{doc_id}.json").write_text(
+            json.dumps(child, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        if progress:
+            progress(f"redistributed {len(child['pages'])} OCR page(s) to {doc_id}")
+    return True
+
+
 def split_bundle(
     proposal: dict,
     *,
@@ -2617,6 +2675,23 @@ def split_bundle(
         if progress:
             progress(f"wrote {doc_id}.pdf (p{seg['page_start']}-{seg['page_end']})")
 
+    # If the bundle was OCR'd BEFORE segmentation, the page text exists against
+    # the parent and each child must be handed the pages it now owns. Written
+    # before the manifest for the same reason the child PDFs are: nothing reads
+    # these until the manifest names the documents, so a failure here leaves
+    # harmless orphans that a re-run overwrites, whereas a half-written manifest
+    # is unrecoverable. Absent a parent OCR record this is skipped entirely and
+    # the older order -- split first, OCR each child afterwards -- is unchanged;
+    # both must coexist, since already-processed cases are not reprocessed.
+    document_ids = [f"DOC_{start_index + offset:03d}" for offset in range(len(segments))]
+    redistributed = _redistribute_parent_ocr(
+        case_id=case_id,
+        bundle_id=bundle_id,
+        segments=segments,
+        document_ids=document_ids,
+        progress=progress,
+    )
+
     new_documents = build_manifest_entries(
         segments,
         case_id=case_id,
@@ -2659,6 +2734,7 @@ def split_bundle(
         "message": message,
         "new_document_ids": [d["document_id"] for d in new_documents],
         "new_pdf_paths": [str(p) for p in written_paths],
+        "redistributed_ocr": redistributed,
         "updated_proposal": proposal_with_assignments(
             proposal, [d["document_id"] for d in new_documents]
         ),
