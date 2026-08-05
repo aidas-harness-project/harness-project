@@ -535,17 +535,36 @@ def run_checkpoint1(
     classifier_model: str | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
+    classify: bool = True,
 ) -> dict:
+    # Structural Stage-1 gate: evaluated before provider construction, PDF
+    # rendering, or any output write, so a blocked call cannot spend tokens.
+    #
+    # What it blocks depends on what this call intends to do, because the two
+    # halves of checkpoint 1 have different prerequisites. `document_type` is a
+    # PER-DOCUMENT value, so one label cannot be right for a bundle mixing a
+    # 진단서, a 검사보고서 and an 입퇴원확인서 -- classification genuinely
+    # requires the split to have happened. OCR is page-wise and assumes nothing
+    # about document identity, so it is safe on an unsplit bundle, and running
+    # it there is the point of the inverted order: boundaries derived from real
+    # page text are measurably better than from a downscaled contact-sheet crop
+    # (CASE_112, 323 pages, precision 1.0000 vs 0.84-0.95), and unlike the text
+    # layer they are available for a scan.
+    #
+    # `classify=False` is therefore a narrower request, not a bypass: it still
+    # refuses a superseded bundle, which after a split is a forbidden target
+    # even though the same document was the only valid one before it.
     segmentation = _dao.check_segmentation_ready(case_id, doc_id)
-    if not segmentation["clear"]:
-        # Structural Stage-1 gate: do this before provider construction, PDF
-        # rendering, or any output write. A blocked call therefore cannot spend
-        # tokens or contaminate Stage 2 with an unsplit bundle.
+    blockers = segmentation["blockers"]
+    if not classify:
+        blockers = [b for b in blockers
+                    if b.get("segmentation_status") not in {"pending_review", "required"}]
+    if blockers or segmentation.get("error"):
         return {
             "status": "blocked_segmentation",
             "case_id": case_id,
             "doc_id": doc_id,
-            "blockers": segmentation["blockers"],
+            "blockers": blockers,
             "error": segmentation.get("error"),
             "next_action": (
                 "Review each pending PDF with dao.py set-segmentation-status; "
@@ -567,7 +586,10 @@ def run_checkpoint1(
         reader_a = reader_a or providers["reader_a"]
         reader_b = reader_b or providers["reader_b"]
         comparator = comparator or providers["comparator"]
-    if classifier is None:
+    if classifier is None and classify:
+        # Not built in bundle-OCR mode: no classification happens, so
+        # constructing a provider for it would resolve credentials and a model
+        # for a call that is never made.
         classifier = build_classifier_provider(
             classifier_provider_name=classifier_provider_name,
             classifier_model=classifier_model,
@@ -615,6 +637,19 @@ def run_checkpoint1(
                 "disagreed_pages": [p["page"] for p in ocr_data["pages"] if p["agreement"] == "disagreed"],
                 "ocr_result_path": str(case_dir(case_id) / f"ocr_result_{doc_id}.json"),
                 "raw_ocr_path": str(raw_ocr_path)}
+
+    if not classify:
+        # Bundle OCR for the inverted order: the text exists and segmentation
+        # reads it to place boundaries, but this document is about to stop
+        # existing as a processing target -- split_bundle supersedes it and
+        # redistributes these pages to its children, which classify
+        # individually. Writing a document_type here would be asserting one
+        # label for a bundle, the very thing the gate above protects against.
+        _dao._update_run_state(case_id, run_id, "document_processing", "in_progress", held_by)
+        return {"status": "bundle_ocr_complete", "case_id": case_id, "doc_id": doc_id,
+                "pages": len(ocr_data["pages"]),
+                "cross_validation_status": ocr_result["cross_validation_status"],
+                "next_action": "derive boundaries from this text, then split; children classify individually"}
 
     return _finish_checkpoint1(case_id, doc_id, run_id, held_by, ocr_data["pages"][0]["reading_a"], classifier=classifier)
 
@@ -900,6 +935,7 @@ def _run_from_args(args):
             classifier_model=args.classifier_model,
             page_start=args.page_start,
             page_end=args.page_end,
+            classify=not args.bundle_ocr,
         )
     except ProviderConfigError as exc:
         sys.exit(f"error: {exc}")
@@ -996,6 +1032,13 @@ def _add_run_arguments(parser):
     parser.add_argument("--classifier-model", help="Model name for --classifier-provider")
     parser.add_argument("--page-start", type=int, help="1-based first source PDF page for this logical document")
     parser.add_argument("--page-end", type=int, help="1-based last source PDF page for this logical document")
+    parser.add_argument(
+        "--bundle-ocr", action="store_true",
+        help="OCR an unsplit bundle without classifying it, so segmentation can "
+             "derive boundaries from real page text. Skips classification and the "
+             "document_type manifest write -- split_bundle then redistributes "
+             "these pages to the children, which classify individually. Still "
+             "refuses a superseded bundle.")
 
 
 # Reserved subcommand names dispatched explicitly; anything else is treated as
