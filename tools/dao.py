@@ -404,6 +404,23 @@ def cmd_read_document_text(args):
                 "No processed text exists and automated downstream use is prohibited."
             )
             return 1
+        # A superseded bundle's redacted_text.md still sits on disk -- the split
+        # hands each child its slice but does not delete the parent's copy, and
+        # the manifest records the parent's redacted_text_path as null to say
+        # so. Serving the file anyway made the manifest's statement advisory:
+        # every page of it is ALSO a page of some child, so an analysis stage
+        # reading both sees one page twice and can count it as two independent
+        # sources agreeing. Found by consistency-check on CASE_909, which
+        # excluded DOC_005 by hand because the DAO would not.
+        if entry and entry.get("downstream_disposition") == "superseded_bundle":
+            print(
+                f"SUPERSEDED_BUNDLE: {args.doc_id} was split into per-document "
+                "children, which own its pages now. Its text is retained for "
+                "provenance only -- reading it alongside its children would "
+                "double-count the same page as two sources. Read the children "
+                "instead."
+            )
+            return 1
     processed = DATA / "processed" / args.case_id / args.doc_id
     redacted = processed / "redacted_text.md"
     if redacted.exists():
@@ -525,9 +542,14 @@ def cmd_search_document_text(args):
             return 1
         # An expert_review_only document has no processed text by design; it is
         # not a searchable surface, and listing it as "unsearchable" every time
-        # would train readers to skim past the field that matters.
+        # would train readers to skim past the field that matters. A
+        # superseded_bundle is excluded for the opposite reason -- its text
+        # very much exists, but every page of it is also a page of one of its
+        # children, so searching both reports one hit twice and inflates the
+        # apparent corroboration for whatever the caller is checking.
+        _EXCLUDED = {"expert_review_only", "superseded_bundle"}
         doc_ids = [d.get("document_id") for d in manifest.get("documents", [])
-                   if d.get("downstream_disposition") != "expert_review_only"]
+                   if d.get("downstream_disposition") not in _EXCLUDED]
     elif args.doc_id:
         doc_ids = [args.doc_id]
     else:
