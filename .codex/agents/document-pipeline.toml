@@ -27,8 +27,32 @@ Then run redaction (checkpoint 2) on the bundle, hand
 `data/processed/CASE_ID/BUNDLE_DOC_ID/redacted_text.md` to `segment_case.py`,
 and split. `split_bundle` redistributes the bundle's OCR pages to the children
 it creates, so **the children are not OCR'd again** — each already owns its
-pages, renumbered from 1, with its P8 verdicts carried over intact. Classify
-and redact the children as usual.
+pages, renumbered from 1, with its P8 verdicts carried over intact.
+
+**Classify each child with `classify-only`, never `run`:**
+
+```
+python tools/run_checkpoint1.py classify-only CASE_ID CHILD_DOC_ID \\
+    --held-by document-pipeline --run-id RUN_ID
+```
+
+`run` begins by OCR'ing. On a child that would re-read pages it just inherited
+and replace their P8 history — including each page's human resolution — with a
+fresh verdict. That is not hypothetical: it happened to CASE_909's DOC_006-013,
+and the records had to be rebuilt from the parent. `run` now refuses a document
+that already has an `ocr_result` (`status: already_extracted`) and names this
+command instead, but do not rely on the guard to catch it.
+
+Most children need no classifier call at all. A child whose approved
+text-anchor title NAMES a form (진단서, 기록지, 내역서) takes its
+`document_type` from that title — the split cut its boundary on it at precision
+1.0000, so the title is recorded evidence, not a guess needing a second
+opinion (`classification_source: printed_form_title`). A title naming only a
+genre falls through to the model: "REPORT" says a report exists, not which
+kind. On CASE_909 that decided 4 of 12 segments deterministically, all 4
+agreeing with the model's own verdict when checked.
+
+Then redact each child (checkpoint 2) as usual.
 
 Segmentation reads the REDACTED text, never `page_NNN.md`. Document titles
 survive redaction (verified across CASE_112's 217 split children), so nothing is

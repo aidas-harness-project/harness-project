@@ -29,7 +29,7 @@ pipeline run.
 1. `run_checkpoint1.py CASE_ID BUNDLE_ID <pdf> --bundle-ocr` — OCR only, no classification (`document_type` is per-document; one label cannot be right for a bundle).
 2. `redact_document.py CASE_ID BUNDLE_ID` — segmentation reads the REDACTED text, so pre-redaction page text never leaves the capability gate. Titles survive redaction (verified on CASE_112's 217 split children), so nothing needed for boundaries is lost.
 3. `segment_case.py propose` → `approve` → `split`. The split hands each child the bundle's pages, renumbered from 1 with P8 verdicts intact, so **children are not re-OCR'd**.
-4. Classify and redact the children normally.
+4. Classify each child with `run_checkpoint1.py classify-only` — **never `run`**, which begins by OCR'ing and would re-read pages the child just inherited, replacing their P8 history (CASE_909's DOC_006-013 lost theirs exactly that way). A child whose approved title names a form takes its `document_type` from that title with no model call; a genre-only title like `REPORT` falls through to the classifier. Then redact each child.
 
 Measured on CASE_908/DOC_005, a 19-page scan with zero embedded text: precision 1.0000 / recall 0.9091 from the title rule alone, and 1.0000/1.0000 with the LLM tier on the 5 pages (26%) it could not settle. Boundaries from redacted OCR text were byte-identical to those from the embedded layer on CASE_112's 323 policy pages.
 
