@@ -54,6 +54,70 @@ ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
 
 
+_CASE_ID_RE = re.compile(r"(CASE_[0-9]{3})")
+
+
+def verify_citation_quotes(sidecar: dict, case_id: str) -> list[str]:
+    """Every citation's quote must appear verbatim in its document's processed
+    text. Returns error strings; empty means every quote resolved.
+
+    This tool renders whatever it is handed. It auto-generates the `[E#]` tags
+    and the sidecar from one source so a tag and its citation cannot drift --
+    but "the tag matches the sidecar" says nothing about whether the QUOTE is
+    real. A citation invented wholesale renders cleanly, passes
+    read-evidence-tags (consistent, 0 orphaned, 0 unused), and ships.
+
+    Not hypothetical: writing CASE_909's v2 draft, 29 of 190 citations were
+    wrong -- quotes reconstructed from memory, and documents misattributed
+    (outpatient bills to DOC_014 instead of DOC_015/016, the 위자료 기준표 to
+    DOC_002 instead of DOC_017). They were caught only because that agent
+    happened to write its own verifier first. Nothing structural would have
+    caught them, which made P1 -- the harness's stated highest-probability
+    failure mode -- rest on an agent's initiative.
+
+    Whitespace is normalized on both sides before comparison: extraction
+    line-wraps mid-sentence, so a quote spanning a wrap is a real quote and
+    failing it would train callers to quote only fragments. Everything else is
+    exact -- this establishes the words are on the page, not that they were
+    read correctly.
+    """
+    processed = ROOT / "data" / "processed" / case_id
+    errors: list[str] = []
+    cache: dict[str, str | None] = {}
+    for citation in sidecar.get("citations", []):
+        doc_id = citation.get("document_id")
+        quote = citation.get("quote")
+        tag = citation.get("tag")
+        if not doc_id or not quote:
+            continue
+        if doc_id not in cache:
+            path = processed / doc_id / "redacted_text.md"
+            try:
+                cache[doc_id] = path.read_text(encoding="utf-8")
+            except OSError:
+                cache[doc_id] = None
+        text = cache[doc_id]
+        if text is None:
+            errors.append(
+                f"[{tag}] {doc_id}: no processed text at "
+                f"data/processed/{case_id}/{doc_id}/redacted_text.md -- a "
+                "citation cannot point at a document this case has not "
+                "processed")
+            continue
+        if quote in text:
+            continue
+        if _squeeze(quote) and _squeeze(quote) in _squeeze(text):
+            continue
+        errors.append(
+            f"[{tag}] {doc_id} p{citation.get('page')}: quote not found in "
+            f"that document's processed text: {quote[:60]!r}")
+    return errors
+
+
+def _squeeze(text: str) -> str:
+    return re.sub(r"\s+", "", text)
+
+
 def validate_template(headings: list[str], template_key: str) -> list[str]:
     """Check section presence + order against templates/registry.json.
 
@@ -166,6 +230,27 @@ def main():
         sys.exit(f"error: output_path {rel!r} escapes outputs/ -- refusing")
     sidecar_path = out_path.with_suffix(".evidence.json")
     sidecar["generated_at"] = now_iso()
+
+    # P1's deterministic floor, and it runs BEFORE anything is written -- the
+    # same fail/don't-persist contract as the template and sidecar checks. A
+    # document whose citations do not resolve must not reach disk, because
+    # every checker downstream (read-evidence-tags, check-untagged-claims)
+    # reads the tag layer and would report it clean.
+    case_match = _CASE_ID_RE.search(rel)
+    if case_match:
+        quote_errors = verify_citation_quotes(sidecar, case_match.group(1))
+        if quote_errors:
+            sys.exit(
+                "error: citation quotes do not appear in the processed source "
+                "-- nothing written:\n"
+                + "\n".join(f"  - {e}" for e in quote_errors)
+                + "\n  Quote from data/processed/<CASE>/<DOC>/redacted_text.md, "
+                  "do not reconstruct from memory. Whitespace differences are "
+                  "tolerated; wrong words and wrong documents are not.")
+    else:
+        print(f"WARNING: output_path {rel!r} carries no CASE_NNN, so citation "
+              "quotes could not be verified against a processed source.",
+              file=sys.stderr)
 
     schemas, registry = load_registry()
     errors = validate_instance(sidecar, "evidence_sidecar.schema.json", schemas, registry)
