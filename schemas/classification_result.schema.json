@@ -64,10 +64,11 @@
           "type": "string",
           "enum": [
             "model",
-            "inherited_from_parent_bundle"
+            "inherited_from_parent_bundle",
+            "printed_form_title"
           ],
           "default": "model",
-          "description": "How this type was decided. 'inherited_from_parent_bundle' means no model call was made: the document is a deterministic text-anchor slice of an already-classified insurance_policy bundle (see run_checkpoint1.inherited_classification), so the parent's type and confidence were carried over. Any other provenance is a real classifier call."
+          "description": "How this type was decided. Two values mean NO model call was made, and both rest on the same fact -- the split cut this document's boundary on a printed title at measured precision 1.0000, so the title is recorded evidence rather than a guess needing a second opinion. 'inherited_from_parent_bundle': a deterministic text-anchor slice of an already-classified insurance_policy bundle, whose parts are policy documents by construction (see run_checkpoint1.inherited_classification). 'printed_form_title': the segment's own title NAMES a form whose type is unambiguous (진단서, 기록지, 내역서 -- see segment_case.document_type_from_title). A title naming only a genre ('REPORT' says a report exists, not which kind) never maps and falls through to the model. 'model' is a real classifier call over the page text."
         },
         "inherited_from_document_id": {
           "$ref": "common_component_output.schema.json#/$defs/document_id",

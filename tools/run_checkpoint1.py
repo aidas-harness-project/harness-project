@@ -75,6 +75,7 @@ from llm_providers import (
     build_provider,
 )
 from ocr_extract import build_ocr_providers, run_ocr
+import segment_case as _segment_case
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -564,6 +565,26 @@ def run_checkpoint1(
             ),
         }
 
+    # Refuse to re-read a document that already has extracted text. `run` starts
+    # by OCR'ing, so calling it on a split child -- whose pages were inherited
+    # from its bundle -- destroys the very record redistribution just created,
+    # replacing an inherited P8 history with a fresh verdict. CASE_909's
+    # DOC_006-013 lost theirs exactly this way. Naming the alternative matters:
+    # the caller usually wants a document_type, not a second reading.
+    existing_ocr = case_dir(case_id) / f"ocr_result_{doc_id}.json"
+    if existing_ocr.exists():
+        return {
+            "status": "already_extracted",
+            "case_id": case_id,
+            "doc_id": doc_id,
+            "ocr_result_path": str(existing_ocr),
+            "next_action": (
+                "This document already has extracted text. To give it a "
+                "document_type without re-reading it, use classify-only. To "
+                "genuinely re-extract, delete the existing ocr_result first."
+            ),
+        }
+
     pdf_path = Path(pdf_path)
     source_total_pages = source_pdf_page_count(pdf_path)
     if reader_a is None or reader_b is None or comparator is None:
@@ -646,12 +667,100 @@ def run_checkpoint1(
     return _finish_checkpoint1(case_id, doc_id, run_id, held_by, ocr_data["pages"][0]["reading_a"], classifier=classifier)
 
 
+def printed_title_classification(case_id: str, doc_id: str,
+                                  manifest: dict | None = None) -> dict | None:
+    """The document_type its own printed title determines, or None.
+
+    The split cut this document's boundary ON that title, at precision 1.0000
+    against the human baseline, so the title is not a guess to be checked -- it
+    is recorded evidence. Asking a model to re-read the same page and name a
+    type is a second opinion on something already held exactly.
+
+    Narrow by construction. `document_type_from_title` maps only titles that
+    name a FORM, never a genre: "REPORT" says a report exists, not which kind,
+    and CASE_909's p6/p7 are imaging readings only by coincidence of that
+    bundle. Anything unmapped returns None and the model classifies as before.
+
+    Verified against the model on CASE_909 before being trusted: of the 12
+    segments, 4 mapped and all 4 agreed with the classifier's own verdict, 0
+    differed, and the 5 it declined include exactly the ambiguous ones (both
+    REPORTs, the untitled page, and 입퇴원확인서 -- which the model itself
+    answered at only 0.72).
+    """
+    if manifest is None:
+        manifest_path = case_dir(case_id) / "document_manifest.json"
+        if not manifest_path.exists():
+            return None
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    child = next((d for d in manifest.get("documents", [])
+                  if d.get("document_id") == doc_id), None)
+    if not child:
+        return None
+    proposal_rel = child.get("segmentation_proposal_path")
+    page_start = child.get("source_page_start")
+    if not proposal_rel or page_start is None:
+        return None
+    proposal_path = ROOT / proposal_rel
+    if not proposal_path.exists():
+        return None
+    try:
+        proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    # Only a human-approved deterministic split. A vision proposal's label is a
+    # model's reading of a downscaled crop, which is exactly the kind of guess
+    # pipeline.md says never to trust downstream.
+    if (proposal.get("method") or {}).get("mode") != "text_anchor":
+        return None
+    if proposal.get("review_status") != "approved":
+        return None
+    label = next((s.get("provisional_type_label") for s in proposal.get("segments", [])
+                  if s.get("page_start") == page_start), None)
+    doc_type = _segment_case.document_type_from_title(label)
+    if doc_type is None:
+        return None
+    return {
+        "predicted_document_type": doc_type,
+        "document_type_label": label,
+        "confidence": PARENT_INHERITED_CONFIDENCE,
+        "quote": label,
+        "_title_classified": label,
+        "_provider_metadata": {},
+    }
+
+
+def classify_existing(case_id: str, doc_id: str, *, held_by: str, run_id: str,
+                       classifier=None) -> dict:
+    """Classify a document whose pages already exist, without re-reading it.
+
+    A split child inherits its pages from the bundle, so its text is on disk
+    before it ever needs a document_type. Without this entry point the only way
+    to get one was `run`, which begins by OCR'ing -- re-reading pages that were
+    just redistributed and replacing their inherited P8 history with a fresh
+    verdict. That is not hypothetical: it happened to CASE_909's DOC_006-013.
+    """
+    ocr_path = case_dir(case_id) / f"ocr_result_{doc_id}.json"
+    if not ocr_path.exists():
+        sys.exit(f"error: {ocr_path} does not exist -- this document has no "
+                  f"extracted text yet, so run checkpoint 1 for it first")
+    ocr_result = json.loads(ocr_path.read_text(encoding="utf-8"))
+    first_page = ocr_result["pages"][0]
+    text_path = first_page.get("text_path")
+    if not text_path:
+        sys.exit(f"error: {doc_id} page 1 has no text_path; nothing to classify from")
+    first_page_text = (ROOT / text_path).read_text(encoding="utf-8")
+    return _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text,
+                                classifier=classifier)
+
+
 def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, classifier=None):
     """Shared tail: classify from page 1's text, write
     classification_result_{doc_id}.json, update document_manifest.json.
     Called both by run_checkpoint1() (no disagreement) and
     apply_disagreement_resolution() (once every page is resolved)."""
     classification = inherited_classification(case_id, doc_id)
+    if classification is None:
+        classification = printed_title_classification(case_id, doc_id)
     if classification is None:
         classification = (classify_document(first_page_text, classifier) if classifier is not None
                           else classify_document(first_page_text))
@@ -669,6 +778,16 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         "evidence_references": [{"page": 1, "quote": classification.get("quote", "")}],
         "review_required": False,
     }
+    title_classified = classification.get("_title_classified")
+    if title_classified:
+        # Record that no classifier ran and what decided instead, so an audit
+        # can tell a printed-title verdict from a model's.
+        classification_result["classification_source"] = "printed_form_title"
+        classification_result["evidence_references"] = [{
+            "page": 1,
+            "quote": (f"printed form title {title_classified!r}: the approved "
+                      "text-anchor split cut this document's boundary on it"),
+        }]
     inherited_from = classification.get("_inherited_from")
     if inherited_from:
         # Record that no classifier ran, and from where the type came, so an
@@ -1051,7 +1170,7 @@ def _add_run_arguments(parser):
 # Reserved subcommand names dispatched explicitly; anything else is treated as
 # the legacy positional `run` invocation (CASE DOC PDF ...) for backward
 # compatibility with document-pipeline.md and existing callers.
-_SUBCOMMANDS = {"run", "resolve-disagreement", "resolve-non-text"}
+_SUBCOMMANDS = {"run", "resolve-disagreement", "resolve-non-text", "classify-only"}
 
 
 def main(argv=None):
@@ -1118,6 +1237,18 @@ def main(argv=None):
     non_text_parser.add_argument("--held-by", required=True)
     non_text_parser.add_argument("--run-id", required=True)
 
+    classify_parser = sub.add_parser(
+        "classify-only",
+        help="Classify a document whose pages already exist, without re-reading it",
+    )
+    classify_parser.add_argument("case_id")
+    classify_parser.add_argument("doc_id")
+    classify_parser.add_argument("--held-by", required=True)
+    classify_parser.add_argument("--run-id", required=True)
+    classify_parser.add_argument("--classifier-provider", choices=SUPPORTED_PROVIDERS,
+                                  help="Provider for classification")
+    classify_parser.add_argument("--classifier-model", help="Model for --classifier-provider")
+
     # Backward compatibility: the legacy form is `... CASE DOC PDF --held-by ...`
     # with no subcommand token. If the first arg isn't a known subcommand (and
     # isn't a help flag), route to the `run` parser so old invocations keep working.
@@ -1127,6 +1258,19 @@ def main(argv=None):
         return
 
     args = ap.parse_args(argv)
+    if args.command == "classify-only":
+        # The provider is built lazily: a printed form title decides most types
+        # with no model call, and constructing one would resolve credentials for
+        # a call that never happens.
+        classifier = None
+        if args.classifier_provider or args.classifier_model:
+            classifier = build_classifier_provider(
+                classifier_provider_name=args.classifier_provider,
+                classifier_model=args.classifier_model)
+        result = classify_existing(args.case_id, args.doc_id, held_by=args.held_by,
+                                    run_id=args.run_id, classifier=classifier)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     if args.command == "resolve-disagreement":
         _resolve_from_args(args)
     elif args.command == "resolve-non-text":

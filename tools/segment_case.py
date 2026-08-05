@@ -474,6 +474,57 @@ _MEDICAL_TITLE_SCAN_LINES = 5
 _MEDICAL_TITLE_MAX_CHARS = 40
 
 
+# Title suffixes that NAME A FORM, mapped to the document_type they determine.
+# Deliberately not exhaustive: a title earns an entry only when the form it
+# names has exactly one type. Order matters -- the longest match wins, so
+# 내역서 is tested before 서.
+_TITLE_TYPE_SUFFIXES = (
+    ("진단서", "diagnosis_certificate"),
+    ("소견서", "diagnosis_certificate"),
+    ("기록지", "medical_record"),
+    ("기록", "medical_record"),
+    ("의무기록", "medical_record"),
+    ("내역서", "receipt"),
+    ("내역", "receipt"),
+    ("명세서", "receipt"),
+    ("영수증", "receipt"),
+)
+
+# Titles that name a GENRE rather than a form. "REPORT" says a report exists,
+# not which kind: CASE_909's p6/p7 are imaging readings, but the same heading
+# sits on lab and pathology reports too, and the model reading the page can tell
+# them apart. Mapping these would encode one bundle's coincidence as a rule.
+_GENRE_ONLY_TITLES = frozenset({"report", "summary", "보고서", "결과지", "판독지"})
+
+
+def document_type_from_title(title: str | None) -> str | None:
+    """The document_type a printed form title determines, or None.
+
+    The split already records the publisher's own title at precision 1.0000, so
+    asking a model to re-read the page and name a type is a second opinion on
+    evidence already held exactly. That only holds where the title names the
+    FORM; None means "no mapping", never a type, and the caller classifies from
+    content as before. Absence of a mapping is not a verdict.
+    """
+    if not title:
+        return None
+    collapsed = re.sub(r"[\s·ㆍ・]+", "", title)
+    if not collapsed or len(collapsed) > _MEDICAL_TITLE_MAX_CHARS:
+        return None
+    if collapsed.lower() in _GENRE_ONLY_TITLES:
+        return None
+    # Only a real title maps -- a sentence that merely mentions a form does not.
+    if medical_form_title(title) is None:
+        return None
+    # Strip a trailing parenthetical/ordinal so "진료비 내역서(외래)" matches on
+    # 내역서 rather than on whatever the scope note ends with.
+    stem = re.sub(r"\([^)]*\)\s*\d*$", "", collapsed).strip()
+    for suffix, doc_type in sorted(_TITLE_TYPE_SUFFIXES, key=lambda x: -len(x[0])):
+        if stem.endswith(suffix):
+            return doc_type
+    return None
+
+
 def medical_form_title(line: str) -> str | None:
     """The line itself if it reads as a medical form's name, else None.
 
@@ -2911,7 +2962,11 @@ def redistribute_ocr_pages(
         child_pages = []
         for offset, source_page in enumerate(pages[start - 1:end], start=1):
             page = copy.deepcopy(source_page)
-            page["page"] = str(offset)
+            # Keep the parent's own type for `page`: ocr_result.schema.json
+            # requires an integer, and stringifying it made every redistributed
+            # child fail validation on CASE_909 -- silently, since nothing
+            # revalidated them at redistribution time.
+            page["page"] = offset
             case_id = parent_ocr.get("case_id") or _case_id_from_text_path(
                 source_page.get("text_path"))
             page["text_path"] = (

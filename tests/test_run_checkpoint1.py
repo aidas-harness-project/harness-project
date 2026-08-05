@@ -953,3 +953,144 @@ def test_resolving_a_bundles_disagreement_does_not_classify_it(tmp_path, monkeyp
 
     assert result["status"] == "bundle_ocr_complete"
     assert not (out_dir / "classification_result_DOC_001.json").exists()
+
+
+# --- classify an already-read document -----------------------------------------
+#
+# A split child inherits its pages from the bundle, so by the time it needs a
+# document_type its text already exists. Before this there was no way to say
+# "classify what is here": the only entry point was `run`, which starts by
+# OCR'ing. Calling it on a child re-read pages that had just been redistributed
+# and overwrote their P8 history with a fresh verdict -- which is what happened
+# to CASE_909's DOC_006-013.
+
+
+def _child_with_inherited_pages(tmp_path, doc_id="DOC_006"):
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    proc = tmp_path / "data" / "processed" / "CASE_009" / doc_id
+    proc.mkdir(parents=True, exist_ok=True)
+    (proc / "page_001.md").write_text("진 단 서\n환자의 성명", encoding="utf-8")
+    dao.atomic_write_json(out_dir / "document_manifest.json", {
+        "case_id": "CASE_009", "created_at": dao.now_iso(),
+        "documents": [{
+            "document_id": doc_id, "file_name": f"{doc_id}.pdf",
+            "file_path": f"data/raw/CASE_009/{doc_id}.pdf", "file_format": "pdf",
+            "file_size_bytes": 100, "ocr_status": "completed",
+            "segmentation_status": "completed", "source_file_name": "DOC_005.pdf",
+            "source_page_start": 1, "source_page_end": 1,
+            "segmentation_proposal_path":
+                "outputs/CASE_009/segmentation_proposal_DOC_005.json",
+        }],
+    })
+    dao.atomic_write_json(out_dir / f"ocr_result_{doc_id}.json", {
+        "case_id": "CASE_009", "run_id": "RUN_20260805_001",
+        "component": "document-pipeline", "status": "success",
+        "created_at": dao.now_iso(),
+        "model_info": {"model_name": "reader_a=x; reader_b=x",
+                        "prompt_version": "ocr_extraction_v0.1"},
+        "document_id": doc_id, "ocr_engine": "x", "vision_model_name": "y",
+        "uncertain_confidence_threshold": 1.0, "extraction_method": "ocr",
+        "ocr_status": "completed", "ocr_quality": "low",
+        "cross_validation_status": "disagreed_resolved",
+        "cross_validation_mode": "single_technology_weak_p8_poc",
+        "cross_validation_note": "inherited from the bundle", "review_required": False,
+        "pages": [{
+            "page": 1, "text_path": f"data/processed/CASE_009/{doc_id}/page_001.md",
+            "mean_confidence": None, "uncertain_regions": [],
+            "cross_validation": {
+                "agreement": "disagreed", "vision_model_reading": "b",
+                "disagreement_details": ["DISAGREE: mock"],
+                "resolution": {"chosen_reading": "reading_a", "resolved_by": "h",
+                                "resolved_at": dao.now_iso(), "note": "n"},
+            },
+        }],
+    })
+    return out_dir
+
+
+def test_classify_only_does_not_re_read_the_document(tmp_path, monkeypatch):
+    """The inherited P8 record must survive classification untouched."""
+    out_dir = _child_with_inherited_pages(tmp_path)
+    monkeypatch.setattr(
+        rc1, "run_ocr",
+        lambda *a, **k: pytest.fail("classify-only must never re-OCR"))
+    _mock_classify(monkeypatch, doc_type="diagnosis_certificate", label="진단서")
+
+    result = rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline",
+        run_id="RUN_20260805_002")
+
+    assert result["status"] == "passed"
+    assert result["document_type"] == "diagnosis_certificate"
+    ocr = json.loads((out_dir / "ocr_result_DOC_006.json").read_text(encoding="utf-8"))
+    assert ocr["cross_validation_status"] == "disagreed_resolved", \
+        "the inherited P8 history must not be replaced by a fresh read"
+    assert ocr["pages"][0]["cross_validation"]["resolution"]["chosen_reading"] == "reading_a"
+
+
+def test_running_full_checkpoint1_on_an_already_read_document_is_refused(tmp_path, monkeypatch):
+    """The guard that would have prevented the CASE_909 overwrite.
+
+    `run` starts by OCR'ing, so calling it on a document whose pages were
+    inherited destroys exactly the record redistribution just created. Refuse
+    it and name the alternative rather than silently paying twice.
+    """
+    _child_with_inherited_pages(tmp_path)
+    monkeypatch.setattr(
+        rc1, "run_ocr",
+        lambda *a, **k: pytest.fail("must refuse before reaching OCR"))
+
+    result = rc1.run_checkpoint1(
+        "CASE_009", "DOC_006", "missing.pdf", "tester", "RUN_20260805_002",
+        reader_a=object(), reader_b=object(), comparator=object(),
+        classifier=object())
+
+    assert result["status"] == "already_extracted"
+    assert "classify-only" in result["next_action"]
+
+
+def test_a_form_naming_title_classifies_without_calling_the_model(tmp_path, monkeypatch):
+    """The split's own title decides the type when it names a form.
+
+    The boundary was cut on that printed title at precision 1.0000, so asking a
+    model to re-read the same page and name a type is a second opinion on
+    evidence already held exactly. Verified against the model on CASE_909: all
+    four titles it maps agreed with the classifier, none differed.
+    """
+    _child_with_inherited_pages(tmp_path)
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    dao.atomic_write_json(out_dir / "segmentation_proposal_DOC_005.json", {
+        "review_status": "approved", "method": {"mode": "text_anchor"},
+        "segments": [{"page_start": 1, "page_end": 1,
+                      "provisional_type_label": "진 단 서"}],
+    })
+    monkeypatch.setattr(
+        rc1, "classify_document",
+        lambda *a, **k: pytest.fail("a form-naming title needs no model call"))
+
+    result = rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline", run_id="RUN_20260805_002")
+
+    assert result["document_type"] == "diagnosis_certificate"
+    written = json.loads(
+        (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
+    assert written["classification_source"] == "printed_form_title"
+    assert "진 단 서" in written["evidence_references"][0]["quote"]
+
+
+def test_a_genre_naming_title_still_calls_the_model(tmp_path, monkeypatch):
+    """"REPORT" names a genre, so the page still has to be read."""
+    _child_with_inherited_pages(tmp_path)
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    dao.atomic_write_json(out_dir / "segmentation_proposal_DOC_005.json", {
+        "review_status": "approved", "method": {"mode": "text_anchor"},
+        "segments": [{"page_start": 1, "page_end": 1,
+                      "provisional_type_label": "REPORT"}],
+    })
+    _mock_classify(monkeypatch, doc_type="imaging_report", label="영상판독지")
+
+    result = rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline", run_id="RUN_20260805_002")
+
+    assert result["document_type"] == "imaging_report"

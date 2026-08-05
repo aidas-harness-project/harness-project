@@ -2316,7 +2316,7 @@ def test_redistribute_renumbers_pages_from_one_within_each_child(tmp_path):
                 {"page_start": 5, "page_end": 5}]
     child = sc.redistribute_ocr_pages(
         parent, segments, ["DOC_006", "DOC_007", "DOC_008"])[1]
-    assert [p["page"] for p in child["pages"]] == ["1", "2", "3"]
+    assert [p["page"] for p in child["pages"]] == [1, 2, 3]
     assert [p["text_path"] for p in child["pages"]] == [
         "data/processed/CASE_900/DOC_007/page_001.md",
         "data/processed/CASE_900/DOC_007/page_002.md",
@@ -2421,7 +2421,7 @@ def test_split_hands_each_child_its_own_page_text_when_the_parent_was_ocrd(tmp_p
     child = json.loads((tmp_path / "outputs" / "CASE_900"
                         / "ocr_result_DOC_003.json").read_text(encoding="utf-8"))
     assert child["document_id"] == "DOC_003"
-    assert [p["page"] for p in child["pages"]] == ["1", "2", "3"]
+    assert [p["page"] for p in child["pages"]] == [1, 2, 3]
 
 
 def test_split_keeps_the_parent_ocr_record_after_redistributing(tmp_path):
@@ -3001,3 +3001,70 @@ def test_auto_falls_back_to_the_policy_result_when_neither_fires():
     """
     pages = ["표지입니다", "본문이 이어집니다"]
     assert set(sc.boundaries_from_page_texts(pages, medical="auto")) == {1}
+
+
+# --- title -> document_type, where the title actually determines it -----------
+#
+# The split already records the publisher's own printed title at precision
+# 1.0000. Asking a model to re-read the same page and name a type is a second
+# opinion on evidence we already hold exactly -- but only where the title names
+# the FORM. Some titles name a genre, not a form, and those must still be
+# classified from content.
+
+
+def test_a_form_naming_title_maps_to_its_type():
+    assert sc.document_type_from_title("진 단 서") == "diagnosis_certificate"
+    assert sc.document_type_from_title("후유장애 진단서(Mc Bride)") == "diagnosis_certificate"
+    assert sc.document_type_from_title("경과기록지") == "medical_record"
+    assert sc.document_type_from_title("수 술 기 록") == "medical_record"
+    assert sc.document_type_from_title("진료비 내역서(외래)") == "receipt"
+    assert sc.document_type_from_title("진료비 세부산정내역(퇴원)") == "receipt"
+
+
+def test_a_genre_naming_title_is_left_to_the_classifier():
+    """"REPORT" says a report exists, not which kind.
+
+    CASE_909's p6/p7 are imaging readings, but the same heading sits on lab and
+    pathology reports too. Mapping it would encode one bundle's coincidence as a
+    rule; the model reads the page and can tell them apart.
+    """
+    assert sc.document_type_from_title("REPORT") is None
+    assert sc.document_type_from_title("SUMMARY") is None
+    assert sc.document_type_from_title("보고서") is None
+
+
+def test_an_unmapped_title_returns_none_rather_than_guessing():
+    """Absence of a mapping is not a type. Unknown falls through to the model."""
+    assert sc.document_type_from_title("입 · 퇴 원 확 인 서") is None
+    assert sc.document_type_from_title("위자료 산정기준표") is None
+    assert sc.document_type_from_title(None) is None
+    assert sc.document_type_from_title("") is None
+
+
+def test_the_mapping_reads_a_letter_spaced_title():
+    """Korean official forms letter-space their titles; that is not a new form."""
+    assert sc.document_type_from_title("진 단 서") == sc.document_type_from_title("진단서")
+    assert sc.document_type_from_title("수 술 기 록") == sc.document_type_from_title("수술기록")
+
+
+def test_the_mapping_never_fires_on_prose_mentioning_a_form():
+    """A sentence about a 진단서 is not a 진단서."""
+    assert sc.document_type_from_title("위 진단서를 첨부하여 제출하였습니다") is None
+
+
+def test_redistributed_pages_keep_the_schema_s_integer_page_numbers():
+    """`page` is an integer in ocr_result.schema.json, and must stay one.
+
+    Caught by the schema test on the real CASE_909 children: redistribution
+    wrote str(offset), so every redistributed ocr_result failed validation --
+    silently, until something happened to validate them. The parent's own pages
+    are integers; re-filing them must not change their type.
+    """
+    parent = _ocr_result("DOC_003", 4)
+    for page in parent["pages"]:
+        page["page"] = int(page["page"])
+    children = sc.redistribute_ocr_pages(
+        parent, [{"page_start": 1, "page_end": 2}, {"page_start": 3, "page_end": 4}],
+        ["DOC_006", "DOC_007"])
+    for child in children:
+        assert [p["page"] for p in child["pages"]] == [1, 2]
