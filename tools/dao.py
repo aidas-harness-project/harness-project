@@ -2871,7 +2871,20 @@ def cmd_write_contract(args):
         schemas, registry = load_registry()
         schema_name = args.schema_name
         if schema_name not in schemas:
-            print(f"FAIL: no schema named {schema_name} in schemas/")
+            # The registry keys on full filenames, but only one agent spec
+            # actually spells the argument out, so an agent reasonably passes
+            # the bare contract name it sees everywhere else ("screening_report").
+            # Refusing with "no such schema" sends it hunting for a schema that
+            # is right there. Name the exact fix instead of failing blind; the
+            # write is still refused, since guessing which schema was meant is
+            # how the wrong contract gets validated against the wrong shape.
+            suffixed = f"{schema_name}.schema.json"
+            if suffixed in schemas:
+                print(f"FAIL: no schema named {schema_name} in schemas/ -- "
+                      f"use the full filename {suffixed!r} (the schema registry "
+                      "keys on filenames, not bare contract names).")
+            else:
+                print(f"FAIL: no schema named {schema_name} in schemas/")
             return 1
         errors = validate_instance(data, schema_name, schemas, registry)
         if errors:
