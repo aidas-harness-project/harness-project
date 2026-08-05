@@ -2835,3 +2835,101 @@ def test_a_generic_title_does_not_merge_two_documents():
     """
     pages = ["REPORT\nReading | MR | HAND", "REPORT\nReading | Right Wrist AP"]
     assert set(sc.boundaries_from_page_texts(pages, medical=True)) == {1, 2}
+
+
+# --- LLM tier: pages the deterministic rule cannot decide ---------------------
+#
+# The title rule answers most pages and is measurably exact where it applies
+# (precision 1.0000 on both medical bundles). It leaves two shapes undecided,
+# both observed on real data rather than imagined:
+#
+#   * a page with NO recognisable form title -- CASE_907 DOC_005 p18,
+#     "[자료 13] 위자료 산정기준표", a court compensation table typed `other`
+#   * a page repeating a GENERIC form-kind word -- p6/p7 both headed "REPORT"
+#     while reading different studies
+#
+# Only those pages are sent to the model. On the 19-page bundle that is 2 of 19.
+
+
+class _FakeBoundaryJudge:
+    """Records what it was asked and replays scripted verdicts."""
+
+    provider_name = "fake"
+    model_name = "fake-model"
+
+    def __init__(self, verdicts):
+        self._verdicts = list(verdicts)
+        self.prompts = []
+
+    def classify_document(self, prompt, prompt_version):
+        from llm_providers import ProviderResult
+        self.prompts.append(prompt)
+        value = self._verdicts[min(len(self.prompts) - 1, len(self._verdicts) - 1)]
+        return ProviderResult(self.provider_name, self.model_name, prompt_version,
+                              value if isinstance(value, str) else json.dumps(value))
+
+
+def test_llm_tier_is_asked_only_about_undecided_pages():
+    """A page the title rule settled must not cost a model call.
+
+    p2 and p3 both lack a form title, so both are genuinely undecided: an
+    untitled page is usually a continuation, but CASE_907 DOC_005 p18 opens a
+    court compensation table with no medical form name, so "untitled" cannot be
+    read as "continuation" on its own. p1 and p4 are settled by their titles
+    and must cost nothing.
+    """
+    pages = [
+        "진 단 서\n환자의 성명",
+        "계속되는 진단 내용입니다",
+        "[자료 13] 위자료 산정기준표\n※ 서울중앙지방법원 기준",
+        "진료비 내역서(외래)\n금액",
+    ]
+    judge = _FakeBoundaryJudge([
+        {"starts_new_document": False, "confidence": 0.9, "title": None},
+        {"starts_new_document": True, "confidence": 0.9, "title": "위자료 산정기준표"},
+    ])
+    found = sc.boundaries_from_page_texts(pages, medical=True, judge=judge)
+    assert len(judge.prompts) == 2, "only the untitled pages may be sent"
+    assert "위자료 산정기준표" in judge.prompts[1]
+    assert set(found) == {1, 3, 4}
+
+
+def test_llm_tier_can_separate_two_pages_sharing_a_generic_title():
+    """CASE_907/CASE_112 p6-p7: both "REPORT", different studies."""
+    pages = ["REPORT\nReading | MR | HAND", "REPORT\nReading | Right Wrist AP"]
+    judge = _FakeBoundaryJudge([{"starts_new_document": True, "confidence": 0.85,
+                                 "title": "REPORT"}])
+    assert set(sc.boundaries_from_page_texts(pages, medical=True, judge=judge)) == {1, 2}
+
+
+def test_llm_tier_may_merge_a_continuation_it_recognises():
+    pages = [
+        "진료비 세부산정내역(퇴원)\n항목 | 금액",
+        "REPORT\n(앞 장에서 이어짐)",
+    ]
+    judge = _FakeBoundaryJudge([{"starts_new_document": False, "confidence": 0.8,
+                                 "title": None}])
+    assert set(sc.boundaries_from_page_texts(pages, medical=True, judge=judge)) == {1}
+
+
+def test_an_unusable_verdict_splits_and_is_flagged_for_review():
+    """Fail toward splitting, and say so.
+
+    Over-splitting is undone by a human merging two segments at the approval
+    gate; over-merging fuses two documents into one document_type and
+    propagates downstream. The page is also reported so the gate knows the
+    boundary was not actually decided -- unlike a title match, which is
+    evidence a reviewer can check on the page itself.
+    """
+    pages = ["진 단 서\n환자의 성명", "REPORT\nReading"]
+    for bad in ("not json at all", {"confidence": 0.4}):
+        judge = _FakeBoundaryJudge([bad])
+        found = sc.boundaries_from_page_texts(pages, medical=True, judge=judge)
+        assert set(found) == {1, 2}
+        assert sc.undecided_pages(pages, medical=True, judge=judge) == [2]
+
+
+def test_without_a_judge_the_deterministic_result_is_unchanged():
+    """The tier is additive: no judge, exactly the behaviour measured before."""
+    pages = ["REPORT\nReading | MR", "REPORT\nReading | Wrist"]
+    assert set(sc.boundaries_from_page_texts(pages, medical=True)) == {1, 2}

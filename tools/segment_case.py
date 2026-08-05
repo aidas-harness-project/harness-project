@@ -648,7 +648,7 @@ def text_anchor_boundaries(pdf_path, page_count: int) -> dict[int, str | None] |
 
 
 def boundaries_from_page_texts(
-    page_texts: list[str], *, medical: bool = False
+    page_texts: list[str], *, medical: bool = False, judge=None,
 ) -> dict[int, str | None] | None:
     """The same boundary rule over page text a caller already has.
 
@@ -677,7 +677,7 @@ def boundaries_from_page_texts(
     return _boundaries_from_page_lines([
         _page_content_lines([line.strip() for line in text.splitlines() if line.strip()])
         for text in page_texts
-    ], medical=medical)
+    ], medical=medical, judge=judge, page_texts=page_texts)
 
 
 def processed_text_boundaries(
@@ -738,8 +738,26 @@ def _split_page_markers(text: str) -> list[str]:
     return pages
 
 
+def undecided_pages(
+    page_texts: list[str], *, medical: bool = False, judge=None
+) -> list[int]:
+    """Pages whose boundary the judge was asked about and could not answer.
+
+    These were split (the fail-safe direction) but not decided, so the human
+    approval gate should see them: unlike a title match, there is no evidence
+    on the page a reviewer can check. Empty when no judge ran.
+    """
+    collected: list[int] = []
+    _boundaries_from_page_lines([
+        _page_content_lines([line.strip() for line in text.splitlines() if line.strip()])
+        for text in page_texts
+    ], medical=medical, judge=judge, page_texts=page_texts, undecided=collected)
+    return collected
+
+
 def _boundaries_from_page_lines(
-    pages: list[list[str]], *, medical: bool = False,
+    pages: list[list[str]], *, medical: bool = False, judge=None,
+    page_texts: list[str] | None = None, undecided: list[int] | None = None,
 ) -> dict[int, str | None] | None:
     """Boundary set for pages already reduced to their content lines.
 
@@ -770,6 +788,10 @@ def _boundaries_from_page_lines(
 
     boundaries: dict[int, str | None] = {1: None}
     previous_title: str | None = None
+    if undecided is None:
+        undecided = []
+    if page_texts is None:
+        page_texts = ["\n".join(lines) for lines in pages]
     if medical:
         # Page 1 starts a document by position, but its title is still worth
         # recording -- unlike the policy path, where line 1 IS the title and a
@@ -782,17 +804,39 @@ def _boundaries_from_page_lines(
             continue
         if medical:
             title = _medical_header_title(lines)
-            if title is not None:
-                key = _title_key(title)
-                # key is None for a generic form-kind word, which never equals
-                # the previous key -- so such a page always starts a document.
-                if key is None or key != previous_title:
+            key = _title_key(title)
+            if title is not None and key is not None:
+                if key != previous_title:
                     boundaries[page] = title
                 previous_title = key
-            # A page with no title of its own continues the preceding document
-            # and does NOT reset the run: the reprint check compares against the
-            # last title seen, so an untitled continuation page in the middle of
-            # a multi-page form does not make the next reprint look new.
+                continue
+            # Reaches the judge only when the rule genuinely cannot decide: a
+            # generic form-KIND heading that says nothing about WHICH document
+            # this is, or a page with no recognisable title. The second is not
+            # automatically a continuation -- CASE_907 DOC_005 p18 opens a court
+            # compensation table with no medical form name -- but most untitled
+            # pages are, so the judge is what separates them. Measured on that
+            # 19-page bundle: 3 untitled pages (p5, p18, p19) plus 2 generic
+            # headings, so the deterministic rule still answers most of it.
+            if judge is None:
+                # Without a judge, a generic title still starts a document (a
+                # repeat of it is no evidence of a reprint) and an untitled page
+                # still continues -- the measured behaviour, unchanged.
+                if title is not None:
+                    boundaries[page] = title
+                continue
+            verdict = _judge_boundary(page_texts[index - 1], page_texts[index], judge)
+            if verdict is None:
+                # Fail toward splitting. Over-splitting is undone by a human
+                # merging two segments at the approval gate; over-merging fuses
+                # two documents into one document_type and propagates
+                # downstream. Recorded as undecided so the gate knows this
+                # boundary was not actually decided.
+                boundaries[page] = title
+                undecided.append(page)
+            elif verdict["starts_new_document"]:
+                boundaries[page] = verdict.get("title") or title
+                previous_title = _title_key(boundaries[page])
             continue
         if toc[index - 1]:
             # First real page after the contents block always starts a document.
@@ -810,6 +854,72 @@ def _boundaries_from_page_lines(
 # on both bundles measured. Deliberately a short list of bare form-kind words --
 # deciding this in general is the LLM tier's job, and this is the floor under it.
 _GENERIC_FORM_TITLES = frozenset({"report", "summary", "결과지", "판독지", "기록지"})
+
+
+BOUNDARY_JUDGE_PROMPT_VERSION = "boundary_judge_v0.1"
+
+BOUNDARY_JUDGE_PROMPT = """You are deciding whether one page of a scanned Korean insurance-claim
+document bundle STARTS A NEW DOCUMENT, or CONTINUES the one before it.
+
+A bundle concatenates separate documents (진단서, 검사 판독지, 진료비 명세서,
+법원 기준표 …). A new document normally opens with its own form title and its
+own header block (patient/registration fields, a fresh table). A continuation
+page carries on the previous page's content -- a table running over, a numbered
+list continuing -- and often repeats the same running header.
+
+Two cases matter most, because they are why the deterministic rule could not
+decide this page:
+- The two pages may share a generic heading (e.g. "REPORT") while being
+  different documents: separate studies, each with its own patient block and
+  its own conclusion. Same heading is NOT evidence of continuation.
+- A page may carry no recognisable form title at all and still start a new
+  document.
+
+Reply with ONLY a JSON object, no other text, in exactly this shape:
+{{"starts_new_document": <true|false>, "confidence": <0-1>,
+  "title": "<the document's own title if this page starts one, else null>"}}
+
+--- Previous page ---
+{previous}
+
+--- Page being judged ---
+{current}
+"""
+
+
+def _judge_boundary(previous_text: str, current_text: str, judge) -> dict | None:
+    """Ask the model whether `current_text` starts a document. None if unusable.
+
+    None covers every way the answer can fail to be an answer -- provider
+    error, unparseable text, missing field, wrong type. The caller treats all
+    of them identically (split and flag), so distinguishing them here would be
+    a distinction nothing acts on.
+    """
+    prompt = BOUNDARY_JUDGE_PROMPT.format(
+        previous=previous_text[:_JUDGE_TEXT_LIMIT],
+        current=current_text[:_JUDGE_TEXT_LIMIT],
+    )
+    try:
+        result = judge.classify_document(prompt, BOUNDARY_JUDGE_PROMPT_VERSION)
+    except Exception:
+        return None
+    raw = (getattr(result, "text", "") or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", raw).strip()
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict) or not isinstance(
+            parsed.get("starts_new_document"), bool):
+        return None
+    return parsed
+
+
+# How much of a page to show the judge. A form's identity is established by its
+# header and the shape of what follows; sending a whole 3000-character billing
+# table adds cost, not signal.
+_JUDGE_TEXT_LIMIT = 1200
 
 
 def _title_key(title: str | None) -> str | None:
