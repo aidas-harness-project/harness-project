@@ -565,10 +565,48 @@ def text_anchor_boundaries(pdf_path, page_count: int) -> dict[int, str | None] |
         # caller falls back to vision rather than this masking a PDF-level error.
         return None
 
-    # A bundle with any empty-text page is not fully born-digital; mixing a
+    return _boundaries_from_page_lines(pages)
+
+
+def boundaries_from_page_texts(page_texts: list[str]) -> dict[int, str | None] | None:
+    """The same boundary rule over page text a caller already has.
+
+    text_anchor_boundaries() reads the PDF's embedded layer, which confines the
+    deterministic path to born-digital bundles -- and this corpus is mostly
+    scans (CASE_025's 110 pages and CASE_026's 59 carry zero embedded
+    characters). Running OCR first gives a scan page text too, and the rule
+    that turns text into boundaries does not care which reader produced it:
+    measured on CASE_112's two policy bundles, boundaries derived from the OCR
+    output are IDENTICAL to those from the embedded layer across all 323 pages.
+
+    The intended input is REDACTED text. Segmentation must never read
+    pre-redaction page text -- that is what dao.read-page-text guards behind
+    checkpoint 2's one-shot capability -- and it does not need to: across
+    CASE_112's 217 split children, the document title line survived redaction
+    in every case, because redaction identifies PII values and substitutes only
+    those spans, and a form's title is not PII.
+
+    Returns None if any page is empty, matching the PDF path's fail-closed
+    contract for a partially-readable bundle: a verdict blind to part of the
+    document is worse than none, since the caller can fall back to vision only
+    if it is told nothing was decided.
+    """
+    if not page_texts:
+        return None
+    return _boundaries_from_page_lines([
+        _page_content_lines([line.strip() for line in text.splitlines() if line.strip()])
+        for text in page_texts
+    ])
+
+
+def _boundaries_from_page_lines(
+    pages: list[list[str]],
+) -> dict[int, str | None] | None:
+    """Boundary set for pages already reduced to their content lines."""
+    # A bundle with any empty-text page is not fully readable; mixing a
     # deterministic verdict with pages we cannot read would produce boundaries
     # that are silently blind to part of the document.
-    if not all(pages):
+    if not pages or not all(pages):
         return None
 
     raw_toc = [_is_toc_page(lines) for lines in pages]

@@ -2475,3 +2475,72 @@ def test_split_without_a_parent_ocr_record_behaves_exactly_as_before(tmp_path):
     assert out["status"] == "split"
     assert out["redistributed_ocr"] is False
     assert not (tmp_path / "outputs" / "CASE_900" / "ocr_result_DOC_002.json").exists()
+
+
+# --- boundaries from already-extracted page text -----------------------------
+#
+# text_anchor_boundaries() opens the PDF and reads its embedded text layer,
+# which confines it to born-digital bundles. This corpus is overwhelmingly
+# scans (CASE_025 110p and CASE_026 59p carry zero embedded characters), so the
+# deterministic path never applied to most of it. Running OCR first produces
+# page text for a scan too; boundaries_from_page_texts() is the same rule over
+# whatever text a caller already has -- redacted OCR output included, which is
+# what keeps segmentation from ever reading pre-redaction PII.
+
+
+def test_boundaries_from_page_texts_matches_the_pdf_path_on_the_same_text(tmp_path):
+    """One rule, two sources. The PDF wrapper must add nothing but extraction."""
+    pages = [
+        ["영업배상책임보험", "보통약관"],
+        ["11. 계속되는 항목입니다"],
+        ["시설소유(관리)자 특별약관", "제1조(사고)"],
+        ["그러나 앞 조항에서 정한 손해는 보상합니다"],
+        ["구내치료비 추가특별약관"],
+    ]
+    path = _korean_pdf(tmp_path, pages)
+    from_pdf = sc.text_anchor_boundaries(path, 5)
+    from_text = sc.boundaries_from_page_texts(["\n".join(p) for p in pages])
+    assert set(from_text) == set(from_pdf) == {1, 3, 5}
+    assert from_text == from_pdf
+
+
+def test_boundaries_from_page_texts_works_on_redacted_ocr_text():
+    """The real input: OCR text that has been through redaction.
+
+    Measured on CASE_112's 217 split children (208 policy + 9 medical), the
+    document title line survived redaction in every single case -- redaction
+    identifies PII VALUES and substitutes only those spans, and a form's title
+    is not PII. So segmentation can read the redacted text and never needs the
+    pre-redaction page text that dao.read-page-text guards behind checkpoint
+    2's one-shot capability.
+    """
+    pages = [
+        "후유장애 진단서(Mc Bride)\n환자: [REDACTED]\n주민등록번호: [REDACTED]",
+        "계속되는 소견 내용입니다",
+        "구내치료비 추가특별약관\n제1조(보상하는 손해)",
+    ]
+    found = sc.boundaries_from_page_texts(pages)
+    assert set(found) == {1, 3}
+    assert found[3] == "구내치료비 추가특별약관"
+
+
+def test_boundaries_from_page_texts_declines_when_any_page_is_empty():
+    """An empty page means the text is incomplete, not that it has no boundary.
+
+    Same fail-closed contract the PDF path uses for a partially-digital bundle:
+    a verdict blind to part of the document is worse than no verdict, because
+    the caller can fall back to vision only if it is told nothing was decided.
+    """
+    assert sc.boundaries_from_page_texts(["구내치료비 추가특별약관", "", "제1조"]) is None
+    assert sc.boundaries_from_page_texts([]) is None
+
+
+def test_boundaries_from_page_texts_ignores_running_footers():
+    """Page furniture must not shift a boundary -- the CASE_112 p6/p7 defect."""
+    footer = "당신에게 좋은보험 삼성화재"
+    pages = [
+        f"영업배상책임보험\n보통약관\n{footer}",
+        f"치료비 추가특별약관\n{footer}",
+        f"제2조(준용규정)\n이 특별약관에 정하지 않은 사항은 보통약관을 따릅니다.\n{footer}",
+    ]
+    assert set(sc.boundaries_from_page_texts(pages)) == {1, 2}
