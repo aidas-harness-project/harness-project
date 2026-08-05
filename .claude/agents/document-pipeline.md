@@ -60,6 +60,38 @@ survive redaction (verified across CASE_112's 217 split children), so nothing is
 lost, and the pre-redaction page text stays behind the capability gate where it
 belongs.
 
+**Classifying before redaction exists blocks the stage until a human clears
+it.** Classification prefers `redacted_text.md` and falls back to
+`page_NNN.md` when none exists yet — a document that has not been redacted
+cannot otherwise be classified at all. The fallback records
+`classification_text_source: raw_page_text` and sets `review_required`, and
+`document_processing` **refuses to finalize** while any such classification
+lacks a cleared review. Order the work so this does not arise (redact the
+bundle before segmenting, then redact each child before it is needed
+downstream); when it does arise, the review asks one question:
+
+> does the classification's `evidence_references` quote survive into
+> `redacted_text.md` verbatim?
+
+If it does, the identical label is reachable from the redacted layer and no PII
+did load-bearing work — confirm and record. If it does not, the label rests on
+text the analysis side should never have seen; re-classify from the redacted
+text instead of clearing it. Record with:
+
+```
+python tools/dao.py record-human-review CASE_ID \
+  --artifact-kind classification_review --artifact-id DOC_XXX \
+  --target-key classification_text_source:raw_page_text \
+  --decision verified --reviewer NAME --note "..." \
+  --held-by NAME --run-id RUN_ID
+```
+
+then write the returned `HR-...` UID into the classification's
+`human_review_uid` field. The record binds to the classification's bytes, so
+re-labelling it afterwards invalidates the review and the gate refuses again —
+you cannot review first and edit after. `--decision rejected` is recordable and
+never clears the gate.
+
 Checkpoint 1 refuses exactly one target, before constructing a provider or
 opening a PDF: the retained `superseded_bundle`. Its children already own every
 one of its pages, so reading it again would duplicate them under a document

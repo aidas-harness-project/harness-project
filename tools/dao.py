@@ -1134,6 +1134,56 @@ def _validate_manifest_lineage(case_id, manifest) -> list:
     return segment_lineage.validate_segment_lineage(manifest, _segment_text_reader(case_id))
 
 
+def _classification_review_blockers(case_id: str, manifest: dict) -> list[str]:
+    """Every classification read from PRE-REDACTION text that no human cleared.
+
+    checkpoint 1 classifies from redacted_text.md when it exists and falls back
+    to page_NNN.md when it does not -- a deliberate fallback, since a document
+    that has not been redacted yet must still be classifiable. The fallback
+    sets review_required and records classification_text_source:raw_page_text
+    so the event is never silent.
+
+    Until this gate existed, that was the whole of it: the flag was written and
+    nothing on earth read it. No finalize check consulted it, and
+    record-human-review had no artifact kind that could clear it, so a case
+    could pass every stage carrying "a human must look at this" forever. A flag
+    nobody reads and nobody can clear is not a notification.
+
+    So the stage that CREATES the condition is the stage that refuses to
+    finalize while it stands unreviewed. What the reviewer is actually asked is
+    narrow and answerable: does the classification's evidence quote survive
+    redaction? If it does, the same label is reachable from the redacted layer
+    and no PII did load-bearing work -- which is the usual case and a quick
+    confirmation. If it does not, the label rests on text the analysis side
+    should never have seen, and that is worth catching before it propagates.
+    """
+    ledger = load_human_review_ledger(case_id)
+    blockers: list[str] = []
+    for doc in manifest.get("documents", []):
+        doc_id = doc.get("document_id")
+        if not doc_id:
+            continue
+        classification = read_contract_data(
+            case_id, f"classification_result_{doc_id}.json")
+        if classification is None:
+            continue
+        if classification.get("classification_text_source") != "raw_page_text":
+            continue
+        if not classification.get("review_required"):
+            continue
+        errors = human_review.verify_reference(
+            ledger,
+            classification.get("human_review_uid"),
+            expected_kind="classification_review",
+            expected_artifact_id=doc_id,
+            expected_target_key="classification_text_source:raw_page_text",
+            current_artifact_sha256=human_review.canonical_artifact_sha256(
+                classification),
+        )
+        blockers.extend(f"{doc_id}: {error}" for error in errors)
+    return blockers
+
+
 def _canonical_uid_finalize_blockers(case_id: str, doc_id: str) -> list[str]:
     """Re-recompute every canonical UID of a document at finalization.
 
@@ -4674,6 +4724,26 @@ def _finalize_stage(case_id, run_id, stage, held_by):
                     for e in derivation_blockers:
                         print(f"  - {e}")
                     return None
+                # This stage classifies, so this stage owns the consequence of
+                # having classified from pre-redaction text.
+                review_blockers = _classification_review_blockers(
+                    case_id, manifest)
+                if review_blockers:
+                    print("REFUSED: cannot finalize 'document_processing' -- a "
+                          "classification was produced from PRE-REDACTION page "
+                          "text and no human review clears it:")
+                    for e in review_blockers:
+                        print(f"  - {e}")
+                    print("  Review each one (does the classification's "
+                          "evidence quote survive redaction?), then record it: "
+                          "dao.py record-human-review CASE_ID --artifact-kind "
+                          "classification_review --artifact-id DOC_XXX "
+                          "--target-key classification_text_source:raw_page_text "
+                          "--decision verified --reviewer NAME --note '...' "
+                          "--held-by NAME --run-id RUN_ID, then write the "
+                          "returned review_uid into the classification's "
+                          "human_review_uid field.")
+                    return None
 
         if stage == "policy_clause_processing":
             # P0-6 again, and not redundantly: document_processing may have
@@ -8031,6 +8101,9 @@ def cmd_record_human_review(args):
     elif kind == "unpaged_physical_exclusion":
         artifact_name = f"policy_parent_coverage_{args.artifact_id}.json"
         schema_name = policy_completeness.PARENT_COVERAGE_SCHEMA
+    elif kind == "classification_review":
+        artifact_name = f"classification_result_{args.artifact_id}.json"
+        schema_name = "classification_result.schema.json"
     else:
         print(f"FAIL: unknown artifact_kind {kind!r}")
         return 1
@@ -8060,6 +8133,27 @@ def cmd_record_human_review(args):
         # finding is still 'open' -- the agent then flips status to
         # accepted_risk and writes the returned UID. The canonical hash is
         # invariant to that transition, so the record stays valid.
+    elif kind == "classification_review":
+        # The only reviewable condition on a classification is the one that
+        # raised review_required in the first place. Pinning the target key to
+        # it means a record cannot be filed against a document that never
+        # needed review, and cannot silently stand in for some other concern.
+        if args.target_key != "classification_text_source:raw_page_text":
+            print("FAIL: target_key for classification_review must be "
+                  "'classification_text_source:raw_page_text' -- that is the "
+                  "condition this review kind exists to clear")
+            return 1
+        if artifact.get("classification_text_source") != "raw_page_text":
+            print(f"FAIL: {artifact_name} has classification_text_source="
+                  f"{artifact.get('classification_text_source')!r}, not "
+                  "'raw_page_text' -- there is no pre-redaction reading to "
+                  "review. Do not file a review for a condition that did not "
+                  "occur.")
+            return 1
+        if not artifact.get("review_required"):
+            print(f"FAIL: {artifact_name} does not have review_required set -- "
+                  "nothing is awaiting review")
+            return 1
     else:  # unpaged_physical_exclusion
         if not args.target_key.startswith("physical:"):
             print("FAIL: target_key for unpaged_physical_exclusion must be 'physical:<N>'")
@@ -8507,7 +8601,8 @@ def build_parser():
     p = sub.add_parser("record-human-review")
     p.add_argument("case_id")
     p.add_argument("--artifact-kind", required=True,
-                   choices=["policy_audit_finding", "unpaged_physical_exclusion"])
+                   choices=["policy_audit_finding", "unpaged_physical_exclusion",
+                            "classification_review"])
     p.add_argument("--artifact-id", required=True,
                    help="the DOC_ID of the audit / parent-coverage artifact")
     p.add_argument("--target-key", required=True,

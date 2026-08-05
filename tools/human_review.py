@@ -50,14 +50,25 @@ HUMAN_REVIEW_LEDGER_SCHEMA = "human_review_ledger.schema.json"
 ALLOWED_DECISION = {
     "policy_audit_finding": "accepted_risk",
     "unpaged_physical_exclusion": "verified",
+    # A classification produced from PRE-REDACTION page text (checkpoint 1's
+    # page_NNN.md, because no redacted_text.md existed yet). The classifier is
+    # an analysis-side consumer, so this is unredacted text reaching a stage
+    # that should never see it -- deliberate and permitted (a document not yet
+    # redacted must stay classifiable), but not something a run may finalize
+    # while nobody has looked. `verified` here means a human read the
+    # classification and confirmed the label stands: the decisive question is
+    # whether the evidence quote survives redaction, because if it does, the
+    # same label is reachable from the redacted layer and no PII was
+    # load-bearing.
+    "classification_review": "verified",
 }
 
 
 # Fields that record a review's OWN disposition, not the substance a human
-# reviews. They are normalized to null before hashing so the binding is
-# invariant to the very decision the review sets -- otherwise a genuine
-# open->accepted_risk transition (plus writing the returned UID) would change
-# the bytes and invalidate the record it just produced. Everything else --
+# reviews. They are REMOVED before hashing so the binding is invariant to the
+# very decision the review sets -- otherwise a genuine open->accepted_risk
+# transition (plus writing the returned UID) would change the bytes and
+# invalidate the record it just produced. Everything else --
 # finding identity, description, evidence, the audit's bound source hashes, the
 # exclusion's reason/page -- stays in the hash, so any substantive edit after
 # review still invalidates the human decision.
@@ -73,26 +84,76 @@ _DISPOSITION_FIELDS = frozenset({
 
 
 def _strip_disposition(obj):
-    """Recursively null every disposition field in a copy of `obj`."""
+    """Recursively REMOVE every disposition field from a copy of `obj`.
+
+    Removal, not nulling. Nulling makes the hash depend on whether the key was
+    present at all, which breaks the exact round trip this module exists to
+    support: record a review against an artifact that has no human_review_uid
+    yet, then write the returned UID into it. Under nulling the artifact goes
+    from `{...}` to `{..., "human_review_uid": null}` -- different canonical
+    bytes, so the record it just produced no longer verifies against the
+    artifact it was made for.
+
+    The two original kinds never exposed this: their artifacts always carry the
+    disposition keys, so present-and-nulled was all that ever happened.
+    classification_review adds the key on write, which is what surfaced it.
+    Removing is invariant both ways -- absent and present-but-nulled now hash
+    identically -- and is otherwise the same rule: the substance a human
+    reviewed stays in the hash, the disposition their review sets does not.
+    """
     if isinstance(obj, dict):
         out = {}
         for key, value in obj.items():
             if key in _DISPOSITION_FIELDS:
-                out[key] = None
-            else:
-                out[key] = _strip_disposition(value)
+                continue
+            out[key] = _strip_disposition(value)
         return out
     if isinstance(obj, list):
         return [_strip_disposition(item) for item in obj]
     return obj
 
 
+def _strip_disposition_legacy_null(obj):
+    """The pre-2026-08-05 rule: null a disposition field rather than remove it.
+
+    Retained ONLY so a review recorded before that change still verifies. Its
+    hash is accepted as a fallback by verify_reference; nothing computes a new
+    binding with it. See _strip_disposition for why nulling was wrong.
+    """
+    if isinstance(obj, dict):
+        out = {}
+        for key, value in obj.items():
+            if key in _DISPOSITION_FIELDS:
+                out[key] = None
+            else:
+                out[key] = _strip_disposition_legacy_null(value)
+        return out
+    if isinstance(obj, list):
+        return [_strip_disposition_legacy_null(item) for item in obj]
+    return obj
+
+
+def _encode_canonical(canonical) -> bytes:
+    return json.dumps(
+        canonical, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")
+
+
+def legacy_null_artifact_sha256(artifact: dict) -> str:
+    """The pre-2026-08-05 canonical hash (disposition fields nulled, not
+    removed). Verification-only: accepted as a fallback so a review recorded
+    under the old rule keeps verifying. Never used to bind a new record."""
+    return hashlib.sha256(_encode_canonical(
+        _strip_disposition_legacy_null(copy.deepcopy(artifact)))).hexdigest()
+
+
 def canonical_artifact_sha256(artifact: dict) -> str:
     """SHA-256 of the artifact in its canonical form: every review-disposition
-    field (see _DISPOSITION_FIELDS) nulled, keys sorted, compact separators,
+    field (see _DISPOSITION_FIELDS) REMOVED, keys sorted, compact separators,
     UTF-8. This is the single hashing rule both record-human-review and every
     verifier use, so the two never disagree about what 'the reviewed substance'
-    was -- and it is invariant to the disposition the review itself sets."""
+    was -- and it is invariant to the disposition the review itself sets,
+    including whether the disposition key is present at all."""
     canonical = _strip_disposition(copy.deepcopy(artifact))
     encoded = json.dumps(
         canonical, ensure_ascii=False, sort_keys=True,
@@ -136,7 +197,8 @@ def verify_reference(
         expected_kind: str,
         expected_artifact_id: str,
         expected_target_key: str,
-        current_artifact_sha256: str | None) -> list[str]:
+        current_artifact_sha256: str | None,
+        legacy_artifact_sha256: str | None = None) -> list[str]:
     """Return blocker strings (empty = the referenced human decision is valid).
 
     current_artifact_sha256 is the canonical hash of the artifact's bytes AS
@@ -180,7 +242,13 @@ def verify_reference(
         errors.append(
             f"human_review_uid {review_uid!r}: the reviewed artifact no longer "
             "exists to hash -- the review cannot be verified against it")
-    elif recorded_hash != current_artifact_sha256:
+    elif recorded_hash != current_artifact_sha256 and (
+            legacy_artifact_sha256 is None
+            or recorded_hash != legacy_artifact_sha256):
+        # The legacy fallback accepts a record bound under the pre-2026-08-05
+        # nulling rule against unchanged bytes. It is strictly a compatibility
+        # path: it never widens what counts as unchanged, since both hashes are
+        # computed from the artifact as it is now.
         errors.append(
             f"human_review_uid {review_uid!r} was recorded against artifact "
             f"bytes {recorded_hash!r} but the artifact now hashes to "
@@ -202,6 +270,7 @@ def check_audit_human_provenance(
     open.
     """
     current_sha = canonical_artifact_sha256(audit)
+    legacy_sha = legacy_null_artifact_sha256(audit)
     errors: list[str] = []
     for index, finding in enumerate(audit.get("findings") or []):
         claims_human = (
@@ -220,6 +289,7 @@ def check_audit_human_provenance(
                 expected_artifact_id=artifact_id,
                 expected_target_key=finding_uid,
                 current_artifact_sha256=current_sha,
+                legacy_artifact_sha256=legacy_sha,
             )
         )
     return errors
@@ -233,6 +303,7 @@ def check_unpaged_human_provenance(
     valid, hash-current, verified ledger record for that physical page. The
     record is bound to the parent-coverage's canonical (UID-stripped) bytes."""
     current_sha = canonical_artifact_sha256(coverage)
+    legacy_sha = legacy_null_artifact_sha256(coverage)
     errors: list[str] = []
     for page in coverage.get("unpaged_physical_pages") or []:
         if page.get("disposition") != "administrative_excluded":
@@ -248,6 +319,7 @@ def check_unpaged_human_provenance(
                 expected_artifact_id=artifact_id,
                 expected_target_key=target_key,
                 current_artifact_sha256=current_sha,
+                legacy_artifact_sha256=legacy_sha,
             )
         )
     return errors
