@@ -433,6 +433,55 @@ DOCUMENT_TITLE_RE = re.compile(
     r"(보통약관|특별약관|특약)\s*(?:\([^)]*\))?\s*[0-9IVXⅠⅡⅢⅣ]*\s*$"
 )
 
+# A MEDICAL bundle announces its documents by form name, the way a policy
+# bundle does by 약관 title. The vocabulary is open (hospitals do not share one
+# publisher's set), so the rule leans on shape rather than an exhaustive list: a
+# short, bare line ending in a form-name suffix. Measured across the real corpus
+# -- CASE_003/005/024/112/907 -- these are the endings that actually occur.
+_MEDICAL_TITLE_RE = re.compile(
+    r"(진단서|확인서|내역서|명세서|소견서|의뢰서|처방전|기록지|기록|증명서|보고서"
+    r"|REPORT|SUMMARY)"
+    r"\s*(?:\([^)]*\))?\s*(?:\d+\s*/\s*\d+)?\s*$"
+)
+
+# A form's field labels sit above its name (DOC_216 "병록 번호", DOC_217
+# "등 록 번 호"). They must never be read as the title, and they end in words
+# that are otherwise unremarkable, so they are excluded by name.
+_MEDICAL_FIELD_LABEL_RE = re.compile(
+    r"^(등록번호|병록번호|연번호|환자의성명|환자성명|성명|주민등록번호|주민번호"
+    r"|환자의주소|진료과목|성별/나이|생년월일)\s*[:：]?\s*$"
+)
+
+# How far into a page a form title may sit and still be its heading. Real
+# corpus: the statutory 별지 서식 header puts 진 단 서 on line 2 (CASE_112
+# DOC_214, CASE_907 DOC_005), and four field labels put 수 술 기 록 on line 5
+# (DOC_217). Past that a match is a mention inside body text, not a heading --
+# the window is what keeps the open medical vocabulary from firing on every
+# continuation page.
+_MEDICAL_TITLE_SCAN_LINES = 5
+
+# The longest a line can be and still be a form title rather than a sentence
+# that happens to end in one. The longest real title measured is
+# "후유장애 진단서(Mc Bride)" at 24 characters.
+_MEDICAL_TITLE_MAX_CHARS = 40
+
+
+def medical_form_title(line: str) -> str | None:
+    """The line itself if it reads as a medical form's name, else None.
+
+    Korean official forms letter-space their titles ("진 단 서",
+    "입 · 퇴 원 확 인 서", "수 술 기 록"), which no substring rule can match, so
+    the line is compared with all whitespace and interpuncts removed while the
+    ORIGINAL is returned -- downstream records the publisher's own words.
+    """
+    if not line or len(line) > _MEDICAL_TITLE_MAX_CHARS:
+        return None
+    collapsed = re.sub(r"[\s·ㆍ・]+", "", line)
+    if not collapsed or _MEDICAL_FIELD_LABEL_RE.match(collapsed):
+        return None
+    return line if _MEDICAL_TITLE_RE.search(collapsed) else None
+
+
 # A TOC page is recognised by density, not by a keyword: at least this many lines
 # and at least this share of them bare titles/headings.
 _TOC_MIN_LINES = 5
@@ -568,7 +617,9 @@ def text_anchor_boundaries(pdf_path, page_count: int) -> dict[int, str | None] |
     return _boundaries_from_page_lines(pages)
 
 
-def boundaries_from_page_texts(page_texts: list[str]) -> dict[int, str | None] | None:
+def boundaries_from_page_texts(
+    page_texts: list[str], *, medical: bool = False
+) -> dict[int, str | None] | None:
     """The same boundary rule over page text a caller already has.
 
     text_anchor_boundaries() reads the PDF's embedded layer, which confines the
@@ -596,7 +647,7 @@ def boundaries_from_page_texts(page_texts: list[str]) -> dict[int, str | None] |
     return _boundaries_from_page_lines([
         _page_content_lines([line.strip() for line in text.splitlines() if line.strip()])
         for text in page_texts
-    ])
+    ], medical=medical)
 
 
 def processed_text_boundaries(
@@ -658,9 +709,16 @@ def _split_page_markers(text: str) -> list[str]:
 
 
 def _boundaries_from_page_lines(
-    pages: list[list[str]],
+    pages: list[list[str]], *, medical: bool = False,
 ) -> dict[int, str | None] | None:
-    """Boundary set for pages already reduced to their content lines."""
+    """Boundary set for pages already reduced to their content lines.
+
+    `medical` swaps the policy rule (a 약관 title, strictly on line 1) for the
+    medical one (a form name within the header window). They are kept separate
+    rather than unioned: the policy rule measured precision 1.0000 across 173
+    boundaries BECAUSE it is narrow, and the medical vocabulary is open, so
+    applying the wider rule to 약관 text would spend that precision for nothing.
+    """
     # A bundle with any empty-text page is not fully readable; mixing a
     # deterministic verdict with pages we cannot read would produce boundaries
     # that are silently blind to part of the document.
@@ -681,9 +739,19 @@ def _boundaries_from_page_lines(
         toc.append(flagged)
 
     boundaries: dict[int, str | None] = {1: None}
+    if medical:
+        # Page 1 starts a document by position, but its title is still worth
+        # recording -- unlike the policy path, where line 1 IS the title and a
+        # null on page 1 loses nothing.
+        boundaries[1] = _medical_header_title(pages[0])
     for index, lines in enumerate(pages):
         page = index + 1
         if page == 1 or toc[index]:
+            continue
+        if medical:
+            title = _medical_header_title(lines)
+            if title is not None:
+                boundaries[page] = title
             continue
         if toc[index - 1]:
             # First real page after the contents block always starts a document.
@@ -691,6 +759,15 @@ def _boundaries_from_page_lines(
         elif DOCUMENT_TITLE_RE.search(lines[0]):
             boundaries[page] = lines[0]
     return boundaries
+
+
+def _medical_header_title(lines: list[str]) -> str | None:
+    """The form name in a page's header window, or None if it has none."""
+    for line in lines[:_MEDICAL_TITLE_SCAN_LINES]:
+        title = medical_form_title(line)
+        if title is not None:
+            return title
+    return None
 
 
 def segments_from_boundaries(

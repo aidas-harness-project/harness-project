@@ -2643,3 +2643,97 @@ def test_propose_prefers_redacted_text_over_raw_page_text(tmp_path):
     assert result["method"]["mode"] == "text_anchor"
     titles = [s.get("provisional_type_label") for s in result["segments"]]
     assert "구내치료비 추가특별약관" in titles
+
+
+# --- medical form titles ------------------------------------------------------
+#
+# A 약관 bundle announces each document with a title line ending in
+# 보통약관/특별약관/특약. A MEDICAL bundle does the same thing with form names,
+# but Korean official forms are typeset differently in three ways that the
+# policy rule cannot see. All three were found in the real corpus, each in more
+# than one case, so they are the standard typography rather than one publisher's
+# quirk:
+#
+#   "진 단 서"                    -- letter-spaced (CASE_005, CASE_024, CASE_112)
+#   "■ 의료법 시행규칙 [별지...]"  -- statutory header ABOVE the title
+#                                    (CASE_112, CASE_907)
+#   "병록 번호" / "등 록 번 호"     -- field labels above it (CASE_112 x2)
+#
+# The last two are why the title is not always line 1: DOC_214's 진 단 서 is on
+# line 2, DOC_216's 경과기록지 and DOC_217's 수 술 기 록 are on line 5.
+
+
+def test_letter_spaced_form_titles_are_recognised():
+    """Korean official forms space out their titles; the words are unchanged."""
+    assert sc.medical_form_title("진 단 서") == "진 단 서"
+    assert sc.medical_form_title("입 · 퇴 원 확 인 서") == "입 · 퇴 원 확 인 서"
+    assert sc.medical_form_title("수 술 기 록") == "수 술 기 록"
+
+
+def test_plain_and_parenthesised_form_titles_are_recognised():
+    assert sc.medical_form_title("후유장애 진단서(Mc Bride)")
+    assert sc.medical_form_title("진료비 내역서(외래)")
+    assert sc.medical_form_title("경과기록지")
+    assert sc.medical_form_title("REPORT")
+
+
+def test_body_prose_mentioning_a_form_name_is_not_a_title():
+    """Anchored like the policy rule: a sentence ABOUT a form is not one.
+
+    The medical vocabulary is open where the policy one is closed
+    (보통약관/특별약관/특약), so without this the wider rule would fire on
+    ordinary narrative text.
+    """
+    assert sc.medical_form_title("위 진단서를 첨부하여 제출하였습니다") is None
+    assert sc.medical_form_title("환자는 경과기록지에 기재된 대로 호전되었습니다") is None
+
+
+def test_field_labels_are_not_form_titles():
+    """A form's field labels are not its name -- they are what sits above it."""
+    assert sc.medical_form_title("병록 번호") is None
+    assert sc.medical_form_title("환자의 성명") is None
+    assert sc.medical_form_title("등 록 번 호") is None
+
+
+def test_medical_boundaries_find_a_title_below_a_statutory_header():
+    """DOC_214/CASE_907 DOC_005: the 별지 서식 header precedes the title."""
+    pages = [
+        "■ 의료법 시행규칙 [별지 제5호의2서식] <개정 2019. 9. 27..>\n"
+        "진 단 서\n등록번호\n연 번 호\n환자의 성명",
+        "계속되는 진단 내용입니다",
+    ]
+    found = sc.boundaries_from_page_texts(pages, medical=True)
+    assert set(found) == {1}
+    assert "진 단 서" in found[1]
+
+
+def test_medical_boundaries_find_a_title_below_field_labels():
+    """DOC_216/DOC_217: four field labels sit above the form name."""
+    pages = [
+        "표지",
+        "등 록 번 호\n성    명\n성별 / 나이\nOS  과\n수 술 기 록\n수 술 일 자 :",
+    ]
+    found = sc.boundaries_from_page_texts(pages, medical=True)
+    assert set(found) == {1, 2}
+    assert "수 술 기 록" in found[2]
+
+
+def test_medical_mode_does_not_scan_past_the_form_header():
+    """The widened scan is a header window, not a whole-page search.
+
+    A title found deep in a page is a mention, not a heading -- that distinction
+    is the only thing keeping the open medical vocabulary from matching body
+    text on every continuation page.
+    """
+    page = "\n".join(["본문 " + str(n) for n in range(10)] + ["진 단 서"])
+    assert sc.boundaries_from_page_texts(["표지", page], medical=True) == {1: None}
+
+
+def test_policy_mode_is_unchanged_by_the_medical_rule():
+    """Policy bundles keep the strict first-line rule that measured 1.0000.
+
+    The medical rule trades precision for the recall its typography needs;
+    applying it to 약관 text would spend that precision for nothing.
+    """
+    pages = ["영업배상책임보험\n보통약관", "등 록 번 호\n성명\n나이\n과\n수 술 기 록"]
+    assert set(sc.boundaries_from_page_texts(pages)) == {1}
