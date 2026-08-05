@@ -4727,6 +4727,33 @@ def _finalize_stage(case_id, run_id, stage, held_by):
                 print(f"  - {b}")
             return None
 
+        # P6. The guardrail says a stage proceeds only once every conflict
+        # entry for the case reads resolved or false_positive, and pipeline.md
+        # calls screening_report "gated on check-conflicts-clear". Neither was
+        # true of the code: check-conflicts-clear existed only as a CLI command
+        # an agent had to remember to run, and the finalize path never consulted
+        # the ledger at all. Verified on CASE_909 -- screening_report finalized
+        # cleanly with CONFLICT_1 still pending. Nothing went wrong there only
+        # because the conflict happened to be adjudicated first.
+        #
+        # Scoped to the stages that CONSUME the case's factual picture. A
+        # conflict is raised by consistency_check, so gating that stage would
+        # make it unable to finalize the very finding it just recorded; intake
+        # and document_processing run before any comparison exists to disagree
+        # about. Everything downstream reasons FROM the contested facts, which
+        # is exactly what the guardrail protects.
+        if stage in CONFLICT_GATED_STAGES:
+            pending = pending_conflict_ids(case_id)
+            if pending:
+                print(f"REFUSED: cannot finalize {stage!r} -- P6: the case has "
+                      f"unresolved conflict ledger entries: {', '.join(pending)}")
+                print("  Every entry must read 'resolved' or 'false_positive' "
+                      "before a stage that reasons from the case's facts may "
+                      "finalize. Adjudicate with `dao.py set-conflict-verdict "
+                      "CASE_ID CONFLICT_ID {resolved|false_positive} --note ...` "
+                      "-- a value is never silently discarded to close one.")
+                return None
+
         if stage == "document_processing":
             manifest = read_contract_data(case_id, "document_manifest.json")
             if manifest is not None:
@@ -5005,9 +5032,39 @@ def cmd_set_conflict_verdict(args):
         release_lock(target)
 
 
+def pending_conflict_ids(case_id: str) -> list[str]:
+    """Conflict entries still awaiting a verdict. Empty = the case is clear.
+
+    Shared by the CLI check and the finalize gate so the two cannot drift into
+    disagreeing about what "clear" means -- the drift that let a documented
+    gate be enforced in prose only.
+    """
+    ledger = load_conflict_ledger(case_id)
+    return [c["conflict_id"] for c in ledger["conflicts"]
+            if c.get("verdict") == "pending"]
+
+
+# Stages a pending conflict blocks. consistency_check is deliberately absent:
+# it is the stage that RAISES conflicts, so gating it would stop it finalizing
+# the finding it just recorded. intake/document_processing run before any
+# cross-document comparison exists. Everything else reasons from the case's
+# factual picture, which is what P6 protects.
+CONFLICT_GATED_STAGES = frozenset({
+    "policy_clause_processing",
+    "claim_analysis",
+    "denial_response",
+    "screening_report",
+    "draft_report_v1",
+    "draft_report_v2",
+    "critic_v1",
+    "critic_v2",
+    "denial_validation",
+    "evaluation",
+})
+
+
 def cmd_check_conflicts_clear(args):
-    ledger = load_conflict_ledger(args.case_id)
-    pending = [c["conflict_id"] for c in ledger["conflicts"] if c["verdict"] == "pending"]
+    pending = pending_conflict_ids(args.case_id)
     clear = not pending
     print(json.dumps({"clear": clear, "pending": pending}))
     return 0 if clear else 1
