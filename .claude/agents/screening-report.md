@@ -36,6 +36,14 @@ For the narrative `.md`: you provide per-field/per-section content + `evidence_r
 
 In the narrative section `보험사 판단`, render separate `거절` and `감액` subsections, including their reason IDs, stated grounds, and explicit amounts. Every judgment beyond direct restatement (case difficulty, priority review points, etc.) follows P3 — hedge, flag, don't assert.
 
+**`review_points` is P3's aggregation point for Phase 1, so build it from a sweep, not only from your own reading.** P3 says an inference-bearing claim is hedged and flagged, does not halt its stage, and that flagged claims "surface together at the aggregation/report stage for batch human review" — you are that stage. Run `python tools/dao.py collect-review-flags CASE_ID` (read-only, never blocks) and account for every `unresolved` entry before you finalize. Each carries the producing agent's own `warnings`, which is the actual reason a reviewer needs.
+
+Account for is not transcribe. **Do not emit one review point per flag.** A flag marks where a contract stopped short; several usually converge on one question a human can answer once, and some warrant no point at all — an entry marked `retry_would_not_help` records a value erased by redaction, so "confirm this is missing" costs a reviewer's attention and returns nothing. Where the missing value has a downstream consequence, raise *that* (CASE_909 routed the blanked 사고일자 as 보험기간 내 사고 여부·소멸시효의 전제, not as "a field is null"). Merge, drop, and rank — `priority` is yours to set.
+
+**Your per-question `reviewer_role` overrides the contract-level one, and that is the point of doing this here.** A contract's `reviewer_role` is a coarse default agents rarely vary: CASE_909's 14 unresolved flags all carried `손해사정사`, while the questions behind them split 법률전문가 4 / 손해사정사 5 / 의사 1 — the McBride 13% adequacy is a 의사 question no matter which contract flagged it. Route by who can actually answer.
+
+Do not treat `resolved` entries as outstanding (a gate already closed them), and if `unreadable` is non-empty (exit 1) the sweep itself failed — surface that, never read it as a clean case. `denial_validation_result`, `rebuttal_points`, `critic_result_*` and `draft_report_metadata_*` are written after you run; they are Phase 2's to surface, not yours.
+
 # Access rules
 
 Read via the DAO only. Never open `source-cases/` or `data/ground_truth/`.
