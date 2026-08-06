@@ -59,6 +59,10 @@ Subcommands:
     check-source-ledger-clear CASE_ID
     read-evidence-tags DOC_PATH
     check-forbidden-expressions DOC_PATH
+    collect-review-flags CASE_ID
+        (P3's batch-review aggregation point: every review_required flag in the
+         case with its agent's stated reason. Read-only, never blocks -- P3
+         says a flagged claim does not halt its stage.)
     update-run-state CASE_ID RUN_ID STAGE STATUS --held-by NAME
         (STATUS in pending|in_progress|failed|skipped; 'passed' is refused here --
          a stage passes only via finalize-stage, atomically with its snapshot)
@@ -4283,6 +4287,141 @@ def cmd_split_core_field_accuracy(args):
     return 0
 
 
+# Contracts whose review_required has a dedicated resolution path already.
+# Only classification_result has one today (the classification_review kind, its
+# UID field, and the document_processing finalize gate). Listing it here keeps
+# the collector from re-reporting a flag that a gate has already closed --
+# and keeps this command honest about the difference between "flagged" and
+# "flagged with nowhere to go".
+_REVIEW_UID_FIELD = {
+    "classification_result": "human_review_uid",
+}
+
+# A contract whose reviewer question is decided by reading the case, not by
+# re-running anything. Nothing is computed from this; it is carried through so
+# a caller can see at a glance which flags are the pipeline reporting a limit
+# of the material versus a judgment a person still owes.
+_UNRECOVERABLE_STATUSES = {"partial"}
+
+
+def _contract_family(filename: str) -> str:
+    """`classification_result_DOC_004.json` -> `classification_result`."""
+    stem = filename[:-5] if filename.endswith(".json") else filename
+    return re.sub(r"_(DOC|GT)_[0-9]+$", "", stem)
+
+
+def collect_review_flags(case_id: str) -> dict:
+    """Gather every review_required flag in a case into one place.
+
+    P3 says a flagged claim "does not halt the current stage" and that flagged
+    claims "surface together at the aggregation/report stage for batch human
+    review". The flagging half was built -- four agent specs set the field and
+    common_component_output.schema.json forces reviewer_role alongside it. The
+    surfacing half never was: before this command, no code in the repo read
+    review_required except the classification gate, and that one reads a single
+    contract family. So the flags accumulated correctly and went nowhere.
+
+    CASE_909 finished with 18 of them, which is what that costs: seeing them
+    meant opening eighteen files by hand.
+
+    This is deliberately a COLLECTOR and not a gate. Most of those 18 are the
+    pipeline correctly reporting that the material runs out -- a date blanked
+    by redaction is not recoverable by retry, and a reviewer confirming so adds
+    nothing. Refusing to finalize on an unresolved flag would demand a human
+    decision for each, which is the opposite of what the flag is for: P3 routes
+    these to batch review precisely so they do not each stop the line.
+
+    Read-only. Reports; never writes, never blocks.
+    """
+    _require_safe_id("case id", case_id)
+    d = case_dir(case_id)
+    ledger = load_human_review_ledger(case_id)
+    unresolved: list[dict] = []
+    resolved: list[dict] = []
+    unreadable: list[dict] = []
+
+    for path in sorted(d.glob("*.json")):
+        name = path.name
+        # Ledgers/run-state are the DAO's own bookkeeping, not component
+        # output, and .evidence.json sidecars carry citations, not judgments.
+        if name.startswith("_") or name.endswith(".evidence.json"):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            # Never let an unreadable contract look like an absent flag.
+            unreadable.append({"contract": name, "reason": str(exc)[:200]})
+            continue
+        if not isinstance(data, dict) or data.get("review_required") is not True:
+            continue
+
+        entry = {
+            "contract": name,
+            "component": data.get("component"),
+            "reviewer_role": data.get("reviewer_role"),
+            "status": data.get("status"),
+            # The agent's own account of why. This is the actual content a
+            # reviewer needs; everything else is routing.
+            "warnings": list(data.get("warnings") or []),
+        }
+        if data.get("status") in _UNRECOVERABLE_STATUSES:
+            entry["retry_would_not_help"] = True
+
+        uid_field = _REVIEW_UID_FIELD.get(_contract_family(name))
+        if uid_field is None:
+            entry["resolution_path"] = None
+            unresolved.append(entry)
+            continue
+
+        uid = data.get(uid_field)
+        # Same verification the document_processing gate performs, so this
+        # command cannot report a flag as cleared that the gate would refuse.
+        errors = human_review.verify_reference(
+            ledger,
+            uid,
+            expected_kind="classification_review",
+            expected_artifact_id=data.get("document_id"),
+            expected_target_key="classification_text_source:raw_page_text",
+            current_artifact_sha256=human_review.canonical_artifact_sha256(data),
+        )
+        entry["resolution_path"] = uid_field
+        entry["human_review_uid"] = uid
+        if errors:
+            entry["resolution_errors"] = errors
+            unresolved.append(entry)
+        else:
+            resolved.append(entry)
+
+    by_role: dict[str, int] = {}
+    for e in unresolved:
+        role = e.get("reviewer_role") or "(unset)"
+        by_role[role] = by_role.get(role, 0) + 1
+
+    return {
+        "case_id": case_id,
+        "unresolved_count": len(unresolved),
+        "resolved_count": len(resolved),
+        "unresolved_by_reviewer_role": by_role,
+        "unresolved": unresolved,
+        "resolved": resolved,
+        "unreadable": unreadable,
+        "note": ("record-only; P3 routes these to batch review and explicitly "
+                 "does not halt a stage. A flag is not a defect -- most report "
+                 "a limit of the material, not work left undone."),
+    }
+
+
+def cmd_collect_review_flags(args):
+    """P3's missing aggregation point. Read-only; see collect_review_flags."""
+    result = collect_review_flags(args.case_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    # 0 whether or not flags are open: an open flag is a normal, expected state
+    # under P3, not an error. Non-zero is reserved for "the collection itself
+    # could not be trusted", which is the one case a caller must not read as
+    # a clean sweep.
+    return 1 if result["unreadable"] else 0
+
+
 def cmd_check_untagged_claims(args):
     """Deterministic floor for the untagged-claim shape read-evidence-tags
     cannot see. Record-only -- the critic decides `passed`."""
@@ -8381,6 +8520,13 @@ def build_parser():
     p.add_argument("--filename", default="evaluation_result_v2.json",
                    help="Which evaluation_result file to read (default evaluation_result_v2.json).")
     p.set_defaults(fn=cmd_split_core_field_accuracy)
+
+    p = sub.add_parser("collect-review-flags",
+                       help="P3's batch-review aggregation point: every review_required flag in "
+                            "a case, in one place, with each agent's own stated reason. "
+                            "Read-only; reports, never blocks.")
+    p.add_argument("case_id")
+    p.set_defaults(fn=cmd_collect_review_flags)
 
     p = sub.add_parser("check-untagged-claims",
                        help="Flag analytical-section lines that assert something but carry no "
