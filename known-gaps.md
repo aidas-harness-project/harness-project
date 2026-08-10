@@ -28,6 +28,7 @@ the same pass.
 | 37 | RISK ACCEPTED | P0-8 table-boundary verification on OCR-sourced policy docs |
 | 43 | OPEN | Policy reference-table reading order |
 | 44 | OPEN | Stage 4 validators defined but never called |
+| 45 | OPEN | P8 disagreements on billing tables: 200dpi vs scan quality unverified |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
@@ -3226,3 +3227,52 @@ Stage 4 refuses, and this branch's scope was Stage 1/2 -- doing it blind
 would risk breaking a stage on evidence I did not gather. What this item
 records is that the audit found them and what each one's status actually
 is, so the next Stage 4 pass starts from a list rather than a suspicion.
+
+## 45. P8 disagreements concentrate on billing tables, and 200dpi may be the cause -- OPEN 2026-08-10
+
+Measured while running S-class cases for the runtime-optimization work
+(CASE_940/942/950/952, real OCR, no mocks). Every P8 disagreement observed
+across four runs -- 17 of them -- fell in the same place:
+
+| Where the disagreement was | Count |
+|---|---|
+| 진료비 세부산정내역 (procedure codes, drug names, amounts) | 15 |
+| 처방/접수내역 (one character in a drug name) | 1 |
+| 경과기록지 image caption (one reader invented a radiology finding) | 1 |
+| **Adjudication fields (상병코드 / diagnosis / dates / accident circumstances)** | **0** |
+
+Not one landed on a field the loss-adjustment judgment depends on. S52530,
+diagnosis names, and treatment dates agreed in all 17.
+
+**User decision (2026-08-10): amount calculation is out of PoC scope, so
+these are skipped for now** -- not resolved, and not counted as a
+regression signal while the PoC's scope excludes them.
+
+**What is NOT established, and is the actual open question:** whether these
+are a limit of the scans or an artifact of render resolution. `ocr_extract.py`
+renders pages at **200dpi** (`page.get_pixmap(dpi=200)`, verified in code this
+session). When the same disputed page was rendered at **400dpi** and read by a
+human, the character was unambiguous: CASE_942 p10's code is plainly `AA800`
+(reading_a correct, reading_b's `AA600` a misread), with no room for doubt.
+
+So the cheap experiment has not been run:
+
+1. Re-OCR CASE_952's six disagreeing pages (p10/12/14/16/17/18) at 300 and 400dpi
+2. Record whether the disagreements disappear, and which fields survive if not
+3. Measure the cost at the same time -- 200→400dpi is 4x the pixels, so provider
+   latency and spend rise. `provider.transcribe_image` spans already carry
+   `input_images` and `duration_s`, so this needs no new instrumentation
+4. If the gain is real, consider per-document-type dpi (raise it only for code
+   tables). A blanket raise hits the SLA directly, since provider time is
+   98%+ of Stage 2 wall-clock (measured, same runs)
+
+**Until that runs, do not describe these as "scan quality limits"** -- that
+claim has not been tested, and the 400dpi human read is evidence against it.
+
+Related: the P8 Go/No-Go criterion had to be revised in the same session.
+"P8 disagreement rate unchanged" is not a satisfiable gate -- running the
+identical file twice with zero code changes produced 0/11 then 1/11, and
+1/17 then 0/17. LLM-backed P8 is nondeterministic, so that criterion would
+have produced false hard-No-Go verdicts on any parallelism change. The gate
+is now the *character* of the disagreement (adjudication field vs amount
+field), not its count.
