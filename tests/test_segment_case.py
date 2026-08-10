@@ -1009,7 +1009,15 @@ def test_failed_cache_is_diagnostic_only_and_is_recalled_next_run(tmp_path):
     geo = sc.compute_sheet_geometry(cols=3, rows=4)
     pdf = _bundle_pdf(tmp_path, 12)
     sheets = _sheet_files(tmp_path, 1)
-    case_id = "CASE_943"
+    # Deliberately outside the real outputs/ + data/processed/ namespace.
+    # These tests pass a tmp_path PDF but a REAL case_id, and
+    # propose_boundaries resolves processed text by case_id -- so if a
+    # case with this number ever exists on disk, the deterministic
+    # text-anchor path wins, the vision provider is never called, and
+    # per_sheet comes back empty. That is exactly what happened when
+    # CASE_943 was created for a real benchmark run: this test began
+    # failing with IndexError on a tree that had not changed.
+    case_id = "CASE_TESTONLY_943"
     doc_id = "DOC_001"
 
     failed = _StructuredSequencedProvider(["prose", "more prose"])
@@ -1041,7 +1049,15 @@ def test_provider_or_model_change_invalidates_success_cache(tmp_path):
     geo = sc.compute_sheet_geometry(cols=3, rows=4)
     pdf = _bundle_pdf(tmp_path, 12)
     sheets = _sheet_files(tmp_path, 1)
-    case_id = "CASE_944"
+    # Deliberately outside the real outputs/ + data/processed/ namespace.
+    # These tests pass a tmp_path PDF but a REAL case_id, and
+    # propose_boundaries resolves processed text by case_id -- so if a
+    # case with this number ever exists on disk, the deterministic
+    # text-anchor path wins, the vision provider is never called, and
+    # per_sheet comes back empty. That is exactly what happened when
+    # CASE_943 was created for a real benchmark run: this test began
+    # failing with IndexError on a tree that had not changed.
+    case_id = "CASE_TESTONLY_944"
     doc_id = "DOC_001"
     response = _response(
         boundaries=[{"page": 1}],
@@ -3216,3 +3232,40 @@ def test_redistributed_redaction_writes_each_childs_contract(tmp_path):
     written = {d["document_id"]: d for d in dao.calls[0]["new_documents"]}
     assert written["DOC_002"]["redacted_text_path"] == \
         "data/processed/CASE_900/DOC_002/redacted_text.md"
+
+
+def test_a_real_case_on_disk_diverts_propose_boundaries_from_the_vision_path():
+    """Pins the hazard that made a passing test start failing.
+
+    `propose_boundaries` resolves processed text by case_id. A test that hands
+    it a tmp_path PDF but a REAL case_id therefore depends on whether that
+    case exists on disk: once it does, the deterministic text-anchor path wins,
+    the vision provider is never called, and `per_sheet` comes back empty.
+
+    That is what happened. Creating CASE_943 for a benchmark run made
+    test_failed_cache_is_diagnostic_only_and_is_recalled_next_run fail with
+    IndexError on a tree whose code had not changed -- the same failure
+    reproduced on the branch-point commit, which is what proved it
+    environmental rather than a regression. The fix was to move that test's
+    case_id out of the real namespace; this test states why, executably.
+
+    Rather than grepping for id strings (too blunt -- other tests in this file
+    legitimately name real ids on paths that never read processed text), it
+    demonstrates the divergence directly.
+    """
+    geo = sc.compute_sheet_geometry(cols=3, rows=4)
+    import tempfile
+    tmp = Path(tempfile.mkdtemp())
+    pdf = _bundle_pdf(tmp, 12)
+    sheets = _sheet_files(tmp, 1)
+
+    provider = _StructuredSequencedProvider(["prose", "more prose"])
+    result = sc.propose_boundaries(
+        pdf, case_id="CASE_TESTONLY_9999", doc_id="DOC_001", provider=provider,
+        geometry=geo, sheet_paths=sheets, resume=True,
+    )
+    # With no processed text for this id, the vision path runs: the provider is
+    # consulted and per_sheet is populated. A test asserting on per_sheet[0]
+    # is only meaningful under this condition.
+    assert provider.calls == 2
+    assert len(result["per_sheet"]) == 1
