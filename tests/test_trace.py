@@ -547,6 +547,17 @@ def test_cli_entry_points_that_raise_spans_also_configure_tracing():
         code = re.sub(r"#.*", "", src)
         if not re.search(r"trace_mod\.configure(_from_args)?\s*\(", code):
             missing.append(path.name)
+            continue
+        # Presence is not enough: it has to run on the CLI path. dao.py called
+        # configure() from deep inside _emit_sla_marker, which satisfied a
+        # bare substring check while every other subcommand ran untraced --
+        # `finalize-stage` emitted no dao.snapshot span, leaving the plan's B5
+        # snapshot cost unmeasured under a green test. Require the call to sit
+        # in main() (or in a helper main() calls on every dispatch).
+        main_body = re.search(r"\ndef main\(.*?\n(?=\S)", code, re.S)
+        if main_body and not re.search(r"configure(_from_args|_trace)?\s*\(",
+                                       main_body.group(0)):
+            missing.append(f"{path.name} (configures, but not from main())")
     assert not missing, (
         "these CLI tools can reach instrumented code but never switch tracing "
         f"on, so their spans are discarded silently: {missing}"

@@ -29,6 +29,7 @@ the same pass.
 | 43 | OPEN | Policy reference-table reading order |
 | 44 | OPEN | Stage 4 validators defined but never called |
 | 45 | OPEN | P8 disagreements on billing tables: 200dpi vs scan quality unverified |
+| 46 | OPEN | P8 correlated error observed live: both readers invented the same caption |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
@@ -3276,3 +3277,58 @@ identical file twice with zero code changes produced 0/11 then 1/11, and
 have produced false hard-No-Go verdicts on any parallelism change. The gate
 is now the *character* of the disagreement (adjudication field vs amount
 field), not its count.
+
+
+## 46. P8 correlated error, observed live: both readers invented the same caption -- OPEN 2026-08-10
+
+`harness-guardrails` P8 and `harness-guardrails-dev` both warn that two
+LLM-vision readers share one extraction technology class and "can make a
+correlated confident error" (`cross_validation_mode:
+single_technology_weak_p8_poc`). That has now been observed on real data
+rather than reasoned about.
+
+The same source page, OCR'd twice in two runs:
+
+| Run | reader_a | reader_b | P8 verdict | What reached the processed layer |
+|---|---|---|---|---|
+| CASE_940 | `[영상: 관상동맥 CT 곡면 재구성 영상]` | `[영상 이미지]` | **disagreed** -> blocked | `[영상 이미지]` (human picked reader_b after reviewing the page at 400dpi) |
+| CASE_951 | `[관상동맥 CT 영상]` | `[관상동맥 CT 영상]` | **agreed** | `[관상동맥 CT 영상]` |
+
+**The page has no caption text at all.** The 10:18 row contains a coronary
+angiography IMAGE and nothing else -- verified by rendering the raw PDF at
+400dpi and looking at it. Both strings are radiological interpretations the
+transcriber produced from the picture.
+
+In CASE_940 the two readers disagreed about *how* to describe the image, and
+P8 did its job: it blocked, a human looked at the source, and the neutral
+placeholder was chosen. In CASE_951 both readers happened to invent the
+*same* description, so there was nothing for `compare()` to catch, and a
+sentence that does not exist on the page is now in
+`data/processed/CASE_951/DOC_001/page_002.md` as validated text.
+
+**Why this is not fixed by the 2026-07-13 compare() work.** That fix (item 11)
+taught `compare()` to treat one-sided extra content as a disagreement. It
+cannot help here: the addition is not one-sided. This is the failure mode
+`compare()` structurally cannot see, because both inputs agree.
+
+**Blast radius is narrow but real.** The invented text is a description of an
+image, in an IMG row that already announces itself as an image, so a
+downstream reader is unlikely to mistake it for a clinical finding stated by
+the physician. It is still fabricated content in the layer P2 tells every
+analysis stage to trust, and P1 forbids exactly this.
+
+**Not fixed here, and deliberately not papered over with a prompt tweak.**
+"Do not describe images" in TRANSCRIBE_PROMPT is the obvious reflex, but the
+2026-07-14 CASE_004 experience is that defensive prompt framing on this path
+caused the very refusal it was meant to prevent, and prompt changes to the P8
+readers alter the thing being cross-validated. Options worth weighing
+separately:
+
+* record IMG-row content as a typed placeholder rather than free text, so an
+  image cell cannot carry a transcription at all
+* a genuinely technology-independent second reader (`open-decisions.md` #4) --
+  the standing answer to correlated LLM error, still unavailable
+* accept and document, since the affected cell is self-labelling
+
+What this item establishes is that the risk is **live and reproducible**, not
+theoretical: one run caught it, the next one did not, on the same page.

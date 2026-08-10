@@ -8991,6 +8991,14 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    # Switch tracing on for the CLI process too. dao.py already called
+    # configure() deep inside _emit_sla_marker, which was enough for the SLA
+    # markers and hid the fact that every OTHER dao subcommand ran untraced:
+    # `finalize-stage` emitted no dao.snapshot span at all, so the P10 snapshot
+    # cost -- the plan's B5 -- stayed unmeasured while looking instrumented.
+    # In-process callers (run_checkpoint1, redact_document) configure for
+    # themselves and are unaffected; this covers the subprocess path.
+    trace_mod.configure_from_args(args)
     sys.exit(args.fn(args))
 
 
