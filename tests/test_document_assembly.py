@@ -85,7 +85,7 @@ def test_full_render_writes_md_and_valid_sidecar_and_releases_lock(isolated_da):
     sidecar_path = out_path.with_suffix(".evidence.json")
     assert out_path.exists()
     assert sidecar_path.exists()
-    assert not out_path.with_name(out_path.name + ".lock").exists()
+    assert dao.read_lock(out_path) is None
 
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
     from _validation import load_registry, validate_instance

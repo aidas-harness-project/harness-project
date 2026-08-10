@@ -5,6 +5,17 @@
   "type": "object",
   "additionalProperties": false,
   "$defs": {
+    "operation_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": { "$ref": "medical_review_common.schema.json#/$defs/lifecycle_action" },
+        "review_item_id": { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" },
+        "state": { "$ref": "medical_review_common.schema.json#/$defs/lifecycle_state" },
+        "decision_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/decision_id" }] }
+      },
+      "required": ["action", "review_item_id", "state", "decision_id"]
+    },
     "event": {
       "type": "object",
       "additionalProperties": false,
@@ -16,6 +27,9 @@
         "to_state": { "$ref": "medical_review_common.schema.json#/$defs/lifecycle_state" },
         "actor": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/actor_assertion" }] },
         "role_policy_snapshot": { "$ref": "medical_review_role_config.schema.json" },
+        "operation_id": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" },
+        "operation_request_sha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+        "operation_result": { "$ref": "#/$defs/operation_result" },
         "reason": { "type": ["string", "null"], "minLength": 1 },
         "decision_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/decision_id" }] },
         "request_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/request_id" }] },
@@ -25,7 +39,7 @@
         "medical_variables_revision": { "$ref": "medical_review_common.schema.json#/$defs/medical_variables_revision" },
         "created_at": { "type": "string", "format": "date-time" }
       },
-      "required": ["event_id", "review_item_id", "action", "from_state", "to_state", "actor", "role_policy_snapshot", "reason", "medical_variables_revision", "created_at"]
+      "required": ["event_id", "review_item_id", "action", "from_state", "to_state", "actor", "role_policy_snapshot", "operation_id", "operation_request_sha256", "operation_result", "reason", "medical_variables_revision", "created_at"]
     },
     "wait_episode": {
       "type": "object",

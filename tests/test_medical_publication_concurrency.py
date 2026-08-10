@@ -8,7 +8,12 @@ import threading
 import dao
 import medical_review_ledger
 import operator_auth
-from test_dao_medical_variables import FIXTURE
+from test_dao_medical_variables import (
+    FIXTURE,
+    _enabled_config,
+    _enabled_projection_config,
+    _write_dependencies,
+)
 from test_medical_review_lifecycle_scenarios import (
     _enabled_multi_operator_policy,
     _enabled_request_config,
@@ -233,3 +238,41 @@ def test_revision_publication_serializes_with_package_supplement(
         recovered_ledger["events"][-1]["medical_variables_revision"]["sha256"]
         == hashlib.sha256(dao.medical_variables_path(case_id).read_bytes()).hexdigest()
     )
+
+
+def test_publication_rejects_foreign_canonical_run_owner(
+    isolated_dao, tmp_path, monkeypatch, make_args, capsys
+):
+    case_id = "CASE_9001"
+    case_dir = dao.case_dir(case_id)
+    _write_dependencies(case_dir)
+    monkeypatch.setattr(
+        dao,
+        "MEDICAL_STRUCTURING_CONFIG",
+        _enabled_config(tmp_path),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dao,
+        "MEDICAL_PROJECTION_CONFIG",
+        _enabled_projection_config(tmp_path),
+        raising=False,
+    )
+    foreign_run_id = "RUN_20260723_002"
+    state = dao.load_run_state(case_id)
+    state["run_id"] = foreign_run_id
+    dao.save_run_state(case_id, state)
+
+    result = dao.cmd_write_medical_variables(make_args(
+        case_id=case_id,
+        data_file=str(FIXTURE),
+        held_by="claim-analysis",
+        run_id="RUN_20260723_001",
+    ))
+
+    assert result == 1
+    assert "canonical run owner" in capsys.readouterr().out
+    assert dao.load_run_state(case_id)["run_id"] == foreign_run_id
+    assert not dao.medical_variables_path(case_id).exists()
+    assert not dao.medical_review_ledger_path(case_id).exists()
+    assert dao.read_lock(dao.run_state_path(case_id)) is None

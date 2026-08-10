@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 
 from _validation import load_registry, validate_instance
@@ -136,6 +137,69 @@ def validate_ledger_semantics(ledger: dict, case_id: str) -> list[str]:
         if event.get("review_item_id") not in item_by_id:
             errors.append(
                 f"{event.get('event_id')} references an unknown review item"
+            )
+    operations: dict[str, list[dict]] = {}
+    for event in ledger.get("events", []):
+        operation_values = (
+            event.get("operation_id"),
+            event.get("operation_request_sha256"),
+            event.get("operation_result"),
+        )
+        if not all(value is not None for value in operation_values):
+            errors.append(
+                f"{event.get('event_id')} has incomplete operation metadata"
+            )
+            continue
+        operations.setdefault(event["operation_id"], []).append(event)
+    for operation_id, operation_events in operations.items():
+        request_shas = {
+            event.get("operation_request_sha256")
+            for event in operation_events
+        }
+        results = [event.get("operation_result") for event in operation_events]
+        if len(request_shas) != 1 or any(
+            result != results[0] for result in results[1:]
+        ):
+            errors.append(
+                f"operation_id {operation_id} maps to inconsistent committed requests"
+            )
+            continue
+        result = results[0]
+        if not isinstance(result, dict):
+            errors.append(f"operation_id {operation_id} has no committed result")
+            continue
+        destination_states = {
+            event.get("to_state") for event in operation_events
+        }
+        if result.get("state") not in destination_states or len(destination_states) != 1:
+            errors.append(
+                f"operation_id {operation_id} result does not match its destination state"
+            )
+        if set(result) != {"action", "review_item_id", "state", "decision_id"}:
+            errors.append(
+                f"operation_id {operation_id} has an incomplete committed result"
+            )
+            continue
+        result_item_id = result["review_item_id"]
+        if result_item_id not in {
+            event.get("review_item_id") for event in operation_events
+        }:
+            errors.append(
+                f"operation_id {operation_id} result names a foreign review item"
+            )
+        result_action = result["action"]
+        if result_action not in {
+            event.get("action") for event in operation_events
+        }:
+            errors.append(
+                f"operation_id {operation_id} result names a foreign action"
+            )
+        event_decision_ids = {
+            event.get("decision_id") for event in operation_events
+        }
+        if result["decision_id"] not in event_decision_ids:
+            errors.append(
+                f"operation_id {operation_id} result names a foreign decision"
             )
     wait_ids = [wait.get("human_input_id") for wait in ledger.get("wait_episodes", [])]
     if len(wait_ids) != len(set(wait_ids)):
@@ -1419,10 +1483,21 @@ def load_ledger(dao, case_id: str, *, allow_initialize: bool = False) -> dict:
     return ledger
 
 
-def reconcile_wait_projection(dao, args) -> tuple[bool, bool, str | None]:
+def reconcile_wait_projection(
+    dao,
+    args,
+    *,
+    blocking: bool = True,
+    automatic: bool = False,
+) -> tuple[bool, bool, str | None]:
     """Project canonical waits to run state after the ledger lock is released."""
     run_state_path = dao.run_state_path(args.case_id)
-    existing_lock = dao.acquire_lock(
+    acquire = (
+        dao.acquire_owned_lock_blocking
+        if blocking
+        else dao.acquire_owned_lock
+    )
+    owned_lock, existing_lock = acquire(
         run_state_path,
         args.held_by,
         args.run_id,
@@ -1430,11 +1505,66 @@ def reconcile_wait_projection(dao, args) -> tuple[bool, bool, str | None]:
     )
     if existing_lock is not None:
         return False, False, f"run-state lock is held: {existing_lock}"
+    assert owned_lock is not None
     try:
         ledger = load_ledger(dao, args.case_id)
-        state = dao.load_run_state(args.case_id)
+        variables, revision_error = dao._load_medical_revision(args.case_id, None)
+        if (
+            revision_error
+            or variables is None
+            or variables.get("run_id") != args.run_id
+        ):
+            return (
+                False,
+                False,
+                "wait reconciliation does not match the canonical revision run owner",
+            )
+        state = dao.validated_run_state(args.case_id)
         if state.get("run_id") not in {None, args.run_id}:
             return False, False, "run state belongs to a different run_id"
+        _required_operation_id(args)
+        if not automatic and args.operation_id.startswith("medical-projection:"):
+            return (
+                False,
+                False,
+                "medical-projection: is reserved for automatic reconciliation",
+            )
+        ledger_sha256 = hashlib.sha256(
+            dao._canonical_json_bytes(ledger)
+        ).hexdigest()
+        operation_id = (
+            f"medical-projection:{ledger_sha256}"
+            if automatic
+            else args.operation_id
+        )
+        request_sha256 = hashlib.sha256(dao._canonical_json_bytes(
+            dao._reconciliation_request(
+                args.case_id,
+                args.run_id,
+                operation_id,
+                ledger_sha256,
+            )
+        )).hexdigest()
+        operations = state.setdefault(
+            "medical_review_wait_reconciliation_operations", []
+        )
+        existing_operation = next(
+            (
+                operation
+                for operation in operations
+                if operation.get("operation_id") == operation_id
+            ),
+            None,
+        )
+        if existing_operation is not None:
+            if existing_operation.get("request_sha256") != request_sha256:
+                return (
+                    False,
+                    False,
+                    "operation_id was already committed for a different "
+                    "wait-reconciliation request",
+                )
+            return True, False, None
         generic_entries = [
             entry
             for entry in state.get("human_input_status", [])
@@ -1463,22 +1593,30 @@ def reconcile_wait_projection(dao, args) -> tuple[bool, bool, str | None]:
             for wait in ledger["wait_episodes"]
         ]
         desired_entries = generic_entries + projected_entries
-        if (
-            state.get("run_id") == args.run_id
-            and state.get("human_input_status") == desired_entries
-        ):
-            return True, False, None
+        projection_changed = (
+            state.get("run_id") != args.run_id
+            or state.get("human_input_status", []) != desired_entries
+        )
         state["run_id"] = args.run_id
         state["human_input_status"] = desired_entries
+        completed_at = dao.now_iso()
+        receipt = {
+            "operation_id": operation_id,
+            "request_sha256": request_sha256,
+            "medical_review_ledger_sha256": ledger_sha256,
+            "completed_at": completed_at,
+        }
+        receipt["receipt_sha256"] = dao._reconciliation_receipt_sha(receipt)
+        operations.append(receipt)
         errors = dao._schema_check(state, "run_state.schema.json")
         if errors:
             return False, False, "; ".join(errors)
         dao.save_run_state(args.case_id, state)
-        return True, True, None
+        return True, projection_changed, None
     except (OSError, ValueError) as exc:
         return False, False, str(exc)
     finally:
-        dao.release_lock(run_state_path)
+        dao.release_owned_lock(owned_lock)
 
 
 def cmd_read_ledger(dao, args) -> int:
@@ -1616,6 +1754,97 @@ def _authenticated_actor(
     }
 
 
+def _required_operation_id(args) -> str:
+    operation_id = getattr(args, "operation_id", None)
+    if not isinstance(operation_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}", operation_id
+    ):
+        raise ValueError("operation_id has an invalid format")
+    return operation_id
+
+
+def _stable_actor_identity(actor: dict) -> dict:
+    return {
+        key: value
+        for key, value in actor.items()
+        if key != "attested_at"
+    }
+
+
+def medical_operation_request_sha256(
+    dao,
+    args,
+    actor: dict,
+    action: str,
+    payload: dict | None,
+    ledger: dict,
+) -> str:
+    """Bind one caller operation ID to one stable authenticated request."""
+    operation_id = _required_operation_id(args)
+    request = {
+        "case_id": args.case_id,
+        "run_id": args.run_id,
+        "review_item_id": getattr(args, "review_item_id", None),
+        "issue_id": getattr(args, "issue_id", None),
+        "decision_owner": getattr(args, "decision_owner", None),
+        "action": action,
+        "reason": getattr(args, "reason", None),
+        "payload": payload,
+        "authenticated_actor": _stable_actor_identity(actor),
+        "operation_id": operation_id,
+    }
+    request_sha256 = hashlib.sha256(
+        dao._canonical_json_bytes(request)
+    ).hexdigest()
+    for event in ledger.get("events", []):
+        if event.get("operation_id") != operation_id:
+            continue
+        if event.get("operation_request_sha256") != request_sha256:
+            raise ValueError(
+                "operation_id was already committed for a different medical request"
+            )
+    return request_sha256
+
+
+def committed_medical_operation_result(
+    ledger: dict,
+    operation_id: str,
+    request_sha256: str,
+) -> dict | None:
+    events = [
+        event
+        for event in ledger.get("events", [])
+        if event.get("operation_id") == operation_id
+    ]
+    if not events:
+        return None
+    if any(
+        event.get("operation_request_sha256") != request_sha256
+        for event in events
+    ):
+        raise ValueError(
+            "operation_id was already committed for a different medical request"
+        )
+    results = [event.get("operation_result") for event in events]
+    if not results or not isinstance(results[0], dict) or any(
+        result != results[0] for result in results[1:]
+    ):
+        raise ValueError("committed medical operation result is inconsistent")
+    return results[0]
+
+
+def _operation_event_fields(
+    args,
+    request_sha256: str,
+    result: dict,
+) -> dict:
+    return {
+        "operation_id": _required_operation_id(args),
+        "operation_request_sha256": request_sha256,
+        "operation_result": result,
+    }
+
+
 def _write_valid_ledger(dao, case_id: str, ledger: dict) -> None:
     schemas, registry = load_registry()
     errors = validate_instance(
@@ -1670,7 +1899,20 @@ def cmd_open(dao, args) -> int:
     try:
         try:
             ledger = load_ledger(dao, args.case_id)
+            operation_sha256 = medical_operation_request_sha256(
+                dao, args, actor, "open", None, ledger,
+            )
+            replay = committed_medical_operation_result(
+                ledger, _required_operation_id(args), operation_sha256,
+            )
+            if replay is not None:
+                print(json.dumps(replay, sort_keys=True))
+                return 0
             variables, revision = _current_revision(dao, args.case_id)
+            if variables.get("run_id") != args.run_id:
+                raise ValueError(
+                    "medical review open run owner is stale against the canonical revision"
+                )
             if not any(
                 issue["issue_id"] == args.issue_id
                 for issue in variables["medical_issues"]
@@ -1690,6 +1932,12 @@ def cmd_open(dao, args) -> int:
             event_id = f"MRE_{ledger['next_event_number']:06d}"
             ledger["next_review_item_number"] += 1
             ledger["next_event_number"] += 1
+            operation_result = {
+                "action": "open",
+                "review_item_id": item_id,
+                "state": "decision_pending",
+                "decision_id": None,
+            }
             ledger["review_items"].append({
                 "review_item_id": item_id,
                 "issue_id": args.issue_id,
@@ -1711,6 +1959,9 @@ def cmd_open(dao, args) -> int:
                 "to_state": "decision_pending",
                 "actor": actor,
                 "role_policy_snapshot": role_policy,
+                **_operation_event_fields(
+                    args, operation_sha256, operation_result,
+                ),
                 "reason": None,
                 "medical_variables_revision": revision,
                 "created_at": at,
@@ -1736,7 +1987,7 @@ def cmd_open(dao, args) -> int:
         except (KeyError, ValueError) as exc:
             print(f"FAIL: {exc}")
             return 1
-        print(json.dumps({"review_item_id": item_id, "state": "decision_pending"}, sort_keys=True))
+        print(json.dumps(operation_result, sort_keys=True))
         return 0
     finally:
         dao.release_lock(path)
@@ -1786,6 +2037,43 @@ def _private_ingress_root() -> Path:
 
 
 def _load_submission(path_value: str, label: str) -> dict:
+    descriptor_match = re.fullmatch(r"fd:([0-9]+)", path_value)
+    if descriptor_match is not None:
+        try:
+            descriptor = os.dup(int(descriptor_match.group(1)))
+            metadata = os.fstat(descriptor)
+        except OSError as exc:
+            raise ValueError(f"{label} is unavailable") from exc
+        try:
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError(f"{label} is not a regular file")
+            if (
+                metadata.st_uid != os.geteuid()
+                or metadata.st_nlink != 0
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise ValueError(f"{label} has unsafe anonymous ownership")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            payload = bytearray()
+            while len(payload) <= MAX_SUBMISSION_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(64 * 1024, MAX_SUBMISSION_BYTES + 1 - len(payload)),
+                )
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            if len(payload) > MAX_SUBMISSION_BYTES:
+                raise ValueError(f"{label} exceeds the byte limit")
+            try:
+                value = json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(f"{label} is invalid") from exc
+        finally:
+            os.close(descriptor)
+        if not isinstance(value, dict):
+            raise ValueError(f"{label} must be one JSON object")
+        return value
     root = _private_ingress_root()
     path = Path(os.path.abspath(path_value))
     try:
@@ -2197,6 +2485,15 @@ def cmd_record_decision(dao, args) -> int:
                     "invalid referral submission: " + "; ".join(errors)
                 )
             ledger = load_ledger(dao, args.case_id)
+            operation_sha256 = medical_operation_request_sha256(
+                dao, args, actor, "record_decision", submission, ledger,
+            )
+            replay = committed_medical_operation_result(
+                ledger, _required_operation_id(args), operation_sha256,
+            )
+            if replay is not None:
+                print(json.dumps(replay, sort_keys=True))
+                return 0
             item = next(
                 (
                     row
@@ -2224,6 +2521,10 @@ def cmd_record_decision(dao, args) -> int:
                 )
             outcome = submission["decision"]["decision"]
             variables, revision = _current_revision(dao, args.case_id)
+            if variables.get("run_id") != args.run_id:
+                raise ValueError(
+                    "medical review decision run owner is stale against the canonical revision"
+                )
             _validate_submission_references(
                 variables,
                 submission,
@@ -2330,6 +2631,12 @@ def cmd_record_decision(dao, args) -> int:
                 })
             event_id = f"MRE_{ledger['next_event_number']:06d}"
             ledger["next_event_number"] += 1
+            operation_result = {
+                "action": "record_decision",
+                "review_item_id": item["review_item_id"],
+                "decision_id": decision_id,
+                "state": destination,
+            }
             ledger["events"].append({
                 "event_id": event_id,
                 "review_item_id": item["review_item_id"],
@@ -2338,6 +2645,9 @@ def cmd_record_decision(dao, args) -> int:
                 "to_state": destination,
                 "actor": actor,
                 "role_policy_snapshot": role_policy,
+                **_operation_event_fields(
+                    args, operation_sha256, operation_result,
+                ),
                 "reason": decision["rationale"],
                 "decision_id": decision_id,
                 "request_id": request["request_id"] if request is not None else None,
@@ -2349,7 +2659,7 @@ def cmd_record_decision(dao, args) -> int:
         except (KeyError, ValueError) as exc:
             print(f"FAIL: {exc}")
             return 1
-        print(json.dumps({"decision_id": decision_id, "state": destination}, sort_keys=True))
+        print(json.dumps(operation_result, sort_keys=True))
         return 0
     finally:
         dao.release_lock(path)
@@ -2410,6 +2720,15 @@ def cmd_provide_information(dao, args) -> int:
     try:
         try:
             ledger = load_ledger(dao, args.case_id)
+            operation_sha256 = medical_operation_request_sha256(
+                dao, args, actor, "provide_information", None, ledger,
+            )
+            replay = committed_medical_operation_result(
+                ledger, _required_operation_id(args), operation_sha256,
+            )
+            if replay is not None:
+                print(json.dumps(replay, sort_keys=True))
+                return 0
             item = next(
                 (
                     row
@@ -2482,6 +2801,12 @@ def cmd_provide_information(dao, args) -> int:
             item["updated_at"] = at
             event_id = f"MRE_{ledger['next_event_number']:06d}"
             ledger["next_event_number"] += 1
+            operation_result = {
+                "action": "provide_information",
+                "review_item_id": item["review_item_id"],
+                "state": "decision_pending",
+                "decision_id": None,
+            }
             ledger["events"].append({
                 "event_id": event_id,
                 "review_item_id": item["review_item_id"],
@@ -2490,6 +2815,9 @@ def cmd_provide_information(dao, args) -> int:
                 "to_state": "decision_pending",
                 "actor": actor,
                 "role_policy_snapshot": role_policy,
+                **_operation_event_fields(
+                    args, operation_sha256, operation_result,
+                ),
                 "reason": args.reason,
                 "medical_variables_revision": current_revision,
                 "created_at": at,
@@ -2499,10 +2827,7 @@ def cmd_provide_information(dao, args) -> int:
         except (KeyError, StopIteration, ValueError) as exc:
             print(f"FAIL: {exc}")
             return 1
-        print(json.dumps({
-            "review_item_id": item["review_item_id"],
-            "state": "decision_pending",
-        }, sort_keys=True))
+        print(json.dumps(operation_result, sort_keys=True))
         return 0
     finally:
         dao.release_lock(path)
@@ -2808,11 +3133,15 @@ def _assert_item_revision_current(item: dict, ledger: dict, revision: dict) -> N
 
 
 def _assert_fresh_adjudication_cohort(item: dict, ledger: dict) -> None:
+    _, anchor_response_id = _item_response_head(item)
     adjudication = next(
         (
             row for row in reversed(ledger["adjudications"])
             if row["status"] == "resolved"
             and item["review_item_id"] in row["review_item_ids"]
+            and row["response_ids"][
+                row["review_item_ids"].index(item["review_item_id"])
+            ] == anchor_response_id
         ),
         None,
     )
@@ -3078,6 +3407,15 @@ def cmd_transition(dao, args) -> int:
         try:
             data = _action_data(dao, args)
             ledger = load_ledger(dao, args.case_id)
+            operation_sha256 = medical_operation_request_sha256(
+                dao, args, actor, args.action, data, ledger,
+            )
+            replay = committed_medical_operation_result(
+                ledger, _required_operation_id(args), operation_sha256,
+            )
+            if replay is not None:
+                print(json.dumps(replay, sort_keys=True))
+                return 0
             item = next(
                 (
                     row
@@ -3089,6 +3427,10 @@ def cmd_transition(dao, args) -> int:
             if item is None:
                 raise ValueError("unknown medical review item")
             variables, revision = _current_revision(dao, args.case_id)
+            if variables.get("run_id") != args.run_id:
+                raise ValueError(
+                    "medical review transition run owner is stale against the canonical revision"
+                )
             item_events = [
                 event
                 for event in ledger["events"]
@@ -3112,6 +3454,7 @@ def cmd_transition(dao, args) -> int:
             ):
                 assert data is not None
                 at = dao.now_iso()
+                event_start = len(ledger["events"])
                 destination = _apply_shared_adjudication_transition(
                     ledger,
                     item,
@@ -3123,13 +3466,20 @@ def cmd_transition(dao, args) -> int:
                     revision=revision,
                     at=at,
                 )
-                ledger["updated_at"] = at
-                _write_valid_ledger(dao, args.case_id, ledger)
-                print(json.dumps({
+                operation_result = {
                     "action": args.action,
                     "review_item_id": item["review_item_id"],
                     "state": destination,
-                }, sort_keys=True))
+                    "decision_id": None,
+                }
+                operation_fields = _operation_event_fields(
+                    args, operation_sha256, operation_result,
+                )
+                for event in ledger["events"][event_start:]:
+                    event.update(operation_fields)
+                ledger["updated_at"] = at
+                _write_valid_ledger(dao, args.case_id, ledger)
+                print(json.dumps(operation_result, sort_keys=True))
                 return 0
             record = (
                 _current_request_record(item)
@@ -3526,6 +3876,12 @@ def cmd_transition(dao, args) -> int:
             ledger["next_event_number"] += 1
             item["state"] = destination
             item["updated_at"] = at
+            operation_result = {
+                "action": args.action,
+                "review_item_id": item["review_item_id"],
+                "state": destination,
+                "decision_id": None,
+            }
             event = {
                 "event_id": event_id,
                 "review_item_id": item["review_item_id"],
@@ -3534,6 +3890,9 @@ def cmd_transition(dao, args) -> int:
                 "to_state": destination,
                 "actor": actor,
                 "role_policy_snapshot": policy,
+                **_operation_event_fields(
+                    args, operation_sha256, operation_result,
+                ),
                 "reason": reason,
                 "medical_variables_revision": revision,
                 "created_at": at,
@@ -3550,11 +3909,7 @@ def cmd_transition(dao, args) -> int:
         except (KeyError, TypeError, ValueError) as exc:
             print(f"FAIL: {exc}")
             return 1
-        print(json.dumps({
-            "action": args.action,
-            "review_item_id": item["review_item_id"],
-            "state": destination,
-        }, sort_keys=True))
+        print(json.dumps(operation_result, sort_keys=True))
         return 0
     finally:
         dao.release_lock(path)
@@ -3612,6 +3967,28 @@ def clearance_blockers(
     return sorted(blocking), sorted(coverage_errors)
 
 
+def require_clearance(dao, case_id: str, run_id: str) -> None:
+    ledger = load_ledger(dao, case_id)
+    variables, error = dao._load_medical_revision(case_id, None)
+    if error or variables is None:
+        raise ValueError(error or "canonical medical variables are unavailable")
+    if variables.get("run_id") != run_id:
+        raise ValueError("medical clearance does not match the canonical run owner")
+    current_revision_sha = hashlib.sha256(
+        dao.medical_variables_path(case_id).read_bytes()
+    ).hexdigest()
+    blocking, coverage_errors = clearance_blockers(
+        ledger,
+        variables,
+        current_revision_sha=current_revision_sha,
+    )
+    if blocking or coverage_errors:
+        raise ValueError(
+            "medical review clearance is blocked: "
+            f"items={blocking}; coverage={coverage_errors}"
+        )
+
+
 def cmd_check_clear(dao, args) -> int:
     try:
         ledger = load_ledger(dao, args.case_id)
@@ -3652,8 +4029,8 @@ def _revision_descriptor(variables: dict, sha256: str) -> dict:
     }
 
 
-def build_downstream_review_outcomes(dao, case_id: str) -> dict:
-    """Build the bounded downstream read model after the gate is clear."""
+def _build_downstream_review_outcomes_locked(dao, case_id: str) -> dict:
+    """Build outcomes while publication's variables->ledger locks are held."""
     ledger = load_ledger(dao, case_id)
     variables, error = dao._load_medical_revision(case_id, None)
     if error or variables is None:
@@ -3677,11 +4054,120 @@ def build_downstream_review_outcomes(dao, case_id: str) -> dict:
         latest_event_by_item[event["review_item_id"]] = event
     projected_items = []
     for item in ledger["review_items"]:
-        if item["requests"] or item["decisions"]:
-            raise ValueError(
-                "review-item decision/response projection is unavailable until "
-                "the authenticated lifecycle is reconstructed"
+        item_events = [
+            event for event in ledger["events"]
+            if event["review_item_id"] == item["review_item_id"]
+        ]
+        latest_decision_cycle_index = max(
+            (
+                index for index, event in enumerate(item_events)
+                if event["action"] in {"reopen", "provide_information"}
+            ),
+            default=0,
+        )
+        current_cycle_decision_ids = {
+            event["decision_id"]
+            for event in item_events[latest_decision_cycle_index:]
+            if event.get("decision_id") is not None
+        }
+        decision = next(
+            (
+                row for row in reversed(item["decisions"])
+                if row["decision_id"] in current_cycle_decision_ids
+            ),
+            None,
+        )
+        projected_decision = None if decision is None else {
+            **{
+                key: decision[key]
+                for key in (
+                    "decision_id", "decision", "decision_origin", "rationale",
+                    "policy_version", "actor",
+                )
+            },
+            "medical_variables_revision": decision["referral_inputs"][
+                "medical_variables_revision"
+            ],
+        }
+        request = (
+            _current_request_record(item)
+            if item.get("current_request_id") is not None
+            else None
+        )
+        response = None
+        if request is not None and request.get("current_response_id") is not None:
+            response = _exactly_one(
+                request["responses"],
+                "response_id",
+                request["current_response_id"],
+                "current response",
             )
+        assignment = None
+        if response is not None:
+            assert request is not None
+            assignment = _exactly_one(
+                request["assignments"],
+                "assignment_id",
+                response["assignment_id"],
+                "response assignment",
+            )
+        if response is not None:
+            assert assignment is not None
+        projected_response = None if response is None else {
+            **{
+                key: response[key]
+                for key in (
+                    "response_id", "response_version", "request_id",
+                    "request_version_reviewed", "assignment_id",
+                    "request_config_version_reviewed",
+                    "referral_policy_version_reviewed", "issue_id", "issue_category",
+                    "decision_id", "evidence_locator_ids_reviewed",
+                    "interpretation", "basis", "uncertainty",
+                    "alternative_interpretations", "downstream_adjustment_advice",
+                    "supersedes_response_id", "response_status", "reviewed_at",
+                    "submitted_at",
+                )
+            },
+            "reviewer": dict(response["reviewer"]),
+            "assignment_role_policy_version": assignment["role_policy_version"],
+        }
+        item_by_id = {
+            candidate["review_item_id"]: candidate
+            for candidate in ledger["review_items"]
+        }
+
+        def adjudication_cohort_is_current(adjudication: dict) -> bool:
+            for participant_id, adjudicated_response_id in zip(
+                adjudication["review_item_ids"],
+                adjudication["response_ids"],
+                strict=True,
+            ):
+                participant = item_by_id.get(participant_id)
+                if participant is None:
+                    return False
+                if participant.get("current_request_id") is None:
+                    return False
+                _, current_response_id = _item_response_head(participant)
+                if current_response_id != adjudicated_response_id:
+                    return False
+            return True
+
+        related_adjudications = [
+            row for row in ledger["adjudications"]
+            if item["review_item_id"] in row["review_item_ids"]
+            and row.get("status") == "resolved"
+            and response is not None
+            and response["response_id"] in row["response_ids"]
+            and adjudication_cohort_is_current(row)
+        ]
+        adjudication = related_adjudications[-1] if related_adjudications else None
+        projected_adjudication = None if adjudication is None else {
+            "adjudication_id": adjudication["adjudication_id"],
+            "response_ids": adjudication["response_ids"],
+            "adjudicator": adjudication["adjudicator"],
+            "record": adjudication["record"],
+            "resolved_at": adjudication["resolved_at"],
+        }
         projected_items.append({
             "review_item_id": item["review_item_id"],
             "issue_id": item["issue_id"],
@@ -3689,9 +4175,9 @@ def build_downstream_review_outcomes(dao, case_id: str) -> dict:
             "target_medical_variables_revision": latest_event_by_item[
                 item["review_item_id"]
             ]["medical_variables_revision"],
-            "decision": None,
-            "response": None,
-            "adjudication": None,
+            "decision": projected_decision,
+            "response": projected_response,
+            "adjudication": projected_adjudication,
         })
 
     projection = {
@@ -3714,6 +4200,39 @@ def build_downstream_review_outcomes(dao, case_id: str) -> dict:
             + "; ".join(errors)
         )
     return projection
+
+
+def build_downstream_review_outcomes(dao, case_id: str) -> dict:
+    """Build a bounded outcome from one publication-consistent snapshot."""
+    variables_target = dao.medical_variables_path(case_id)
+    ledger_target = ledger_path(dao, case_id)
+    run_id = dao.validated_run_state(case_id).get("run_id")
+    if not isinstance(run_id, str):
+        raise ValueError("canonical run owner is unavailable for outcome projection")
+    variables_lock = dao.acquire_lock_blocking(
+        variables_target,
+        "medical-outcome-reader",
+        run_id,
+        "read publication-consistent medical-review outcomes",
+    )
+    if variables_lock is not None:
+        raise ValueError("medical variables are locked during outcome projection")
+    ledger_acquired = False
+    try:
+        ledger_lock = dao.acquire_lock_blocking(
+            ledger_target,
+            "medical-outcome-reader",
+            run_id,
+            "read publication-consistent medical-review outcomes",
+        )
+        if ledger_lock is not None:
+            raise ValueError("medical review ledger is locked during outcome projection")
+        ledger_acquired = True
+        return _build_downstream_review_outcomes_locked(dao, case_id)
+    finally:
+        if ledger_acquired:
+            dao.release_lock(ledger_target)
+        dao.release_lock(variables_target)
 
 
 def cmd_read_outcomes(dao, args) -> int:

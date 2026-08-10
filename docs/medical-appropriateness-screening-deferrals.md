@@ -36,11 +36,12 @@ Until the corresponding deferrals are resolved, implementation must preserve the
 | Medical structuring | `behavior_enabled: false`; no enabled case/document roles | Real-case medical extraction is rejected; schema and synthetic tests remain possible. |
 | Referral policy | `policy_enabled: false`; no executable severity thresholds or referral rules | `decision_origin: policy` is rejected. |
 | Human role policy | `operations_enabled: false`; no named human actors; only placeholder specialty `unspecified` | Real-case human lifecycle actions are rejected. |
+| Operator authentication | `operations_enabled: false`; no approved operator tokens or actors | The localhost API rejects medical reads and mutations until an approved local policy is explicitly installed. |
 | Review-request vocabulary | `requests_enabled: false`; no approved interpretation entries | Real medical-review packages are rejected. |
 | Source viewing | Redacted, revision-pinned quote/table path only | Controlled originals are unavailable. |
-| Deployment | Localhost only; no identity claim beyond an audited actor assertion | Remote or multi-user deployment is non-conforming. |
+| Deployment | Localhost bearer-token authentication against the disabled-by-default operator policy; no production identity assurance | Remote or multi-user deployment is non-conforming. |
 | Retrieval/reuse | No cross-case index or retrieval API | Expert responses cannot become precedent or automatic input. |
-| Evaluation | No ground-truth access before the existing formal human-review/evaluation gate | D1 remains unchanged. |
+| Evaluation | No local ground-truth access or runnable Evaluation stage | Evaluation is deferred to an unavailable isolated Unit 11 service. |
 
 ## Deferred decisions requiring explicit approval
 
@@ -56,7 +57,7 @@ Until the corresponding deferrals are resolved, implementation must preserve the
 | MED-DEF-008 | Approve specialty taxonomy, specialty routing, and requested-interpretation codes with allowed issue-category/specialty combinations. | MED-OQ-003 | Medical lead and workflow owner | Only `unspecified` placeholder specialty exists and request vocabulary remains empty/disabled. |
 | MED-DEF-009 | Name authorized actors and approve who may confirm, override, assign, cancel, reassign, amend, withdraw, adjudicate, close, and reopen; also approve escalation and service-level rules. | MED-OQ-018 | Workflow owner with named actor IDs, roles, permissions, and policy version | Human role policy remains disabled and has no named actors. |
 | MED-DEF-010 | Approve whether medical reviewers may see controlled original pages in addition to redacted revision-pinned text/table evidence. | MED-OQ-008 | Privacy/security owner and medical workflow owner | Controlled-original access is rejected. |
-| MED-DEF-011 | Approve authentication, authorization, audit retention, de-identification, tenant boundaries, accessibility, localization, and production deployment requirements. | MED-OQ-019 | Privacy/security, product, accessibility/localization owners, and engineering | Backend/UI remain localhost-only and actor metadata is explicitly not authentication. |
+| MED-DEF-011 | Approve production authentication, authorization, audit retention, de-identification, tenant boundaries, accessibility, localization, and deployment requirements. | MED-OQ-019 | Privacy/security, product, accessibility/localization owners, and engineering | Backend/UI use localhost-only bearer-token authentication when explicitly enabled; the shipped policy is disabled, has no approved operator tokens, and is not production identity assurance. |
 | MED-DEF-012 | Approve remote/asynchronous expert delivery and coordinator import of another professional's response, including identity verification and reviewer attestation. | MED-OQ-018, MED-OQ-019 | Workflow owner and privacy/security owner | Only the currently assigned professional may submit their own response in the localhost workflow. |
 | MED-DEF-013 | Approve any automated anomaly producer and its validated input/output boundary. | MED-OQ-004 through MED-OQ-006 | Medical lead and engineering owner | The approved implementation accepts guarded referral inputs but does not create a real-case anomaly model. |
 | MED-DEF-014 | Define benchmark medical issues without leaking ground truth, review-time measurement, unnecessary-referral measurement, sample sizes, confidence reporting, and Go/No-Go thresholds. | MED-OQ-010, MED-OQ-011, MED-OQ-016 | Evaluation owner and medical adjudication lead | No medical-screening effectiveness or Go/No-Go claim may be made. |

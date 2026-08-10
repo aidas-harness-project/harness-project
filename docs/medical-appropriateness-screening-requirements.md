@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Internal baseline | v0.1 |
-| Status | Approved technical implementation baseline; non-UI harness implementation tracked below; clinical and operational activation deferred |
+| Status | Approved technical implementation baseline; harness and localhost UI implementation tracked below; clinical and operational activation deferred |
 | Prepared | 2026-07-23 |
 | External request source | [`의료적정성_스크리닝_설계안_v0.3.pdf`](../의료적정성_스크리닝_설계안_v0.3.pdf), 19 pages, v0.3 |
 | Source audience | Medical professionals, project leadership, and the development team |
@@ -24,6 +24,20 @@ clinical codebooks, thresholds, real-case activation, reviewer authority, contro
 original source access, production deployment, retrieval/reuse, or evaluation policy.
 The authoritative unresolved list and activation rule are recorded in
 [`medical-appropriateness-screening-deferrals.md`](medical-appropriateness-screening-deferrals.md).
+
+### Current technical implementation status
+
+The repository implements the approved fail-closed technical harness: canonical
+medical variables and immutable revisions, the authenticated medical-review ledger and
+13-action lifecycle, wait projection and recovery, the clearance gate, a bounded
+downstream outcome projection, and a localhost-only authenticated API and purpose-built
+UI. These capabilities are verified with synthetic fixtures and automated tests.
+
+This is technical capability, not clinical approval. Medical structuring, compatibility
+projection, referral, request vocabulary, role, and operator policies ship disabled
+without approved real-case scopes, clinical thresholds, named actors, or operator
+tokens. The medical workflow is therefore not operationally activated, and no current
+case may be described as medically screened merely because the harness or UI exists.
 
 Documentation, requirement IDs, and implementation guidance are English. Korean
 domain labels remain Korean where they are actual workflow values or source terms.
@@ -132,7 +146,7 @@ explains where and why attention is needed, and a human makes the medical judgme
 | Referral | A versioned recommendation that a real human medical expert review a narrow issue. It is not a conclusion that care or diagnosis was wrong. |
 | Referral package | The case summary, focused question, issue rationale, and linked evidence prepared for the expert. |
 | Medical expert response | Genuine human input answering a referral question under the structured contract in this baseline. It is distinct from the existing human review of critic findings. |
-| Benchmark issue | An independently established medical issue used only for evaluation after the applicable ground-truth gate. |
+| Benchmark issue | An independently established medical issue reserved for a future authenticated isolated Unit 11 evaluation service; it is unavailable to the local harness. |
 | Material | Capable of changing a medical-review question, referral decision, or downstream insurance/loss-adjustment analysis. The operational threshold is not defined by this word and requires an approved codebook. |
 | Critical evidence | Evidence whose absence prevents a material medical question from being assessed. The evidence type and reason it is critical must be stated. |
 | Objective evidence | A documented test, image/report, measured functional finding, pathology result, procedure record, or other observation not based only on an uncorroborated narrative statement. |
@@ -197,7 +211,7 @@ the layer. They are planning context, not proof that the PoC will achieve them.
 | Referral router (target role) | Under an approved versioned policy, decide whether a human review package should be prepared, explain why, and identify an appropriate specialty or reviewer class. The bootstrap policy is disabled and makes no real-case decision. |
 | Medical expert | Review the focused issue and source evidence, then provide a structured human answer. |
 | Loss adjuster | Use medical variables and expert answers in later coverage, reduction, rebuttal, and report work. |
-| Evaluator | Measure the layer only after the applicable human-review and ground-truth gates are satisfied. |
+| Evaluator | Future isolated Unit 11 role; no evaluator or ground-truth access exists in the local Units 1–7 harness. |
 | Product/development team | Define contracts, workflow, UI, calibration rules, privacy controls, and measurement protocol. |
 
 The existing `reviewer_role: "의사"` value is sufficient only as a broad routing class.
@@ -514,11 +528,13 @@ The approved non-UI lifecycle surface is exact and closed:
 ```text
 read-medical-review-ledger CASE_ID
 read-medical-review-evidence CASE_ID REVIEW_ITEM_ID REQUEST_ID REQUEST_VERSION LOCATOR_ID
-open-medical-review-item CASE_ID --issue-id MCI_NNNN --decision-owner {policy|human} [--actor-file PATH] --held-by NAME --run-id RUN_ID
-record-medical-referral-decision CASE_ID REVIEW_ITEM_ID --decision-file PATH [--actor-file PATH] --held-by NAME --run-id RUN_ID
-transition-medical-review CASE_ID REVIEW_ITEM_ID ACTION --actor-file PATH [--data-file PATH] [--reason TEXT] --held-by NAME --run-id RUN_ID
+read-medical-review-outcomes CASE_ID --caller-stage STAGE --run-id RUN_ID
+open-medical-review-item CASE_ID --issue-id MCI_NNNN --decision-owner {policy|human} --operation-id OPERATION_ID --held-by NAME --run-id RUN_ID
+record-medical-referral-decision CASE_ID REVIEW_ITEM_ID DECISION_FILE --operation-id OPERATION_ID --held-by NAME --run-id RUN_ID
+provide-medical-review-information CASE_ID REVIEW_ITEM_ID --reason TEXT --operation-id OPERATION_ID --held-by NAME --run-id RUN_ID
+transition-medical-review CASE_ID REVIEW_ITEM_ID --action ACTION [--data-file PATH] [--reason TEXT] --operation-id OPERATION_ID --held-by NAME --run-id RUN_ID
 check-medical-reviews-clear CASE_ID
-reconcile-medical-review-waits CASE_ID --held-by NAME --run-id RUN_ID
+reconcile-medical-review-waits CASE_ID --operation-id OPERATION_ID --held-by NAME --run-id RUN_ID
 ```
 
 `ACTION` is one of `provide_information`, `assign`, `request_information`,
@@ -530,6 +546,10 @@ explicit immutable revision through `read-medical-evidence CASE_ID LOCATOR_ID
 `read-medical-review-evidence`: the DAO derives the stored revision, enforces request
 and closed-locator membership plus D1/source classification, and never substitutes the
 current revision or current page/chunk text. Controlled-original access is deferred.
+Every mutating lifecycle call uses a caller-generated operation ID. A caller retries an
+unknown transport outcome with the same ID; a distinct intended mutation uses a new
+ID. An exact retry returns the committed result, while reuse with different request
+content fails closed.
 
 These command and schema surfaces are harness capability, not operational activation.
 The bootstrap referral, request, role, and medical-structuring configurations remain
@@ -561,7 +581,7 @@ reported.
 | MED-MET-001 | Expert referral rate | Eligible cases referred for medical review divided by all eligible cases. Report overall and by issue category. | 16 |
 | MED-MET-002 | Unnecessary referral rate | Completed referrals that the medical expert marks as not requiring expert review, divided by completed referrals. The exact expert disposition field is TBD. | 16 |
 | MED-MET-003 | Source-linking rate | Required variables and anomaly signals with valid, resolvable source references divided by all variables and signals required to have references. | 16 |
-| MED-MET-004 | Important-issue detection rate | Eligible issues from the final loss-adjustment report or an independently adjudicated benchmark that were detected during screening, divided by all applicable benchmark issues. Final-report ground truth may be accessed only through the evaluation-stage gate. | 16 |
+| MED-MET-004 | Important-issue detection rate | Eligible issues from the final loss-adjustment report or an independently adjudicated benchmark that were detected during screening, divided by all applicable benchmark issues. This requires the future authenticated isolated Unit 11 service; local access is prohibited. | 16 |
 | MED-MET-005 | Review-time reduction | Difference in human review time between the current full-record workflow and the referral-package workflow, using a predefined paired or controlled protocol. | 16 |
 | MED-MET-006 | Summary/variable accuracy | Field-level agreement for diagnosis dates, treatment facts, prior conditions, and other structured variables against human-reviewed reference values. | 16 |
 | MED-MET-007 | Referral yield by issue | Referrals that produce a material expert clarification divided by completed referrals, grouped by issue code. | Derived planning metric |
@@ -572,7 +592,7 @@ reported.
 | ID | Requirement |
 |---|---|
 | MED-EVL-001 | The evaluation set, benchmark issue definitions, and inclusion/exclusion rules must be fixed independently of model outputs. |
-| MED-EVL-002 | Ground-truth-based issue detection must run only after the existing D1 human-review gate. |
+| MED-EVL-002 | Ground-truth-based issue detection must run only in the future authenticated isolated Unit 11 service after its independent human-review prerequisite; it must never run in the local harness. |
 | MED-EVL-003 | Referral thresholds must not be tuned and evaluated on the same cases without an explicitly labeled exploratory result. |
 | MED-EVL-004 | Time measurements must define start/stop events and whether source-navigation time is included. |
 | MED-EVL-005 | Results must be reported by case type and issue category where sample size allows; aggregate rates alone may hide systematic misses. |
@@ -600,8 +620,8 @@ deferral register control that separate activation decision.
 | Conflict/route separation | P4/P6/P8 and medical-review schemas keep contract failure, factual conflict, extraction disagreement, and medical interpretation as separate routes. | Clinical anomaly definitions, convergence rules, and policy thresholds remain unapproved. |
 | Revision-pinned source navigation | `read-medical-evidence` supports pre-request reinspection of an explicit immutable revision. `read-medical-review-evidence` derives the stored request revision and enforces request/version/closed-locator/source-classification/D1 membership without falling forward. | Controlled-original source access is disabled; only redacted revision-pinned quote/table evidence is available. Production authentication/authorization is unresolved. |
 | Screening/referral output | Closed referral-input, decision, focused-package, response, and lifecycle contracts prevent final medical/insurance verdict fields and preserve balanced evidence/uncertainty. | No approved real-case anomaly producer, specialty taxonomy, requested-interpretation codebook, or referral policy is active. |
-| Human-facing UI | The current localhost UI reads DAO-backed medical state and is not the authority for state or clearance. Any future lifecycle mutation surface must invoke the purpose-built DAO commands rather than write state itself. | UI presence is not authentication, medical-lead approval, or operational readiness; remote/production workflow and authenticated mutation remain deferred. |
-| Evaluation | Existing D1 gates remain separate, and synthetic tests can verify structural correctness without answer keys. | Referral effectiveness, traceability, time-saving, medical-variable accuracy, issue-detection metrics, benchmark protocol, and Go/No-Go thresholds remain unapproved/unimplemented as operational evaluation. |
+| Human-facing UI | The localhost UI reads medical state and submits the approved structured lifecycle actions exclusively through authenticated FastAPI endpoints and purpose-built DAO commands; it is not the authority for state or clearance. Static builds fail closed with the medical workspace unavailable. | UI presence is not medical-lead approval or operational readiness. The shipped operator policy is disabled and unapproved, so no real operator can authenticate; remote/production workflow remains deferred. |
+| Evaluation | Synthetic tests verify local structural correctness without answer keys. No local Evaluation stage or ground-truth access exists. | Evaluation requires the future authenticated isolated Unit 11 service; referral effectiveness, traceability, time-saving, medical-variable accuracy, issue-detection metrics, benchmark protocol, and Go/No-Go thresholds remain unapproved/unimplemented. |
 | Knowledge reuse | Structured expert responses are stored case-locally with issue/provenance/version data so future search is not blocked by shape. | No cross-case index, retrieval API, de-identification/access policy, or automatic reuse exists. |
 
 ## 9. Development missions and acceptance criteria
@@ -702,7 +722,7 @@ detection, and variable accuracy without recomputing metrics manually.
 - Rates show numerator, denominator, exclusions, and N/A reasons, not only a
   percentage.
 - False-negative and unnecessary-referral examples can be inspected.
-- Ground-truth-backed metrics are unavailable before the evaluation gate.
+- Ground-truth-backed metrics are unavailable locally and require the future authenticated isolated Unit 11 service.
 
 ## 10. Planning order and dependency map
 
@@ -790,7 +810,7 @@ governed by `medical-appropriateness-screening-deferrals.md`.
 | MED-OQ-016 | Deferred | What sample sizes, target ranges, confidence reporting, and success/failure thresholds define the PoC evaluation protocol? | No Go/No-Go or effectiveness claim is currently authorized. |
 | MED-OQ-017 | Partially resolved | Generic closed schemas and versioning are fixed; which domain field types, units, coding systems, correction policy, and extension vocabulary receive clinical approval? | Bootstrap medical structuring remains disabled. |
 | MED-OQ-018 | Partially resolved | Lifecycle states, actions, role vocabulary, actor-assertion shape, and wait semantics are fixed. Which named people may act, and what service levels/escalations apply? | Human role policy remains disabled with no named actors. |
-| MED-OQ-019 | Deferred | What authentication, authorization, audit, retention, de-identification, tenant-boundary, accessibility, localization, and production source-view requirements apply? | Local actor assertions are audit metadata, not authentication; production/remote use is non-conforming. |
+| MED-OQ-019 | Deferred | What production authentication, authorization, audit, retention, de-identification, tenant-boundary, accessibility, localization, and production source-view requirements apply? | The localhost bearer-token policy authenticates synthetic/local operators only when explicitly enabled; it is not production identity assurance, and production/remote use is non-conforming. |
 | MED-OQ-020 | Partially resolved | For an adopted new run, medical-variable publication activates the fail-closed ledger gate before claim-analysis completion and every downstream stage. What are the old-run migration/backfill, invalidation, cost, latency, and reproducibility policies? | Pre-adoption runs remain explicit legacy mode and are not silently backfilled or called medically screened. |
 
 ## 12. Cross-cutting project constraints

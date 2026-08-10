@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "expert_review.schema.json",
   "title": "expert_review.json -- structured human review of a draft version v0.1",
-  "description": "Produced by evaluation, transcribing an actual human reviewer's disposition of critic_result.json's findings -- never fabricated (P7), and only written once that human review genuinely exists. Ties back to critic_result.json by finding_id so what was and wasn't addressed is unambiguous.",
+  "description": "A structured transcription of an actual human reviewer's disposition of critic_result.json's findings -- never fabricated (P7), and only written once that human review genuinely exists. It is a local handoff prerequisite, not Evaluation. Ties back to critic_result.json by finding_id so what was and wasn't addressed is unambiguous.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {

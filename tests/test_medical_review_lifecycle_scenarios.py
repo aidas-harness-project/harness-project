@@ -386,8 +386,12 @@ def test_authenticated_coordinator_opens_revision_pinned_item_and_gate_blocks(
         decision_owner="human",
         held_by="medical-coordinator",
         run_id="RUN_20260723_001",
+        operation_id="medical:test-open-replay",
     )
     assert dao.cmd_open_medical_review_item(args) == 0
+    committed_ledger = dao.medical_review_ledger_path(case_id).read_bytes()
+    assert dao.cmd_open_medical_review_item(args) == 0
+    assert dao.medical_review_ledger_path(case_id).read_bytes() == committed_ledger
     ledger = dao.load_medical_review_ledger(case_id)
     assert len(ledger["review_items"]) == 1
     item = ledger["review_items"][0]
@@ -397,6 +401,28 @@ def test_authenticated_coordinator_opens_revision_pinned_item_and_gate_blocks(
     assert ledger["events"][0]["medical_variables_revision"]["sha256"]
     assert ledger["events"][0]["actor"]["operator_actor_id"] == "OP_MEDICAL_TEST"
     assert ledger["events"][0]["actor"]["assertion_source"] == "authenticated_operator_policy"
+    assert ledger["events"][0]["operation_id"] == "medical:test-open-replay"
+    tampered_operation = json.loads(json.dumps(ledger))
+    tampered_operation["events"][0]["operation_result"][
+        "review_item_id"
+    ] = "MRI_9999"
+    assert medical_review_ledger.validate_ledger_semantics(
+        tampered_operation, case_id,
+    )
+    stripped_operation = json.loads(json.dumps(ledger))
+    for field in (
+        "operation_id", "operation_request_sha256", "operation_result"
+    ):
+        stripped_operation["events"][0].pop(field)
+    assert medical_review_ledger.validate_ledger_semantics(
+        stripped_operation, case_id,
+    )
+    for field in ("action", "review_item_id", "state", "decision_id"):
+        incomplete_result = json.loads(json.dumps(ledger))
+        incomplete_result["events"][0]["operation_result"].pop(field, None)
+        assert medical_review_ledger.validate_ledger_semantics(
+            incomplete_result, case_id,
+        )
     run_state = dao.load_run_state(case_id)
     projected_wait = next(
         entry
@@ -448,6 +474,7 @@ def test_authenticated_coordinator_opens_revision_pinned_item_and_gate_blocks(
         make_args(case_id=case_id)
     ) == 1
 
+    args.operation_id = "medical:test-open-duplicate"
     assert dao.cmd_open_medical_review_item(args) == 1
     monkeypatch.delenv(operator_auth.TOKEN_ENV)
     assert dao.cmd_open_medical_review_item(args) == 1
@@ -458,7 +485,7 @@ def test_policy_owned_open_is_rejected_without_a_policy_decision_route(
     isolated_dao, tmp_path: Path, monkeypatch, make_args, capsys
 ):
     case_id = _publish_issue(tmp_path, monkeypatch, make_args, capsys)
-    _authorize_open(tmp_path, monkeypatch)
+    _authorize_actions(tmp_path, monkeypatch, ["open", "cancel"])
     before = dao.load_medical_review_ledger(case_id)
 
     assert dao.cmd_open_medical_review_item(make_args(
@@ -475,7 +502,7 @@ def test_wait_projection_reconciliation_is_repairable_and_idempotent(
     isolated_dao, tmp_path: Path, monkeypatch, make_args, capsys
 ):
     case_id = _publish_issue(tmp_path, monkeypatch, make_args, capsys)
-    _authorize_open(tmp_path, monkeypatch)
+    _authorize_actions(tmp_path, monkeypatch, ["open", "cancel"])
     run_id = "RUN_20260723_001"
     state = dao.load_run_state(case_id)
     state["run_id"] = run_id
@@ -504,6 +531,7 @@ def test_wait_projection_reconciliation_is_repairable_and_idempotent(
         case_id=case_id,
         held_by="medical-coordinator",
         run_id=run_id,
+        operation_id="medical:test-reconcile-replay",
     )
     assert dao.cmd_reconcile_medical_review_waits(reconcile_args) == 0
     repaired = dao.load_run_state(case_id)
@@ -511,11 +539,83 @@ def test_wait_projection_reconciliation_is_repairable_and_idempotent(
         entry.get("human_input_id")
         for entry in repaired["human_input_status"]
     ] == [None, "MRH_000001"]
+    assert any(
+        operation["operation_id"] == "medical:test-reconcile-replay"
+        for operation in repaired["medical_review_wait_reconciliation_operations"]
+    )
     assert dao.cmd_reconcile_medical_review_waits(reconcile_args) == 0
     assert dao.load_run_state(case_id) == repaired
 
+    tampered_receipt = dao.load_run_state(case_id)
+    tampered_receipt[
+        "medical_review_wait_reconciliation_operations"
+    ][-1]["medical_review_ledger_sha256"] = "f" * 64
+    dao.save_run_state(case_id, tampered_receipt)
+    assert dao.cmd_read_run_state(make_args(case_id=case_id)) == 1
+    dao.save_run_state(case_id, repaired)
 
-def test_projection_lock_failure_preserves_ledger_success_for_reconciliation(
+    assert dao.cmd_reconcile_medical_review_waits(make_args(
+        case_id=case_id,
+        held_by="medical-coordinator",
+        run_id=run_id,
+        operation_id="medical-projection:caller-owned",
+    )) == 1
+
+    duplicate_receipt = dao.load_run_state(case_id)
+    duplicate_receipt[
+        "medical_review_wait_reconciliation_operations"
+    ].append(json.loads(json.dumps(
+        duplicate_receipt["medical_review_wait_reconciliation_operations"][-1]
+    )))
+    dao.save_run_state(case_id, duplicate_receipt)
+    assert dao.cmd_reconcile_medical_review_waits(make_args(
+        case_id=case_id,
+        held_by="medical-coordinator",
+        run_id=run_id,
+        operation_id="medical:test-reconcile-after-duplicate",
+    )) == 1
+    dao.save_run_state(case_id, repaired)
+
+    cancel_path = tmp_path / "cancel-after-reconcile.json"
+    cancel_path.write_text("{}", encoding="utf-8")
+    assert dao.cmd_transition_medical_review(make_args(
+        case_id=case_id,
+        review_item_id="MRI_0001",
+        action="cancel",
+        data_file=str(cancel_path),
+        reason="Synthetic cancellation changes the ledger generation.",
+        held_by="medical-coordinator",
+        run_id=run_id,
+    )) == 0
+    capsys.readouterr()
+    assert dao.cmd_open_medical_review_item(args) == 0
+    assert "requires reconciliation" not in capsys.readouterr().out
+    before_retry = dao.load_run_state(case_id)
+    assert dao.cmd_reconcile_medical_review_waits(reconcile_args) == 0
+    assert dao.load_run_state(case_id) == before_retry
+
+
+def test_wait_reconciliation_rejects_foreign_canonical_revision_owner(
+    isolated_dao, tmp_path: Path, monkeypatch, make_args, capsys
+):
+    case_id = _publish_issue(tmp_path, monkeypatch, make_args, capsys)
+    state = dao.load_run_state(case_id)
+    state["run_id"] = None
+    dao.save_run_state(case_id, state)
+
+    result = dao.cmd_reconcile_medical_review_waits(make_args(
+        case_id=case_id,
+        held_by="foreign-reconciler",
+        run_id="RUN_20260723_002",
+    ))
+
+    assert result == 1
+    assert "canonical revision run owner" in capsys.readouterr().out
+    assert dao.load_run_state(case_id)["run_id"] is None
+    assert dao.read_lock(dao.run_state_path(case_id)) is None
+
+
+def test_run_owner_lock_blocks_mutation_before_ledger_write(
     isolated_dao, tmp_path: Path, monkeypatch, make_args, capsys
 ):
     case_id = _publish_issue(tmp_path, monkeypatch, make_args, capsys)
@@ -524,10 +624,11 @@ def test_projection_lock_failure_preserves_ledger_success_for_reconciliation(
     run_state_path = dao.run_state_path(case_id)
     assert dao.acquire_lock(
         run_state_path,
-        "synthetic-projection-holder",
+        "synthetic-run-owner-holder",
         run_id,
-        "exercise partial projection failure",
+        "exercise authoritative run-owner serialization",
     ) is None
+    monkeypatch.setattr(dao, "LOCK_MAX_WAIT_SECONDS", 0)
     args = make_args(
         case_id=case_id,
         issue_id="MCI_0001",
@@ -536,14 +637,13 @@ def test_projection_lock_failure_preserves_ledger_success_for_reconciliation(
         run_id=run_id,
     )
     try:
-        assert dao.cmd_open_medical_review_item(args) == 0
-        assert "requires reconciliation" in capsys.readouterr().out
-        assert len(dao.load_medical_review_ledger(case_id)["review_items"]) == 1
-        assert dao.load_run_state(case_id)["human_input_status"] == []
+        assert dao.cmd_open_medical_review_item(args) == 1
+        assert "LOCKED:" in capsys.readouterr().out
+        assert dao.load_medical_review_ledger(case_id)["review_items"] == []
     finally:
         dao.release_lock(run_state_path)
 
-    assert dao.cmd_reconcile_medical_review_waits(args) == 0
+    assert dao.cmd_open_medical_review_item(args) == 0
     assert dao.load_run_state(case_id)["human_input_status"][0][
         "human_input_id"
     ] == "MRH_000001"
@@ -581,14 +681,14 @@ def test_reconciliation_reads_canonical_ledger_after_projection_lock(
     ))
     assert cancelled_ledger["wait_episodes"][0]["status"] == "no_longer_required"
 
-    original_acquire_lock = dao.acquire_lock
+    original_acquire_lock = dao.acquire_owned_lock_blocking
     projection_locked = False
     run_state_path = dao.run_state_path(case_id)
 
     def acquire_lock_after_new_generation(target, held_by, run_id, purpose):
         nonlocal projection_locked
         result = original_acquire_lock(target, held_by, run_id, purpose)
-        if target == run_state_path and result is None:
+        if target == run_state_path and result[0] is not None:
             projection_locked = True
         return result
 
@@ -599,7 +699,11 @@ def test_reconciliation_reads_canonical_ledger_after_projection_lock(
             cancelled_ledger if projection_locked else open_ledger
         ))
 
-    monkeypatch.setattr(dao, "acquire_lock", acquire_lock_after_new_generation)
+    monkeypatch.setattr(
+        dao,
+        "acquire_owned_lock_blocking",
+        acquire_lock_after_new_generation,
+    )
     monkeypatch.setattr(
         medical_review_ledger,
         "load_ledger",
@@ -614,6 +718,37 @@ def test_reconciliation_reads_canonical_ledger_after_projection_lock(
     assert dao.load_run_state(case_id)["human_input_status"][0][
         "status"
     ] == "no_longer_required"
+
+
+def test_post_commit_wait_projection_does_not_add_a_third_blocking_window(
+    isolated_dao, monkeypatch, make_args
+):
+    case_id = "CASE_9001"
+    run_id = "RUN_20260723_001"
+    state = dao.load_run_state(case_id)
+    state["run_id"] = run_id
+    dao.save_run_state(case_id, state)
+    calls = []
+
+    def reconcile(_dao, args, *, blocking=True, automatic=False):
+        calls.append((args.case_id, args.run_id, blocking, automatic))
+        return False, False, "synthetic busy run-state lock"
+
+    monkeypatch.setattr(
+        medical_review_ledger,
+        "reconcile_wait_projection",
+        reconcile,
+    )
+    args = make_args(
+        case_id=case_id,
+        run_id=run_id,
+        held_by="medical-coordinator",
+    )
+    assert dao._run_medical_review_mutation(
+        lambda _dao, _args: 0,
+        args,
+    ) == 0
+    assert calls == [(case_id, run_id, False, True)]
 
 
 def test_duplicate_role_action_key_is_rejected_before_authorization(
@@ -660,13 +795,18 @@ def test_authenticated_tier_b_routing_decision_resolves_without_fabricated_revie
         json.dumps(_do_not_refer_submission()),
         encoding="utf-8",
     )
-    assert dao.cmd_record_medical_referral_decision(make_args(
+    decision_args = make_args(
         case_id=case_id,
         review_item_id="MRI_0001",
         decision_file=str(decision_path),
         held_by="medical-coordinator",
         run_id="RUN_20260723_001",
-    )) == 0
+        operation_id="medical:test-decision-replay",
+    )
+    assert dao.cmd_record_medical_referral_decision(decision_args) == 0
+    committed_ledger = dao.medical_review_ledger_path(case_id).read_bytes()
+    assert dao.cmd_record_medical_referral_decision(decision_args) == 0
+    assert dao.medical_review_ledger_path(case_id).read_bytes() == committed_ledger
 
     ledger = dao.load_medical_review_ledger(case_id)
     item = ledger["review_items"][0]
@@ -935,13 +1075,18 @@ def test_authenticated_assignment_response_and_append_only_amendment(
             "no_verdict_confirmed": True,
         },
     }), encoding="utf-8")
-    assert dao.cmd_transition_medical_review(make_args(
+    assignment_args = make_args(
         **common,
         review_item_id="MRI_0001",
         action="assign",
         data_file=str(assignment_path),
         reason=None,
-    )) == 0
+        operation_id="medical:test-assignment-replay",
+    )
+    assert dao.cmd_transition_medical_review(assignment_args) == 0
+    assigned_ledger = dao.medical_review_ledger_path(case_id).read_bytes()
+    assert dao.cmd_transition_medical_review(assignment_args) == 0
+    assert dao.medical_review_ledger_path(case_id).read_bytes() == assigned_ledger
 
     monkeypatch.setenv(operator_auth.TOKEN_ENV, reviewer_token)
     response_path = tmp_path / "response.json"
@@ -1000,6 +1145,25 @@ def test_authenticated_assignment_response_and_append_only_amendment(
     closed_record = closed["review_items"][0]["requests"][0]
     assert closed_record["current_assignment_id"] is None
     assert closed_record["current_response_id"] == "MRR_0001-R02"
+    outcomes = medical_review_ledger.build_downstream_review_outcomes(dao, case_id)
+    projected = outcomes["review_items"][0]
+    assert projected["state"] == "closed"
+    assert projected["decision"]["decision_id"] == "MRI_0001-D01"
+    assert projected["decision"]["policy_version"] is None
+    assert projected["decision"]["actor"]["actor_id"] == "coordinator-1"
+    assert projected["decision"]["actor"]["assertion_source"] == "authenticated_operator_policy"
+    assert projected["response"]["response_id"] == "MRR_0001-R02"
+    assert projected["response"]["response_status"] == "amended"
+    assert projected["response"]["reviewer"]["display_name"] == "Synthetic Reviewer"
+    assert projected["response"]["reviewer"]["actor_id"] == "reviewer-1"
+    assert projected["response"]["reviewer"]["assertion_source"]
+    assert projected["response"]["assignment_id"] == "MRR_0001-A01"
+    assert projected["response"]["assignment_role_policy_version"] == record["assignments"][0]["role_policy_version"]
+    assert projected["response"]["request_config_version_reviewed"]
+    assert "referral_policy_version_reviewed" in projected["response"]
+    assert projected["response"]["uncertainty"]
+    assert projected["response"]["alternative_interpretations"] == []
+    assert "downstream_adjustment_advice" in projected["response"]
     tampered_assignment_head = json.loads(json.dumps(closed))
     tampered_assignment_head["review_items"][0]["requests"][0][
         "current_assignment_id"
@@ -1174,6 +1338,80 @@ def test_coordinator_supplements_package_after_expert_requests_evidence(
     )
 
 
+def test_dao_mutation_wrapper_rejects_stale_run_before_canonical_command(
+    isolated_dao, make_args, capsys
+):
+    case_id = "CASE_9001"
+    dao.case_dir(case_id).mkdir(parents=True, exist_ok=True)
+    state = dao.load_run_state(case_id)
+    state["run_id"] = "RUN_20260805_0002"
+    dao.save_run_state(case_id, state)
+    invoked = []
+
+    result = dao._run_medical_review_mutation(
+        lambda _dao, _args: invoked.append(True) or 0,
+        make_args(
+            case_id=case_id,
+            held_by="medical-coordinator",
+            run_id="RUN_20260805_0001",
+        ),
+    )
+
+    assert result == 1
+    assert invoked == []
+    assert "does not match the canonical run owner" in capsys.readouterr().out
+    assert dao.read_lock(dao.run_state_path(case_id)) is None
+
+
+def test_medical_mutation_rejects_replacement_run_owner_lock(
+    isolated_dao, make_args, monkeypatch
+):
+    case_id = "CASE_9001"
+    run_id = "RUN_20260723_001"
+    dao.save_run_state(case_id, {
+        "case_id": case_id,
+        "run_id": run_id,
+        "created_at": dao.now_iso(),
+        "updated_at": dao.now_iso(),
+        "stages": [],
+        "human_input_status": [],
+    })
+    state_path = dao.run_state_path(case_id)
+    second_owner_attempts = []
+
+    def replace_owner(_dao, _args):
+        dao.lock_path(state_path).unlink()
+        second_owner_attempts.append(dao.acquire_lock(
+            state_path,
+            "replacement-owner",
+            run_id,
+            "replacement serialization owner",
+        ))
+        monkeypatch.setattr(
+            Path,
+            "unlink",
+            lambda *_args, **_kwargs: pytest.fail(
+                "owned lock release must never unlink a pathname"
+            ),
+        )
+        return 1
+
+    args = make_args(
+        case_id=case_id,
+        run_id=run_id,
+        held_by="original-owner",
+    )
+    assert dao._run_medical_review_mutation(replace_owner, args) == 1
+    assert second_owner_attempts and second_owner_attempts[0] is not None
+    assert dao.acquire_lock(
+        state_path,
+        "replacement-owner",
+        run_id,
+        "replacement owner after original release",
+    ) is None
+    dao.release_lock(state_path)
+
+
 def test_coordinator_cancels_nonterminal_item_and_resolves_active_wait(
     isolated_dao, tmp_path: Path, monkeypatch, make_args, capsys
 ):
@@ -1307,6 +1545,87 @@ def test_additional_information_rebinds_stale_item_to_new_revision(
         decision_file=str(final_path),
     )) == 0
     assert dao.cmd_check_medical_reviews_clear(make_args(case_id=case_id)) == 0
+
+
+def test_information_reset_cancelled_cycle_projects_no_historical_decision(
+    isolated_dao, tmp_path: Path, monkeypatch, make_args, capsys
+):
+    case_id = _publish_issue(tmp_path, monkeypatch, make_args, capsys)
+    _authorize_actions(
+        tmp_path,
+        monkeypatch,
+        ["open", "record_decision", "provide_information", "cancel", "close"],
+    )
+    common = {
+        "case_id": case_id,
+        "held_by": "medical-coordinator",
+        "run_id": "RUN_20260723_001",
+    }
+    assert dao.cmd_open_medical_review_item(make_args(
+        **common,
+        issue_id="MCI_0001",
+        decision_owner="human",
+    )) == 0
+    first_decision = tmp_path / "historical-needs-information.json"
+    first_decision.write_text(
+        json.dumps(_insufficient_information_submission()),
+        encoding="utf-8",
+    )
+    assert dao.cmd_record_medical_referral_decision(make_args(
+        **common,
+        review_item_id="MRI_0001",
+        decision_file=str(first_decision),
+    )) == 0
+
+    revised = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    revised_observation = revised["variables"][0]["observations"][0]
+    revised_observation["coded_value"]["display"] = "Synthetic reset finding"
+    revised_observation["evidence"][0]["quote"] = "Synthetic reset finding documented."
+    page_chunks = dao.load_json(dao.case_dir(case_id) / "page_chunks.json")
+    page_chunks["chunks"][0]["text"] = "Synthetic reset finding documented."
+    dao.atomic_write_json(dao.case_dir(case_id) / "page_chunks.json", page_chunks)
+    revised_path = tmp_path / "reset-medical-variables.json"
+    revised_path.write_text(json.dumps(revised), encoding="utf-8")
+    assert dao.cmd_write_medical_variables(make_args(
+        case_id=case_id,
+        data_file=str(revised_path),
+        held_by="claim-analysis",
+        run_id="RUN_20260723_001",
+    )) == 0
+
+    information_path = tmp_path / "reset-provided-information.json"
+    information_path.write_text(json.dumps({
+        "information": "A revised synthetic observation was committed.",
+    }), encoding="utf-8")
+    assert dao.cmd_transition_medical_review(make_args(
+        **common,
+        review_item_id="MRI_0001",
+        action="provide_information",
+        data_file=str(information_path),
+        reason=None,
+    )) == 0
+    cancel_path = tmp_path / "cancel-reset-cycle.json"
+    cancel_path.write_text("{}", encoding="utf-8")
+    assert dao.cmd_transition_medical_review(make_args(
+        **common,
+        review_item_id="MRI_0001",
+        action="cancel",
+        data_file=str(cancel_path),
+        reason="Cancel the reset synthetic cycle.",
+    )) == 0
+    assert dao.cmd_transition_medical_review(make_args(
+        **common,
+        review_item_id="MRI_0001",
+        action="close",
+        data_file=None,
+        reason="Close the cancelled synthetic cycle.",
+    )) == 0
+
+    projected = medical_review_ledger.build_downstream_review_outcomes(
+        dao, case_id
+    )["review_items"][0]
+    assert projected["state"] == "closed"
+    assert projected["decision"] is None
 
 
 def test_request_reassign_withdraw_and_reopen_preserve_heads_and_waits(

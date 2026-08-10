@@ -25,6 +25,7 @@ no such issue: it runs the prompt and exits.
 
 Run: uvicorn main:app --reload --port 8000  (from frontend/backend/, with venv/ active)
 """
+import copy
 import json
 import os
 import re
@@ -36,12 +37,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 import dao  # tools/dao.py
+import medical_repository
+import medical_review_ledger
+import operator_auth  # tools/operator_auth.py
 import run_checkpoint1  # tools/run_checkpoint1.py -- resolve_from_raw_ocr for P8 review
 
 app = FastAPI(title="Pipeline Viewer API")
@@ -119,8 +123,11 @@ def _known_ledger_file_name(case_id: str, file_name: str):
     dao.py; this closes the injection path (a crafted '--held-by' value
     won't be a real ledger entry) and gives a clear error for a genuine
     typo instead of dao.py's deeper NOT_FOUND."""
-    ledger = dao.load_json(dao.source_ledger_path(case_id))
-    known = {e["file_name"] for e in (ledger or {}).get("files", [])}
+    try:
+        ledger = dao.validated_source_ledger(case_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    known = {e["file_name"] for e in ledger["files"]}
     if file_name not in known:
         raise HTTPException(400, f"{file_name!r} is not a file in this case's ledger")
 
@@ -134,6 +141,191 @@ def _require_case(case_id: str) -> Path:
     if not base.is_relative_to(dao.OUTPUTS.resolve()) or not base.is_dir():
         raise HTTPException(404, f"case {case_id!r} not found under outputs/")
     return base
+
+
+def _read_dao_cli(args: list[str], *, operator_token: str | None = None) -> dict:
+    """Read canonical case state only through the public DAO CLI."""
+    command_env = os.environ.copy()
+    if operator_token is not None:
+        command_env[operator_auth.TOKEN_ENV] = operator_token
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "dao.py"), *args],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=15,
+            env=command_env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, "dao.py canonical read timed out") from exc
+    if result.returncode != 0:
+        message = result.stdout.strip() or result.stderr.strip() or "dao.py rejected this read"
+        missing = "NOT_FOUND" in message or "not found" in message.lower()
+        if "medical review ledger is missing" in message.lower():
+            missing = True
+        raise HTTPException(404 if missing else 409, message)
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(502, "dao.py returned malformed JSON") from exc
+
+
+def _authenticate_operator_request(
+    authorization: str | None,
+    action: str,
+    *,
+    claimed_display_name: str | None = None,
+) -> tuple[str, dict]:
+    try:
+        token = operator_auth.token_from_header(authorization)
+        identity = operator_auth.authenticate_token(
+            token, action, claimed_display_name=claimed_display_name,
+        )
+    except operator_auth.OperatorAuthorizationError as exc:
+        raise HTTPException(401, str(exc)) from exc
+    return token, identity
+
+
+def _authorize_medical_read(authorization: str | None) -> str:
+    token, identity = _authenticate_operator_request(authorization, "medical_review")
+    if not isinstance(identity.get("medical_actor_id"), str):
+        raise HTTPException(403, "operator is not linked to a medical-review actor")
+    return token
+
+
+def _authenticated_medical_actor(
+    authorization: str | None,
+) -> tuple[str, dict, dict]:
+    token, identity = _authenticate_operator_request(authorization, "medical_review")
+    medical_actor_id = identity.get("medical_actor_id")
+    if not isinstance(medical_actor_id, str):
+        raise HTTPException(403, "operator is not linked to a medical-review actor")
+    try:
+        policy = medical_review_ledger._load_role_policy(dao)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    matches = [
+        actor for actor in policy["named_actors"]
+        if actor["actor_id"] == medical_actor_id
+    ]
+    if len(matches) != 1:
+        raise HTTPException(403, "operator medical-review identity is not approved")
+    named = matches[0]
+    if identity.get("role") != named["declared_role"]:
+        raise HTTPException(403, "operator role does not match medical-review identity")
+    actor = {
+        **named,
+        "attested_at": dao.now_iso(),
+        "assertion_source": "authenticated_operator_policy",
+        "operator_actor_id": identity["actor_id"],
+        "operator_policy_version": identity["policy_version"],
+        "authentication_method": identity["authentication_method"],
+    }
+    return token, actor, policy
+
+
+def _canonical_case_run_id(case_id: str) -> str:
+    state = _read_dao_cli(["read-run-state", case_id])
+    if state.get("case_id") != case_id:
+        raise HTTPException(409, "case run state belongs to a different case")
+    run_id = state.get("run_id")
+    if not isinstance(run_id, str) or not re.fullmatch(
+        r"^RUN_[0-9]{8}_[0-9]+$", run_id
+    ):
+        raise HTTPException(409, "case run state has no canonical run owner")
+    return run_id
+
+
+def _run_medical_dao_cli(
+    args: list[str],
+    *,
+    held_by: str,
+    operator_token: str,
+    input_payload: object | None,
+) -> dict:
+    run_id = _canonical_case_run_id(args[1])
+    input_stream = None
+    input_fd = -1
+    command = [sys.executable, str(ROOT / "tools" / "dao.py"), *args]
+    try:
+        if input_payload is not None:
+            try:
+                ingress = medical_review_ledger._private_ingress_root()
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            try:
+                input_fd = os.open(
+                    ingress,
+                    os.O_TMPFILE | os.O_RDWR,
+                    0o600,
+                )
+            except OSError as exc:
+                raise HTTPException(
+                    409, "anonymous private medical-review ingress is unavailable"
+                ) from exc
+            input_stream = os.fdopen(input_fd, "w+", encoding="utf-8")
+            json.dump(
+                input_payload,
+                input_stream,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            input_stream.flush()
+            os.fsync(input_fd)
+            input_stream.seek(0)
+            command += ["--data-file", f"fd:{input_fd}"]
+        command += ["--held-by", held_by, "--run-id", run_id]
+        command_env = os.environ.copy()
+        command_env[operator_auth.TOKEN_ENV] = operator_token
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                env=command_env,
+                timeout=1830,
+                pass_fds=(input_fd,) if input_fd >= 0 else (),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(
+                504, "dao.py mutation exceeded the authoritative lock window"
+            ) from exc
+    finally:
+        if input_stream is not None:
+            input_stream.close()
+    if result.returncode != 0:
+        message = result.stdout.strip() or result.stderr.strip() or "dao.py rejected this action"
+        if message.startswith("LOCKED:"):
+            status = 423
+        elif "not found" in message.lower() or message.startswith("NOT_FOUND"):
+            status = 404
+        elif "not authorized" in message.lower() or message.startswith("DENIED:"):
+            status = 403
+        elif "schema" in message.lower() or "invalid" in message.lower():
+            status = 422
+        else:
+            status = 409
+        raise HTTPException(status, message)
+    output = result.stdout.strip()
+    status = (
+        "committed_projection_pending"
+        if "WARNING: canonical medical-review mutation succeeded" in output
+        else "committed"
+    )
+    return {"ok": True, "status": status}
+
+
+def _without_internal_paths(value):
+    if isinstance(value, list):
+        return [_without_internal_paths(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _without_internal_paths(item)
+            for key, item in value.items()
+            if key not in {"file_path", "source_dir", "document_path"}
+            and not key.endswith("_path")
+        }
+    return value
 
 
 def _safe_child(case_dir: Path, name: str) -> Path:
@@ -158,14 +350,179 @@ def list_cases():
 @app.get("/api/cases/{case_id}/run-state")
 def run_state(case_id: str):
     _require_case(case_id)
-    return dao.load_run_state(case_id)
+    return _read_dao_cli(["read-run-state", case_id])
+
+
+@app.get("/api/cases/{case_id}/medical-reviews")
+def medical_reviews(
+    case_id: str,
+    authorization: str | None = Header(default=None),
+):
+    """Return the canonical validated medical-review ledger, never run state."""
+    token = _authorize_medical_read(authorization)
+    _require_case(case_id)
+    return _read_dao_cli(
+        ["read-medical-review-ledger", case_id], operator_token=token,
+    )
+
+
+@app.get("/api/cases/{case_id}/medical-variables")
+def medical_variables(
+    case_id: str,
+    revision_sha: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Read a schema-validated current or immutable medical revision."""
+    token = _authorize_medical_read(authorization)
+    _require_case(case_id)
+    args = ["read-medical-variables", case_id]
+    if revision_sha is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", revision_sha):
+            raise HTTPException(400, "revision_sha must be a lowercase SHA-256 digest")
+        args += ["--revision-sha", revision_sha]
+    return _without_internal_paths(_read_dao_cli(args, operator_token=token))
+
+
+class MedicalReviewActionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    data: dict | None = None
+    reason: str | None = None
+    operation_id: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    )
+
+
+MEDICAL_REVIEW_ITEM_RE = re.compile(r"^MRI_[0-9]{4}$")
+MEDICAL_REVIEW_REQUEST_RE = re.compile(r"^MRR_[0-9]{4}$")
+MEDICAL_EVIDENCE_LOCATOR_RE = re.compile(r"^MEV_[0-9]{4,}$")
+MEDICAL_REVIEW_ACTIONS = {
+    "provide_information",
+    "assign",
+    "request_information",
+    "supplement_package",
+    "reassign",
+    "submit_response",
+    "amend_response",
+    "withdraw_response",
+    "flag_conflict",
+    "adjudicate",
+    "cancel",
+    "close",
+    "reopen",
+}
+
+
+@app.post(
+    "/api/cases/{case_id}/medical-reviews/{review_item_id}/actions/{action}"
+)
+def medical_review_action(
+    case_id: str,
+    review_item_id: str,
+    action: str,
+    body: MedicalReviewActionBody,
+    authorization: str | None = Header(default=None),
+):
+    token, actor, _role_policy = _authenticated_medical_actor(authorization)
+    _require_case(case_id)
+    if not MEDICAL_REVIEW_ITEM_RE.fullmatch(review_item_id):
+        raise HTTPException(400, "review_item_id must match MRI_<4 digits>")
+    if action not in MEDICAL_REVIEW_ACTIONS:
+        raise HTTPException(400, "unsupported medical-review action")
+    action_data = copy.deepcopy(body.data)
+    if action in {"assign", "reassign"} and isinstance(action_data, dict):
+        attestation = action_data.get("package_review_attestation")
+        if isinstance(attestation, dict):
+            attestation["reviewed_by_actor_id"] = actor["actor_id"]
+    errors = dao._schema_check(
+        {"action": action, "data": action_data},
+        "medical_review_action.schema.json",
+    )
+    if errors:
+        raise HTTPException(422, "; ".join(errors))
+    if action == "close" and not (body.reason or "").strip():
+        raise HTTPException(422, "close requires a nonblank disposition reason")
+    args = [
+        "transition-medical-review",
+        case_id,
+        review_item_id,
+        "--action",
+        action,
+    ]
+    if body.reason is not None:
+        args += ["--reason", body.reason]
+    args += ["--operation-id", body.operation_id]
+    return _run_medical_dao_cli(
+        args,
+        held_by=actor["display_name"],
+        operator_token=token,
+        input_payload=action_data,
+    )
+
+
+@app.get(
+    "/api/cases/{case_id}/medical-reviews/{review_item_id}"
+    "/requests/{request_id}/versions/{request_version}/evidence/{locator_id}"
+)
+def medical_review_evidence(
+    case_id: str,
+    review_item_id: str,
+    request_id: str,
+    request_version: int,
+    locator_id: str,
+    authorization: str | None = Header(default=None),
+):
+    token = _authorize_medical_read(authorization)
+    _require_case(case_id)
+    if not MEDICAL_REVIEW_ITEM_RE.fullmatch(review_item_id):
+        raise HTTPException(400, "review_item_id must match MRI_<4 digits>")
+    if not MEDICAL_REVIEW_REQUEST_RE.fullmatch(request_id):
+        raise HTTPException(400, "request_id must match MRR_<4 digits>")
+    if request_version < 1:
+        raise HTTPException(400, "request_version must be positive")
+    if not MEDICAL_EVIDENCE_LOCATOR_RE.fullmatch(locator_id):
+        raise HTTPException(400, "locator_id must match MEV_<4 or more digits>")
+    ledger = _read_dao_cli(
+        ["read-medical-review-ledger", case_id], operator_token=token,
+    )
+    items = [
+        item for item in ledger.get("review_items", [])
+        if item.get("review_item_id") == review_item_id
+    ]
+    if len(items) != 1:
+        raise HTTPException(404, "medical review item not found")
+    requests = [
+        record for record in items[0].get("requests", [])
+        if record.get("request_id") == request_id
+    ]
+    if len(requests) != 1:
+        raise HTTPException(404, "medical review request not found")
+    versions = [
+        version for version in requests[0].get("versions", [])
+        if version.get("request_version") == request_version
+    ]
+    if len(versions) != 1:
+        raise HTTPException(404, "medical review request version not found")
+    if locator_id not in versions[0].get("included_evidence_locator_ids", []):
+        raise HTTPException(404, "evidence locator is not in the requested package version")
+    return _without_internal_paths(_read_dao_cli([
+        "read-medical-review-evidence",
+        case_id,
+        review_item_id,
+        request_id,
+        str(request_version),
+        locator_id,
+    ], operator_token=token))
 
 
 @app.get("/api/cases/{case_id}/ledgers")
 def ledgers(case_id: str):
     _require_case(case_id)
-    source_ledger = dao.load_json(dao.source_ledger_path(case_id))
-    conflict_ledger = dao.load_conflict_ledger(case_id)
+    try:
+        source_ledger = dao.validated_source_ledger(case_id)
+        conflict_ledger = dao.load_conflict_ledger(case_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return {"source_ledger": source_ledger, "conflict_ledger": conflict_ledger}
 
 
@@ -174,11 +531,17 @@ class LedgerStatusBody(BaseModel):
     status: str  # approved | rejected
     reviewer: str
     reason: str | None = None
+    operation_id: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    )
 
 
 class ConflictVerdictBody(BaseModel):
     verdict: str  # resolved | false_positive
     note: str
+    operation_id: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    )
 
 
 def _frontend_run_id() -> str:
@@ -195,10 +558,15 @@ def _run_dao_cli(args: list[str], held_by: str) -> dict:
     as a person running it from a terminal would -- this backend has no
     special library-level write access. See harness-guardrails D2/P6: the
     human decision itself (not this endpoint) is what the harness trusts."""
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "tools" / "dao.py"), *args, "--held-by", held_by, "--run-id", _frontend_run_id()],
-        cwd=str(ROOT), capture_output=True, text=True, timeout=15,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "dao.py"), *args, "--held-by", held_by, "--run-id", _frontend_run_id()],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=1830,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(
+            504, "dao.py mutation exceeded the authoritative lock window"
+        ) from exc
     if result.returncode != 0:
         raise HTTPException(400, result.stdout.strip() or result.stderr.strip() or "dao.py rejected this action")
     return {"ok": True, "output": result.stdout.strip()}
@@ -217,6 +585,7 @@ def set_ledger_status(case_id: str, body: LedgerStatusBody):
         if not (body.reason or "").strip():
             raise HTTPException(400, "a rejection reason is required")
         args += ["--reason", body.reason]
+    args += ["--operation-id", body.operation_id]
     return _run_dao_cli(args, held_by=body.reviewer)
 
 
@@ -228,31 +597,53 @@ def set_conflict_verdict(case_id: str, conflict_id: str, body: ConflictVerdictBo
         raise HTTPException(400, "verdict must be resolved or false_positive")
     if not body.note.strip():
         raise HTTPException(400, "a resolution note is required -- this is a real human-audit record")
-    return _run_dao_cli(["set-conflict-verdict", case_id, conflict_id, body.verdict, "--note", body.note],
+    return _run_dao_cli(["set-conflict-verdict", case_id, conflict_id, body.verdict, "--note", body.note,
+                         "--operation-id", body.operation_id],
                          held_by="frontend-reviewer")
 
 
 @app.get("/api/cases/{case_id}/contract/{name}")
 def contract(case_id: str, name: str):
-    case_dir = _require_case(case_id)
-    path = _safe_child(case_dir, name)
-    data = dao.load_json(path)
-    if data is None:
+    _require_case(case_id)
+    try:
+        medical_repository.require_generic_target_allowed(dao, case_id, name)
+        medical_repository.require_generic_read_allowed(dao, case_id, name)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    try:
+        data = json.loads(dao.read_generic_file_bytes(case_id, name))
+    except FileNotFoundError:
         raise HTTPException(404, f"{name} not found for {case_id}")
+    except (ValueError, OSError) as exc:
+        raise HTTPException(403, str(exc)) from exc
     return data
 
 
 @app.get("/api/cases/{case_id}/report/{name}")
 def report(case_id: str, name: str):
     """name is the .md filename, e.g. draft_report_v1.md"""
-    case_dir = _require_case(case_id)
-    doc_path = _safe_child(case_dir, name)
-    if not doc_path.exists():
+    _require_case(case_id)
+    try:
+        medical_repository.require_generic_target_allowed(dao, case_id, name)
+        medical_repository.require_generic_read_allowed(dao, case_id, name)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    try:
+        markdown = dao.read_generic_file_bytes(case_id, name).decode("utf-8")
+    except FileNotFoundError:
         raise HTTPException(404, f"{name} not found for {case_id}")
-    sidecar_path = doc_path.with_suffix(".evidence.json")
+    except (UnicodeDecodeError, ValueError, OSError) as exc:
+        raise HTTPException(403, str(exc)) from exc
+    sidecar_name = str(Path(name).with_suffix(".evidence.json"))
+    try:
+        evidence = json.loads(dao.read_generic_file_bytes(case_id, sidecar_name))
+    except FileNotFoundError:
+        evidence = {"citations": []}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(403, str(exc)) from exc
     return {
-        "markdown": doc_path.read_text(encoding="utf-8"),
-        "evidence": dao.load_json(sidecar_path) or {"citations": []},
+        "markdown": markdown,
+        "evidence": evidence,
     }
 
 
@@ -383,9 +774,8 @@ class HumanReviewCompleteBody(BaseModel):
 
 @app.get("/api/cases/{case_id}/human-review")
 def human_review(case_id: str):
-    """State of the critic -> human review -> evaluation gate (P7/D1) per
-    draft version, so the UI can show exactly what the pipeline is waiting
-    on and whether the gate is already open."""
+    """State of the critic -> human review -> external handoff prerequisite
+    per draft version. Local Evaluation and ground-truth access remain unavailable."""
     case_path = _require_case(case_id)
     out = {}
     for version in ("v1", "v2"):
@@ -402,10 +792,10 @@ def human_review(case_id: str):
 
 @app.post("/api/cases/{case_id}/human-review-complete")
 def human_review_complete(case_id: str, body: HumanReviewCompleteBody):
-    """The human marks their expert review done, opening D1's versioned gate.
+    """The human records completion of the local expert-review prerequisite.
     dao.py itself enforces the hard precondition (expert_review_v{N}.json
     must exist and validate) -- this endpoint only relays the human's action,
-    it cannot self-certify past that check."""
+    it cannot self-certify past that check or enable local Evaluation."""
     _require_case(case_id)
     _valid_actor_name(body.reviewer)
     if not VERSION_RE.fullmatch(body.version):
@@ -471,10 +861,12 @@ def run_case(case_id: str):
         f"Process case {case_id} through the loss-adjustment-pipeline.\n"
         f"Source documents are at: {staging}\n"
         "Steps:\n"
-        "1. Run intake (tools/intake_case.py) with --init-ledger, review the proposed "
-        "raw/ground_truth classification yourself, and set each file's review status via "
-        "tools/dao.py set-ledger-status (approved/rejected) based on that review.\n"
-        "2. Once every file is approved, run intake with --execute to copy them.\n"
+        "1. If no intake ledger exists, run tools/intake_case.py with --init-ledger. "
+        "Never approve, reject, or otherwise decide a pending intake entry.\n"
+        "2. A genuine human reviews every pending intake entry through the authorized "
+        "UI/DAO surface. Call check-source-ledger-clear; if it is not clear, record the "
+        "intake human-input wait and stop. If it is clear from a prior human review, "
+        "run intake with --execute.\n"
         "3. Proceed through Phase 1 of the pipeline (document processing through the "
         "draft report v1), following harness-guardrails and harness-guardrails-dev throughout.\n"
         "4. If you hit a hard guardrail halt (a conflict, an extraction mismatch, retries "

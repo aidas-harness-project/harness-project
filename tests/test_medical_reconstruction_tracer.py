@@ -170,7 +170,18 @@ def test_qg_med_1_contract_revision_and_gate_are_fail_closed() -> None:
         variables,
         manifest=_manifest(),
         page_chunks=_page_chunks(),
-        conflict_ledger={"case_id": "CASE_9001", "conflicts": []},
+        conflict_ledger={
+            "ledger_version": "conflict_ledger.v0.3",
+            "case_id": "CASE_9001",
+            "conflicts": [],
+            "history_boundary": {
+                "mode": "native",
+                "established_at": "2026-07-23T00:00:00+09:00",
+                "baseline_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "baseline_state": [],
+            },
+            "operations": [],
+        },
         config=_config(),
         canonical_case_type="synthetic",
     )

@@ -36,12 +36,40 @@ worked through -- see CLAUDE.md's changelog).
 | 7 | Screening Report | `screening-report` | Gated on `check-conflicts-clear`; consumes `denial-response`'s output whenever an insurer-response document exists (a dependency, not a phase gate) |
 | 8 | Draft Report v1 | `draft-report` | Same agent reused for the v2 update in Phase 2 |
 | 9 | Critic Pass (v1) | `critic` | Blind -- structurally cannot read ground truth |
-| 10 | Evaluation | `evaluation` | Sole D1 exception, only after human review is marked complete |
+| 10 | Human Review v1 / external handoff | human-owned | Completes the local v1 boundary; any future Evaluation remains in the isolated Unit 11 service |
 
 `denial-response` is not numbered here -- it's dependency-triggered, not
 phase-gated. It runs whenever a flagged insurer-response document's
 processed text (from stage 2) exists, whether that's during Phase 1
 (closed cases bundle the insurer notice from the start) or genuinely later.
+
+## Medical-review checkpoint and downstream boundary
+
+Medical structuring and review are checkpoints and a human gate inside
+`claim_analysis`, not a new top-level autonomous stage. Once a run publishes a
+canonical medical-variable revision, the claim-analysis agent and orchestrator must run
+`python tools/dao.py check-medical-reviews-clear CASE_ID` before claim analysis can pass
+and immediately before every downstream agent dispatch. Missing, malformed, stale, uncovered, or unresolved
+medical-review state fails closed.
+
+Authorized in-progress report consumers read only the bounded ledger-derived view:
+
+```bash
+python tools/dao.py read-medical-review-outcomes CASE_ID --caller-stage STAGE --run-id RUN_ID
+```
+
+`STAGE` is restricted to `screening_report`, `denial_validation`,
+`draft_report_v1`, or `draft_report_v2`. The projection pins the canonical medical
+revision and preserves response attribution, interpretation, uncertainty, alternatives,
+and downstream-adjustment advice. Downstream agents never read the internal medical
+ledger directly.
+
+**Capability versus activation:** schemas, canonical storage, lifecycle controls,
+localhost API/UI, and synthetic tests are implemented. The shipped medical structuring,
+projection, referral, request, role, and operator policies remain disabled and contain
+no approved clinical thresholds, real-case scope, named medical actors, or operator
+tokens. No real run may claim medical screening until the deferrals in
+`docs/medical-appropriateness-screening-deferrals.md` are explicitly resolved.
 
 # Phase 2 -- insurer denial/reduction response
 
@@ -55,7 +83,7 @@ for rebuttal generation).
 | 1 | Denial Validation | `denial-validation` | 2 internal checkpoints: (a) evidence retrieval + validate each denial reason against it, (b) generate rebuttal points from the validation. Insurer-vs-evidence disagreement is this stage's actual purpose, **not** a P6 conflict -- don't route it through the conflict ledger |
 | 2 | Draft Report v2 | `draft-report` | Second checkpoint of the Phase 1 agent |
 | — | Critic Pass (v2) | `critic` | Same agent as Phase 1 |
-| — | Evaluation | `evaluation` | Same agent as Phase 1 |
+| — | Human Review v2 / external handoff | human-owned | Completes the local v2 boundary; any future Evaluation remains in the isolated Unit 11 service |
 
 # Document-assembly tool
 

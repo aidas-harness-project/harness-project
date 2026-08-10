@@ -9,7 +9,7 @@ These rules are scoped to the PoC/evaluation phase specifically — they exist b
 
 ## D1. Ground-truth isolation
 
-No agent reads `source-cases/` final reports or `data/ground_truth/` — with exactly one exception: the evaluation stage, and only after human review is complete. If any agent (including the evaluation stage, outside its designated moment) is found to have accessed ground truth: halt the run immediately, exclude that run's outputs from evaluation entirely.
+No agent or tool in the local Units 1–7 harness reads `source-cases/` final reports or `data/ground_truth/`. Evaluation is deferred to an isolated Unit 11 service that is not implemented here; human-review completion records a future handoff prerequisite but does not grant local ground-truth access. If any local agent or tool is found to have accessed ground truth, halt the run immediately and exclude that run's outputs from evaluation entirely.
 
 ## D2. Intake requires a per-file review ledger
 

@@ -7,7 +7,7 @@ import { useReviewerName } from "./LedgerPanel";
 // document via the intake panel) and pick the correct one without leaving
 // the screen. Resolving the last page of a document continues into
 // classification -- one real model call -- so the busy state is explicit.
-export default function OcrReviewPanel({ caseId, review, onResolved }) {
+export default function OcrReviewPanel({ caseId, review, onResolved, readOnly = false }) {
   const [reviewer, setReviewer] = useReviewerName();
   const [picking, setPicking] = useState(null); // {docId, page, reading}
   const [noteText, setNoteText] = useState("");
@@ -39,10 +39,12 @@ export default function OcrReviewPanel({ caseId, review, onResolved }) {
 
   return (
     <div className="ocr-review">
-      <label className="reviewer-field">
-        Reviewer name
-        <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="e.g. 김태윤" />
-      </label>
+      {!readOnly && (
+        <label className="reviewer-field">
+          Reviewer name
+          <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="e.g. 김태윤" />
+        </label>
+      )}
       {error && <p className="audit-error">{error}</p>}
 
       {documents.map((doc) => (
@@ -76,7 +78,7 @@ export default function OcrReviewPanel({ caseId, review, onResolved }) {
                     <div className={`ocr-reading${isPicking && picking.reading === side ? " chosen" : ""}`} key={side}>
                       <div className="ocr-reading-head">
                         <span className="mono">{side === "reading_a" ? "Reading A (path 1)" : "Reading B (path 2)"}</span>
-                        {doc.raw_available && p[side] != null && (
+                        {!readOnly && doc.raw_available && p[side] != null && (
                           <button
                             className="btn-tiny approve"
                             disabled={isBusy}

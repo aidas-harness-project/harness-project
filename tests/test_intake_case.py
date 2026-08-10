@@ -111,7 +111,7 @@ def test_write_manifest_writes_a_schema_valid_file(isolated_intake):
     assert target.exists()
     manifest = json.loads(target.read_text(encoding="utf-8"))
     assert manifest["documents"][0]["document_id"] == "DOC_001"
-    assert not target.with_name(target.name + ".lock").exists()
+    assert dao.read_lock(target) is None
 
 
 def test_write_manifest_schema_failure_exits_without_writing(isolated_intake):
@@ -247,6 +247,29 @@ def test_execute_without_ledger_exits(isolated_intake, monkeypatch):
 
     with pytest.raises(SystemExit):
         _run_main(monkeypatch, [str(src), "CASE_009", "--execute"])
+
+
+def test_execute_uses_the_dao_validated_source_ledger_gate(
+    isolated_intake, monkeypatch
+):
+    src = _make_source_case(isolated_intake)
+    _write_approved_ledger("CASE_009", src, [
+        ("claim_form_kim.pdf", "raw", "approved"),
+        ("diagnosis_kim.pdf", "raw", "approved"),
+        ("최종손해사정서.pdf", "ground_truth", "approved"),
+    ])
+    monkeypatch.setattr(
+        dao,
+        "validated_source_ledger",
+        lambda _case_id: (_ for _ in ()).throw(ValueError("tampered receipt")),
+        raising=False,
+    )
+
+    with pytest.raises(SystemExit):
+        _run_main(monkeypatch, [
+            str(src), "CASE_009", "--execute", "--run-id", "RUN_20260713_001",
+        ])
+    assert not (isolated_intake / "data" / "raw" / "CASE_009").exists()
 
 
 def test_dry_run_does_not_write_anything(isolated_intake, monkeypatch, capsys):

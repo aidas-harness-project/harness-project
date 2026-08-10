@@ -340,6 +340,18 @@ def test_two_answered_items_share_one_atomic_adjudication(
             stale_cohort,
         )
 
+    later_cycle = copy.deepcopy(resolved)
+    later_record = later_cycle["review_items"][1]["requests"][0]
+    later_response = copy.deepcopy(later_record["responses"][-1])
+    later_response["response_id"] = "MRR_0002-R99"
+    later_response["response_version"] = 99
+    later_record["responses"].append(later_response)
+    later_record["current_response_id"] = "MRR_0002-R99"
+    medical_review_ledger._assert_fresh_adjudication_cohort(
+        later_cycle["review_items"][1],
+        later_cycle,
+    )
+
     monkeypatch.setenv(operator_auth.TOKEN_ENV, tokens["medical_coordinator"])
     for item_id in ("MRI_0001", "MRI_0002"):
         assert dao.cmd_transition_medical_review(make_args(
@@ -352,6 +364,20 @@ def test_two_answered_items_share_one_atomic_adjudication(
     terminal = dao.load_medical_review_ledger(case_id)
     assert {item["state"] for item in terminal["review_items"]} == {"closed"}
     assert medical_review_ledger.validate_ledger_semantics(terminal, case_id) == []
+    outcomes = medical_review_ledger.build_downstream_review_outcomes(dao, case_id)
+    assert {
+        row["adjudication"]["adjudication_id"]
+        for row in outcomes["review_items"]
+    } == {"MRA_000001"}
+    assert all(
+        row["response"]["response_id"]
+        in row["adjudication"]["response_ids"]
+        for row in outcomes["review_items"]
+    )
+    assert {
+        row["adjudication"]["adjudicator"]["display_name"]
+        for row in outcomes["review_items"]
+    } == {"Synthetic Adjudicator"}
 
     assert dao.cmd_read_medical_review_ledger(make_args(case_id=case_id)) == 0
     ledger_output = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
@@ -377,6 +403,78 @@ def test_two_answered_items_share_one_atomic_adjudication(
     evidence_args.locator_id = "MEV_9999"
     assert dao.cmd_read_medical_review_evidence(evidence_args) == 1
     assert "not included in the request version" in capsys.readouterr().out
+
+
+    post_adjudication_amendment = _response_submission(amended=True)
+    post_adjudication_amendment["supersedes_response_id"] = "MRR_0001-R02"
+    amendment_path = tmp_path / "post-adjudication-amendment.json"
+    amendment_path.write_text(json.dumps({
+        "response": post_adjudication_amendment,
+        "reason": "Amend one response after the shared adjudication.",
+    }), encoding="utf-8")
+    monkeypatch.setenv(operator_auth.TOKEN_ENV, tokens["medical_reviewer"])
+    assert dao.cmd_transition_medical_review(make_args(
+        **{**common, "held_by": "medical-reviewer"},
+        review_item_id="MRI_0001",
+        action="amend_response",
+        data_file=str(amendment_path),
+        reason=None,
+    )) == 0
+    monkeypatch.setenv(operator_auth.TOKEN_ENV, tokens["medical_coordinator"])
+    assert dao.cmd_transition_medical_review(make_args(
+        **common,
+        review_item_id="MRI_0001",
+        action="close",
+        data_file=None,
+        reason="Close the amended response cycle.",
+    )) == 0
+    amended_outcomes = medical_review_ledger.build_downstream_review_outcomes(
+        dao, case_id
+    )
+    assert all(
+        row["adjudication"] is None
+        for row in amended_outcomes["review_items"]
+    )
+
+    monkeypatch.setenv(operator_auth.TOKEN_ENV, tokens["medical_coordinator"])
+    reopen_path = tmp_path / "reopen-second-item.json"
+    reopen_path.write_text(json.dumps({
+        "decision_owner": "human",
+        "reason": "Start a fresh synthetic decision cycle.",
+    }), encoding="utf-8")
+    assert dao.cmd_transition_medical_review(make_args(
+        **common,
+        review_item_id="MRI_0002",
+        action="reopen",
+        data_file=str(reopen_path),
+        reason=None,
+    )) == 0
+    cancellation_path = tmp_path / "cancel-reopened-item.json"
+    cancellation_path.write_text("{}", encoding="utf-8")
+    assert dao.cmd_transition_medical_review(make_args(
+        **common,
+        review_item_id="MRI_0002",
+        action="cancel",
+        data_file=str(cancellation_path),
+        reason="The fresh cycle is no longer required.",
+    )) == 0
+    assert dao.cmd_transition_medical_review(make_args(
+        **common,
+        review_item_id="MRI_0002",
+        action="close",
+        data_file=None,
+        reason="Close the cancelled fresh cycle.",
+    )) == 0
+    assert dao.cmd_check_medical_reviews_clear(
+        make_args(case_id=case_id)
+    ) == 0
+    reopened_outcomes = medical_review_ledger.build_downstream_review_outcomes(
+        dao, case_id
+    )
+    assert all(
+        row["adjudication"] is None
+        for row in reopened_outcomes["review_items"]
+    )
 
 
 def test_shared_adjudication_cancellation_is_cohort_atomic(
@@ -518,29 +616,30 @@ def test_old_resolved_adjudication_does_not_block_later_cancelled_cycle_close(
         "decision_owner": "human",
         "reason": "Open an independent synthetic cycle.",
     }), encoding="utf-8")
-    assert dao.cmd_transition_medical_review(make_args(
-        **common,
-        review_item_id="MRI_0001",
-        action="reopen",
-        data_file=str(reopen_path),
-        reason=None,
-    )) == 0
-    cancel_path = tmp_path / "cancel-reopened-cycle.json"
-    cancel_path.write_text("{}", encoding="utf-8")
-    assert dao.cmd_transition_medical_review(make_args(
-        **common,
-        review_item_id="MRI_0001",
-        action="cancel",
-        data_file=str(cancel_path),
-        reason="Cancel only the independent reopened cycle.",
-    )) == 0
-    assert dao.cmd_transition_medical_review(make_args(
-        **common,
-        review_item_id="MRI_0001",
-        action="close",
-        data_file=None,
-        reason="Close after cancelling the reopened cycle.",
-    )) == 0
+    for review_item_id in ("MRI_0001", "MRI_0002"):
+        assert dao.cmd_transition_medical_review(make_args(
+            **common,
+            review_item_id=review_item_id,
+            action="reopen",
+            data_file=str(reopen_path),
+            reason=None,
+        )) == 0
+        cancel_path = tmp_path / f"cancel-reopened-cycle-{review_item_id}.json"
+        cancel_path.write_text("{}", encoding="utf-8")
+        assert dao.cmd_transition_medical_review(make_args(
+            **common,
+            review_item_id=review_item_id,
+            action="cancel",
+            data_file=str(cancel_path),
+            reason="Cancel only the independent reopened cycle.",
+        )) == 0
+        assert dao.cmd_transition_medical_review(make_args(
+            **common,
+            review_item_id=review_item_id,
+            action="close",
+            data_file=None,
+            reason="Close after cancelling the reopened cycle.",
+        )) == 0
 
     ledger = dao.load_medical_review_ledger(case_id)
     item = next(
@@ -550,3 +649,12 @@ def test_old_resolved_adjudication_does_not_block_later_cancelled_cycle_close(
     assert item["state"] == "closed"
     assert item["current_request_id"] is None
     assert medical_review_ledger.validate_ledger_semantics(ledger, case_id) == []
+    outcomes = medical_review_ledger.build_downstream_review_outcomes(dao, case_id)
+    projected = next(
+        row for row in outcomes["review_items"]
+        if row["review_item_id"] == "MRI_0001"
+    )
+    assert projected["state"] == "closed"
+    assert projected["decision"] is None
+    assert projected["response"] is None
+    assert projected["adjudication"] is None

@@ -90,7 +90,18 @@ def semantic_inputs() -> tuple[dict, dict, dict]:
             "text": "Synthetic finding documented.",
         }],
     }
-    return manifest, page_chunks, {"case_id": "CASE_9001", "conflicts": []}
+    return manifest, page_chunks, {
+        "ledger_version": "conflict_ledger.v0.3",
+        "case_id": "CASE_9001",
+        "conflicts": [],
+        "history_boundary": {
+            "mode": "native",
+            "established_at": "2026-07-23T00:00:00+09:00",
+            "baseline_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "baseline_state": [],
+        },
+        "operations": [],
+    }
 
 
 def enabled_config() -> dict:

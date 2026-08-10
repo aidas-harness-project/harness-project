@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-from dao import case_dir, load_run_state
+from dao import case_dir, validated_run_state
 from fork_case import next_free_case_id, copy_outputs_and_rewrite_case_id, copy_data_tree, check_no_active_locks
 from llm_providers import ProviderConfigError, ProviderExecutionError, SUPPORTED_PROVIDERS
 from ocr_extract import build_ocr_providers
@@ -125,7 +125,7 @@ def run_matrix(
         fork_id = _fork_for_scenario(case_id, scenario)
         if scenario == "unresolved":
             manifest = json.loads((case_dir(fork_id) / "document_manifest.json").read_text(encoding="utf-8"))
-            state = load_run_state(fork_id)
+            state = validated_run_state(fork_id)
             results[scenario] = {
                 "fork_case_id": fork_id, "status": "left_unresolved",
                 "document_manifest_ocr_status": manifest["documents"][0]["ocr_status"],

@@ -7,6 +7,35 @@ import { STATIC_CASES } from "./staticCaseData";
 // Promise so no component needs to know which mode it's in.
 const STATIC_MODE = import.meta.env.VITE_STATIC_MODE === "true";
 const BASE = "http://127.0.0.1:8000";
+const MEDICAL_TOKEN_KEY = "aidas.medicalOperatorToken";
+
+function medicalToken() {
+  return globalThis.sessionStorage?.getItem(MEDICAL_TOKEN_KEY) || "";
+}
+
+function setMedicalToken(token) {
+  const value = token.trim();
+  if (value) globalThis.sessionStorage?.setItem(MEDICAL_TOKEN_KEY, value);
+  else globalThis.sessionStorage?.removeItem(MEDICAL_TOKEN_KEY);
+}
+
+async function medicalRequest(path, { method = "GET", body } = {}) {
+  const token = medicalToken();
+  if (!token) throw new Error("Enter an authenticated medical operator token.");
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(errBody.detail || `${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
 
 async function get(path) {
   const res = await fetch(`${BASE}${path}`);
@@ -31,6 +60,8 @@ async function post(path, { body, isForm } = {}) {
 }
 
 const liveApi = {
+  medicalWorkspaceAvailable: true,
+  mutationsAvailable: true,
   listCases: () => get("/api/cases"),
   runState: (caseId) => get(`/api/cases/${caseId}/run-state`),
   ledgers: (caseId) => get(`/api/cases/${caseId}/ledgers`),
@@ -45,10 +76,10 @@ const liveApi = {
   runCase: (caseId) => post(`/api/cases/${caseId}/run`),
   runStatus: (caseId) => get(`/api/cases/${caseId}/run-status`),
 
-  setLedgerStatus: (caseId, fileName, status, reviewer, reason) =>
-    post(`/api/cases/${caseId}/ledger/status`, { body: { file_name: fileName, status, reviewer, reason } }),
-  setConflictVerdict: (caseId, conflictId, verdict, note) =>
-    post(`/api/cases/${caseId}/conflicts/${conflictId}/verdict`, { body: { verdict, note } }),
+  setLedgerStatus: (caseId, fileName, status, reviewer, reason, operationId) =>
+    post(`/api/cases/${caseId}/ledger/status`, { body: { file_name: fileName, status, reviewer, reason, operation_id: operationId } }),
+  setConflictVerdict: (caseId, conflictId, verdict, note, operationId) =>
+    post(`/api/cases/${caseId}/conflicts/${conflictId}/verdict`, { body: { verdict, note, operation_id: operationId } }),
 
   // In-UI review of the actual object under decision + P8/D1 human gates.
   sourceFileUrl: (caseId, fileName) =>
@@ -61,13 +92,38 @@ const liveApi = {
   humanReview: (caseId) => get(`/api/cases/${caseId}/human-review`),
   markHumanReviewComplete: (caseId, version, reviewer) =>
     post(`/api/cases/${caseId}/human-review-complete`, { body: { version, reviewer } }),
+
+  hasMedicalToken: () => Boolean(medicalToken()),
+  setMedicalToken,
+  medicalVariables: (caseId, revisionSha) => medicalRequest(
+    `/api/cases/${caseId}/medical-variables${
+      revisionSha ? `?revision_sha=${encodeURIComponent(revisionSha)}` : ""
+    }`,
+  ),
+  medicalReviews: (caseId) => medicalRequest(`/api/cases/${caseId}/medical-reviews`),
+  medicalReviewAction: (caseId, reviewItemId, action, body, operationId) => medicalRequest(
+    `/api/cases/${caseId}/medical-reviews/${reviewItemId}/actions/${action}`,
+    { method: "POST", body: { ...body, operation_id: operationId } },
+  ),
+  medicalEvidence: (
+    caseId, reviewItemId, requestId, requestVersion, locatorId,
+  ) => medicalRequest(
+    `/api/cases/${caseId}/medical-reviews/${reviewItemId}`
+      + `/requests/${requestId}/versions/${requestVersion}/evidence/${locatorId}`,
+  ),
 };
 
 function notFound(name) {
   return Promise.reject(new Error(`${name} not in the static snapshot`));
 }
 
+function rejectStaticMutation() {
+  return Promise.reject(new Error("read-only snapshot -- not connected to a live case"));
+}
+
 const staticApi = {
+  medicalWorkspaceAvailable: false,
+  mutationsAvailable: false,
   listCases: () => Promise.resolve(Object.keys(STATIC_CASES)),
   runState: (caseId) => Promise.resolve(STATIC_CASES[caseId]?.runState),
   ledgers: (caseId) => Promise.resolve(STATIC_CASES[caseId]?.ledgers),
@@ -76,19 +132,24 @@ const staticApi = {
   report: (caseId, name) =>
     STATIC_CASES[caseId]?.reports[name] ? Promise.resolve(STATIC_CASES[caseId].reports[name]) : notFound(name),
 
-  // Audit-write and run-launch actions are inert in static mode -- this
-  // build has no backend to actually call. Resolve harmlessly rather than
-  // erroring, since the buttons are still visible in the snapshot.
-  uploadDocuments: () => Promise.resolve({ files: [] }),
-  runCase: () => Promise.resolve({ status: "unavailable" }),
+  // Static snapshots are read-only: every mutation rejects and the
+  // corresponding controls are omitted from the rendered application.
+  uploadDocuments: rejectStaticMutation,
+  runCase: rejectStaticMutation,
   runStatus: () => Promise.resolve({ status: "unavailable" }),
-  setLedgerStatus: () => Promise.reject(new Error("read-only snapshot -- not connected to a live case")),
-  setConflictVerdict: () => Promise.reject(new Error("read-only snapshot -- not connected to a live case")),
+  setLedgerStatus: rejectStaticMutation,
+  setConflictVerdict: rejectStaticMutation,
   sourceFileUrl: () => null,
   ocrReview: () => Promise.resolve({ documents: [] }),
-  ocrResolve: () => Promise.reject(new Error("read-only snapshot -- not connected to a live case")),
+  ocrResolve: rejectStaticMutation,
   humanReview: () => Promise.resolve({}),
-  markHumanReviewComplete: () => Promise.reject(new Error("read-only snapshot -- not connected to a live case")),
+  markHumanReviewComplete: rejectStaticMutation,
+  hasMedicalToken: () => false,
+  setMedicalToken: () => {},
+  medicalVariables: () => notFound("medical variables"),
+  medicalReviews: () => notFound("medical reviews"),
+  medicalReviewAction: rejectStaticMutation,
+  medicalEvidence: () => notFound("medical evidence"),
 };
 
 export const api = STATIC_MODE ? staticApi : liveApi;

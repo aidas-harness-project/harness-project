@@ -137,6 +137,78 @@ def test_sync_agents_escapes_triple_quotes_in_body(isolated_sync):
     assert toml_text.count('developer_instructions = """') == 1
 
 
+def test_medically_relevant_downstream_agents_consume_review_outcomes():
+    expected_stages = {
+        "screening-report": ("screening_report",),
+        "denial-validation": ("denial_validation",),
+        "draft-report": ("draft_report_v1", "draft_report_v2"),
+    }
+    for agent_name, stages in expected_stages.items():
+        instructions = (
+            sa.ROOT / ".claude" / "agents" / f"{agent_name}.md"
+        ).read_text(encoding="utf-8")
+        assert "check-medical-reviews-clear" in instructions, agent_name
+        assert "read-medical-review-outcomes" in instructions, agent_name
+        for stage in stages:
+            assert f"--caller-stage {stage}" in instructions, (agent_name, stage)
+        for provenance_field in (
+            "attribution",
+            "interpretation",
+            "uncertainty",
+            "alternatives",
+            "downstream-adjustment advice",
+        ):
+            assert provenance_field in instructions, (agent_name, provenance_field)
+
+
+def test_local_harness_is_fail_closed_and_ground_truth_blind():
+    guardrails = (
+        sa.ROOT / ".claude" / "skills" / "harness-guardrails" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    dev_guardrails = (
+        sa.ROOT / ".claude" / "skills" / "harness-guardrails-dev" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    evaluation_agent = (
+        sa.ROOT / ".claude" / "agents" / "evaluation.md"
+    ).read_text(encoding="utf-8")
+    pipeline_skill = (
+        sa.ROOT / ".claude" / "skills" / "loss-adjustment-pipeline" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    document_agent = (
+        sa.ROOT / ".claude" / "agents" / "document-pipeline.md"
+    ).read_text(encoding="utf-8")
+    critic_agent = (
+        sa.ROOT / ".claude" / "agents" / "critic.md"
+    ).read_text(encoding="utf-8")
+    claim_agent = (
+        sa.ROOT / ".claude" / "agents" / "claim-analysis.md"
+    ).read_text(encoding="utf-8")
+    settings = (sa.ROOT / ".claude" / "settings.json").read_text(encoding="utf-8")
+    readme = (sa.ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "ignore-and-proceed" not in guardrails
+    assert "abandon-run" in guardrails
+    assert "## P11. Medical review is a structural human gate" in guardrails
+    assert "No agent or tool in the local Units 1–7 harness reads" in dev_guardrails
+    assert "deferred to an isolated Unit 11 service" in dev_guardrails
+    assert "Deferred Evaluation placeholder" in evaluation_agent
+    assert "Do not inspect case data, ground truth, run state" in evaluation_agent
+    assert "BLOCKED: Evaluation is unavailable" in evaluation_agent
+    assert "ignore-and-proceed" not in pipeline_skill
+    assert "ignore-and-proceed" not in document_agent
+    assert "Evaluation remains unavailable" in pipeline_skill
+    assert "sole) permission to open ground truth" not in critic_agent
+    assert "isolated Unit 11" in critic_agent
+    assert "write-medical-variables" in claim_agent
+    assert "check-medical-reviews-clear" in claim_agent
+    assert "snapshot-backup" in claim_agent
+    assert "`.lock` present" not in pipeline_skill
+    assert "check-lock" in pipeline_skill
+    assert "No local Evaluation stage or read-ground-truth command is authorized" in settings
+    assert '"allow"' not in settings
+    assert '"Run CASE_003 evaluation"    -> denied locally' in readme
+
+
 def test_sync_agents_processes_every_md_file_in_the_directory(isolated_sync):
     for i in range(3):
         (isolated_sync.claude_agents / f"agent-{i}.md").write_text(

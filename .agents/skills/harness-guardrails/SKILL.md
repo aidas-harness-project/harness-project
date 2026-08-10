@@ -33,17 +33,17 @@ A stage whose output fails schema validation gets exactly one self-correction at
 
 On halt, the orchestrator alerts the user with the validation errors and the failing output, and asks the user to pick one:
 
-- **ignore-and-proceed** — pass the output downstream as-is, unvalidated, with a `warnings` entry noting it was force-passed
 - **retry-N-times** — user specifies N, the agent retries up to N additional attempts before halting again
 - **fix-manually** — user edits the output directly; the orchestrator re-runs validation on the edited file before resuming
+- **abandon-run** — leave the run halted and do not publish or pass the invalid output downstream
 
-The pipeline does not pick one of these on its own — it's a human decision every time.
+The pipeline does not pick one of these on its own — it's a human decision every time. Retry or manual correction resumes only after the replacement output validates successfully; no option authorizes unvalidated propagation.
 
 ## P5. Shared-file editing requires an exclusive lock
 
-Every write path in `tools/dao.py` (`write-contract`, `write-page-text`, `write-redacted-text`, `write-text`, `write-reviewed-draft`, `patch-manifest-document`, `add-conflict-entry`, `set-conflict-verdict`, `update-run-state`, `set-human-input-status`, `snapshot-backup`, `set-ledger-status`) creates a sidecar lock file — `<filename>.lock` — before making any edit, and deletes it immediately after the edit is complete. The lock is acquired with an atomic `O_EXCL` create, so two racing callers cannot both acquire a free lock. This is structural, not something an agent has to remember to do itself — an agent never writes to a shared file by any path other than these DAO subcommands.
+Every write path in `tools/dao.py` (`write-contract`, `write-page-text`, `write-redacted-text`, `write-text`, `write-reviewed-draft`, `patch-manifest-document`, `add-conflict-entry`, `set-conflict-verdict`, `update-run-state`, `set-human-input-status`, `snapshot-backup`, `set-ledger-status`) acquires two kernel-owned resources before making any edit: a Linux abstract UNIX-domain ownership token keyed by the logical lock coordinate, and an exclusive advisory lock on a persistent `<filename>.lock` sidecar inode. The abstract token is the non-replaceable serialization authority: unlinking or replacing the sidecar pathname cannot create a second owner. Each successfully bound token enters a fork-guarded active-token registry before `_try_kernel_lock` hands it to generic, run-owner, or descriptor-anchored acquisition; child at-fork cleanup therefore closes even a token whose later file-lock handle has not yet been registered. The sidecar remains after ordinary release as human-readable diagnostics and compatibility state; pathname presence alone never means a lock is held. Generic nested writes bind the sidecar and payload to the same no-follow parent descriptor. Release is descriptor/token-owned, never unlinks a pathname, and generic path-based release is scoped to the acquiring PID and thread. Forked children discard inherited duplicates without issuing `LOCK_UN`, so they cannot release or retain a parent's live ownership. This is structural, not something an agent has to remember to do itself — an agent never writes to a shared file by any path other than these DAO subcommands.
 
-Lock file contents (required):
+Lock metadata while the abstract ownership token and sidecar advisory lock are held (required; stale bytes in an unlocked persistent inode are not ownership):
 
 ```json
 {
@@ -56,7 +56,9 @@ Lock file contents (required):
 
 **Mid-run conflict handling:** if a DAO write subcommand finds a lock already held, it does not fail immediately. It sleeps 30 seconds, then rechecks. Repeats on a fixed 30-second interval (no exponential backoff) up to 15 minutes total, *inside the same CLI call* — the calling agent doesn't implement this loop itself, it just waits for the one call to return. For the DAO's own read-modify-write subcommands (`add-conflict-entry`, `set-conflict-verdict`, `update-run-state`, `set-ledger-status`), the lock is held across the *entire* read+modify+write, not just the final write, so the read those calls act on is always fresh once the lock clears — nothing else could have written to that file while this call was waiting. `write-contract` is the one caller-driven exception: the data it writes was already assembled by the calling agent *before* the call (via an earlier, separate `read-contract`), so waiting for the lock here prevents write/write corruption but does not by itself guarantee the agent's read was fresh — an agent updating a shared multi-writer file (e.g. `document_manifest.json`) is still responsible for re-reading right before building what it hands to `write-contract`. If 15 minutes pass with the lock still held, the call gives up and reports the lock's full contents; the calling agent halts and waits for explicit human confirmation before proceeding.
 
-**Run-start/resume conflict handling (deliberately different from mid-run):** if the orchestrator finds a lock file already present when a run starts or resumes, it does not poll and does not assume the lock is stale — a lock present at that point means the previous run ended abnormally. It halts immediately, reports the lock's full contents, and waits for human confirmation before anything touches that file.
+`set-ledger-status`, `add-conflict-entry`, `set-conflict-verdict`, and every mutating medical-review lifecycle command require a caller-generated `--operation-id`. Preserve that exact ID across retries after an unknown transport outcome; a new operation gets a new ID. The live API and UI must transport and retain the same ID rather than relying on a DAO fallback.
+
+**Run-start/resume conflict handling (deliberately different from mid-run):** the orchestrator asks the DAO whether the logical kernel ownership token or compatible sidecar advisory lock is actually held. If held when a run starts or resumes, it does not poll or infer staleness; it halts immediately, reports the held lock metadata, and waits for human confirmation before anything touches that file. An unlocked persistent sidecar does not block resume.
 
 Holding the lock means owning the entire file for that edit — nothing else may write, even to unrelated fields.
 
@@ -97,3 +99,17 @@ Every run maintains a persistent run-state file (`outputs/CASE_XXX/_run_state.js
 After every stage passes validation, the orchestrator takes a full cumulative snapshot of all outputs produced so far — not just that stage's own delta — and retains it as a dedicated backup for that step (e.g. `outputs/CASE_XXX/_backups/step_<N>_<stage>/`). One snapshot per passed step, kept for the life of the run — never overwritten or rolled off. If a later stage crashes or produces contaminated output, restart reverts to the most recent intact step's snapshot instead of trying to salvage or reason about a half-corrupted state.
 
 Small, cheap cost per step against a much more expensive failure: a pipeline crashing near the end and leaving the entire case's output contaminated with no clean point to resume from.
+
+## P11. Medical review is a structural human gate, not a medical verdict
+
+A medical referral requests narrow human interpretation. It is never a finding that care, diagnosis, causation, disability, coverage, denial, reduction, or final disposition is correct or incorrect. A/B/C contextual importance, anomaly severity, convergence, or anomaly count cannot authorize referral by itself. A request requires the approved decision route, mandatory source reinspection, one focused issue/question, a valid package, balanced supporting and countervailing evidence, and a closed evidence-locator set. OCR disagreement remains P8, schema failure remains P4, and contradictory case-source facts remain P6; none may be relabeled as medical uncertainty to bypass its own gate. Ground truth and final reports remain forbidden request inputs under D1.
+
+All review-item creation, decisions, assignments, responses, amendments, withdrawals, cancellations, adjudications, closures, wait reconciliation, and lifecycle reads go through the medical-review DAO commands. The canonical clear/block check is:
+
+```bash
+python tools/dao.py check-medical-reviews-clear CASE_ID
+```
+
+Medical-review gating becomes applicable to a run as soon as claim analysis successfully publishes the canonical medical-variable revision. From then on, the command must exit successfully before `claim_analysis` may be marked `passed` or snapshotted, and the orchestrator must run it again immediately before dispatching every downstream stage. A nonzero result halts the run. A missing, unreadable, schema-invalid, or semantically invalid `_medical_review_ledger.json` is **not** an empty/clear ledger and fails closed. A stale or missing run-state wait projection cannot create clearance because this command reads the canonical ledger directly.
+
+The schemas, ledger/state machine, CLI contract, and gate are harness capabilities, not permission to operate a real medical-review program. Disabled medical-structuring, referral-policy, request-vocabulary, or role-policy configuration remains disabled until its named medical/workflow/privacy approver activates a versioned policy. Do not create stand-in actors, thresholds, specialties, request codes, ledgers, or responses to make the gate pass. Pre-adoption legacy runs remain explicitly legacy and cannot be silently treated as medically screened or backfilled; their migration policy is still deferred.

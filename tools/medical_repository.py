@@ -107,7 +107,7 @@ def _load_dependencies(dao, case_id: str) -> tuple[dict | None, ...]:
     return (
         dao.load_json(directory / "document_manifest.json"),
         dao.load_json(directory / "page_chunks.json"),
-        dao.load_json(directory / "_conflict_ledger.json"),
+        dao.validated_conflict_ledger(case_id),
         dao.load_json(directory / "case_type_result.json"),
     )
 
@@ -124,6 +124,68 @@ def _load_candidate(dao, args) -> dict:
 
 
 def publish(dao, args) -> int:
+    """Fence publication to the canonical run owner, then publish atomically."""
+    state_target = dao.run_state_path(args.case_id)
+    owned_lock, existing_lock = dao.acquire_owned_lock_blocking(
+        state_target,
+        args.held_by,
+        args.run_id,
+        "authorize canonical medical publication run owner",
+    )
+    if existing_lock is not None:
+        print(
+            f"LOCKED: held_by={existing_lock['held_by']} "
+            f"run_id={existing_lock['run_id']}"
+        )
+        return 1
+    assert owned_lock is not None
+    try:
+        try:
+            state = dao.validated_run_state(
+                args.case_id, allow_missing=True
+            )
+        except ValueError as exc:
+            print(f"BLOCKED: {exc}")
+            return 1
+        owner = state.get("run_id")
+        current_target = medical_variables_path(dao, args.case_id)
+        if current_target.exists() or current_target.is_symlink():
+            variables, error = load_revision(dao, args.case_id, None)
+            if (
+                error
+                or variables is None
+                or variables.get("run_id") != args.run_id
+            ):
+                print(
+                    "BLOCKED: medical publication does not match the "
+                    "canonical revision run owner"
+                )
+                return 1
+        if owner not in {None, args.run_id}:
+            print("BLOCKED: medical publication does not match the canonical run owner")
+            return 1
+        state["run_id"] = args.run_id
+        # Persist applicability before the publication commit point. A crash
+        # after the medical pointer is published can therefore never make P11
+        # disappear by leaving an old run state behind.
+        state["medical_review_adopted"] = True
+        errors = dao._schema_check(state, "run_state.schema.json")
+        if errors:
+            print("FAIL: canonical medical-adoption state is invalid")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
+        try:
+            dao.save_run_state(args.case_id, state)
+        except OSError as exc:
+            print(f"FAIL: cannot establish canonical medical adoption: {exc}")
+            return 1
+        return _publish_owned(dao, args)
+    finally:
+        dao.release_owned_lock(owned_lock)
+
+
+def _publish_owned(dao, args) -> int:
     """Validate and publish current, revision, projection, and initial ledger."""
     import medical_review_ledger as ledger_owner
 
@@ -181,9 +243,16 @@ def publish(dao, args) -> int:
             print("FAIL: candidate run_id does not match --run-id")
             return 1
 
-        manifest, page_chunks, conflict_ledger, case_type_result = (
-            _load_dependencies(dao, args.case_id)
-        )
+        try:
+            dao.ensure_conflict_ledger(
+                args.case_id, args.held_by, args.run_id
+            )
+            manifest, page_chunks, conflict_ledger, case_type_result = (
+                _load_dependencies(dao, args.case_id)
+            )
+        except ValueError as exc:
+            print(f"FAIL: canonical conflict ledger is invalid: {exc}")
+            return 1
         if any(
             dependency is None
             for dependency in (
@@ -517,8 +586,20 @@ def load_projection(dao, case_id: str) -> tuple[dict | None, str | None]:
             "medical compatibility projection failed schema validation: "
             + "; ".join(errors),
         )
-    if data["projection_mode"] != "canonical_medical_projection":
-        return None, "legacy pre-medical projection is not a canonical medical input"
+    projection_mode = data.get("projection_mode")
+    if projection_mode is None:
+        return None, "medical compatibility projection must declare projection_mode"
+    if projection_mode == "legacy_pre_medical":
+        authority_paths = (
+            medical_variables_path(dao, case_id),
+            dao.case_dir(case_id) / "_medical_review_ledger.json",
+            revisions_dir(dao, case_id),
+        )
+        if any(path.exists() or path.is_symlink() for path in authority_paths):
+            return None, "legacy pre-medical projection is invalid for a post-adoption case"
+        return data, None
+    if projection_mode != "canonical_medical_projection":
+        return None, "unknown medical compatibility projection_mode"
     variables, error = load_revision(dao, case_id, None)
     if error or variables is None:
         return None, error or "canonical medical variables are unavailable"

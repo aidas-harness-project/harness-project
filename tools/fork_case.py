@@ -26,14 +26,17 @@ What gets copied, by default:
                                     corrupt anything)
     data/processed/{source}/    -> data/processed/{new}/      (always)
     data/raw/{source}/          -> data/raw/{new}/            (only --include-raw)
-    data/ground_truth/{source}/ -> data/ground_truth/{new}/   (only
-                                    --include-ground-truth -- copies real
-                                    answer-key material; prints a loud
-                                    warning when used, see D1)
 
-_backups/ and *.lock files are never copied -- a stale lock in a fresh
-branch would incorrectly look like an in-progress write, and a fork starts
-its own backup history rather than inheriting the source's.
+Ground truth is never scanned or copied. Evaluation belongs to the deferred
+isolated Unit 11 service, not this local Units 1-7 utility.
+
+Content-addressed medical revisions are not rebased by this legacy utility.
+If canonical medical artifacts exist, the fork fails closed before copying;
+use a future purpose-built medical lineage operation instead.
+
+_backups/ and *.lock files are never copied -- persistent lock inodes are
+source-local coordination state, and a fork starts its own backup history
+rather than inheriting the source's.
 
 The forked _source_ledger.json keeps the source case's approved/rejected
 statuses as-is -- it's a copy of already-reviewed content, not new raw
@@ -43,11 +46,11 @@ D2 approvals did NOT come from an independent human review of that specific
 case_id -- _fork_record.json exists specifically so nobody mistakes a fork
 for a freshly-reviewed case.
 
-Refuses to fork if any *.lock file is present anywhere under the source
-root being copied -- a lock present means a write may be in progress or was
-interrupted; forking possibly-half-written state would just propagate the
-problem into the branch (same "don't poll, don't assume stale" discipline
-P5 uses for a lock found at run start).
+Refuses to fork if any persistent *.lock file under the source is kernel-held
+or unsafe. Unlocked persistent lock inodes are expected and are never copied.
+Forking possibly-half-written state would just propagate the problem into the
+branch (same "don't poll, don't assume stale" discipline P5 uses for a lock
+found at run start).
 
 Known limitation, documented rather than silently assumed away: case_id
 auto-assignment (scan existing CASE_NNN dirs, use the next number) has a
@@ -58,7 +61,7 @@ concurrent multi-actor use.
 Usage:
     python tools/fork_case.py SOURCE_CASE_ID --label "..." --held-by NAME --run-id RUN_ID
     python tools/fork_case.py SOURCE_CASE_ID --from-step 3 --label "..." --held-by NAME --run-id RUN_ID
-    python tools/fork_case.py SOURCE_CASE_ID --include-raw --include-ground-truth --label "..." --held-by NAME --run-id RUN_ID
+    python tools/fork_case.py SOURCE_CASE_ID --include-raw --label "..." --held-by NAME --run-id RUN_ID
 """
 import argparse
 import json
@@ -69,7 +72,8 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-from dao import case_dir, atomic_write_json, now_iso, OUTPUTS, DATA
+import dao
+from dao import case_dir, atomic_write_json, now_iso, read_lock, OUTPUTS, DATA
 from _validation import load_registry, validate_instance, schema_name_for
 
 CASE_ID_DIR_RE = re.compile(r"^CASE_(\d+)$")
@@ -82,7 +86,7 @@ def next_free_case_id() -> str:
     CASE_SMOKE) are ignored -- they predate or fall outside the
     ^CASE_[0-9]+$ schema pattern and aren't part of this numbering."""
     max_n = 0
-    for root in (OUTPUTS, DATA / "raw", DATA / "processed", DATA / "ground_truth"):
+    for root in (OUTPUTS, DATA / "raw", DATA / "processed"):
         if not root.exists():
             continue
         for d in root.iterdir():
@@ -112,14 +116,29 @@ def resolve_source_root(source_case_id: str, from_step: int | None) -> Path:
 
 def check_no_active_locks(source_root: Path) -> None:
     locks = list(source_root.rglob("*.lock"))
-    if locks:
-        sys.exit(f"error: refusing to fork -- {len(locks)} lock file(s) present under {source_root}, "
-                  f"a write may be in progress or was interrupted: {[str(p) for p in locks]}")
+    active = [
+        path
+        for path in locks
+        if read_lock(path.with_name(path.name.removesuffix(".lock"))) is not None
+    ]
+    if active:
+        sys.exit(f"error: refusing to fork -- {len(active)} active or unsafe lock(s) under {source_root}, "
+                  f"a write may be in progress: {[str(p) for p in active]}")
 
 
 def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str) -> list[str]:
     """Returns the list of validation warnings (empty if everything that has
     a schema still validates after the case_id rewrite)."""
+    medical_artifacts = [
+        source_root / "medical_variables.json",
+        source_root / "_medical_review_ledger.json",
+        source_root / "_medical_variable_revisions",
+    ]
+    if any(path.exists() or path.is_symlink() for path in medical_artifacts):
+        raise ValueError(
+            "forking adopted medical state is unavailable: content-addressed "
+            "medical revision lineage cannot be generically rewritten"
+        )
     dest = case_dir(new_case_id)
     for item in source_root.iterdir():
         if item.name == "_backups" or item.name.endswith(".lock"):
@@ -127,7 +146,12 @@ def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str) -> lis
         if item.is_file():
             shutil.copy2(item, dest / item.name)
         elif item.is_dir():
-            shutil.copytree(item, dest / item.name, dirs_exist_ok=True)
+            shutil.copytree(
+                item,
+                dest / item.name,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("*.lock"),
+            )
 
     schemas, registry = load_registry()
     warnings = []
@@ -137,6 +161,45 @@ def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str) -> lis
         except json.JSONDecodeError:
             continue
         if isinstance(data, dict) and "case_id" in data:
+            source_case_id = data["case_id"]
+            if json_path.name == "_run_state.json":
+                data = dao._normalize_legacy_run_state(source_case_id, data)
+            elif json_path.name == "_source_ledger.json":
+                data = dao._normalize_legacy_generic_ledger(
+                    data,
+                    version="source_ledger.v0.4",
+                    state_key="files",
+                    schema_name="source_ledger.schema.json",
+                    predecessor_versions={"source_ledger.v0.3"},
+                )
+                dao._validate_generic_ledger(
+                    data, source_case_id, "source_ledger.schema.json"
+                )
+                data["history_boundary"] = dao.make_history_boundary(
+                    data["files"],
+                    mode="legacy_snapshot",
+                    forked_operations=data["operations"],
+                )
+                data["operations"] = []
+            elif json_path.name == "_conflict_ledger.json":
+                data = dao._normalize_legacy_generic_ledger(
+                    data,
+                    version="conflict_ledger.v0.3",
+                    state_key="conflicts",
+                    schema_name="conflict_ledger.schema.json",
+                    predecessor_versions={"conflict_ledger.v0.2"},
+                )
+                dao._validate_generic_ledger(
+                    data, source_case_id, "conflict_ledger.schema.json"
+                )
+                data["history_boundary"] = dao.make_history_boundary(
+                    data["conflicts"],
+                    mode="legacy_snapshot",
+                    forked_operations=data["operations"],
+                )
+                data["operations"] = []
+            if json_path.name == "_run_state.json":
+                data["medical_review_wait_reconciliation_operations"] = []
             data["case_id"] = new_case_id
             atomic_write_json(json_path, data)
             schema_name = schema_name_for(json_path)
@@ -149,6 +212,8 @@ def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str) -> lis
 
 
 def copy_data_tree(subdir_name: str, source_case_id: str, new_case_id: str) -> Path | None:
+    if subdir_name not in {"processed", "raw"}:
+        raise ValueError(f"unsupported fork data namespace: {subdir_name!r}")
     src = DATA / subdir_name / source_case_id
     if not src.exists():
         return None
@@ -170,8 +235,6 @@ def main():
     ap.add_argument("--from-step", type=int, help="Fork from a specific P10 backup step instead of current state")
     ap.add_argument("--label", required=True, help="Human-readable description of what this branch is testing")
     ap.add_argument("--include-raw", action="store_true")
-    ap.add_argument("--include-ground-truth", action="store_true",
-                     help="Copies real answer-key material into the new case_id -- use deliberately, not by default")
     ap.add_argument("--held-by", required=True)
     ap.add_argument("--run-id", required=True)
     args = ap.parse_args()
@@ -188,17 +251,13 @@ def main():
         sys.exit(f"error: {dest} already exists and isn't empty -- refusing to fork into it. "
                   f"(TOCTOU race with a concurrent fork? re-run.)")
 
-    warnings = copy_outputs_and_rewrite_case_id(source_root, new_case_id)
+    try:
+        warnings = copy_outputs_and_rewrite_case_id(source_root, new_case_id)
+    except ValueError as exc:
+        sys.exit(f"error: {exc}")
 
     copy_data_tree("processed", args.source_case_id, new_case_id)
     raw_copied = args.include_raw and copy_data_tree("raw", args.source_case_id, new_case_id) is not None
-    gt_copied = False
-    if args.include_ground_truth:
-        gt_copied = copy_data_tree("ground_truth", args.source_case_id, new_case_id) is not None
-        if gt_copied:
-            print(f"WARNING: copied data/ground_truth/{args.source_case_id}/ -> data/ground_truth/{new_case_id}/ "
-                  f"-- real answer-key material now exists under a second case_id. D1 still applies: "
-                  f"only the evaluation stage may ever read it, only after human review is confirmed complete.")
 
     fork_record = {
         "new_case_id": new_case_id,
@@ -207,7 +266,7 @@ def main():
         "forked_at": now_iso(),
         "label": args.label,
         "included_raw": raw_copied,
-        "included_ground_truth": gt_copied,
+        "included_ground_truth": False,
         "ledger_carried_forward": True,
         "held_by": args.held_by,
         "run_id": args.run_id,
@@ -220,7 +279,7 @@ def main():
     print(f"  outputs/: copied, case_id fields rewritten")
     print(f"  data/processed/: copied")
     print(f"  data/raw/: {'copied' if raw_copied else 'not copied (pass --include-raw)'}")
-    print(f"  data/ground_truth/: {'copied' if gt_copied else 'not copied (pass --include-ground-truth)'}")
+    print("  data/ground_truth/: unavailable to the local fork utility")
     if warnings:
         print(f"  WARNING: {len(warnings)} file(s) failed schema validation after the case_id rewrite:")
         for w in warnings:

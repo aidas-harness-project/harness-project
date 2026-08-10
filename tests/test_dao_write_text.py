@@ -29,7 +29,7 @@ def test_write_text_writes_arbitrary_filename_and_releases_lock(isolated_dao, ma
     target = isolated_dao / "outputs" / "CASE_009" / "some_freeform_note.md"
     assert rc == 0
     assert target.read_text(encoding="utf-8").startswith("## Annotated draft")
-    assert not target.with_name(target.name + ".lock").exists()
+    assert dao.read_lock(target) is None
 
 
 def test_write_text_rejects_ancestor_swap_into_medical_revision_namespace(

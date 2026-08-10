@@ -92,6 +92,14 @@ def _terminal_ledger(case_id: str, candidate: dict, sha: str) -> dict:
             "reason": None,
             "medical_variables_revision": _revision(sha, candidate),
             "created_at": timestamp,
+            "operation_id": "medical:test-open-0001",
+            "operation_request_sha256": "0" * 64,
+            "operation_result": {
+                "action": "open",
+                "review_item_id": "MRI_0001",
+                "state": "decision_pending",
+                "decision_id": None,
+            },
         },
         {
             "event_id": "MRE_000002",
@@ -104,6 +112,14 @@ def _terminal_ledger(case_id: str, candidate: dict, sha: str) -> dict:
             "reason": "Synthetic terminal routing state; no clinical judgment.",
             "medical_variables_revision": _revision(sha, candidate),
             "created_at": timestamp,
+            "operation_id": "medical:test-cancel-0001",
+            "operation_request_sha256": "1" * 64,
+            "operation_result": {
+                "action": "cancel",
+                "review_item_id": "MRI_0001",
+                "state": "cancelled",
+                "decision_id": None,
+            },
         },
     ]
     ledger["wait_episodes"] = [{

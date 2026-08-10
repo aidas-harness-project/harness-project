@@ -51,7 +51,11 @@ def make_args():
     """
     from types import SimpleNamespace
 
+    operation_sequence = 0
+
     def _make(**overrides):
+        nonlocal operation_sequence
+        operation_sequence += 1
         defaults = dict(
             case_id="CASE_009", doc_id="DOC_001", run_id="RUN_20260712_001",
             held_by="test-agent", purpose=None, stage=None,
@@ -60,6 +64,7 @@ def make_args():
             reviewer=None, reason=None, doc_path=None,
             topic=None, sources_file=None, conflict_id=None, verdict=None, note=None,
             caller_stage=None, description=None, version=None, fields_file=None,
+            operation_id=f"test-operation-{operation_sequence:08d}",
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)

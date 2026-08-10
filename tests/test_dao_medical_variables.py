@@ -5,11 +5,24 @@ import os
 from pathlib import Path
 
 import dao
+import medical_repository
 import medical_review_ledger
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / "tests" / "fixtures" / "medical" / "minimal_variables.json"
+
+
+def _legacy_projection(case_id: str, mode: str | None) -> dict:
+    projection = {
+        "case_id": case_id,
+        "component": "claim-analysis",
+        "status": "success",
+        "fields": {},
+    }
+    if mode is not None:
+        projection["projection_mode"] = mode
+    return projection
 
 
 def _write_dependencies(case_dir: Path) -> None:
@@ -41,8 +54,11 @@ def _write_dependencies(case_dir: Path) -> None:
         }],
     })
     dao.atomic_write_json(case_dir / "_conflict_ledger.json", {
+        "ledger_version": "conflict_ledger.v0.3",
         "case_id": "CASE_9001",
         "conflicts": [],
+        "history_boundary": dao.make_history_boundary([], mode="native"),
+        "operations": [],
     })
     dao.atomic_write_json(case_dir / "case_type_result.json", {
         "case_id": "CASE_9001",
@@ -764,7 +780,6 @@ def test_interrupted_projection_publication_fails_closed_and_retry_recovers(
 @pytest.mark.parametrize(
     "replacement",
     [
-        None,
         {"case_id": "OTHER", "conflicts": []},
         {"case_id": "CASE_9001", "conflicts": "not-an-array"},
     ],
@@ -798,6 +813,47 @@ def test_publication_requires_valid_canonical_conflict_ledger(
 
     assert result == 1
     assert not dao.medical_variables_path("CASE_9001").exists()
+
+
+def test_publication_initializes_missing_zero_conflict_ledger_under_dao_control(
+    isolated_dao, tmp_path, monkeypatch, make_args
+):
+    case_dir = dao.case_dir("CASE_9001")
+    _write_dependencies(case_dir)
+    (case_dir / "_conflict_ledger.json").unlink()
+    monkeypatch.setattr(
+        dao, "MEDICAL_STRUCTURING_CONFIG", _enabled_config(tmp_path), raising=False
+    )
+    monkeypatch.setattr(
+        dao, "MEDICAL_PROJECTION_CONFIG", _enabled_projection_config(tmp_path),
+        raising=False,
+    )
+
+    assert dao.cmd_write_medical_variables(make_args(
+        case_id="CASE_9001",
+        data_file=str(FIXTURE),
+        held_by="claim-analysis",
+        run_id="RUN_20260723_001",
+    )) == 0
+    ledger = dao.validated_conflict_ledger("CASE_9001")
+    assert ledger["conflicts"] == []
+    assert ledger["history_boundary"]["mode"] == "native"
+    assert dao.validated_run_state("CASE_9001")["medical_review_adopted"] is True
+
+
+def test_publication_persists_adoption_before_the_medical_commit_point(
+    isolated_dao, monkeypatch, make_args
+):
+    monkeypatch.setattr(medical_repository, "_publish_owned", lambda _dao, _args: 1)
+
+    assert dao.cmd_write_medical_variables(make_args(
+        case_id="CASE_9001",
+        data_file=str(FIXTURE),
+        held_by="claim-analysis",
+        run_id="RUN_20260723_001",
+    )) == 1
+    state = dao.validated_run_state("CASE_9001")
+    assert state["medical_review_adopted"] is True
 
 
 def test_no_issue_publication_clears_but_missing_or_malformed_ledger_blocks(
@@ -930,3 +986,53 @@ def test_generic_contract_read_rejects_hardlink_to_private_medical_ledger(
     assert "SYNTHETIC_PRIVATE_MEDICAL_LEDGER" not in capsys.readouterr().out
     with pytest.raises(ValueError, match="purpose-built medical DAO command"):
         dao.read_contract_data("CASE_9001", alias.name)
+
+
+def test_projection_read_requires_explicit_legacy_mode(isolated_dao):
+    case_id = "CASE_9001"
+    directory = dao.case_dir(case_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    dao.atomic_write_json(
+        directory / "extracted_claim_fields.json",
+        _legacy_projection(case_id, None),
+    )
+
+    projection, error = medical_repository.load_projection(dao, case_id)
+
+    assert projection is None
+    assert "projection_mode" in error
+
+
+def test_explicit_legacy_projection_is_readable_only_before_medical_adoption(
+    isolated_dao,
+):
+    case_id = "CASE_9001"
+    directory = dao.case_dir(case_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    legacy = _legacy_projection(case_id, "legacy_pre_medical")
+    dao.atomic_write_json(directory / "extracted_claim_fields.json", legacy)
+
+    projection, error = medical_repository.load_projection(dao, case_id)
+    assert error is None
+    assert projection == legacy
+
+    dao.atomic_write_json(directory / "medical_variables.json", {"post": "adoption"})
+    projection, error = medical_repository.load_projection(dao, case_id)
+    assert projection is None
+    assert "post-adoption" in error
+
+
+def test_legacy_projection_rejects_partial_medical_authority(isolated_dao):
+    case_id = "CASE_9001"
+    directory = dao.case_dir(case_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    dao.atomic_write_json(
+        directory / "extracted_claim_fields.json",
+        _legacy_projection(case_id, "legacy_pre_medical"),
+    )
+    (directory / "_medical_variable_revisions").mkdir()
+
+    projection, error = medical_repository.load_projection(dao, case_id)
+
+    assert projection is None
+    assert "post-adoption" in error
