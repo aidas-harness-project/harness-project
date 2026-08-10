@@ -59,6 +59,11 @@ Subcommands:
     check-source-ledger-clear CASE_ID
     read-evidence-tags DOC_PATH
     check-forbidden-expressions DOC_PATH
+    aggregate-trace CASE_ID --run-id RID --held-by NAME
+        [--input-class {S-min|S|M|L|XL|embedded}] [--cold-or-warm {cold|warm}]
+        (rolls this run's tools/trace.py span shards up into
+         _timing_summary.json; run once, after the SLA end marker)
+    read-timing-summary CASE_ID
     update-run-state CASE_ID RUN_ID STAGE STATUS --held-by NAME
         (STATUS in pending|in_progress|failed|skipped; 'passed' is refused here --
          a stage passes only via finalize-stage, atomically with its snapshot)
@@ -167,6 +172,8 @@ import policy_audit
 import policy_roles
 import human_review
 import llm_providers
+import trace as trace_mod
+import trace_aggregate
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
@@ -4721,7 +4728,13 @@ def _build_snapshot_atomic(case_id: str, stage: str, prospective_state: dict) ->
     tmp.mkdir(parents=True)
     try:
         for item in src.iterdir():
-            if item.name in ("_backups",) or item.name.endswith(".lock"):
+            # _trace/ is diagnostic scratch, not contract data: nothing
+            # downstream reads it and there is nothing in it to restore. It
+            # also GROWS through the run, so copying it into every cumulative
+            # snapshot is precisely the O(stages x tree) cost that makes
+            # finalize a serial tail. The permanent artifact derived from it
+            # (_timing_summary.json) is a normal file and is still snapshotted.
+            if item.name in ("_backups", "_trace") or item.name.endswith(".lock"):
                 continue
             if item.is_file():
                 shutil.copy2(item, tmp / item.name)
@@ -8363,6 +8376,99 @@ def cmd_record_human_review(args):
     return 0
 
 
+# ------------------------------------------------------------ trace rollup --
+
+TIMING_SUMMARY_FILENAME = "_timing_summary.json"
+TIMING_SUMMARY_SCHEMA = "timing_summary.schema.json"
+
+
+def trace_spans_dir(case_id: str, run_id: str) -> Path:
+    """Where tools/trace.py's shards land for one run.
+
+    Built through _require_within like every other DAO path, so a crafted
+    run_id cannot walk out of the case directory -- the shard tree is written
+    outside the lock discipline, which makes its path the one part of it that
+    still has to be checked here.
+    """
+    _require_safe_id("run_id", run_id)
+    return _require_within(case_dir(case_id), "_trace", run_id, "spans")
+
+
+def cmd_aggregate_trace(args):
+    """Roll the run's span shards up into _timing_summary.json.
+
+    Runs exactly once, after the run's SLA end marker, so it contends with
+    nothing -- which is what lets the shards themselves be written lock-free
+    (see tools/trace.py). The write itself is an ordinary governed DAO write:
+    locked, schema-validated, atomic, refusing to persist on a validation
+    failure exactly like write-contract.
+    """
+    spans_dir = trace_spans_dir(args.case_id, args.run_id)
+    if not spans_dir.exists():
+        print(f"NO_TRACE: {spans_dir} does not exist -- nothing was recorded "
+              f"for {args.case_id}/{args.run_id}. Was HARNESS_TRACE=0?")
+        return 1
+
+    spans, dropped_lines, shard_count = trace_aggregate.read_shards(spans_dir)
+    if not spans:
+        print(f"NO_TRACE: {spans_dir} holds no parseable spans "
+              f"({dropped_lines} unparseable line(s) discarded)")
+        return 1
+
+    summary = trace_aggregate.summarize(
+        spans, case_id=args.case_id, run_id=args.run_id,
+        generated_at=now_iso(), dropped_span_lines=dropped_lines,
+        shard_count=shard_count, input_class=args.input_class,
+        cold_or_warm=args.cold_or_warm)
+
+    target = _require_within(case_dir(args.case_id), TIMING_SUMMARY_FILENAME)
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id, f"aggregate trace for {args.run_id}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        errors = _schema_check(summary, TIMING_SUMMARY_SCHEMA)
+        if errors:
+            print(f"FAIL: schema validation errors for {target} -- not written:")
+            for e in errors:
+                print(f"  - {e}")
+            return 1
+        atomic_write_json(target, summary)
+    finally:
+        release_lock(target)
+
+    print(f"PASS: wrote {target}")
+    print(f"  spans={summary['span_count']} shards={shard_count} "
+          f"dropped_lines={dropped_lines}")
+    if summary.get("active_s") is None:
+        # Without both markers there is no SLA window, so every duration below
+        # is still a real measurement but none of them is an SLA verdict. Say
+        # so rather than printing a number that reads like one.
+        print("  active_s=n/a -- sla.phase1.start / sla.phase1.end markers not "
+              "both present in this trace")
+    else:
+        print(f"  sla_wall_clock_s={summary['sla_wall_clock_s']} "
+              f"human_wait_s={summary['human_wait_s']} "
+              f"active_s={summary['active_s']}")
+    top = sorted(summary["by_category"].items(),
+                 key=lambda kv: kv[1]["self_time_s"], reverse=True)[:5]
+    for name, entry in top:
+        print(f"  {name}: {entry['self_time_s']}s "
+              f"({entry['share_of_total'] * 100:.1f}%, n={entry['count']})")
+    return 0
+
+
+def cmd_read_timing_summary(args):
+    p = _require_within(case_dir(args.case_id), TIMING_SUMMARY_FILENAME)
+    if not p.exists():
+        print(f"NOT_FOUND: {p}")
+        return 1
+    print(p.read_text(encoding="utf-8"))
+    return 0
+
+
 # ------------------------------------------------------------------- main --
 
 def build_parser():
@@ -8745,6 +8851,25 @@ def build_parser():
     p.add_argument("--document-id", required=True, action="append",
                    help="referenced policy document; repeat for each one")
     p.set_defaults(fn=cmd_policy_snapshot)
+
+    p = sub.add_parser("aggregate-trace",
+                       help="Roll this run's span shards up into _timing_summary.json. "
+                            "Run once, after the SLA end marker.")
+    p.add_argument("case_id")
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--held-by", required=True)
+    p.add_argument("--input-class", default=None,
+                   choices=["S-min", "S", "M", "L", "XL", "embedded"],
+                   help="Case size class, for comparing runs of like inputs.")
+    p.add_argument("--cold-or-warm", default=None, choices=["cold", "warm"],
+                   help="Whether resume caches were cleared first. Only cold "
+                        "numbers are SLA-judgable.")
+    p.set_defaults(fn=cmd_aggregate_trace)
+
+    p = sub.add_parser("read-timing-summary",
+                       help="Read _timing_summary.json (read-contract's symmetric reader).")
+    p.add_argument("case_id")
+    p.set_defaults(fn=cmd_read_timing_summary)
 
     p = sub.add_parser("record-human-review")
     p.add_argument("case_id")
