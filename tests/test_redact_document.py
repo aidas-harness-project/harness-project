@@ -111,3 +111,141 @@ def test_over_redaction_ambiguous_span_writes_with_review(monkeypatch, tmp_path)
     assert captured["contract"]["review_required"] is True
     assert any("not redacted" in w for w in captured["contract"]["warnings"])
     assert result["review_required"] is True
+
+
+# ------------------------------------------------- T4b: per-page resume cache --
+
+def test_second_run_serves_from_cache_and_makes_no_provider_call(monkeypatch, tmp_path):
+    calls, captured = [], {}
+    _install_dao_stubs(monkeypatch, "환자 홍길동 진단 골절", captured, calls)
+    monkeypatch.setattr(rd, "ROOT", tmp_path)
+    items = json.dumps({"pii_items": [{"text": "홍길동", "category": "person_name"}]})
+
+    first = _fixture_redactor(items)
+    r1 = rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1", first)
+    assert r1["cache_hits"] == 0
+
+    # A provider that would RAISE if consulted -- the only honest way to show
+    # the second run made no call.
+    class _Exploding:
+        method = "llm_span_redaction"
+        label = first.label
+
+        def redact_page(self, text):
+            raise AssertionError("cache miss: the provider was called on a warm run")
+
+    r2 = rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1", _Exploding())
+    assert r2["cache_hits"] == 2
+    assert r2["items_redacted"] == r1["items_redacted"]
+    assert r2["review_required"] == r1["review_required"]
+
+
+def test_cached_redaction_is_byte_identical_to_the_fresh_one(monkeypatch, tmp_path):
+    """A cache that returns different bytes is worse than no cache."""
+    cold, warm = {}, {}
+    _install_dao_stubs(monkeypatch, "환자 홍길동 진단 골절", cold)
+    monkeypatch.setattr(rd, "ROOT", tmp_path)
+    items = json.dumps({"pii_items": [{"text": "홍길동", "category": "person_name"}]})
+    redactor = _fixture_redactor(items)
+    rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1", redactor)
+
+    _install_dao_stubs(monkeypatch, "환자 홍길동 진단 골절", warm)
+    rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1",
+                       _fixture_redactor(items))
+    assert warm["redacted"] == cold["redacted"]
+
+
+def test_a_prompt_version_change_invalidates_the_cache(monkeypatch, tmp_path):
+    """The privacy-critical case. A prompt revision usually means the previous
+    prompt MISSED something, so serving its output afterwards is not a stale
+    performance number -- it is un-redacted PII reaching the processed layer."""
+    _install_dao_stubs(monkeypatch, "환자 홍길동 진단 골절")
+    monkeypatch.setattr(rd, "ROOT", tmp_path)
+    items = json.dumps({"pii_items": [{"text": "홍길동", "category": "person_name"}]})
+    rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1",
+                       _fixture_redactor(items))
+
+    monkeypatch.setattr(rd, "PROMPT_VERSION", "pii_redaction_v999")
+    called = {"n": 0}
+    base = _fixture_redactor(items)
+
+    class _Counting:
+        method = "llm_span_redaction"
+        label = base.label
+
+        def redact_page(self, text):
+            called["n"] += 1
+            return base.redact_page(text)
+
+    result = rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1",
+                                _Counting())
+    assert result["cache_hits"] == 0
+    assert called["n"] == 2  # both pages genuinely re-redacted
+
+
+def test_a_different_model_does_not_reuse_another_models_entry(monkeypatch, tmp_path):
+    _install_dao_stubs(monkeypatch, "환자 홍길동 진단 골절")
+    monkeypatch.setattr(rd, "ROOT", tmp_path)
+    items = json.dumps({"pii_items": [{"text": "홍길동", "category": "person_name"}]})
+    rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1",
+                       _fixture_redactor(items))
+
+    other = LlmRedactor(FixtureProvider(model_name="a-different-model",
+                                        responses={"redact_text": items}))
+    result = rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1", other)
+    assert result["cache_hits"] == 0
+
+
+def test_changed_page_text_invalidates_the_cache(monkeypatch, tmp_path):
+    """Checkpoint 1 output can change (a P8 disagreement resolved, a page
+    re-transcribed). The old redaction was computed against text that no
+    longer exists."""
+    _install_dao_stubs(monkeypatch, "환자 홍길동 진단 골절")
+    monkeypatch.setattr(rd, "ROOT", tmp_path)
+    items = json.dumps({"pii_items": [{"text": "홍길동", "category": "person_name"}]})
+    rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1",
+                       _fixture_redactor(items))
+
+    _install_dao_stubs(monkeypatch, "환자 홍길동 진단 골절 (재전사됨)")
+    result = rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1",
+                                _fixture_redactor(items))
+    assert result["cache_hits"] == 0
+
+
+def test_a_leaking_page_is_never_cached(monkeypatch, tmp_path):
+    """A blocked document must leave nothing reusable behind -- otherwise a
+    rerun would serve the very output the leak check refused."""
+    _install_dao_stubs(monkeypatch, "환자 홍길동 010-1234-5678")
+    monkeypatch.setattr(rd, "ROOT", tmp_path)
+    items = json.dumps({"pii_items": [{"text": "홍길동", "category": "person_name"}]})
+    with pytest.raises(RedactionLeakError):
+        rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1",
+                           _fixture_redactor(items))
+    cache_dir = rd._resume_cache_dir("CASE_009", "DOC_001")
+    assert not list(cache_dir.glob("page_*.json"))
+
+
+def test_a_corrupt_cache_entry_is_a_miss_not_a_crash(monkeypatch, tmp_path):
+    _install_dao_stubs(monkeypatch, "환자 홍길동 진단 골절")
+    monkeypatch.setattr(rd, "ROOT", tmp_path)
+    items = json.dumps({"pii_items": [{"text": "홍길동", "category": "person_name"}]})
+    rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1",
+                       _fixture_redactor(items))
+    cache_dir = rd._resume_cache_dir("CASE_009", "DOC_001")
+    (cache_dir / "page_001.json").write_text("{ truncated", encoding="utf-8")
+
+    result = rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1",
+                                _fixture_redactor(items))
+    assert result["cache_hits"] == 1  # page 2 still hit, page 1 re-run
+    assert result["status"] == "success"
+
+
+def test_no_resume_ignores_an_existing_cache(monkeypatch, tmp_path):
+    _install_dao_stubs(monkeypatch, "환자 홍길동 진단 골절")
+    monkeypatch.setattr(rd, "ROOT", tmp_path)
+    items = json.dumps({"pii_items": [{"text": "홍길동", "category": "person_name"}]})
+    rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1",
+                       _fixture_redactor(items))
+    result = rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1",
+                                _fixture_redactor(items), resume=False)
+    assert result["cache_hits"] == 0

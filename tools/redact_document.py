@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -42,12 +43,114 @@ from llm_providers import (
     build_provider,
 )
 from redaction import (PROMPT_VERSION, LlmRedactor, NoPiiClassRedactor,
-                       RedactionLeakError, RedactionParseError)
+                       RedactionLeakError, RedactionOutcome, RedactionParseError)
 
 
 ROOT = Path(__file__).resolve().parent.parent
 DAO = ROOT / "tools" / "dao.py"
 DEFAULT_REDACTION_PROVIDER = "codex-cli"
+
+
+# Bumped when the CACHE ENTRY's own shape changes (not when redaction changes
+# -- that is what fingerprint() covers). An old entry with a different version
+# is treated as a miss rather than migrated.
+CACHE_FORMAT_VERSION = 1
+
+
+def _resume_cache_dir(case_id: str, doc_id: str) -> Path:
+    """Per-document dir holding one JSON per completed page.
+
+    Mirrors ocr_extract._resume_cache_dir: stable (not pid-tagged) so it
+    survives across runs, one file per page so there is exactly one writer per
+    file and no lock is needed (see tools/trace.py's docstring for the same
+    argument stated in full).
+    """
+    # ROOT is resolved at CALL time, not import time. Tests monkeypatch
+    # rd.ROOT to a tmp_path; a module-level SCRATCH_ROOT would be frozen
+    # before that patch and every test would write into the real repository
+    # scratch dir -- which is not hypothetical, it happened while building
+    # this: two tests sharing CASE_009/DOC_001 leaked cache entries into each
+    # other and turned a passing leak-detection test into a failure.
+    return ROOT / "_redaction_scratch" / "_resume" / f"{case_id}_{doc_id}"
+
+
+def _cache_fingerprint(page_text: str, redactor) -> str:
+    """What the cached redaction is only valid FOR.
+
+    Every input that can change a redaction's OUTPUT is in here:
+
+    * `PROMPT_VERSION` -- the plan is explicit that serving a redaction
+      produced by an older prompt is "not a performance defect but a privacy
+      defect". A prompt revision usually means the previous one missed
+      something, so an entry from before it must never be reused.
+    * `redactor.label` -- method + provider + model. A different model is a
+      different redactor; NoPiiClassRedactor and LlmRedactor must never share
+      an entry, since the former deliberately redacts nothing.
+    * sha256 of the exact page text -- if checkpoint 1's output changed (a P8
+      disagreement resolved, a page re-transcribed), the old redaction was
+      computed against text that no longer exists.
+
+    A mismatch on any of them is a miss, and a miss re-runs the real call.
+    Nothing here is a heuristic: the entry either was produced by this exact
+    combination or it was not.
+    """
+    digest = hashlib.sha256(page_text.encode("utf-8")).hexdigest()
+    label = getattr(redactor, "label", getattr(redactor, "method", "unknown"))
+    return f"{CACHE_FORMAT_VERSION}:{PROMPT_VERSION}:{label}:{digest}"
+
+
+def _load_cached_page(cache_dir: Path, page: int, fingerprint: str):
+    """Return the cached RedactionOutcome for this page, or None.
+
+    Fails closed in every ambiguous case -- unreadable file, malformed JSON,
+    missing fingerprint, fingerprint mismatch -- because the cost of a miss is
+    one provider call while the cost of a wrong hit is serving a stale
+    redaction.
+    """
+    p = cache_dir / f"page_{page:03d}.json"
+    if not p.exists():
+        return None
+    try:
+        entry = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None  # corrupt/partial entry -> re-redact this page
+    if not isinstance(entry, dict) or entry.get("fingerprint") != fingerprint:
+        return None
+    outcome = entry.get("outcome")
+    if not isinstance(outcome, dict) or "redacted_text" not in outcome:
+        return None
+    return RedactionOutcome(
+        redacted_text=outcome["redacted_text"],
+        items_redacted=int(outcome.get("items_redacted") or 0),
+        categories=list(outcome.get("categories") or []),
+        provider_metadata=outcome.get("provider_metadata"),
+        review_warnings=list(outcome.get("review_warnings") or []),
+        spans=outcome.get("spans"),
+    )
+
+
+def _save_cached_page(cache_dir: Path, page: int, fingerprint: str, outcome) -> None:
+    """Persist one page's redaction. Atomic tmp->replace, so an interrupt
+    mid-write never leaves a half-entry that a later run would trust.
+
+    Only leak-free outcomes reach here: redact_page raises on a detected leak
+    and nothing is cached for that page, so a failing document cannot poison
+    the cache with a partial result."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "fingerprint": fingerprint,
+        "outcome": {
+            "redacted_text": outcome.redacted_text,
+            "items_redacted": outcome.items_redacted,
+            "categories": list(outcome.categories),
+            "provider_metadata": outcome.provider_metadata,
+            "review_warnings": list(outcome.review_warnings),
+            "spans": outcome.spans,
+        },
+    }
+    tmp = cache_dir / f"page_{page:03d}.json.tmp"
+    tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(cache_dir / f"page_{page:03d}.json")
 
 
 def _dao(*args: str, capability: str | None = None) -> str:
@@ -88,7 +191,8 @@ def _dao(*args: str, capability: str | None = None) -> str:
         return result.stdout
 
 
-def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redactor) -> dict:
+def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redactor,
+                    *, resume: bool = True) -> dict:
     # read_contract_data is the DAO's own in-process contract read -- same
     # path resolution and traversal guard as the CLI, without paying an
     # interpreter start to get it.
@@ -106,6 +210,8 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
     categories: set[str] = set()
     provider_metadata = None
     review_warnings: list[str] = []
+    cache_dir = _resume_cache_dir(case_id, doc_id)
+    cache_hits = 0
 
     # Scoped to this one document and revoked in the finally, so the window in
     # which pre-redaction text is obtainable at all is the page loop and
@@ -129,11 +235,22 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
                     case_id, doc_id, page_number,
                     caller_stage="document-pipeline", capability=capability)
                 sp.set(bytes_in=len(text))
-                # redact_page HARD-FAILS (RedactionLeakError) on any detected
-                # possible PII leak -- that propagates out of this function and
-                # nothing is written, blocking the document exactly like a P8
-                # disagreement. Only a leak-free page returns an outcome.
-                outcome = redactor.redact_page(text)
+                fingerprint = _cache_fingerprint(text, redactor)
+                outcome = (_load_cached_page(cache_dir, page_number, fingerprint)
+                           if resume else None)
+                if outcome is not None:
+                    cache_hits += 1
+                    sp.set_status("cache_hit")
+                else:
+                    # redact_page HARD-FAILS (RedactionLeakError) on any detected
+                    # possible PII leak -- that propagates out of this function and
+                    # nothing is written, blocking the document exactly like a P8
+                    # disagreement. Only a leak-free page returns an outcome.
+                    outcome = redactor.redact_page(text)
+                    # Cache only after the leak check has passed, so a blocked
+                    # document leaves nothing reusable behind.
+                    if resume:
+                        _save_cached_page(cache_dir, page_number, fingerprint, outcome)
                 sp.set(bytes_out=len(outcome.redacted_text))
                 redacted_pages.append(f"<<<PAGE page={page_number}>>>\n{outcome.redacted_text}")
                 total_items += outcome.items_redacted
@@ -221,6 +338,9 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
         "items_redacted": total_items,
         "review_required": review_required,
         "redactor": redactor.label,
+        # Reported so a run's cost is legible: pages == cache_hits means the
+        # document cost zero provider calls this time.
+        "cache_hits": cache_hits,
     }
 
 
@@ -260,6 +380,11 @@ def main() -> None:
     parser.add_argument("--provider", choices=SUPPORTED_PROVIDERS,
                         default=os.environ.get("HARNESS_REDACTION_PROVIDER", DEFAULT_REDACTION_PROVIDER))
     parser.add_argument("--model", default=os.environ.get("HARNESS_REDACTION_MODEL"))
+    parser.add_argument("--no-resume", action="store_true",
+                        help="Ignore and do not write the per-page redaction cache. "
+                             "The cache is keyed on prompt version, redactor identity "
+                             "and page-text hash, so a stale entry is already a miss; "
+                             "this is for forcing a cold measurement.")
     args = parser.parse_args()
 
     # Without this every span below is a no-op: trace.enabled() stays False
@@ -272,7 +397,8 @@ def main() -> None:
 
     try:
         redactor = _redactor_for(args.case_id, args.doc_id, args.provider, args.model)
-        result = redact_document(args.case_id, args.doc_id, args.held_by, args.run_id, redactor)
+        result = redact_document(args.case_id, args.doc_id, args.held_by,
+                                 args.run_id, redactor, resume=not args.no_resume)
     except RedactionLeakError as exc:
         # Possible PII leak detected -- nothing was written. Block the document.
         sys.exit(f"REDACTION BLOCKED ({args.doc_id}): possible PII leak -- {exc}")
