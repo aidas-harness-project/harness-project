@@ -19,6 +19,16 @@ material, not a live spec).
 ## Tools
 
 - `python tools/dao.py <subcommand>` -- the sole data-access path (locking, ledgers, run-state, conflict tracking, schema-validated writes). See its module docstring for the full subcommand list.
+- `tools/trace.py` -- performance instrumentation. Every pipeline tool records timing spans
+  automatically (its `main()` calls `trace.configure_from_args`); `HARNESS_TRACE=0` turns the
+  whole layer off. Shards are written lock-free under `outputs/CASE_X/_trace/<run_id>/` because
+  each names exactly one writer thread — see the module docstring for why that is not a P5
+  bypass. `attrs` are filtered against a per-category allow-list, so a prompt or a page of case
+  material cannot reach a trace file. The two SLA markers (`sla.phase1.start` on a clear source
+  ledger, `sla.phase1.end` on `finalize-stage draft_report_v1`) are emitted by the DAO itself.
+  **One manual step:** `dao.py aggregate-trace CASE_ID --run-id RID --held-by NAME` rolls the
+  shards into a schema-validated `_timing_summary.json` (read back with `read-timing-summary`).
+  Nothing calls it automatically, so a run that skips it leaves raw shards and no summary.
 - `python tools/validate_output.py <file.json>` -- standalone schema validation (also used internally by `dao.py write-contract`).
 - `python tools/intake_case.py <source-cases folder> <CASE_ID>` -- case intake with the D2 per-file review ledger.
 - `python tools/document_assembly.py --sections-file <spec.json> --held-by <agent> --run-id <run>` -- renders narrative reports and auto-generates `[E#]` citation tags + sidecar (P1). DAO-backed like any other write path: locked, atomic, sidecar schema-validated before either file touches disk.

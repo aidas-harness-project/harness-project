@@ -24,6 +24,14 @@ pipeline run.
 2. **Intake check**: if `data/raw/CASE_XXX/` doesn't exist yet, run intake first (D2 — `_source_ledger.json` gate, every file `pending`→human sets `approved`/`rejected`, whole case blocks on any rejection). Never skip the human confirmation step.
    - **Segmentation**: a raw source may be a *bundle* concatenating several logical documents. **Do not decide in advance which PDFs are bundles.** That question is answered by `propose`, from the text — a proposal with one boundary is a single document, several boundaries is a bundle — so it cannot be a precondition for producing that text. Run every PDF through `tools/segment_case.py` (`propose` → `approve` → `split`); a single-boundary proposal simply splits into itself and the document continues unchanged.
 
+3. **Start the SLA clock**: once intake review is finished, run
+   `python tools/dao.py check-source-ledger-clear CASE_ID --run-id RUN_ID`. A `clear` result
+   emits the `sla.phase1.start` marker, which is what makes the run's timing measurable at all
+   — without it `aggregate-trace` reports `active_s: n/a` and no 30-minute judgment is possible.
+   It is idempotent (safe to call repeatedly) and it does **not** add a human gate: it only reads
+   the ledger you already had to satisfy, so when D2 eventually goes away this check simply
+   always passes. Pass `--run-id` — without it the check still works but records nothing.
+
 **OCR the bundle first.** `propose` resolves its evidence in the order processed text → the PDF's own embedded layer → vision, and the deterministic paths are both better and cheaper than vision. Only the first reaches a scan, which is most of this corpus, so a `required` bundle takes this sequence:
 
 1. `run_checkpoint1.py CASE_ID BUNDLE_ID <pdf> --bundle-ocr` — OCR only, no classification (`document_type` is per-document; one label cannot be right for a bundle).
@@ -89,5 +97,21 @@ Only two genuinely new stages — everything else is Phase 1's agents reused on 
 | Unauthorized ground-truth access detected outside `evaluation` (D1) | Halt immediately, exclude the run's outputs from evaluation |
 
 ## Completion report
+
+**Aggregate the run's timing first.** After `draft_report_v1` finalizes (which emits
+`sla.phase1.end`), run once:
+
+```
+python tools/dao.py aggregate-trace CASE_ID --run-id RUN_ID --held-by <name>     [--input-class S|M|L|XL] [--cold-or-warm cold|warm]
+```
+
+This is the ONLY manual step in the timing path — spans are recorded automatically by every
+tool, and both SLA markers are emitted by the DAO itself, but nothing calls the aggregator on
+its own, so skipping it means the run leaves raw shards and no `_timing_summary.json`. It is
+read-only over the trace, runs after the work is done, and contends with nothing. Report
+`active_s` (the SLA number: wall clock minus human-gate waiting) and the top `by_category`
+entries. `active_s: n/a` means a marker is missing, not that the run was instant — usually the
+Phase 0 ledger check was skipped or run without `--run-id`. Read it back later with
+`dao.py read-timing-summary CASE_ID`. `HARNESS_TRACE=0` disables tracing entirely.
 
 At the end of a run (or when halted), report to the user: per-stage pass/fail/pending status from `_run_state.json`, validation PASS/FAIL/SKIP tally, `review_required` count and routing (손사/의사), any partial/warning list, and next actions (e.g. awaiting human review). Ask for feedback — this harness evolves from it, see the root `CLAUDE.md` changelog.
