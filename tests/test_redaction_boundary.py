@@ -329,3 +329,83 @@ def test_expert_review_only_document_is_refused_before_any_path_is_emitted(
     assert rc == 1
     assert "NON_TEXT_EXPERT_REVIEW_ONLY" in out
     assert "redacted_text.md" not in out
+
+
+# ------------------------------- T4a: in-process page-text read keeps gates --
+
+def _cap_env(monkeypatch, tmp_path):
+    monkeypatch.setattr(dao, "OUTPUTS", tmp_path / "outputs")
+    monkeypatch.setattr(dao, "DATA", tmp_path / "data")
+    page = dao.processed_dir("CASE_009", "DOC_001") / "page_001.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("환자 홍길동 010-1234-5678", encoding="utf-8")
+    return page
+
+
+def test_in_process_read_returns_text_with_a_live_capability(monkeypatch, tmp_path):
+    _cap_env(monkeypatch, tmp_path)
+    cap, path = dao._issue_page_text_capability("CASE_009", "DOC_001")
+    try:
+        text = dao.read_page_text_data("CASE_009", "DOC_001", 1,
+                                       caller_stage="document-pipeline",
+                                       capability=cap)
+        assert "홍길동" in text
+    finally:
+        dao.release_page_text_capability(path)
+
+
+def test_in_process_read_refuses_without_a_capability(monkeypatch, tmp_path):
+    """Being in-process is not a reason to trust the caller. An importer is
+    not more privileged than a subprocess."""
+    _cap_env(monkeypatch, tmp_path)
+    with pytest.raises(PermissionError) as exc:
+        dao.read_page_text_data("CASE_009", "DOC_001", 1,
+                                caller_stage="document-pipeline", capability="")
+    assert "capability" in str(exc.value).lower()
+
+
+def test_in_process_read_refuses_a_capability_minted_for_another_document(monkeypatch, tmp_path):
+    _cap_env(monkeypatch, tmp_path)
+    cap, path = dao._issue_page_text_capability("CASE_009", "DOC_002")
+    try:
+        with pytest.raises(PermissionError):
+            dao.read_page_text_data("CASE_009", "DOC_001", 1,
+                                    caller_stage="document-pipeline",
+                                    capability=cap)
+    finally:
+        dao.release_page_text_capability(path)
+
+
+def test_in_process_read_refuses_a_disallowed_caller_stage(monkeypatch, tmp_path):
+    _cap_env(monkeypatch, tmp_path)
+    cap, path = dao._issue_page_text_capability("CASE_009", "DOC_001")
+    try:
+        with pytest.raises(PermissionError) as exc:
+            dao.read_page_text_data("CASE_009", "DOC_001", 1,
+                                    caller_stage="denial-response",
+                                    capability=cap)
+        assert "not permitted" in str(exc.value)
+    finally:
+        dao.release_page_text_capability(path)
+
+
+def test_in_process_read_refuses_after_the_capability_is_released(monkeypatch, tmp_path):
+    """The window closes when checkpoint 2's finally runs."""
+    _cap_env(monkeypatch, tmp_path)
+    cap, path = dao._issue_page_text_capability("CASE_009", "DOC_001")
+    dao.release_page_text_capability(path)
+    with pytest.raises(PermissionError):
+        dao.read_page_text_data("CASE_009", "DOC_001", 1,
+                                caller_stage="document-pipeline", capability=cap)
+
+
+def test_in_process_read_raises_rather_than_returning_a_denial_string(monkeypatch, tmp_path):
+    """The CLI prints a denial and returns 1; a stdout-scraping caller could
+    mistake that text for page content. The in-process form must raise."""
+    _cap_env(monkeypatch, tmp_path)
+    try:
+        result = dao.read_page_text_data("CASE_009", "DOC_001", 1,
+                                         caller_stage="evaluation", capability="x")
+    except PermissionError:
+        return
+    pytest.fail(f"expected PermissionError, got a value: {result!r}")

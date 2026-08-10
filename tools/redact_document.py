@@ -51,14 +51,20 @@ DEFAULT_REDACTION_PROVIDER = "codex-cli"
 
 
 def _dao(*args: str, capability: str | None = None) -> str:
-    """Run a DAO subcommand.
+    """Run a DAO subcommand as a subprocess.
 
-    `capability` is checkpoint 2's per-run secret, passed only on the one call
-    that needs pre-redaction page text. It goes through the environment rather
-    than argv so it does not land in process listings, and it is minted fresh
-    per run so it cannot be replayed from a log. Every other DAO call runs
-    without it -- the capability is scoped to the reads that actually require
-    it, not granted for the whole process.
+    Only the WRITE path still uses this. The per-page read moved in-process
+    (see redact_document), which is where the cost was: a subprocess per page
+    multiplied ~0.38s of interpreter startup by page count. The remaining
+    calls are a fixed three per document, and they go through write-contract's
+    schema + cross-contract validation, which is not worth re-implementing
+    in-process to save a constant.
+
+    `capability` is retained for callers that still need the subprocess form:
+    it travels through the child environment rather than argv so it does not
+    land in a process listing, and it is minted fresh per run so it cannot be
+    replayed from a log. The in-process read passes the same token as an
+    argument instead, which keeps it out of the environment entirely.
     """
     env = dict(os.environ)
     if capability is not None:
@@ -83,7 +89,12 @@ def _dao(*args: str, capability: str | None = None) -> str:
 
 
 def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redactor) -> dict:
-    ocr_result = json.loads(_dao("read-contract", case_id, f"ocr_result_{doc_id}.json"))
+    # read_contract_data is the DAO's own in-process contract read -- same
+    # path resolution and traversal guard as the CLI, without paying an
+    # interpreter start to get it.
+    ocr_result = dao.read_contract_data(case_id, f"ocr_result_{doc_id}.json")
+    if ocr_result is None:
+        raise RuntimeError(f"checkpoint 2 blocked: no ocr_result for {doc_id}")
     if ocr_result.get("cross_validation_status") not in {"agreed", "disagreed_resolved"}:
         raise RuntimeError(
             f"checkpoint 2 blocked: {doc_id} cross_validation_status is "
@@ -106,11 +117,17 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
             page_number = page["page"]
             with trace_mod.span("redact.page", category="io", case_id=case_id,
                                 doc_id=doc_id, page=page_number) as sp:
-                # --caller-stage is a hard DAO gate, not a label, and the
-                # capability is what makes the claim verifiable rather than
-                # self-asserted.
-                text = _dao("read-page-text", case_id, doc_id, str(page_number),
-                            "--caller-stage", "document-pipeline", capability=capability)
+                # In-process, not a subprocess: this is the per-PAGE call, so
+                # the ~0.38s of interpreter startup (measured) was multiplied
+                # by page count -- 11.2% of redaction wall-clock on a real
+                # 17-page document. Both DAO gates still run, in the same
+                # order, and the capability now travels as an argument instead
+                # of through the child environment, so it never appears in a
+                # process listing. read_page_text_data raises on refusal, so a
+                # denial cannot be mistaken for page content.
+                text = dao.read_page_text_data(
+                    case_id, doc_id, page_number,
+                    caller_stage="document-pipeline", capability=capability)
                 sp.set(bytes_in=len(text))
                 # redact_page HARD-FAILS (RedactionLeakError) on any detected
                 # possible PII leak -- that propagates out of this function and
@@ -220,7 +237,9 @@ NO_PII_DOCUMENT_TYPES = frozenset({"insurance_policy"})
 def _redactor_for(case_id: str, doc_id: str, provider_name: str, model: str | None):
     """Pick the redactor for this document: deterministic pass-through for a
     PII-free document class, otherwise the real LLM span redactor."""
-    manifest = json.loads(_dao("read-contract", case_id, "document_manifest.json"))
+    manifest = dao.read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        raise RuntimeError(f"no document_manifest.json for {case_id}")
     entry = next((d for d in manifest.get("documents", [])
                   if d.get("document_id") == doc_id), None)
     if entry and entry.get("document_type") in NO_PII_DOCUMENT_TYPES:

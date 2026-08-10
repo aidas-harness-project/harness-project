@@ -694,12 +694,60 @@ def release_page_text_capability(path: Path) -> None:
         pass
 
 
-def _page_text_capability_ok(case_id: str, doc_id: str) -> bool:
-    """Whether this process presented a live capability for THIS document."""
-    presented = os.environ.get(PAGE_TEXT_CAPABILITY_ENV)
+def _page_text_capability_ok(case_id: str, doc_id: str,
+                              capability: str | None = None) -> bool:
+    """Whether the caller presented a live capability for THIS document.
+
+    `capability` is the in-process form: checkpoint 2 calling
+    read_page_text_data() directly hands the token as an argument. The env
+    var remains the subprocess form, and neither weakens the check -- both
+    resolve to the same digest lookup, so a caller without a live token is
+    refused either way.
+
+    Passing it as an argument is strictly the safer of the two: the token
+    never enters the environment block and so cannot be read out of a process
+    listing or inherited by an unrelated grandchild.
+    """
+    presented = capability or os.environ.get(PAGE_TEXT_CAPABILITY_ENV)
     if not presented:
         return False
     return (capability_dir() / _capability_filename(presented, case_id, doc_id)).exists()
+
+
+def read_page_text_data(case_id: str, doc_id: str, page: int, *,
+                        caller_stage: str, capability: str) -> str:
+    """In-process equivalent of `read-page-text`, for checkpoint 2.
+
+    Exists so redact_document.py can stop paying ~0.38s of interpreter
+    startup per page (measured) to read text this process could read
+    directly. It enforces the SAME two gates as the CLI path, in the same
+    order: the caller-stage allowlist, then the per-document capability.
+    Being in-process is explicitly NOT a reason to skip them -- an importer
+    is not more trusted than a subprocess, and the capability is what makes
+    the stage claim verifiable rather than self-asserted.
+
+    Raises PermissionError when a gate refuses, so a caller cannot mistake a
+    denial message for page content the way a stdout-scraping subprocess
+    caller could.
+    """
+    if caller_stage not in PAGE_TEXT_ALLOWED_STAGES:
+        raise PermissionError(
+            f"page text is pre-redaction and may only be read by "
+            f"{sorted(PAGE_TEXT_ALLOWED_STAGES)} (harness-guardrails P2); "
+            f"caller_stage={caller_stage!r} is not permitted")
+    if not _page_text_capability_ok(case_id, doc_id, capability):
+        raise PermissionError(
+            "--caller-stage is self-asserted and is not sufficient on its own. "
+            "Pre-redaction page text additionally requires checkpoint 2's run "
+            "capability for this specific document.")
+    if page < 1:
+        raise ValueError(f"page must be >= 1 (got {page})")
+    page_path = processed_dir(case_id, doc_id) / f"page_{page:03d}.md"
+    if not page_path.exists():
+        raise FileNotFoundError(
+            f"NOT_EXTRACTED: {doc_id} page {page} has no validated processed "
+            "text yet. Complete document-pipeline checkpoint 1 first.")
+    return page_path.read_text(encoding="utf-8")
 
 
 def cmd_read_page_text(args):
@@ -734,6 +782,12 @@ def cmd_read_page_text(args):
     permission question, not something the DAO can answer, and it is recorded
     honestly in known-gaps.md rather than described as sealed.
     """
+    # NOTE: this CLI path and read_page_text_data() above enforce the same two
+    # gates. They are kept as separate code because the CLI's contract is
+    # "print a message, return an exit code" while the in-process contract is
+    # "return text or raise" -- a stdout-scraping caller cannot distinguish a
+    # denial string from page content, so the in-process form must raise.
+    # tests/test_redaction_boundary.py pins that both refuse the same inputs.
     if args.caller_stage not in PAGE_TEXT_ALLOWED_STAGES:
         print(f"DENIED: page text is pre-redaction and may only be read by "
               f"{sorted(PAGE_TEXT_ALLOWED_STAGES)} (checkpoint 2's own input; harness-guardrails P2). "

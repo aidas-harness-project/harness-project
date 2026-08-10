@@ -12,20 +12,35 @@ def _fixture_redactor(pii_items_json: str) -> LlmRedactor:
     return LlmRedactor(provider)
 
 
-def _dao_factory(page_text, captured=None, calls=None):
-    ocr_result = {"cross_validation_status": "agreed", "pages": [{"page": 1}, {"page": 2}]}
+OCR_RESULT = {"cross_validation_status": "agreed", "pages": [{"page": 1}, {"page": 2}]}
+
+
+def _install_dao_stubs(monkeypatch, page_text, captured=None, calls=None):
+    """Stub the DAO surface redact_document uses.
+
+    The per-page read is now an in-process call (T4a: a subprocess per page
+    multiplied ~0.38s of interpreter startup by page count), so it is stubbed
+    separately from the subprocess writes. The capability assertion is kept on
+    BOTH paths -- it is the check that stops a regression from reading
+    pre-redaction text without checkpoint 2's token, and moving the call
+    in-process must not be allowed to quietly drop it.
+    """
+    def fake_read_contract(case_id, filename):
+        if calls is not None:
+            calls.append(("read-contract", filename))
+        return dict(OCR_RESULT) if filename.startswith("ocr_result") else {}
+
+    def fake_read_page_text(case_id, doc_id, page, *, caller_stage, capability):
+        if calls is not None:
+            calls.append(("read-page-text", page))
+        assert capability, "read_page_text_data must receive checkpoint 2's capability"
+        assert caller_stage == "document-pipeline", (
+            "the caller-stage gate must still be asserted in-process")
+        return page_text  # page-invariant so one canned fixture fits both pages
 
     def fake_dao(*args, capability=None):
         if calls is not None:
             calls.append(args)
-        if args[0] == "read-contract":
-            return json.dumps(ocr_result)
-        if args[0] == "read-page-text":
-            # Pre-redaction reads must carry checkpoint 2's capability -- the
-            # real DAO refuses without it, so a stub that accepted the call
-            # bare would let a regression through here.
-            assert capability, "read-page-text must be called with the checkpoint 2 capability"
-            return page_text  # page-invariant so one canned fixture fits both pages
         assert capability is None, f"{args[0]} must not be handed the page-text capability"
         if captured is not None and args[0] == "write-redacted-text":
             captured["redacted"] = rd.Path(args[args.index("--text-file") + 1]).read_text(encoding="utf-8")
@@ -33,12 +48,15 @@ def _dao_factory(page_text, captured=None, calls=None):
             captured["contract"] = json.loads(rd.Path(args[args.index("--data-file") + 1]).read_text(encoding="utf-8"))
         return "OK"
 
+    monkeypatch.setattr(rd.dao, "read_contract_data", fake_read_contract)
+    monkeypatch.setattr(rd.dao, "read_page_text_data", fake_read_page_text)
+    monkeypatch.setattr(rd, "_dao", fake_dao)
     return fake_dao
 
 
 def test_clean_redaction_writes_via_dao_and_flags_no_review(monkeypatch, tmp_path):
     calls, captured = [], {}
-    monkeypatch.setattr(rd, "_dao", _dao_factory("환자 홍길동 진단 골절", captured, calls))
+    _install_dao_stubs(monkeypatch, "환자 홍길동 진단 골절", captured, calls)
     monkeypatch.setattr(rd, "ROOT", tmp_path)
     redactor = _fixture_redactor(json.dumps({"pii_items": [{"text": "홍길동", "category": "person_name"}]}))
 
@@ -58,7 +76,7 @@ def test_clean_redaction_writes_via_dao_and_flags_no_review(monkeypatch, tmp_pat
 def test_residual_structured_pii_hard_fails_and_writes_nothing(monkeypatch, tmp_path):
     calls = []
     # Page has a phone number; the model lists only the name -> phone survives.
-    monkeypatch.setattr(rd, "_dao", _dao_factory("환자 홍길동 010-1234-5678", calls=calls))
+    _install_dao_stubs(monkeypatch, "환자 홍길동 010-1234-5678", calls=calls)
     monkeypatch.setattr(rd, "ROOT", tmp_path)
     redactor = _fixture_redactor(json.dumps({"pii_items": [{"text": "홍길동", "category": "person_name"}]}))
 
@@ -71,7 +89,7 @@ def test_residual_structured_pii_hard_fails_and_writes_nothing(monkeypatch, tmp_
 
 
 def test_unmatched_span_hard_fails(monkeypatch, tmp_path):
-    monkeypatch.setattr(rd, "_dao", _dao_factory("환자 홍길동 진단 골절"))
+    _install_dao_stubs(monkeypatch, "환자 홍길동 진단 골절")
     monkeypatch.setattr(rd, "ROOT", tmp_path)
     # Model names a person not present verbatim in the source.
     redactor = _fixture_redactor(json.dumps({"pii_items": [{"text": "김철수", "category": "person_name"}]}))
@@ -83,7 +101,7 @@ def test_unmatched_span_hard_fails(monkeypatch, tmp_path):
 
 def test_over_redaction_ambiguous_span_writes_with_review(monkeypatch, tmp_path):
     captured = {}
-    monkeypatch.setattr(rd, "_dao", _dao_factory("이 사람은 이번 사고를 겪었다", captured))
+    _install_dao_stubs(monkeypatch, "이 사람은 이번 사고를 겪었다", captured)
     monkeypatch.setattr(rd, "ROOT", tmp_path)
     # A 1-char "name" -> over-redaction guard leaves it, flags review (no leak).
     redactor = _fixture_redactor(json.dumps({"pii_items": [{"text": "이", "category": "person_name"}]}))
