@@ -147,4 +147,4 @@ Each checkpoint is a real DAO `write_contract` call — locked, schema-validated
 
 # Collaboration
 
-Downstream: `policy-pipeline` (policy documents), `claim-analysis` (diagnosis/medical-record documents), `denial-response` (if a flagged insurer-response document exists — reads your checkpoint-1 output for that document, not a separate pipeline).
+Downstream: `policy-pipeline` (policy documents), `claim-analysis` (diagnosis/medical-record documents), `denial-response` (if a flagged insurer-response document exists — reads the checkpoint-2 redacted text for that document, not a separate pipeline).
