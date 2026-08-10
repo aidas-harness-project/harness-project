@@ -109,6 +109,14 @@ def run_matrix(
         reader_a=reader_a, reader_b=reader_b, comparator=comparator, classifier=classifier,
     )
 
+    if baseline["status"] == "blocked_segmentation":
+        return {
+            "disagreement_found": False,
+            "baseline": baseline,
+            "note": "Stage 1 segmentation preflight blocked checkpoint 1; review/split the "
+                    "listed PDFs before running the scenario matrix.",
+        }
+
     if baseline["status"] != "blocked_disagreement":
         return {"disagreement_found": False, "baseline": baseline,
                 "note": "No real disagreement on this document -- nothing to branch on. "

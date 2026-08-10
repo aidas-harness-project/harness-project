@@ -16,6 +16,16 @@ import dao
 @pytest.fixture
 def isolated_da(tmp_path, monkeypatch):
     monkeypatch.setattr(da, "ROOT", tmp_path)
+    # Real processed text for the documents these specs cite. main() verifies
+    # every citation quote against this layer before writing, so a fixture
+    # without it would exercise the refusal path instead of the render path --
+    # and seeding it keeps each end-to-end test passing THROUGH the check
+    # rather than around it.
+    for doc_id, text in (("DOC_001", "claim filed"),
+                         ("DOC_002", "second source")):
+        d = tmp_path / "data" / "processed" / "CASE_009" / doc_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "redacted_text.md").write_text(text, encoding="utf-8")
     return tmp_path
 
 
@@ -172,3 +182,107 @@ def test_template_screening_report_conforms():
     headings = ["1. 사건 개요", "2. 보험사 판단", "3. 핵심 쟁점", "4. 문서 간 불일치",
                 "5. 추가 필요 서류", "6. 전문가 검수 포인트", "7. 1차 판단"]
     assert da.validate_template(headings, "screening_report") == []
+
+
+# --------------------------------------------------- citation quote check ---
+# The tool renders whatever it is handed. Auto-generating the [E#] tags and the
+# sidecar from one source stops a tag and its citation DRIFTING, but says
+# nothing about whether the quote is real: an invented citation renders
+# cleanly, passes read-evidence-tags (consistent, 0 orphaned, 0 unused), and
+# ships. On CASE_909's v2 draft, 29 of 190 citations were wrong -- quotes
+# recalled rather than copied, and bills attributed to the wrong document --
+# caught only because that agent wrote its own verifier first.
+
+def _processed(tmp_path, monkeypatch, case_id="CASE_909", docs=None):
+    monkeypatch.setattr(da, "ROOT", tmp_path)
+    for doc_id, text in (docs or {}).items():
+        d = tmp_path / "data" / "processed" / case_id / doc_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "redacted_text.md").write_text(text, encoding="utf-8")
+
+
+def _sidecar(*citations):
+    return {"citations": [
+        {"tag": f"E{i}", "document_id": d, "page": p, "quote": q}
+        for i, (d, p, q) in enumerate(citations, start=1)]}
+
+
+def test_quote_present_in_source_passes(tmp_path, monkeypatch):
+    _processed(tmp_path, monkeypatch,
+               docs={"DOC_001": "<<<PAGE page=1>>>\n계단은 그리 넓지 않은바\n"})
+    side = _sidecar(("DOC_001", 1, "계단은 그리 넓지 않은바"))
+    assert da.verify_citation_quotes(side, "CASE_909") == []
+
+
+def test_invented_quote_is_rejected(tmp_path, monkeypatch):
+    _processed(tmp_path, monkeypatch,
+               docs={"DOC_001": "<<<PAGE page=1>>>\n계단은 그리 넓지 않은바\n"})
+    side = _sidecar(("DOC_001", 1, "이 문장은 어느 문서에도 없습니다"))
+    errors = da.verify_citation_quotes(side, "CASE_909")
+    assert len(errors) == 1
+    assert "quote not found" in errors[0]
+
+
+def test_right_quote_wrong_document_is_rejected(tmp_path, monkeypatch):
+    """The real CASE_909 failure: the words existed, in another document."""
+    _processed(tmp_path, monkeypatch, docs={
+        "DOC_015": "<<<PAGE page=1>>>\n본인부담금 246,560\n",
+        "DOC_014": "<<<PAGE page=1>>>\n총진료비 5,806,892\n",
+    })
+    side = _sidecar(("DOC_014", 1, "본인부담금 246,560"))
+    assert len(da.verify_citation_quotes(side, "CASE_909")) == 1
+
+
+def test_line_wrapped_quote_still_passes(tmp_path, monkeypatch):
+    """Extraction wraps mid-sentence, so a quote spanning a wrap is a REAL
+    quote. Failing it would train callers to cite only short fragments, which
+    makes citations less checkable, not more."""
+    _processed(tmp_path, monkeypatch,
+               docs={"DOC_001": "제설제인 염화칼슘이나 모\n래 등을 뿌려\n"})
+    side = _sidecar(("DOC_001", 9, "제설제인 염화칼슘이나 모래 등을 뿌려"))
+    assert da.verify_citation_quotes(side, "CASE_909") == []
+
+
+def test_document_with_no_processed_text_is_rejected(tmp_path, monkeypatch):
+    """A citation cannot point at a document this case never processed --
+    e.g. a superseded bundle, whose pages belong to its children."""
+    _processed(tmp_path, monkeypatch, docs={"DOC_001": "본문\n"})
+    side = _sidecar(("DOC_005", 1, "무엇이든"))
+    errors = da.verify_citation_quotes(side, "CASE_909")
+    assert len(errors) == 1
+    assert "no processed text" in errors[0]
+
+
+def test_every_bad_citation_is_reported_not_just_the_first(tmp_path, monkeypatch):
+    """29 were wrong at once. Reporting one per run would take 29 renders."""
+    _processed(tmp_path, monkeypatch, docs={"DOC_001": "본문\n"})
+    side = _sidecar(("DOC_001", 1, "없음1"), ("DOC_001", 2, "없음2"),
+                    ("DOC_001", 3, "없음3"))
+    assert len(da.verify_citation_quotes(side, "CASE_909")) == 3
+
+
+def test_main_refuses_a_bad_citation_and_writes_nothing(isolated_da):
+    """Drives main(), not the helper.
+
+    Every test above passes if the check is computed and then never consulted
+    -- the "implemented but not wired" shape this project keeps hitting. It
+    also pins the fail-BEFORE-disk contract: a document whose citations do not
+    resolve must not exist, because read-evidence-tags and
+    check-untagged-claims both read the tag layer and would report it clean.
+    """
+    spec = {"output_path": "outputs/CASE_009/draft_report_v1.md", "sections": [
+        {"heading": "1. Overview", "content": "Claim {{E}} filed.",
+         "evidence_references": [
+             {"document_id": "DOC_001", "page": 1,
+              "quote": "이 문장은 처리된 원문에 없습니다"}]},
+    ]}
+    sections_file = _write_sections_file(isolated_da, spec)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_main(sections_file)
+    assert "citation quotes do not appear" in str(excinfo.value)
+
+    out_path = isolated_da / "outputs" / "CASE_009" / "draft_report_v1.md"
+    assert not out_path.exists()
+    assert not out_path.with_suffix(".evidence.json").exists()
+    assert not out_path.with_name(out_path.name + ".lock").exists()

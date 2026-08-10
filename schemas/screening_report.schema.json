@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "screening_report.schema.json",
-  "title": "screening_report.json -- initial screening briefing v0.1",
+  "title": "screening_report.json -- initial screening briefing v0.3",
   "description": "Machine-readable screening report assembled from prior-stage outputs. Produced by screening-report; screening_report.md (the human-facing render) is generated from this JSON via the document-assembly tool. Section structure follows templates/screening-report.md's 7-section shape.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
@@ -14,6 +14,11 @@
         },
         "case_summary": { "$ref": "#/$defs/case_summary" },
         "insurer_position": { "$ref": "#/$defs/insurer_position" },
+        "source_denial_contract_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the denial_reason_result.json this report summarizes -- of the reason ids, decision types, taxonomy codes, and owned policy_match_ids, not the whole file. The DAO recomputes it from the contract on disk at write time and refuses a mismatch, so a screening report describing a superseded reason set cannot be persisted. Rewriting denial_reason_result.json flips this stage back to pending in run-state; no file is deleted."
+        },
         "key_issues": {
           "type": "array",
           "items": { "$ref": "#/$defs/key_issue" }
@@ -78,21 +83,124 @@
       "type": "object",
       "description": "Insurer's determination section. Source: denial_reason_result (from denial-response, consumed as a dependency -- see pipeline.md).",
       "properties": {
-        "has_denial_or_reduction": { "type": "boolean" },
+        "has_denial": { "type": "boolean" },
+        "has_reduction": { "type": "boolean" },
+        "has_denial_or_reduction": {
+          "type": "boolean",
+          "deprecated": true,
+          "description": "Deprecated compatibility field retained for one schema version. Must equal has_denial OR has_reduction; consumers should migrate to the two explicit fields."
+        },
+        "has_acceptance": {
+          "type": "boolean",
+          "description": "Whether the insurer's response ACCEPTED any coverage. Optional and additive: absent means the report predates this field, NOT that nothing was accepted. Without it a split outcome was structurally invisible -- CASE_907's report correctly said in prose that 배상책임 was denied while 구내치료비 ₩2,000,000 was notified, but insurer_position read has_denial:true/has_reduction:false and nothing else, which a structural consumer takes as a total denial. That is the exact misreading denial_reason_result's accepted_coverages exists to prevent, so the report that summarizes it must carry the axis too."
+        },
+        "acceptance": {
+          "type": "object",
+          "description": "Which coverages the insurer accepted, mirroring the denial/reduction summaries. Sourced from denial_reason_result.accepted_coverages; ids must be exactly that contract's accepted_coverage_ids.",
+          "properties": {
+            "accepted_coverage_ids": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^AC_[0-9]+$" }
+            },
+            "total_amount": {
+              "type": ["number", "null"],
+              "description": "Sum of stated accepted amounts, or null when no figure is stated. An amount the insurer merely NOTIFIED is still recorded here -- payment_status on the source contract carries whether it was actually paid, and this field must never be read as proof of payment."
+            }
+          },
+          "required": ["accepted_coverage_ids"],
+          "additionalProperties": false
+        },
+        "denial": { "$ref": "#/$defs/decision_summary" },
+        "reduction": { "$ref": "#/$defs/decision_summary" },
         "main_reason_code": {
+          "deprecated": true,
           "anyOf": [
             { "$ref": "common_component_output.schema.json#/$defs/taxonomy_code" },
             { "type": "null" }
           ]
         },
-        "main_reason_label": { "type": ["string", "null"] },
+        "main_reason_label": { "type": ["string", "null"], "deprecated": true },
         "summary": {
           "type": ["string", "null"],
           "description": "Summary of the insurer's position -- hedged, non-definitive phrasing."
         },
-        "reduction_amount": { "type": ["number", "null"], "minimum": 0 }
+        "reduction_amount": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "deprecated": true,
+          "description": "Deprecated compatibility field. Use reduction.total_amount."
+        }
       },
-      "required": ["has_denial_or_reduction"]
+      "required": ["has_denial", "has_reduction", "has_denial_or_reduction", "denial", "reduction"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "has_denial": { "const": false },
+              "has_reduction": { "const": false }
+            },
+            "required": ["has_denial", "has_reduction"]
+          },
+          "then": { "properties": { "has_denial_or_reduction": { "const": false } } },
+          "else": { "properties": { "has_denial_or_reduction": { "const": true } } }
+        },
+        {
+          "if": {
+            "properties": { "has_denial": { "const": true } },
+            "required": ["has_denial"]
+          },
+          "then": {
+            "properties": {
+              "denial": {
+                "properties": { "reason_ids": { "minItems": 1 } }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "denial": {
+                "properties": { "reason_ids": { "maxItems": 0 } }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "has_reduction": { "const": true } },
+            "required": ["has_reduction"]
+          },
+          "then": {
+            "properties": {
+              "reduction": {
+                "properties": { "reason_ids": { "minItems": 1 } }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reduction": {
+                "properties": { "reason_ids": { "maxItems": 0 } }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "decision_summary": {
+      "type": "object",
+      "properties": {
+        "reason_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^DR_[0-9]+$" }
+        },
+        "total_amount": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Total denied or reduced amount when explicitly available; null when the source does not state enough amounts to total safely."
+        }
+      },
+      "required": ["reason_ids", "total_amount"]
     },
     "key_issue": {
       "type": "object",
@@ -141,13 +249,45 @@
     },
     "review_point": {
       "type": "object",
-      "description": "A point flagged for expert review.",
+      "description": "A point flagged for expert review. This array is P3's aggregation point for Phase 1: P3 says an inference-bearing claim is hedged and flagged, does not halt its stage, and that flagged claims 'surface together at the aggregation/report stage for batch human review' -- screening-report is that stage, and these are those claims. v0.3 adds point_id, source_refs and answerable, all optional so every pre-2026-08-06 report validates untouched.",
       "properties": {
+        "point_id": {
+          "type": "string",
+          "pattern": "^RP-[0-9]+$",
+          "description": "Stable identifier, RP-N, numbered within this report. Its absence was a real asymmetry: critic findings carry finding_id and expert_review disposes of each by finding_ref, so a human's answer to a critic has somewhere to attach -- while a review point had no id at all, leaving a reviewer's answer with nothing to bind to and no way to tell later which points were ever addressed. Number stably; a point that survives into a later revision keeps its id."
+        },
         "point": { "type": "string" },
-        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" },
-        "priority": { "$ref": "common_component_output.schema.json#/$defs/severity" }
+        "reviewer_role": {
+          "$ref": "common_component_output.schema.json#/$defs/reviewer_role",
+          "description": "Who can actually answer THIS question -- routed per question, not copied from the flagging contract's own reviewer_role. Those differ in practice and the per-question value is the correct one: on CASE_909 every upstream contract-level flag read 손해사정사, while the questions behind them split 법률전문가 4 / 손해사정사 5 / 의사 1. Whether a McBride rating is medically sound is a 의사 question no matter which contract raised it."
+        },
+        "priority": { "$ref": "common_component_output.schema.json#/$defs/severity" },
+        "source_refs": {
+          "type": "array",
+          "description": "Where this point came from: the upstream contract(s) whose review_required flag, uncertainty, or warning it aggregates. Prose naming of a source is not enough -- on CASE_909, 5 of 10 points named no document and none was machine-resolvable, so nothing could check whether a flagged contract had been surfaced at all. Empty is legitimate for a point the agent raised from its own reading rather than from an upstream flag.",
+          "items": { "$ref": "#/$defs/review_point_source" }
+        },
+        "answerable": {
+          "type": "boolean",
+          "description": "Whether a reviewer can change anything by answering. False marks a point raised for the record over material that is simply gone -- a value erased by redaction, a document absent from the pack -- where 'please confirm this is missing' spends expert attention and returns nothing. Default true when omitted. This is what keeps batch review from filling with unanswerable items: prefer raising the DOWNSTREAM CONSEQUENCE as an answerable point instead (CASE_909 routed a redaction-blanked 사고일자 as the premise of 보험기간 내 사고 여부 and 소멸시효, not as 'a field is null')."
+        }
       },
       "required": ["point", "reviewer_role", "priority"]
+    },
+    "review_point_source": {
+      "type": "object",
+      "description": "An upstream contract this review point aggregates, and optionally the element within it.",
+      "properties": {
+        "contract": {
+          "type": "string",
+          "description": "Filename of the upstream contract, e.g. requirement_matching_result.json or denial_reason_result.json."
+        },
+        "element_id": {
+          "type": ["string", "null"],
+          "description": "The specific element inside that contract when one applies -- REQ-3, DR_1, PM_2, CONFLICT_1. Null when the flag is contract-level."
+        }
+      },
+      "required": ["contract"]
     },
     "preliminary_assessment": {
       "type": "object",

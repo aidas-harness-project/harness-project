@@ -1,0 +1,444 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "policy_audit_result.schema.json",
+  "title": "policy_audit_result_DOC_XXX.json -- version-bound policy extraction audit v0.1",
+  "description": "Binds an audit to exact normalized/inventory/reference-table bytes and records every defect until resolved, false-positive, or explicitly accepted by a human.",
+  "allOf": [
+    {
+      "$ref": "common_component_output.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "source_document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id"
+        },
+        "normalized_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "inventory_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "reference_table_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_text_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Digest of the PROCESSED source text (redacted_text.md) the audited contracts quote. Every boundary offset and evidence quote is expressed against these exact bytes, so a re-extraction that changes them invalidates the audit even when the contracts themselves are untouched. null only when the document has no processed text at all (which is itself a completion blocker)."
+        },
+        "manifest_entry_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Digest of this document's document_manifest.json entry, including its page_map. A segment's logical->physical page mapping is what parent coverage and physical-page provenance are checked against; changing it must make the audit stale."
+        },
+        "parent_coverage_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Digest of the parent's policy_parent_coverage contract, for a document whose parent declares one. null when the document has no segmented parent with coverage."
+        },
+        "audit_scope": {
+          "type": "object",
+          "properties": {
+            "source_completeness": {
+              "const": true
+            },
+            "semantic_buckets": {
+              "const": true
+            },
+            "evidence_support": {
+              "const": true
+            },
+            "reference_tables": {
+              "const": true
+            },
+            "downstream_addresses": {
+              "const": true
+            }
+          },
+          "required": [
+            "source_completeness",
+            "semantic_buckets",
+            "evidence_support",
+            "reference_tables",
+            "downstream_addresses"
+          ],
+          "additionalProperties": false
+        },
+        "auditor_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "audited_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/finding"
+          }
+        },
+        "source_text_revision": {
+          "type": "object",
+          "description": "Which registered source-text revision this contract's offsets, quotes and source-derived UIDs were computed against (Part 11J). A single hash cannot express a contract that reads several documents, so this is a per-document map -- the same shape as upstream_policy_snapshot in Part 11I, deliberately, since using two shapes for one idea is itself a drift source. Absent on legacy (v0.1) contracts, which stay readable and migratable but cannot be written or finalized as new work; required once the document is canonical_v1.",
+          "properties": {
+            "documents": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "document_id": {
+                    "$ref": "common_component_output.schema.json#/$defs/document_id"
+                  },
+                  "revision_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "document_id",
+                  "revision_sha256"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "documents"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "source_document_id",
+        "normalized_sha256",
+        "inventory_sha256",
+        "reference_table_sha256",
+        "source_text_sha256",
+        "manifest_entry_sha256",
+        "parent_coverage_sha256",
+        "audit_scope",
+        "auditor_id",
+        "audited_at",
+        "findings"
+      ]
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "finding": {
+      "type": "object",
+      "properties": {
+        "finding_uid": {
+          "type": "string",
+          "pattern": "^PA-[a-f0-9]{16,64}$"
+        },
+        "category": {
+          "enum": [
+            "missing_boundary",
+            "semantic_mismatch",
+            "misbucketed_clause",
+            "evidence_insufficient",
+            "reference_table_ambiguity",
+            "lineage_issue",
+            "downstream_address_issue",
+            "other"
+          ]
+        },
+        "severity": {
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "status": {
+          "enum": [
+            "open",
+            "resolved",
+            "false_positive",
+            "accepted_risk"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "remediation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "clause_uid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^PC-[a-f0-9]{16,64}$"
+        },
+        "condition_uid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^CI-[a-f0-9]{16,64}$"
+        },
+        "boundary_uid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^PB-[a-f0-9]{16,64}$"
+        },
+        "table_uid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^RT-[a-f0-9]{16,64}$"
+        },
+        "evidence_references": {
+          "type": "array",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
+          }
+        },
+        "artifact_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "resolution_note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolved_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolution_actor_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "human",
+            "automated",
+            null
+          ]
+        },
+        "human_review_uid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^HR-[a-f0-9]{16}$",
+          "description": "Reference into _human_review_ledger.json. Required whenever a human decision is claimed (resolution_actor_type=human, or status=accepted_risk). The DAO re-verifies this UID exists, was recorded for this finding, still matches the audit's current bytes, and carries decision=accepted_risk. A bare resolved_by name string can no longer stand in for a human decision -- that record must exist in the DAO-only ledger."
+        }
+      },
+      "required": [
+        "finding_uid",
+        "category",
+        "severity",
+        "status",
+        "description",
+        "remediation",
+        "clause_uid",
+        "condition_uid",
+        "boundary_uid",
+        "table_uid",
+        "evidence_references",
+        "artifact_refs",
+        "resolution_note",
+        "resolved_by",
+        "resolution_actor_type",
+        "human_review_uid"
+      ],
+      "anyOf": [
+        {
+          "properties": {
+            "evidence_references": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifact_refs": {
+              "minItems": 1
+            }
+          }
+        }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "open"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolution_note": {
+                "type": "null"
+              },
+              "resolved_by": {
+                "type": "null"
+              },
+              "resolution_actor_type": {
+                "type": "null"
+              },
+              "human_review_uid": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "resolved",
+                  "false_positive",
+                  "accepted_risk"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolution_note": {
+                "type": "string",
+                "minLength": 1
+              },
+              "resolved_by": {
+                "type": "string",
+                "minLength": 1
+              },
+              "resolution_actor_type": {
+                "enum": [
+                  "human",
+                  "automated"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "accepted_risk"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolution_actor_type": {
+                "const": "human"
+              },
+              "human_review_uid": {
+                "type": "string",
+                "pattern": "^HR-[a-f0-9]{16}$"
+              }
+            },
+            "required": [
+              "human_review_uid"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resolution_actor_type": {
+                "const": "human"
+              }
+            },
+            "required": [
+              "resolution_actor_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "human_review_uid": {
+                "type": "string",
+                "pattern": "^HR-[a-f0-9]{16}$"
+              }
+            },
+            "required": [
+              "human_review_uid"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resolution_actor_type": {
+                "const": "automated"
+              }
+            },
+            "required": [
+              "resolution_actor_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "human_review_uid": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

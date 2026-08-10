@@ -10,4 +10,4 @@ Do not inspect case data, ground truth, run state, or Evaluation artifacts. Do n
 
 `BLOCKED: Evaluation is unavailable in the local Units 1-7 harness and requires the deferred authenticated isolated Unit 11 service.`
 
-Human expert review is completed by the Units 1-7 operator workflow without this agent. It does not authorize local ground-truth access.
+Human expert review is completed by the Units 1–7 operator workflow without this agent. It does not authorize local ground-truth access.

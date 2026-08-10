@@ -20,6 +20,13 @@ __pycache__/
 
 # Pipeline execution data (copy of source-cases/ + intermediate outputs -- originals version-controlled in source-cases/)
 data/
+*.pdf
+*.zip
+*.txt
+*.pptx
+CASE_112_pipeline_walkthrough/
+docs/
+.tmp/
 
 # Workspace Data with each run's report written by agent
 _workspace/
@@ -36,9 +43,28 @@ archive/
 # Shared temp zip (schemas/ is the source of truth)
 schemas.zip
 
+# Local scratch workspace (extracted page PDFs/images etc.) -- transient working
+# files, never a source of truth. Raw sources live in source-cases/.
+tmp/
+
 # ocr_extract.py's project-local scratch (page images) -- transient, cleaned up on exit
 _ocr_scratch/
+
+# Checkpoint 2's short-lived page-text capabilities. Minted per document and
+# revoked when the run ends; never source, never worth committing.
+_capabilities/
 _redaction_scratch/
+_segmentation_scratch/
+_source-cases/
+source-cases/
+
+# segment_case.py's contact sheets and per-sheet resume cache. Kept separate from
+# _ocr_scratch/ because these deliberately OUTLIVE the process: a human reads the
+# sheets to approve boundaries, so nothing here may be rmtree'd on exit.
+_segmentation_scratch/
+
+# Project-local offline runtimes and model weights (downloaded, never versioned)
+.runtime/
 
 # graphify knowledge-graph build output -- regenerable from the corpus, not source
 graphify-out/

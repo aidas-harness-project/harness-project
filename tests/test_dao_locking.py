@@ -2,7 +2,8 @@
 atomic-write-then-validate-fail rollback known-gaps.md item 4 named
 explicitly, and acquire_lock_blocking's wait-for-clear behavior (item 7 --
 every lock in the DAO now blocks instead of failing fast, per P5's
-already-documented 30s/15min cadence, now owned by the DAO itself).
+already-documented 30s/15min cadence, now owned by the DAO itself -- with the
+poll interval overridable for parallel batches of short commits).
 """
 import json
 import os
@@ -444,7 +445,51 @@ def test_generic_lock_release_never_unlinks_the_lock_path(
 
     dao.release_lock(target)
 
+
+def test_release_lock_tolerates_a_concurrent_release(isolated_dao):
+    """The exact CASE_907 crash: two workers release the same lock and the
+    loser hit FileNotFoundError between exists() and unlink(), failing a
+    caller whose write had already committed."""
+    target = isolated_dao / "outputs" / "CASE_009" / "thing.json"
+    dao.acquire_lock(target, "worker-a", "RUN_A", "committing")
+
+    dao.release_lock(target)
+    dao.release_lock(target)  # must not raise
+
     assert dao.read_lock(target) is None
+
+
+def test_release_lock_removes_a_held_lock(isolated_dao):
+    target = isolated_dao / "outputs" / "CASE_009" / "thing.json"
+    dao.acquire_lock(target, "worker-a", "RUN_A", "committing")
+    assert dao.read_lock(target) is not None
+
+    dao.release_lock(target)
+
+    assert dao.read_lock(target) is None, "release must still actually release"
+
+
+# ------------------------------------------------- poll-interval resolution --
+#
+# The interval became configurable because a parallel batch of short commits
+# (analyze-policy-polarity appending one receipt) waits 30s per contended
+# commit for work that takes milliseconds. A bad value must degrade to the
+# default, never spin (0/negative) and never hard-fail the run.
+
+def test_lock_poll_interval_defaults_when_unset():
+    assert dao._lock_poll_interval({}) == 30.0
+
+
+def test_lock_poll_interval_reads_env_override():
+    assert dao._lock_poll_interval({dao.LOCK_POLL_INTERVAL_ENV: "0.5"}) == 0.5
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "abc", "", "   "])
+def test_lock_poll_interval_rejects_values_that_would_spin_or_crash(raw):
+    assert dao._lock_poll_interval({dao.LOCK_POLL_INTERVAL_ENV: raw}) == 30.0, (
+        "a zero/negative interval would busy-spin and a malformed one must not "
+        "turn every lock wait into a configuration failure"
+    )
 
 
 def test_acquire_lock_blocking_gives_up_after_max_wait(isolated_dao, monkeypatch):

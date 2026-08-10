@@ -18,45 +18,54 @@
         "field_name": "diagnosis_name",
         "predicted_value": "기타 명시된 뇌혈관질환",
         "actual_value": "기타 명시된 뇌혈관질환 (I678) — GT 주요 상병명",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "kcd_code",
         "predicted_value": "I67.8",
         "actual_value": "I67.8 / I678 (GT: I67 기타 뇌혈관질환, 뇌혈관질환(뇌졸중제외) 범주에 포함)",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "claim_coverage",
         "predicted_value": "뇌혈관질환진단비 (진단비 특약)",
         "actual_value": "뇌질병진단비(뇌혈관질환(뇌졸중제외))진단비III / 뇌혈관질환진단비 특별약관 (GT 사정금액 대상 담보)",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "accident_date (보험사고일)",
         "predicted_value": "2025-10-16",
         "actual_value": "2025-10-16 (GT: '2025년 10월 16일 발생한 보험사고')",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "imaging_date",
         "predicted_value": "2025-10-10",
         "actual_value": "2025-10-10 (GT 진단경위: 2025.10.10 시행 뇌 MRI)",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "policy_contract_date (KB)",
         "predicted_value": "2023-10-16",
         "actual_value": "2023-10-16 (GT 보험계약사항: KB 보험기간 2023.10.16~2043.10.16 시기)",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "onset_date",
         "predicted_value": "2025-09-30",
         "actual_value": null,
-        "match": false
+        "match": false,
+        "field_kind": "fact"
       }
-    ]
+    ],
+    "fact_extraction_score": 0.8571,
+    "discretionary_agreement_score": null
   },
   "case_type_accuracy": {
     "applicable": true,

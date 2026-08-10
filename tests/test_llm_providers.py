@@ -187,6 +187,87 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
     assert result.metadata()["provider_name"] == "claude-cli"
 
 
+def test_claude_cli_structured_image_uses_native_json_schema(monkeypatch, tmp_path):
+    captured = {}
+    structured = {
+        "boundaries": [{"page": 1}],
+        "continuations": [2],
+        "needs_full_page": [],
+    }
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "session_id": "session-1",
+            "structured_output": structured,
+        })
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.ClaudeCliProvider(root=tmp_path)
+    image = tmp_path / "sheets" / "sheet.png"
+    schema = {
+        "type": "object",
+        "properties": {"boundaries": {"type": "array"}},
+        "required": ["boundaries"],
+    }
+
+    result = provider.analyze_image_structured(
+        image, "analyze", "segment_v1", schema
+    )
+
+    assert "--output-format" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--output-format") + 1] == "json"
+    assert json.loads(captured["cmd"][captured["cmd"].index("--json-schema") + 1]) == schema
+    assert "--safe-mode" in captured["cmd"]
+    assert captured["cmd"][-2:] == ["--allowedTools", "Read"]
+    assert captured["kwargs"]["cwd"] == str(image.resolve().parent)
+    assert result.structured_output == structured
+    assert json.loads(result.text) == structured
+
+
+def test_claude_cli_structured_image_fails_closed_without_structured_output(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "explanatory prose",
+        })
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    provider = providers.ClaudeCliProvider(root=tmp_path)
+
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.analyze_image_structured(
+            tmp_path / "sheet.png",
+            "analyze",
+            "segment_v1",
+            {"type": "object"},
+        )
+
+    # Caller owns the single P4 correction; the provider must not hide three
+    # whole-model content retries behind one apparent attempt.
+    assert len(calls) == 1
+    assert "structured_output" in str(excinfo.value)
+
+
 def test_claude_cli_provider_always_passes_safe_mode(monkeypatch, tmp_path):
     """Regression (CASE_022 real run): claude -p with cwd=ROOT auto-loads the
     project's CLAUDE.md/hooks, and a context-aware reader editorializes --
@@ -798,3 +879,68 @@ def test_openai_empty_output_rejected(monkeypatch):
     )
     with pytest.raises(providers.ProviderExecutionError):
         provider.classify_document("prompt", "classification_v0.1")
+
+
+# --- compare_text timeout override (policy-polarity long-passage support) ---
+
+
+def test_compare_text_timeout_defaults_and_overrides():
+    """The default stays 60s; a valid override is honoured."""
+    assert providers.compare_text_timeout(env={}) == 60
+    assert providers.compare_text_timeout(
+        env={"HARNESS_LLM_COMPARE_TIMEOUT_SECONDS": "180"}) == 180
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "0", "-5", "  "])
+def test_compare_text_timeout_falls_back_on_invalid(bad):
+    """A malformed timeout must not make every semantic analysis a hard error."""
+    assert providers.compare_text_timeout(
+        env={"HARNESS_LLM_COMPARE_TIMEOUT_SECONDS": bad}) == 60
+
+
+def test_compare_text_passes_env_timeout_to_subprocess(monkeypatch, tmp_path):
+    """The resolved timeout actually reaches the claude-cli subprocess call."""
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = "AGREE"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    monkeypatch.setenv("HARNESS_LLM_COMPARE_TIMEOUT_SECONDS", "240")
+    providers.ClaudeCliProvider(root=tmp_path).compare_text(
+        "compare prompt", "ocr_compare_v0.1")
+
+    assert seen["timeout"] == 240
+
+
+def test_codex_compare_text_passes_env_timeout_to_subprocess(monkeypatch, tmp_path):
+    """Same override reaches codex-cli, the other production CLI analyzer.
+
+    codex-cli returns its result via an output FILE (`--output-last-message`),
+    not stdout, so the fake must populate that path or the provider correctly
+    fails closed on empty output.
+    """
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        for flag in ("--output-last-message", "--output_last_message"):
+            if flag in cmd:
+                Path(cmd[cmd.index(flag) + 1]).write_text("AGREE", encoding="utf-8")
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    monkeypatch.setenv("HARNESS_LLM_COMPARE_TIMEOUT_SECONDS", "150")
+    providers.CodexCliProvider(root=tmp_path).compare_text(
+        "compare prompt", "ocr_compare_v0.1")
+
+    assert seen["timeout"] == 150

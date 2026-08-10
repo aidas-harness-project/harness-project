@@ -21,9 +21,38 @@ First inspect `extracted_claim_fields.json` through the DAO. Only a DAO-accepted
 
 `screening_report.json` + `screening_report.md`. Content structure and required sections: template TBD, see `pipeline.md`'s note on pending template rules — do not invent a template structure now.
 
+In `insurer_position`, preserve denial and reduction separately:
+
+- `has_denial` and `denial.reason_ids`/`total_amount`
+- `has_reduction` and `reduction.reason_ids`/`total_amount`
+- `has_denial_or_reduction` remains for one schema version only as a deprecated compatibility field and must equal the logical OR of the two explicit booleans.
+
+A case may populate both sections. Never collapse two reason lists into one main classification. Each section may only list reasons whose `decision_type` matches it — a `reduction` under `denial.reason_ids` (or the reverse) is rejected by the DAO, as is the same `reason_id` appearing in both. This is not bookkeeping: the screening report is the triage document a human reads first, so a reason filed under the wrong heading misstates what the insurer actually decided.
+
+Record `source_denial_contract_hash` from the `denial_reason_result.json` you summarized (see `denial-validation.md` for how it is computed). The DAO recomputes it at write time and refuses a mismatch, so a report describing a superseded reason set cannot be persisted; a refusal means the denial contract was rewritten while you worked — re-read it and redo the summary. Set a total amount only when every amount needed for that total is explicitly stated; otherwise use `null`. The deprecated `main_reason_*` and flat `reduction_amount` fields are not authoritative for new consumers.
+
+**`document_assembly.py` verifies every citation quote against `data/processed/<CASE>/<DOC>/redacted_text.md` before writing anything, and refuses the whole document if one does not resolve.** Quote from the processed text; never reconstruct one from memory. Whitespace differences are tolerated (extraction line-wraps mid-sentence), wrong words and wrong `document_id`s are not.
+
 For the narrative `.md`: you provide per-field/per-section content + `evidence_references` to `python tools/document_assembly.py --sections-file <spec.json> --held-by screening-report --run-id RUN_ID --template screening_report`, which assembles the file and auto-generates `[E#]` tags and the `.evidence.json` sidecar in one pass — locked and atomic like any other DAO write. The `--template screening_report` flag structurally enforces `templates/screening-report.md`'s 7 sections (exact headings and order, per `templates/registry.json`) — a refusal means fix your section list to match, not drop the flag. You never hand-write a tag number or hand-maintain the sidecar.
 
-Every judgment beyond direct restatement (case difficulty, priority review points, etc.) follows P3 — hedge, flag, don't assert.
+In the narrative section `보험사 판단`, render separate `거절` and `감액` subsections, including their reason IDs, stated grounds, and explicit amounts. Every judgment beyond direct restatement (case difficulty, priority review points, etc.) follows P3 — hedge, flag, don't assert.
+
+## `review_points` — P3's aggregation point
+
+**This array is where Phase 1's flagged claims land, and you are the stage P3 names.** P3 says an inference-bearing claim is hedged and flagged, *does not halt its stage*, and that flagged claims "surface together at the aggregation/report stage for batch human review." Nothing upstream blocks on a flag, so if a question does not reach this array it reaches nobody.
+
+Build it from a sweep of your upstream inputs, not only from your own reading. Every contract you read carries `review_required`, `confidence`, `warnings`, and its own uncertainty markers (`uncertain` requirements, `agent_inferred` matches, `partial` status). Account for each one — the producing agent's `warnings` text is usually the real substance, written by the agent that had the evidence in front of it.
+
+**Account for is not transcribe. Do not emit one point per flag.** Several flags usually converge on a single question a human answers once; merge them and cite each contributing source. `priority` is yours to set, and a flat list of "high" helps nobody.
+
+Fill these fields:
+
+- **`point_id`** — `RP-N`, numbered within the report. Critic findings have carried `finding_id` all along, and `expert_review.json` disposes of each by `finding_ref`; review points had no id, so a reviewer's answer had nothing to bind to and no one could later tell which points were ever addressed. Number stably.
+- **`source_refs`** — the upstream contract(s), with `element_id` where one applies (`REQ-3`, `DR_1`, `PM_2`, `CONFLICT_1`). Naming a source only in prose is not enough: on CASE_909, 5 of 10 points named no document at all and none was machine-resolvable. Leave empty only for a point you raised from your own reading rather than from an upstream flag.
+- **`reviewer_role`** — route by **who can actually answer this question**, not by copying the flagging contract's own `reviewer_role`. Those differ, and yours is the correct one: on CASE_909 every contract-level flag read `손해사정사`, while the questions behind them split 법률전문가 4 / 손해사정사 5 / 의사 1. Whether a McBride rating is medically sound is a 의사 question no matter which contract raised it.
+- **`answerable`** — `false` when a reviewer cannot change anything by answering, because the material is simply gone (a value erased by redaction, a document absent from the pack). Asking an expert to confirm something is missing spends their attention and returns nothing. **Prefer raising the downstream consequence as an answerable point instead** — CASE_909 routed a redaction-blanked 사고일자 as the premise of 보험기간 내 사고 여부 and 소멸시효, not as "a field is null."
+
+Contracts written after you run — `denial_validation_result`, `rebuttal_points`, `critic_result_*`, `draft_report_metadata_*` — are Phase 2's to surface, not yours.
 
 # Access rules
 

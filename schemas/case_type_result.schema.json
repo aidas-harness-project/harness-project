@@ -1,14 +1,41 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "case_type_result.schema.json",
-  "title": "case_type_result.json -- case-type classification v0.1",
-  "description": "Produced by claim-analysis's checkpoint 3 (Case Type Classification). Determines template_id for the report template downstream -- a mandatory, independently schema-validated gate, see claim-analysis.md.",
+  "title": "case_type_result.json -- case-type classification v0.2",
+  "description": "Produced by claim-analysis's checkpoint 3 (Case Type Classification). Determines template_id for the report template downstream -- a mandatory, independently schema-validated gate, see claim-analysis.md. v0.2 (2026-08-04) adds the two-axis classification -- coverage_basis (who pays, on what legal basis) and loss_type (what loss is computed) -- which replaces the flat case_type enum plus its secondary_case_types hedge. The axes are ADDITIVE and OPTIONAL in this version so an in-flight case (CASE_907) can complete against v0.1 semantics; case_type remains required. Once CASE_907 finishes, v0.3 makes the axes required and case_type deprecated. See open-decisions.md #8/#8a. Rationale for the split: every multi-type case on record straddles in the same direction (배상책임 x 후유장해) because the two questions are orthogonal, and templates/registry.json's key 배상책임_후유장해형 is already a compound of both axes.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
       "type": "object",
       "properties": {
         "case_type": { "$ref": "#/$defs/case_type" },
+        "coverage_basis": {
+          "$ref": "#/$defs/coverage_basis",
+          "description": "Axis 1 -- 보상 근거: who pays and on what legal basis. Adjuster-supplied at intake when case_type_source is adjuster_input (see open-decisions.md #8); otherwise inferred. Null only for a case that is not a claim at all (policy/증권/청약 material with no accident and no insurer response -- see is_claim_case)."
+        },
+        "loss_type": {
+          "$ref": "#/$defs/loss_type",
+          "description": "Axis 2 -- 손해 유형: what kind of loss is being computed. Independent of coverage_basis; a claim holds one value on each axis. Null under the same non-claim condition as coverage_basis."
+        },
+        "is_claim_case": {
+          "type": "boolean",
+          "description": "False for material that carries no claim at all (e.g. CASE_030: 보험약관 + 증권서류 + 청약서류, no accident, no insurer response). A non-claim case has no case type on either axis -- this flag exists so that absence is stated explicitly rather than forced into a 기타 bucket, which previously did double duty for 'unusual claim' and 'not a claim'. Defaults to true when absent."
+        },
+        "case_type_source": {
+          "enum": ["adjuster_input", "inferred"],
+          "description": "Provenance of the classification. adjuster_input means a loss adjuster supplied it at intake as a practice fact -- P1's quote-tracing requirement is satisfied by the recorded intake input, not by a document quote, because no document states a case's type. inferred means checkpoint 3 derived it from claim fields and coverage. When adjuster_input, checkpoint 3 still forms its own independent view and sets review_required true on contradiction rather than overriding (see claim-analysis.md)."
+        },
+        "axis_cross_check": {
+          "type": "object",
+          "description": "Recorded when case_type_source is adjuster_input: checkpoint 3's independent view, and whether it agrees with what the adjuster supplied. A disagreement is a review signal, never an override -- it catches both adjuster mis-entry and the CASE_022 failure shape (the adjuster's type is right but the pack lacks that type's claim documents).",
+          "properties": {
+            "agrees": { "type": "boolean" },
+            "inferred_coverage_basis": { "$ref": "#/$defs/coverage_basis" },
+            "inferred_loss_type": { "$ref": "#/$defs/loss_type" },
+            "note": { "type": "string" }
+          },
+          "required": ["agrees"]
+        },
         "secondary_case_types": {
           "type": "array",
           "description": "Additional case types that also genuinely apply to this claim (e.g. a claim that is both a surgery-cost case and a permanent-disability case), beyond the primary. Empty array if the claim is a single, clean case type.",
@@ -40,12 +67,57 @@
         "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
       },
       "required": ["case_type", "template_id", "confidence", "evidence_references", "review_required"]
+    },
+    {
+      "description": "Rule: a non-claim case (is_claim_case false) carries no case type on either axis. Stated as an explicit null rather than an omission so the absence is a recorded judgment, not a missing field.",
+      "if": {
+        "properties": { "is_claim_case": { "const": false } },
+        "required": ["is_claim_case"]
+      },
+      "then": {
+        "properties": {
+          "coverage_basis": { "type": "null" },
+          "loss_type": { "type": "null" }
+        }
+      }
+    },
+    {
+      "description": "Rule: a claim case that declares either axis must declare both -- a half-classified claim would silently pick a template from one axis. Only binds when is_claim_case is not false, so v0.1-era outputs that declare neither axis stay valid.",
+      "if": {
+        "not": {
+          "properties": { "is_claim_case": { "const": false } },
+          "required": ["is_claim_case"]
+        },
+        "anyOf": [
+          { "required": ["coverage_basis"] },
+          { "required": ["loss_type"] }
+        ]
+      },
+      "then": { "required": ["coverage_basis", "loss_type"] }
+    },
+    {
+      "description": "Rule: an adjuster-supplied classification must record the cross-check outcome, so a contradiction between the adjuster's input and checkpoint 3's independent view can never be silently dropped.",
+      "if": {
+        "properties": { "case_type_source": { "const": "adjuster_input" } },
+        "required": ["case_type_source"]
+      },
+      "then": { "required": ["axis_cross_check"] }
     }
   ],
   "$defs": {
     "case_type": {
-      "description": "Kept in Korean -- matches pipeline.md's case-type taxonomy, the real-world classification vocabulary that determines report template selection.",
+      "description": "DEPRECATED as of v0.2 -- superseded by the coverage_basis + loss_type axis pair. Still required in v0.2 so pre-2026-08-04 outputs (CASE_021/024/112/908) stay readable and an in-flight case can complete unchanged; becomes optional-then-removed in v0.3. Kept in Korean -- matches pipeline.md's case-type taxonomy. Known defect motivating the split: this enum conflates two orthogonal questions, has no value for 자동차보험 (the largest series in the corpus, 16 files), and its 기타 value does double duty for 'unusual claim' and 'not a claim at all'.",
       "enum": ["후유장해", "진단·수술비", "실손", "배상책임", "기타"]
+    },
+    "coverage_basis": {
+      "description": "Axis 1 -- 보상 근거. Kept in Korean: these are the real-world practice categories a loss adjuster uses. 배상책임 = third-party liability (시설소유자/영업배상책임, 민법 제758조 등). 개인보험 = first-party personal insurance benefit (상해후유장해보험금, 진단비 특약 등). 자동차보험 = 자동차보험 대인배상, computed on 자동차보험약관 지급기준 with 소득 and 과실상계 -- a distinct regime that had NO representation in the v0.1 enum despite being the corpus's largest series. Null is permitted only when is_claim_case is false.",
+      "type": ["string", "null"],
+      "enum": ["배상책임", "개인보험", "자동차보험", null]
+    },
+    "loss_type": {
+      "description": "Axis 2 -- 손해 유형. 후유장해 = permanent-disability determination drives the loss. 진단·수술비 = fixed-benefit diagnosis/surgery claim. 실손 = indemnity (medical expense reimbursement). NOTE: 실손 has never occurred in any real case in this corpus and has no templates/registry.json contract, so accepting it as adjuster input means the draft stage will fail at render time -- surface that at intake, not at draft time. Null is permitted only when is_claim_case is false.",
+      "type": ["string", "null"],
+      "enum": ["후유장해", "진단·수술비", "실손", null]
     }
   }
 }

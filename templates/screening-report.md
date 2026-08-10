@@ -1,7 +1,7 @@
 ---
 type: Template
 title: 스크리닝 리포트 템플릿
-description: 핵심항목·청구담보·감액사유·불일치를 통합한 1차 스크리닝 리포트의 7개 섹션 구조.
+description: 핵심항목·청구담보·거절·감액사유·불일치를 통합한 1차 스크리닝 리포트의 7개 섹션 구조.
 tags: [template, screening]
 timestamp: 2026-07-13T00:00:00+09:00
 adopted_from: wiki/templates/screening-report.md
@@ -28,10 +28,12 @@ adopted_from: wiki/templates/screening-report.md
 - 주요 청구담보:
 
 ## 2. 보험사 판단
-- 부지급/감액 여부:
-- 감액사유:
+- 거절 여부:
+- 거절 사유 및 지급제외금액:
+- 감액 여부:
+- 감액 사유 및 감액금액/감액률:
+- 지급 상태:
 - 보험사 주장 요약:
-- 감액금액 / 지급제외금액:
 
 ## 3. 핵심 쟁점
 - 쟁점 1:

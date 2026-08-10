@@ -14,6 +14,18 @@
             "applicable": { "type": "boolean" },
             "na_reason": { "type": ["string", "null"] },
             "score": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+            "fact_extraction_score": {
+              "type": ["number", "null"],
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Match rate over field_comparisons whose field_kind is 'fact' -- values written somewhere in the case material, where a mismatch means the pipeline misread or missed something. This is the number that measures extraction capability, and the one that is comparable across cases. Null when no fact-kind comparison applies. Optional/additive (deliberately NOT in required): evaluation_result files written before 2026-08-04 carry unclassified comparisons and still validate."
+            },
+            "discretionary_agreement_score": {
+              "type": ["number", "null"],
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Match rate over field_comparisons whose field_kind is 'discretionary' -- normative values no document states (과실률, which figure counts as 손해액, an income basis substituted under 입증 곤란). A mismatch here is a difference in professional judgment, and under P3 the draft may correctly decline to assert one at all, scoring 0 for being right. Report it, never fold it into the headline. Null when no discretionary comparison applies."
+            },
             "field_comparisons": {
               "type": "array",
               "items": {
@@ -22,7 +34,11 @@
                   "field_name": { "type": "string" },
                   "predicted_value": { "type": ["string", "null"] },
                   "actual_value": { "type": ["string", "null"] },
-                  "match": { "type": "boolean" }
+                  "match": { "type": "boolean" },
+                  "field_kind": {
+                    "enum": ["fact", "discretionary"],
+                    "description": "Whether this field's correct value is STATED in the case material ('fact') or ARRIVED AT by professional judgment ('discretionary'). Classify by where the answer comes from, not by how hard it was: a 상병명 buried in a scanned chart is still a fact, and a 과실률 both parties agree on is still discretionary. The distinction exists because a single accuracy number silently measures different things depending on what the answer key happens to be -- CASE_907's ground truth was a 손해액 산정서, so discretionary values entered the denominator and both of its misses came from there, while its 8 fact fields matched 8/8. Optional/additive: pre-2026-08-04 outputs omit it and still validate, but a new evaluation should classify every comparison."
+                  }
                 },
                 "required": ["field_name", "predicted_value", "actual_value", "match"]
               }

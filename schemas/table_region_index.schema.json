@@ -1,0 +1,416 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "table_region_index.schema.json",
+  "title": "_table_region_index.json -- DAO-owned table-region receipts v0.1",
+  "description": "P0-8. One `table_region_v1` receipt per derived table. A reference table's `source_regions` used to be the extracting agent's own declaration, enforced downwards (rows inside regions, every region character covered by a row or a header span) but never upwards: nothing established that the declared region was the table's real extent, so a region drawn narrowly hid every row outside it, and a `header_span` with kind `note` hid rows inside it. A receipt here records the extent and the row bands the DAO derived by opening the registered PDF and running a real table detector over it, mapped onto exact offsets in the registered source-text revision. DAO-OWNED: written only by `dao.py register-table-region`. No agent-facing write path may create, change, or delete a receipt -- the file is sealed in dao._PROTECTED_CONTRACT_FILES, so a generic write-contract cannot mint one. Deliberately NOT keyed on table_uid: RT is derived FROM source_regions, so selecting a receipt by table_uid would make the regions authorize the receipt that authorizes the regions.",
+  "type": "object",
+  "properties": {
+    "case_id": {
+      "$ref": "common_component_output.schema.json#/$defs/case_id"
+    },
+    "tables": {
+      "type": "array",
+      "description": "One entry per derived table region. A table absent from this array has no receipt, which blocks a canonical_v1 write and policy_clause_processing finalization -- never a check that is skipped for lack of data. Superseded receipts are RETAINED as audit history: currency is checked against the receipts a contract actually cites, so an old receipt records what was once derived without permanently blocking the document.",
+      "items": {
+        "$ref": "#/$defs/table_region_receipt"
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "description": "One DAO-derived scan per document, listing EVERY table the detector found in it -- not only the ones somebody chose to register. Verifying the receipts a contract cites answers 'is this table complete?' but never 'were there other tables?', so without this a document with two appendices could have one extracted and the other never mentioned by anyone, with every check passing. At finalization each candidate must be either extracted as a verified table or recorded in the authenticated human-review ledger; there is deliberately no agent-writable 'ignore this candidate' field.",
+      "items": {
+        "$ref": "#/$defs/candidate_inventory"
+      }
+    }
+  },
+  "required": ["case_id", "tables"],
+  "additionalProperties": false,
+  "$defs": {
+    "table_region_receipt": {
+      "type": "object",
+      "description": "One table's DAO-derived extent and row structure. Valid only for the exact pair it names: these raw PDF bytes and this source-text revision. Either moving makes the receipt a true statement about a state that no longer exists, which is why the write gate and finalization re-check both against freshly computed values instead of trusting the recorded ones.",
+      "properties": {
+        "receipt_id": {
+          "type": "string",
+          "pattern": "^TRR-[a-f0-9]{64}$",
+          "description": "Computed by the DAO from source provenance and detector output only (see table_region_provenance.compute_receipt_id) -- never from a caller-supplied value and never from table_uid. Because issuance metadata is excluded from the hash, re-deriving identical bytes yields the identical id, which is what makes re-registration a recognizable no-op rather than a second receipt."
+        },
+        "scheme": {
+          "const": "table_region_v1",
+          "description": "The verification this receipt was issued under. A value this build does not recognize is refused rather than treated as equivalent -- an unknown scheme is not a verified one."
+        },
+        "case_id": {
+          "$ref": "common_component_output.schema.json#/$defs/case_id"
+        },
+        "document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id",
+          "description": "The document whose table this receipt establishes. A reference table citing a receipt issued for a different document is refused: a real receipt for the wrong document is still not provenance for this one."
+        },
+        "candidate_id": {
+          "type": ["string", "null"],
+          "pattern": "^TRC-[a-f0-9]{32}$",
+          "description": "Which entry of the document's candidate inventory this receipt derives from (the table's FIRST page), so finalization can tell an extracted candidate from one nothing ever handled. Null only on receipts issued before the inventory existed."
+        },
+        "covered_candidate_ids": {
+          "type": "array",
+          "description": "Every inventory candidate this one receipt accounts for. A table continued across pages is detected once per page but extracted once, so coverage must credit all of its pages -- otherwise every legitimate multi-page table would block finalization on its own continuation pages.",
+          "items": {
+            "type": "string",
+            "pattern": "^TRC-[a-f0-9]{32}$"
+          }
+        },
+        "source_pdf_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 of the registered raw file, computed by the DAO by reading the file at registration time -- never accepted from the caller and never copied out of the manifest. For a segment this is the PARENT's digest, matching canonical UID identity rules."
+        },
+        "source_text_revision_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "The registered source-text revision (see revision_index.schema.json) whose page bodies the offsets below index into. Revising the text after the receipt was issued makes it stale: the extent was derived against bytes that are no longer current."
+        },
+        "segment_derivation_receipt_id": {
+          "type": ["string", "null"],
+          "description": "For a segment, the P0-6 segment_page_map_v2 derivation whose logical->physical mapping these regions sit on top of; null for a physical document. Recorded so a re-derived page map makes this receipt stale rather than silently re-pointing its regions at different physical pages."
+        },
+        "detector": {
+          "type": "object",
+          "description": "The table-detection identity the DAO observed. The profile NAME enters the receipt fingerprint, so retuning what a profile means requires a new profile name and a fresh derivation -- silently changing a detector under a stable name would let two different extents claim the same provenance.",
+          "properties": {
+            "tool": { "type": "string", "minLength": 1 },
+            "profile": { "type": "string", "minLength": 1 },
+            "library": { "type": ["string", "null"] },
+            "library_version": { "type": ["string", "null"] },
+            "config_fingerprint": { "type": "string", "minLength": 1 },
+            "settings": { "type": ["string", "null"] }
+          },
+          "required": [
+            "tool",
+            "profile",
+            "library",
+            "library_version",
+            "config_fingerprint",
+            "settings"
+          ],
+          "additionalProperties": false
+        },
+        "selector": {
+          "type": "object",
+          "description": "What the caller asked for, recorded for audit only. It selects among candidates the DAO found and grants nothing: it can never define, widen or narrow an extent. A selector matching two candidates, or none, issues no receipt at all.",
+          "properties": {
+            "anchor": { "type": ["string", "null"] },
+            "logical_pages": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 }
+            }
+          },
+          "required": ["anchor", "logical_pages"],
+          "additionalProperties": false
+        },
+        "extent": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The table's full derived extent, one entry per logical page it occupies. A reference table's source_regions must equal this set exactly -- not overlap it, not sit inside it. This is the field that makes a narrow region detectable.",
+          "items": { "$ref": "#/$defs/derived_region" }
+        },
+        "regions": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Every band the detector found inside the extent, each with the structural kind the DAO derived for it. Extracted rows must map onto the `data_row` bands as a bijection, and a header_span may only cover a band classified non-data -- which is what stops a data row being relabelled `note` to escape coverage.",
+          "items": { "$ref": "#/$defs/derived_region" }
+        },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "issued_by": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The --held-by of the DAO call. Accountability, not authority: it grants nothing, and in particular is never a substitute for the derived geometry."
+        },
+        "run_id": { "type": "string", "pattern": "^RUN_[0-9]{8}_[0-9]+$" },
+        "verification_status": {
+          "enum": ["verified"],
+          "description": "Only a fully derived region is recorded. An ambiguous or unmappable layout does not produce a weaker receipt -- it produces no receipt, and the table stays review_required. A future human-approved status would be a separate, authenticated path (see known-gaps.md), never a boolean an agent can set."
+        }
+      },
+      "required": [
+        "receipt_id",
+        "scheme",
+        "case_id",
+        "document_id",
+        "candidate_id",
+        "covered_candidate_ids",
+        "source_pdf_sha256",
+        "source_text_revision_sha256",
+        "segment_derivation_receipt_id",
+        "detector",
+        "selector",
+        "extent",
+        "regions",
+        "issued_at",
+        "issued_by",
+        "verification_status"
+      ],
+      "additionalProperties": false
+    },
+    "candidate_inventory": {
+      "type": "object",
+      "description": "The DAO's scan of one document: strict verified candidates plus high-recall possible-table signals, whether or not anybody registered a table. Written only by `dao.py scan-table-candidates` (and by register-table-region, which scans the same way before it can derive anything). Replaced on each scan. `scan_id` is a deterministic whole-body corruption checksum and no-op identity, not an authenticated signature; the security boundary is the DAO-owned protected write path. Direct filesystem writers are outside the supported agent threat model and can recompute a public checksum.",
+      "properties": {
+        "scheme": {
+          "const": "table_candidate_scan_v2",
+          "description": "The scan contract this inventory was produced under. An unrecognized scheme is refused rather than assumed equivalent."
+        },
+        "scan_id": {
+          "type": "string",
+          "pattern": "^TRS-[a-f0-9]{48}$",
+          "description": "Deterministic checksum computed by the DAO from the whole scan: source identity, page map, strict and sentinel profiles/config/library versions, scan status, pages, verified candidates, possible-table signals, and errors. Recomputed at every gate to catch corruption that does not also refresh the checksum and to recognize an unchanged re-scan as a no-op. It is not an authenticated signature."
+        },
+        "document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id"
+        },
+        "pdf_owner_document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id",
+          "description": "Whose raw PDF was actually opened. For a segment this is the PARENT, matching canonical UID identity rules -- recorded so a scan cannot silently be attributed to a different owner's bytes."
+        },
+        "source_pdf_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_text_revision_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "segment_derivation_receipt_id": {
+          "type": ["string", "null"],
+          "description": "For a segment, the P0-6 derivation fixing which physical pages this document owns; null for a physical document. A re-derived page map changes which pages the scan should have covered, so it makes the scan stale."
+        },
+        "detector_profile": { "type": "string", "minLength": 1 },
+        "detector_config_fingerprint": { "type": "string", "minLength": 1 },
+        "detector_library_version": { "type": "string", "minLength": 1 },
+        "sentinel_profile": { "type": "string", "minLength": 1 },
+        "sentinel_config_fingerprint": { "type": "string", "minLength": 1 },
+        "sentinel_library_version": { "type": "string", "minLength": 1 },
+        "scan_status": {
+          "enum": [
+            "complete_no_candidates",
+            "complete_with_candidates",
+            "inconclusive",
+            "failed",
+            "unverifiable_ocr_source"
+          ],
+          "description": "Only complete_no_candidates proves a reference_table is not owed. Inconclusive and failed are blockers, never synonyms for an empty document. unverifiable_ocr_source is a distinct, explicitly human-authorized state for an extraction_method with no deterministic text layer (OCR): it is NOT a claim that no tables exist, only that finalization was allowed to proceed without a verified table-boundary scan -- see human_override below, which is required whenever this status is set."
+        },
+        "human_override": {
+          "type": "object",
+          "description": "Required when scan_status is unverifiable_ocr_source. Records who authorized proceeding without deterministic table-boundary verification and why, so a reduced-assurance pass is never indistinguishable from a genuine complete_no_candidates scan.",
+          "properties": {
+            "authorized_by": { "type": "string", "minLength": 1 },
+            "authorized_at": { "type": "string", "format": "date-time" },
+            "reason": { "type": "string", "minLength": 1 }
+          },
+          "required": ["authorized_by", "authorized_at", "reason"]
+        },
+        "scan_errors": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "scanned_logical_pages": {
+          "type": "array",
+          "description": "Every logical page the detector actually examined. The inventory's real claim is a NEGATIVE one -- 'these are all the tables in this document' -- and that claim is only as wide as the pages it looked at. A page missing here is an UNSCANNED page, never a page established to have no table, and finalization refuses while any page the document currently owns is absent.",
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "scanned_at": { "type": "string", "format": "date-time" },
+        "candidates": {
+          "type": "array",
+          "description": "Every detected table. An empty array means the detector found none -- which is only ever recorded for a document the DAO actually scanned, never inferred from the absence of a scan.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "candidate_id": {
+                "type": "string",
+                "pattern": "^TRC-[a-f0-9]{32}$",
+                "description": "Derived from the document's source identity plus this candidate's own geometry, so re-scanning unchanged bytes yields the same id. Never from a caller-supplied value and never from a table_uid."
+              },
+              "page": { "type": "integer", "minimum": 1 },
+              "physical_page": { "type": "integer", "minimum": 1 },
+              "bbox": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": { "type": "number" }
+              },
+              "row_count": { "type": "integer", "minimum": 0 },
+              "header_preview": {
+                "type": "string",
+                "description": "The candidate's header text, for a human reading a blocker message. Diagnostic only -- nothing is decided from it."
+              }
+            },
+            "required": [
+              "candidate_id",
+              "page",
+              "physical_page",
+              "bbox",
+              "row_count",
+              "header_preview"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "possible_tables": {
+          "type": "array",
+          "description": "High-recall sentinel signals not backed by strict geometry. They never authorize a table receipt and remain review_required until a genuine review path resolves them.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "signal_id": {
+                "type": "string",
+                "pattern": "^TRP-[a-f0-9]{32}$"
+              },
+              "document_id": {
+                "$ref": "common_component_output.schema.json#/$defs/document_id"
+              },
+              "page": { "type": "integer", "minimum": 1 },
+              "physical_page": { "type": "integer", "minimum": 1 },
+              "bbox": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": { "type": "number" }
+              },
+              "reason": { "type": "string", "minLength": 1 },
+              "status": { "const": "review_required" },
+              "page_text_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "sentinel_profile": { "type": "string", "minLength": 1 },
+              "sentinel_library_version": { "type": "string", "minLength": 1 },
+              "preview": { "type": "string" }
+            },
+            "required": [
+              "signal_id",
+              "document_id",
+              "page",
+              "physical_page",
+              "bbox",
+              "reason",
+              "status",
+              "page_text_sha256",
+              "sentinel_profile",
+              "sentinel_library_version",
+              "preview"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "scheme",
+        "scan_id",
+        "document_id",
+        "pdf_owner_document_id",
+        "source_pdf_sha256",
+        "source_text_revision_sha256",
+        "segment_derivation_receipt_id",
+        "detector_profile",
+        "detector_config_fingerprint",
+        "detector_library_version",
+        "sentinel_profile",
+        "sentinel_config_fingerprint",
+        "sentinel_library_version",
+        "scan_status",
+        "scan_errors",
+        "scanned_logical_pages",
+        "scanned_at",
+        "candidates",
+        "possible_tables"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": { "scan_status": { "const": "unverifiable_ocr_source" } },
+        "required": ["scan_status"]
+      },
+      "then": { "required": ["human_override"] }
+    },
+    "derived_region": {
+      "type": "object",
+      "description": "One derived band: where it is in the PDF (bbox), where it is in the registered processed text (offsets + verbatim quote), and what the detector established it to be. Both coordinate systems are required -- the bbox is what the detector actually found, the offsets are what a contract's spans can be compared against, and the page digest ties the offsets to specific page bytes.",
+      "properties": {
+        "page": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Logical page in the registered source-text revision."
+        },
+        "physical_page": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The physical page of the raw PDF the detector read, resolved through the P0-6 page map for a segment. Recorded so a region's geometry and its text offsets cannot silently refer to different pages."
+        },
+        "kind": {
+          "enum": [
+            "table_extent",
+            "data_row",
+            "column_header",
+            "repeated_header",
+            "caption",
+            "separator",
+            "note",
+            "ambiguous"
+          ],
+          "description": "`table_extent` appears only in `extent`. `ambiguous` marks a band the detector could not establish as data or non-data: it is never a coverage exemption -- a table containing one may only be written review_required, and cannot finalize."
+        },
+        "start_char": { "type": "integer", "minimum": 0 },
+        "end_char": { "type": "integer", "minimum": 1 },
+        "quote": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The exact registered page text at [start_char:end_char], verbatim. Stored so a receipt can be audited without re-reading the revision, and re-verified against the revision at finalization."
+        },
+        "page_text_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 of the whole registered page body (NFC, LF-normalized) this band was located in. Catches a revision whose pointer matches but whose page bytes do not."
+        },
+        "bbox": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "type": "number" },
+          "description": "The band's rectangle in PDF coordinates, as the detector reported it."
+        },
+        "cells": {
+          "type": "array",
+          "description": "The detector's cells for this band, each mapped to exact processed-text offsets. Empty for a band with no resolvable cells.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "page": { "type": "integer", "minimum": 1 },
+              "start_char": { "type": "integer", "minimum": 0 },
+              "end_char": { "type": "integer", "minimum": 1 },
+              "quote": { "type": "string", "minLength": 1 },
+              "text": { "type": "string" },
+              "bbox": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": { "type": "number" }
+              }
+            },
+            "required": ["page", "start_char", "end_char", "quote", "text"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "page",
+        "physical_page",
+        "kind",
+        "start_char",
+        "end_char",
+        "quote",
+        "page_text_sha256",
+        "bbox"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
