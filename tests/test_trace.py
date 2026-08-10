@@ -514,16 +514,40 @@ def test_cli_entry_points_that_raise_spans_also_configure_tracing():
     configured (llm_providers and ocr_extract are used this way, and do record
     spans in a real run). This pins the CLI entry points only.
     """
+    import re
     tools = Path(__file__).resolve().parent.parent / "tools"
-    entry_points = ["redact_document.py", "run_checkpoint1.py", "segment_case.py"]
+
+    # Modules whose mere use emits spans. dao is on this list because calling
+    # ANY dao function emits lock.acquire/validate.schema, and llm_providers
+    # because every provider method is wrapped -- so a tool "without
+    # instrumentation" can still be losing measurements. That indirect case is
+    # what the first version of this test missed: it only looked for tools
+    # that raise spans themselves, and passed while intake_case.py (a real
+    # vision call) and run_scenario_matrix.py (real OCR) recorded nothing.
+    span_emitting = ("dao", "llm_providers", "ocr_extract", "redaction",
+                     "segment_case", "run_checkpoint1")
+
     missing = []
-    for name in entry_points:
-        src = (tools / name).read_text(encoding="utf-8")
-        raises_spans = "trace_mod.span(" in src or "trace_mod.traced(" in src
-        configures = "trace_mod.configure(" in src
-        if raises_spans and not configures:
-            missing.append(name)
+    for path in sorted(tools.glob("*.py")):
+        src = path.read_text(encoding="utf-8")
+        if not re.search(r"^if __name__ == .__main__.:", src, re.M):
+            continue  # library, configured by its caller
+        raises_directly = ("trace_mod.span(" in src or "trace_mod.traced(" in src
+                           or "trace_mod.event(" in src)
+        imports_emitter = any(
+            re.search(rf"^\s*(import|from)\s+{mod}", src, re.M)
+            for mod in span_emitting)
+        if not (raises_directly or imports_emitter):
+            continue
+        # Strip comments before looking for the call. A substring check over
+        # raw text counts the explanatory comment beside the call as if it
+        # were the call: removing the real line left "see
+        # trace.configure_from_args" behind and the test still passed. It is
+        # only a defect-detector if it reads code.
+        code = re.sub(r"#.*", "", src)
+        if not re.search(r"trace_mod\.configure(_from_args)?\s*\(", code):
+            missing.append(path.name)
     assert not missing, (
-        f"these CLI tools raise spans but never call trace.configure(), so "
-        f"their spans are discarded: {missing}"
+        "these CLI tools can reach instrumented code but never switch tracing "
+        f"on, so their spans are discarded silently: {missing}"
     )

@@ -49,6 +49,8 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from dao import acquire_lock_blocking, release_lock, atomic_write_text, atomic_write_json, now_iso
 from _validation import load_registry, validate_instance
+# tools/trace.py, not the stdlib `trace` module.
+import trace as trace_mod
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
@@ -205,6 +207,10 @@ def main():
                     "presence/order against (e.g. 진단수술비형, screening_report). Omit only for "
                     "documents with no registry entry (rebuttal_points).")
     args = ap.parse_args()
+    # Switch tracing on before any instrumented path runs. This tool does not
+    # raise spans itself, but the dao/provider calls below do -- and without
+    # this they are discarded silently (see trace.configure_from_args).
+    trace_mod.configure_from_args(args)
 
     spec = json.loads(Path(args.sections_file).read_text(encoding="utf-8"))
 

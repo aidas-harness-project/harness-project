@@ -71,6 +71,8 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from dao import case_dir, atomic_write_json, now_iso, OUTPUTS, DATA
 from _validation import load_registry, validate_instance, schema_name_for
+# tools/trace.py, not the stdlib `trace` module.
+import trace as trace_mod
 
 CASE_ID_DIR_RE = re.compile(r"^CASE_(\d+)$")
 
@@ -175,6 +177,10 @@ def main():
     ap.add_argument("--held-by", required=True)
     ap.add_argument("--run-id", required=True)
     args = ap.parse_args()
+    # Switch tracing on before any instrumented path runs. This tool does not
+    # raise spans itself, but the dao/provider calls below do -- and without
+    # this they are discarded silently (see trace.configure_from_args).
+    trace_mod.configure_from_args(args)
 
     if not re.match(r"^CASE_\d+$", args.source_case_id):
         sys.exit(f"error: source_case_id must match CASE_NNN -- got {args.source_case_id!r}")

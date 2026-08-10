@@ -449,6 +449,31 @@ def run_in_context(fn):
     return _wrapped
 
 
+def configure_from_args(args, *, case_id: str | None = None,
+                        run_id: str | None = None) -> bool:
+    """Switch tracing on from a CLI's parsed arguments. Returns whether it did.
+
+    Every CLI entry point that can reach an instrumented code path must call
+    this, and "instrumented" includes paths it does not own: merely calling
+    `dao` emits lock.acquire and validate.schema spans, and calling a provider
+    emits provider.* spans. A tool that never configures silently discards all
+    of them and still exits 0, which is indistinguishable from a run that had
+    nothing to report -- exactly how redact_document.py lost the entire B1
+    measurement.
+
+    Both ids are required and neither is invented. A missing run_id used to be
+    tempting to synthesize, but shards written under a made-up id land where
+    `aggregate-trace --run-id` will never look, which is worse than not
+    recording: the run appears traced and the data is unreachable.
+    """
+    resolved_case = case_id or getattr(args, "case_id", None)
+    resolved_run = run_id or getattr(args, "run_id", None)
+    if not resolved_case or not resolved_run:
+        return False
+    configure(resolved_case, resolved_run)
+    return enabled()
+
+
 def traced(op: str, *, category: str = "compute"):
     """Decorator form of span(), for wrapping a whole function.
 

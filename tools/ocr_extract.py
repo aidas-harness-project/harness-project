@@ -791,11 +791,20 @@ def main():
     ap.add_argument("--reader-a-model", help="Model name for --reader-a")
     ap.add_argument("--reader-b-model", help="Model name for --reader-b")
     ap.add_argument("--comparator-model", help="Model name for --comparator")
+    # Optional, and deliberately not synthesized when absent: this tool is
+    # usually driven as a library by run_checkpoint1 (which configures tracing
+    # itself). Run standalone it has no run to attribute spans to, and a
+    # made-up id would put shards where `aggregate-trace --run-id` never
+    # looks -- traced in appearance, unreachable in fact.
+    ap.add_argument("--run-id", default=None,
+                    help="Record this run's spans under outputs/<case>/_trace/<run-id>/. "
+                         "Without it, a standalone run is simply not traced.")
     ap.add_argument("--workers", type=int, default=None, metavar="N",
                     help="Pages transcribed concurrently (default %d, or HARNESS_OCR_WORKERS). "
                          "1 = the strictly sequential loop. Output is identical either way -- "
                          "pages are always returned in source order." % DEFAULT_OCR_WORKERS)
     args = ap.parse_args()
+    trace_mod.configure_from_args(args)
 
     try:
         providers = build_ocr_providers(
