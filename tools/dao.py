@@ -4020,6 +4020,18 @@ def cmd_check_source_ledger_clear(args):
     pending = [e["file_name"] for e in ledger["files"] if e["review_status"] == "pending"]
     rejected = [e["file_name"] for e in ledger["files"] if e["review_status"] == "rejected"]
     clear = not pending and not rejected
+    if clear:
+        # SLA start (plan B10). This check is exactly the moment the plan
+        # defines as "human approval finished, automatic execution resumes",
+        # and it is a check every path already performs -- so the clock starts
+        # here rather than in the frontend, and a CLI-driven or scripted run is
+        # measured identically to a UI-driven one.
+        #
+        # It does NOT enforce who approved: D2 is PoC-only and the goal is
+        # fewer human touchpoints, so once D2 is gone this check simply always
+        # passes and the marker still fires at the same place.
+        _emit_sla_marker(args.case_id, getattr(args, "run_id", None),
+                         "sla.phase1.start")
     print(json.dumps({"clear": clear, "pending": pending, "rejected": rejected}))
     return 0 if clear else 1
 
@@ -5032,6 +5044,13 @@ def cmd_snapshot_backup(args):
         return 1
     entry = next(s for s in state["stages"] if s["stage_name"] == args.stage)
     print(f"OK: finalized {args.stage} -> passed, snapshot at {entry['backup_path']}")
+    # SLA end -- only on the success path, and only for the terminal stage. A
+    # failed finalize returned above, so the window never closes on a stage
+    # that did not actually pass.
+    if args.stage == SLA_END_STAGE and _emit_sla_marker(
+            args.case_id, args.run_id, "sla.phase1.end"):
+        print(f"  sla.phase1.end recorded -- run `dao.py aggregate-trace "
+              f"{args.case_id} --run-id {args.run_id} --held-by <name>` for timings")
     return 0
 
 
@@ -8406,6 +8425,55 @@ def cmd_record_human_review(args):
 TIMING_SUMMARY_FILENAME = "_timing_summary.json"
 TIMING_SUMMARY_SCHEMA = "timing_summary.schema.json"
 
+# The stage whose successful finalize closes the SLA window. draft_report_v1,
+# not critic_v1: what the practice actually delivers is the report, and critic
+# is review rather than production (plan section 2.1, user decision
+# 2026-08-10). critic_v1 still RUNS -- evaluation depends on it -- it is simply
+# outside the measured window.
+SLA_END_STAGE = "draft_report_v1"
+
+
+def _emit_sla_marker(case_id: str, run_id: str | None, op: str) -> bool:
+    """Emit an SLA boundary marker exactly once per (case, run).
+
+    Idempotence is the whole contract here. `check-source-ledger-clear` is a
+    query an agent may legitimately call several times, and a stage can be
+    finalized again after a rerun -- but a window with two starts has no
+    defined width. The marker file is the record of "already emitted"; it sits
+    beside the shards under _trace/ because it describes the trace, not the
+    case, and like the shards it is excluded from P10 snapshots.
+
+    Returns True if this call emitted the marker. Never raises: a failure to
+    record a measurement must not fail the pipeline operation that triggered
+    it, so every error path here degrades to "no marker" and the run proceeds.
+    """
+    if not run_id:
+        # Nothing to scope the marker to. A run without an id cannot be
+        # aggregated anyway -- aggregate-trace is keyed by run_id.
+        return False
+    try:
+        trace_mod.configure(case_id, run_id)
+        if not trace_mod.enabled():
+            return False
+        marker_dir = trace_spans_dir(case_id, run_id).parent / "markers"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        stamp = marker_dir / f"{op}.json"
+        # O_EXCL, not exists()-then-write: two concurrent callers must not both
+        # conclude they were first. Same atomic-create reasoning as the lock
+        # primitive, for the same reason.
+        try:
+            fd = os.open(stamp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"op": op, "case_id": case_id, "run_id": run_id,
+                       "emitted_at": now_iso()}, fh, ensure_ascii=False)
+        trace_mod.event(op, category="marker", case_id=case_id,
+                        marker_kind="sla_start" if op.endswith("start") else "sla_end")
+        return True
+    except Exception:  # noqa: BLE001 -- diagnostics must never break a run
+        return False
+
 
 def trace_spans_dir(case_id: str, run_id: str) -> Path:
     """Where tools/trace.py's shards land for one run.
@@ -8639,6 +8707,12 @@ def build_parser():
     p.set_defaults(fn=cmd_set_ledger_status)
 
     p = sub.add_parser("check-source-ledger-clear"); p.add_argument("case_id")
+    # Optional on purpose: this is a read-only query with existing callers, and
+    # making it required would break them for the sake of a measurement. With a
+    # run-id the clear result also opens the SLA window (plan B10); without
+    # one, the check behaves exactly as before.
+    p.add_argument("--run-id", default=None,
+                   help="Records sla.phase1.start for this run when the ledger is clear.")
     p.set_defaults(fn=cmd_check_source_ledger_clear)
 
     p = sub.add_parser("read-evidence-tags"); p.add_argument("doc_path")
