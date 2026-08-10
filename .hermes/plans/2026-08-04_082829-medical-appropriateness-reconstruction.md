@@ -131,8 +131,8 @@ Statuses: `PENDING`, `IN_PROGRESS`, `BLOCKED`, `GREEN`, `DEFERRED`.
 | R16 | GREEN | Prove report-consumption path | Authorized agents gate on clearance and consume bounded outcomes with attribution/provenance |
 | R17 | GREEN | Synchronize agent definitions | Canonical edits synchronized; generated mirrors match their canonical definitions |
 | R18 | GREEN | Update truthful docs/deferrals | Requirements, deferrals, pipeline, and README distinguish implemented, synthetic-verified, and disabled operational states |
-| R19 | IN_PROGRESS | Final verification and bounded reviews | Exact final scoped tree passes Python/frontend/build/reviews |
-| R20 | IN_PROGRESS | Maintain semantic checkpoint commits | Commit each independently verified reconstruction unit; never push without separate authorization |
+| R19 | GREEN | Final verification and bounded reviews | Exact final scoped tree passes Python/frontend/build/reviews |
+| R20 | GREEN | Maintain semantic checkpoint commits | Commit each independently verified reconstruction unit; never push without separate authorization |
 
 ## Expected first-loop files
 
@@ -216,11 +216,11 @@ Never quote pre-edit passes as final evidence.
 ## Current state
 
 - Initialized: 2026-08-04 Asia/Seoul.
-- Active phase: R19 final refreeze after predecessor timestamp normalization.
-- Last completed: persistence closed; whole-change found that immediate-predecessor authored timestamps were not canonically bound to retained receipt completion. Migration now validates and normalizes them while retaining the original state digest.
-- Next action: freeze the exact candidate and repeat whole-change confirmation before commit.
+- Active phase: R19/R20 complete; branch ready for PR handoff.
+- Last completed: final persistence and whole-change confirmation closed on exact tree `9a6262652626f123481af7c1c35a765089288197`; the implementation checkpoint was committed without changing that tree.
+- Next action: push the branch and create a PR when separately authorized.
 - Reconstruction production code written: schemas, disabled v0.1 policies, contract validation, dedicated medical repository, thin DAO publication/read wrappers, fail-closed revision-aware ledger, narrow operator auth, all thirteen declared lifecycle action routes, durable operation replay, balanced request creation, assignment/reassignment, expert response/withdrawal/amendment, information/supplement cycles, ordinary/cohort-atomic cancellation, atomic shared adjudication, terminal closure/reopen, pinned authorization snapshots, authoritative lifecycle/head/wait/adjudication replay, authenticated localhost API, purpose-built UI, and bounded report-consumption instructions.
-- Commits/pushes: sixteenth-reviewed core checkpoint committed as `ed25e37`; no push performed. R14-R18 remain uncommitted pending final exact-tree approval.
+- Commits/pushes: sixteenth-reviewed core checkpoint `ed25e37`; final reviewed implementation checkpoint `633bd7b`; current closeout changes are documentation-only. No push performed.
 - Authority incident: the two approved plan files disappeared from the source worktree before transfer. Exact approved copies were recovered from non-truncated session messages `107110` and `107111`; implementation did not continue from memory or the earlier pre-approval drafts.
 
 ## Evidence log
@@ -319,6 +319,8 @@ Never quote pre-edit passes as final evidence.
 | 2026-08-10 | GREEN: predecessor retry and medical fork boundary remediated | Predecessor receipts remain searchable as a validated absorbed prefix; replay begins after that prefix while exact retries still return their committed result. Migration rejects a current baseline contradicting its latest receipt. Pre-medical forks establish explicit forked-operation digests and reset case-bound receipts; adopted medical state now fails closed before generic copying because immutable revision lineage cannot be safely rebased by this utility. | Focused exact-retry/final-binding/fork-refusal checks passed 5 tests; expanded neighborhood passed 128 tests; full Python passed 612; all 11 frontend tests passed; lint had zero errors and two established warnings; production/static builds, synchronization, compilation, and diff checks passed. Persistence/whole-change confirmation remains required. |
 | 2026-08-10 | OPEN: whole-change timestamp finding on tree `dd440565` | Persistence returned CLOSED. Whole-change confirmed predecessor retry and medical-fork blockers closed, then found retained predecessor receipts did not canonically bind `reviewed_at`/`resolved_at`; schema-valid missing or falsified timestamps could be frozen into the migration baseline. | Opening/closing tree `dd440565de22c8c87b9426b2199168c82dad9614`, patch SHA-256 `647cff3cbbbfbbde32c0ea9634325da437823deeb10a479134103c82a80887d2`, no unstaged changes, no reviewer edits. |
 | 2026-08-10 | GREEN: predecessor audit timestamps normalized | Migration requires each receipt-authored state timestamp, checks it precedes the adjacent receipt completion within the known predecessor writer window, records a digest of the original predecessor state, and sets the canonical migrated timestamp to the retained receipt’s `completed_at`. Pending add-only conflicts require no resolution timestamp. | Focused timestamp tests passed 4; expanded persistence/lifecycle neighborhood passed 130; full Python passed 614; all 11 frontend tests passed; lint had zero errors and two established warnings; production/static builds, synchronization, compilation, and diff checks passed. Whole-change confirmation remains required. |
+| 2026-08-10 | CLOSED: final persistence and whole-change confirmation | Both repeated review axes closed without findings or edits. They confirmed predecessor timestamp normalization and original-state digest binding, absorbed-prefix exact retry and subsequent replay, the medical fork boundary, and preservation of P11/P5/D1/API/UI controls. | Opening/closing tree `9a6262652626f123481af7c1c35a765089288197`, patch SHA-256 `6282382d78bf233f34b7cd0fc49b50909dd3585aa27f8f93c07010d2355c0150`, 92 staged paths, no unstaged changes. Earlier final lifecycle/docs and frontend/API reviews were also CLOSED; their surfaces were unaffected by the last persistence-only remediation. |
+| 2026-08-10 | GREEN: final semantic implementation checkpoint | Committed the exact independently reviewed implementation tree. | Commit `633bd7b03878264abbbb03b15c8a60fb10a48c77`; tree `9a6262652626f123481af7c1c35a765089288197`; no push performed. |
 
 ## Decision log
 
