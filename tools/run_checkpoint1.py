@@ -76,6 +76,8 @@ from llm_providers import (
 )
 from ocr_extract import build_ocr_providers, run_ocr
 import segment_case as _segment_case
+# tools/trace.py, not the stdlib `trace` module.
+import trace as trace_mod
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -1084,6 +1086,7 @@ def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, c
     return _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, classifier=classifier)
 
 
+@trace_mod.traced("stage.document_processing")
 def _run_from_args(args):
     try:
         result = run_checkpoint1(
@@ -1221,6 +1224,21 @@ def _add_run_arguments(parser):
 _SUBCOMMANDS = {"run", "resolve-disagreement", "resolve-non-text", "classify-only"}
 
 
+def _configure_trace(args) -> None:
+    """Point tracing at this case/run, once, as early as the ids are known.
+
+    Every span raised deeper in the call tree (provider calls, DAO locks,
+    schema validation, the page pool) is dropped until this runs, so it has to
+    happen before any work starts rather than beside it. A tool invoked
+    without both ids simply is not traced -- there is nowhere case-scoped to
+    put the shards, and inventing a location would scatter them.
+    """
+    case_id = getattr(args, "case_id", None)
+    run_id = getattr(args, "run_id", None)
+    if case_id and run_id:
+        trace_mod.configure(case_id, run_id)
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
 
@@ -1302,10 +1320,12 @@ def main(argv=None):
     # isn't a help flag), route to the `run` parser so old invocations keep working.
     if argv and argv[0] not in _SUBCOMMANDS and argv[0] not in ("-h", "--help"):
         args = run_parser.parse_args(argv)
+        _configure_trace(args)
         _run_from_args(args)
         return
 
     args = ap.parse_args(argv)
+    _configure_trace(args)
     if args.command == "classify-only":
         # The provider is built lazily: a printed form title decides most types
         # with no model call, and constructing one would resolve credentials for

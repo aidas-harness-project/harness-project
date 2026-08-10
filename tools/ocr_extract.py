@@ -40,6 +40,10 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+# tools/trace.py, not the stdlib `trace` module -- tools/ precedes stdlib on
+# sys.path for every entry point in this repo.
+import trace as trace_mod
+
 sys.stdout.reconfigure(encoding="utf-8")
 
 from llm_providers import (
@@ -505,63 +509,80 @@ def run_ocr(
             with progress_lock:
                 progress(msg) if progress else print(msg, file=sys.stderr)
 
+        concurrency = trace_mod.ConcurrencyProbe()
+
         def process_page(index: int, img_path: Path) -> None:
             page_no = index + 1
-            cached = _load_cached_page(cache_dir, page_no) if resume else None
-            if cached is not None:
-                slots[index] = cached
-                report(f"page {page_no}/{total}: {cached['agreement']} (cached)")
-                return
+            with trace_mod.span("ocr.page", category="io", case_id=case_id,
+                                doc_id=doc_id, page=page_no) as sp, concurrency.enter():
+                cached = _load_cached_page(cache_dir, page_no) if resume else None
+                if cached is not None:
+                    slots[index] = cached
+                    sp.set_status("cache_hit")
+                    report(f"page {page_no}/{total}: {cached['agreement']} (cached)")
+                    return
 
-            # reader_a and reader_b are deliberately BOTH given img_path: P8's
-            # premise is two independent reads of the same page. They stay
-            # sequential relative to each other -- the parallelism is across
-            # pages, so pairing can never drift.
-            reading_a = transcribe_once(img_path, reader_a)
-            reading_b = transcribe_once(img_path, reader_b)
-            result = compare(reading_a["text"], reading_b["text"], comparator)
-            page_result = {
-                "page": page_no,
-                "reading_a": reading_a["text"],
-                "reading_b": reading_b["text"],
-                "agreement": result["agreement"],
-                "disagreement_details": result["disagreement_details"],
-                "provider_metadata": {
-                    "reader_a": reading_a["metadata"],
-                    "reader_b": reading_b["metadata"],
-                    "comparator": result["metadata"],
-                },
-            }
-            # Cache before publishing the slot: an interrupt between the two
-            # loses nothing (the page is re-read), whereas the reverse could
-            # report a page as done that was never persisted.
-            if resume:
-                _save_cached_page(cache_dir, page_no, page_result)
-            slots[index] = page_result
-            report(f"page {page_no}/{total}: {result['agreement']}")
-
-        if workers <= 1 or total <= 1:
-            for index, img_path in enumerate(page_images):
-                process_page(index, img_path)
-        else:
-            with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
-                futures = {
-                    pool.submit(process_page, index, img_path): index
-                    for index, img_path in enumerate(page_images)
+                # reader_a and reader_b are deliberately BOTH given img_path: P8's
+                # premise is two independent reads of the same page. They stay
+                # sequential relative to each other -- the parallelism is across
+                # pages, so pairing can never drift.
+                reading_a = transcribe_once(img_path, reader_a)
+                reading_b = transcribe_once(img_path, reader_b)
+                result = compare(reading_a["text"], reading_b["text"], comparator)
+                page_result = {
+                    "page": page_no,
+                    "reading_a": reading_a["text"],
+                    "reading_b": reading_b["text"],
+                    "agreement": result["agreement"],
+                    "disagreement_details": result["disagreement_details"],
+                    "provider_metadata": {
+                        "reader_a": reading_a["metadata"],
+                        "reader_b": reading_b["metadata"],
+                        "comparator": result["metadata"],
+                    },
                 }
-                # Surface the first failure, but only after every in-flight page
-                # has settled -- a page that already finished has been cached,
-                # and killing the pool early would throw that work away. That is
-                # the property the sequential loop had for free: a crash on page
-                # 7 kept pages 1-6.
-                first_error = None
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except BaseException as exc:  # noqa: BLE001 -- re-raised below
-                        first_error = first_error or exc
-                if first_error is not None:
-                    raise first_error
+                # Cache before publishing the slot: an interrupt between the two
+                # loses nothing (the page is re-read), whereas the reverse could
+                # report a page as done that was never persisted.
+                if resume:
+                    _save_cached_page(cache_dir, page_no, page_result)
+                slots[index] = page_result
+                report(f"page {page_no}/{total}: {result['agreement']}")
+
+        with trace_mod.span("pool.ocr_pages", category="compute",
+                            case_id=case_id, doc_id=doc_id,
+                            worker_count=min(workers, total),
+                            items=total) as pool_span:
+            if workers <= 1 or total <= 1:
+                for index, img_path in enumerate(page_images):
+                    process_page(index, img_path)
+            else:
+                with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
+                    # run_in_context: concurrent.futures does NOT propagate
+                    # contextvars into workers, so submitting process_page raw
+                    # would leave every ocr.page span parented at None. The
+                    # page loop is the most expensive thing in the pipeline;
+                    # orphaning its spans would make it precisely the part the
+                    # critical path could not explain.
+                    submit = trace_mod.run_in_context(process_page)
+                    futures = {
+                        pool.submit(submit, index, img_path): index
+                        for index, img_path in enumerate(page_images)
+                    }
+                    # Surface the first failure, but only after every in-flight page
+                    # has settled -- a page that already finished has been cached,
+                    # and killing the pool early would throw that work away. That is
+                    # the property the sequential loop had for free: a crash on page
+                    # 7 kept pages 1-6.
+                    first_error = None
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except BaseException as exc:  # noqa: BLE001 -- re-raised below
+                            first_error = first_error or exc
+                    if first_error is not None:
+                        raise first_error
+            pool_span.set(observed_max_concurrency=concurrency.max_observed)
 
         pages_out = [slot for slot in slots if slot is not None]
         if len(pages_out) != total:

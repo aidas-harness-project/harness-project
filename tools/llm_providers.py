@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import functools
 import json
 import mimetypes
 import os
@@ -31,6 +32,11 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+# Local tools/trace.py, not the stdlib `trace` -- tools/ precedes stdlib on
+# sys.path for every entry point in this repo. Aliased so the shadowing is
+# visible at each use site rather than only here.
+import trace as trace_mod
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -255,9 +261,81 @@ class ProviderResult:
         }
 
 
+# The provider call surface, instrumented uniformly. Wrapping happens in
+# BaseProvider.__init_subclass__ rather than by decorating each method,
+# because every provider OVERRIDES these -- a decorator on the base class
+# would be shadowed by the subclass and silently measure nothing. Hooking
+# subclass creation catches every provider, present and future, including
+# ones added later by someone who has never read this file.
+_TRACED_PROVIDER_METHODS = (
+    "transcribe_image",
+    "analyze_image_structured",
+    "compare_text",
+    "classify_document",
+    "scan_intake_content",
+    "redact_text",
+)
+
+
+def _traced_provider_call(method_name, fn):
+    """Wrap one provider method in a `provider.<method>` span.
+
+    Records only sizes and identifiers -- never the prompt, never the returned
+    page text. `input_chars`/`output_chars` stand in for tokens deliberately
+    (tokens are out of scope for this instrumentation); they are already in
+    hand, cost nothing to record, and carry no content.
+    """
+    op = f"provider.{method_name}"
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        if not trace_mod.enabled():
+            return fn(self, *args, **kwargs)
+        prompt = next((a for a in args if isinstance(a, str)), None)
+        if prompt is None:
+            prompt = kwargs.get("prompt")
+        images = kwargs.get("image_paths")
+        if images is None and method_name == "scan_intake_content":
+            images = next((a for a in args if isinstance(a, (list, tuple))), None)
+        image_count = len(images) if images else (
+            1 if method_name in ("transcribe_image", "analyze_image_structured") else 0)
+        with trace_mod.span(
+            op, category="provider",
+            provider_name=getattr(self, "provider_name", None),
+            model_name=getattr(self, "model_name", None),
+            input_chars=len(prompt) if isinstance(prompt, str) else None,
+            input_images=image_count or None,
+            structured=bool(kwargs.get("output_schema")) or None,
+        ) as sp:
+            result = fn(self, *args, **kwargs)
+            text = getattr(result, "text", None)
+            if isinstance(text, str):
+                sp.set(output_chars=len(text))
+            version = getattr(result, "prompt_version", None)
+            if isinstance(version, str):
+                sp.set(prompt_version=version)
+            return result
+
+    return wrapper
+
+
 class BaseProvider:
     provider_name: str
     model_name: str
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        for name in _TRACED_PROVIDER_METHODS:
+            fn = cls.__dict__.get(name)
+            # Only wrap a method this class actually defines, and only once --
+            # an intermediate subclass (_ApiProviderStub) would otherwise have
+            # its already-wrapped method re-wrapped by its own children, double
+            # counting the same call as two nested spans.
+            if fn is None or getattr(fn, "_harness_traced", False):
+                continue
+            wrapped = _traced_provider_call(name, fn)
+            wrapped._harness_traced = True
+            setattr(cls, name, wrapped)
 
     def _result(
         self,

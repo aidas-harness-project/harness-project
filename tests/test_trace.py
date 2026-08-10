@@ -191,6 +191,61 @@ def test_run_in_context_propagates_parent_into_pool_workers(tmp_path):
     assert sorted(p["page"] for p in pages) == [0, 1, 2]
 
 
+def test_run_in_context_survives_genuinely_overlapping_workers(tmp_path):
+    """A single contextvars.Context cannot be entered twice concurrently.
+
+    The first implementation copied the context ONCE at wrap time and reused
+    that object for every submitted call, which raises 'cannot enter context:
+    ... is already entered' as soon as two workers actually overlap -- i.e. on
+    every run that parallelises at all. It was caught by the real ocr_extract
+    suite, not here, because the other pool tests happen to hand off between
+    workers rather than overlap. This one forces the overlap with a barrier
+    held open across the wrapped call."""
+    _configure(tmp_path)
+    inside = threading.Barrier(4, timeout=10)
+
+    def worker(i):
+        # The barrier is INSIDE the wrapped callable, so all four threads are
+        # provably still executing within ctx.run() at the same instant --
+        # merely releasing them at the same time is not enough, since they can
+        # still enter and leave the context one at a time.
+        with trace_mod.span("ocr.page", category="io", page=i):
+            inside.wait()
+
+    with trace_mod.span("pool.ocr_pages", category="compute") as pool_span:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            # ONE wrapper submitted four times, which is what ocr_extract
+            # does. Calling run_in_context() once per submit would give each
+            # future its own context object and hide the bug entirely.
+            submit = trace_mod.run_in_context(worker)
+            futures = [pool.submit(submit, i) for i in range(4)]
+            for f in futures:
+                f.result()  # re-raises the RuntimeError if it regresses
+
+    pages = [s for s in _read_spans(tmp_path) if s["op"] == "ocr.page"]
+    assert len(pages) == 4
+    assert {p["parent_span_id"] for p in pages} == {pool_span.span_id}
+
+
+def test_run_in_context_wrapper_is_reusable_across_calls(tmp_path):
+    """One wrapper submitted many times must work every time -- the pool
+    submits the same wrapped callable once per page."""
+    _configure(tmp_path)
+
+    def worker(i):
+        with trace_mod.span("ocr.page", category="io", page=i):
+            pass
+
+    with trace_mod.span("pool.ocr_pages", category="compute") as pool_span:
+        wrapped = trace_mod.run_in_context(worker)
+        for i in range(5):
+            wrapped(i)
+
+    pages = [s for s in _read_spans(tmp_path) if s["op"] == "ocr.page"]
+    assert len(pages) == 5
+    assert {p["parent_span_id"] for p in pages} == {pool_span.span_id}
+
+
 def test_pool_workers_write_to_distinct_shards(tmp_path):
     """Shard uniqueness is the entire justification for writing without a
     lock: one writer per file means there is no second writer to exclude."""
@@ -202,8 +257,9 @@ def test_pool_workers_write_to_distinct_shards(tmp_path):
         with trace_mod.span("ocr.page", category="io", page=i):
             pass
 
+    submit = trace_mod.run_in_context(worker)
     with ThreadPoolExecutor(max_workers=4) as pool:
-        for f in [pool.submit(trace_mod.run_in_context(worker), i) for i in range(4)]:
+        for f in [pool.submit(submit, i) for i in range(4)]:
             f.result()
 
     spans_dir = tmp_path / "CASE_999" / "_trace" / "RUN_20260810_001" / "spans"

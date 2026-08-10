@@ -32,6 +32,8 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
 import dao
+# tools/trace.py, not the stdlib `trace` module.
+import trace as trace_mod
 from llm_providers import (
     ProviderConfig,
     ProviderConfigError,
@@ -61,14 +63,23 @@ def _dao(*args: str, capability: str | None = None) -> str:
     env = dict(os.environ)
     if capability is not None:
         env[dao.PAGE_TEXT_CAPABILITY_ENV] = capability
-    result = subprocess.run(
-        [sys.executable, str(DAO), *args], capture_output=True, text=True,
-        encoding="utf-8", errors="replace", cwd=str(ROOT), env=env,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(f"dao.py {' '.join(args[:2])} failed: {detail}")
-    return result.stdout
+    # Instrumented to quantify B1's per-page tax: this spawns a fresh Python
+    # interpreter for every page of every document, and a bare `import dao`
+    # subprocess measures ~0.35s. Only the subcommand name is recorded -- the
+    # rest of argv carries case/doc/page identifiers, and the capability secret
+    # travels in env and must never reach a trace file.
+    with trace_mod.span("subprocess.dao", category="subprocess",
+                        argv0="dao.py",
+                        subcommand=args[0] if args else None) as sp:
+        result = subprocess.run(
+            [sys.executable, str(DAO), *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", cwd=str(ROOT), env=env,
+        )
+        sp.set(exit_code=result.returncode)
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"dao.py {' '.join(args[:2])} failed: {detail}")
+        return result.stdout
 
 
 def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redactor) -> dict:
@@ -93,22 +104,26 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
     try:
         for page in ocr_result.get("pages", []):
             page_number = page["page"]
-            # --caller-stage is a hard DAO gate, not a label, and the
-            # capability is what makes the claim verifiable rather than
-            # self-asserted.
-            text = _dao("read-page-text", case_id, doc_id, str(page_number),
-                        "--caller-stage", "document-pipeline", capability=capability)
-            # redact_page HARD-FAILS (RedactionLeakError) on any detected
-            # possible PII leak -- that propagates out of this function and
-            # nothing is written, blocking the document exactly like a P8
-            # disagreement. Only a leak-free page returns an outcome.
-            outcome = redactor.redact_page(text)
-            redacted_pages.append(f"<<<PAGE page={page_number}>>>\n{outcome.redacted_text}")
-            total_items += outcome.items_redacted
-            categories.update(outcome.categories)
-            provider_metadata = outcome.provider_metadata
-            for warning in outcome.review_warnings:
-                review_warnings.append(f"page {page_number}: {warning}")
+            with trace_mod.span("redact.page", category="io", case_id=case_id,
+                                doc_id=doc_id, page=page_number) as sp:
+                # --caller-stage is a hard DAO gate, not a label, and the
+                # capability is what makes the claim verifiable rather than
+                # self-asserted.
+                text = _dao("read-page-text", case_id, doc_id, str(page_number),
+                            "--caller-stage", "document-pipeline", capability=capability)
+                sp.set(bytes_in=len(text))
+                # redact_page HARD-FAILS (RedactionLeakError) on any detected
+                # possible PII leak -- that propagates out of this function and
+                # nothing is written, blocking the document exactly like a P8
+                # disagreement. Only a leak-free page returns an outcome.
+                outcome = redactor.redact_page(text)
+                sp.set(bytes_out=len(outcome.redacted_text))
+                redacted_pages.append(f"<<<PAGE page={page_number}>>>\n{outcome.redacted_text}")
+                total_items += outcome.items_redacted
+                categories.update(outcome.categories)
+                provider_metadata = outcome.provider_metadata
+                for warning in outcome.review_warnings:
+                    review_warnings.append(f"page {page_number}: {warning}")
     finally:
         dao.release_page_text_capability(capability_path)
 

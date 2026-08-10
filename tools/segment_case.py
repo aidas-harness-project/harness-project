@@ -37,6 +37,9 @@ import re
 import sys
 from pathlib import Path
 
+# tools/trace.py, not the stdlib `trace` module.
+import trace as trace_mod
+
 sys.stdout.reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1020,8 +1023,15 @@ def _judge_boundary(previous_text: str, current_text: str, judge) -> dict | None
         previous=previous_text[:_JUDGE_TEXT_LIMIT],
         current=current_text[:_JUDGE_TEXT_LIMIT],
     )
+    # Spanned because the LLM tier judges the SAME page pair twice today
+    # (processed_text_boundaries then processed_undecided_pages both reach
+    # here, with no memo between them). That is exactly 2x its cost, and this
+    # span is what turns that reading of the code into a measured number.
+    # Scoped to the call alone -- the parsing below is free, and widening the
+    # span would only blur where the time actually goes.
     try:
-        result = judge.classify_document(prompt, BOUNDARY_JUDGE_PROMPT_VERSION)
+        with trace_mod.span("segment.judge", category="compute"):
+            result = judge.classify_document(prompt, BOUNDARY_JUDGE_PROMPT_VERSION)
     except Exception:
         return None
     raw = (getattr(result, "text", "") or "").strip()

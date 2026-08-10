@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import functools
 import json
 import os
 import threading
@@ -425,13 +426,46 @@ def run_in_context(fn):
     becomes the part the instrumentation cannot explain.
 
     Usage: `pool.submit(trace.run_in_context(worker), arg)`.
+
+    The parent span id is captured ONCE here, at wrap time, but each call gets
+    a FRESH context to run in. A single `contextvars.Context` object cannot be
+    entered more than once concurrently -- reusing one across pool workers
+    raises "cannot enter context: ... is already entered" the moment two
+    workers overlap, which is every run that actually parallelises. Copying
+    per call is also the more accurate semantics: a worker's own nested spans
+    belong to that worker, not to a context shared with its siblings.
     """
-    ctx = contextvars.copy_context()
+    parent_id = _current_span_id.get()
 
     def _wrapped(*args, **kwargs):
-        return ctx.run(fn, *args, **kwargs)
+        ctx = contextvars.copy_context()
+
+        def _inner():
+            _current_span_id.set(parent_id)
+            return fn(*args, **kwargs)
+
+        return ctx.run(_inner)
 
     return _wrapped
+
+
+def traced(op: str, *, category: str = "compute"):
+    """Decorator form of span(), for wrapping a whole function.
+
+    Used where the function body is long enough that opening a `with` around
+    it would mean reindenting hundreds of lines across several early returns
+    -- a large mechanical edit to production code in exchange for a
+    measurement, which is the wrong trade on a write path.
+    """
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            if not enabled():
+                return fn(*args, **kwargs)
+            with span(op, category=category):
+                return fn(*args, **kwargs)
+        return wrapper
+    return decorate
 
 
 class ConcurrencyProbe:

@@ -365,15 +365,28 @@ def acquire_lock_blocking(target: Path, held_by: str, run_id: str, purpose: str)
     nothing else could have written since), or the lock dict still held once
     LOCK_MAX_WAIT_SECONDS is exceeded (same failure contract as acquire_lock).
     """
-    waited = 0.0
-    while True:
-        existing = acquire_lock(target, held_by, run_id, purpose)
-        if existing is None:
-            return None
-        if waited >= LOCK_MAX_WAIT_SECONDS:
-            return existing
-        time.sleep(LOCK_POLL_INTERVAL_SECONDS)
-        waited += LOCK_POLL_INTERVAL_SECONDS
+    # The highest-value span in the DAO: wait_s and poll_count together are
+    # the whole contention story, and the repo's own comment above records 4.5
+    # minutes of pure polling on CASE_907 without any way to see it in
+    # aggregate. lock_kind carries the target's basename (a filename, not a
+    # path -- trace's allow-list sanitises it to a bounded identifier) so a
+    # rollup can say WHICH file serialises the run.
+    with trace_mod.span("lock.acquire", category="lock",
+                        lock_kind=target.name) as sp:
+        waited = 0.0
+        polls = 0
+        while True:
+            existing = acquire_lock(target, held_by, run_id, purpose)
+            if existing is None:
+                sp.set(wait_s=waited, poll_count=polls, acquired=True)
+                return None
+            if waited >= LOCK_MAX_WAIT_SECONDS:
+                sp.set(wait_s=waited, poll_count=polls, acquired=False)
+                sp.set_status("error")
+                return existing
+            time.sleep(LOCK_POLL_INTERVAL_SECONDS)
+            waited += LOCK_POLL_INTERVAL_SECONDS
+            polls += 1
 
 
 # ------------------------------------------------------------- run-state --
@@ -3086,6 +3099,7 @@ _PROVENANCE_MANIFEST_FIELDS = frozenset({
 })
 
 
+@trace_mod.traced("dao.patch_manifest_document")
 def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_by: str, run_id: str,
                              stage: str | None = None, purpose: str | None = None):
     """Atomically read-modify-write a single document's fields in
@@ -4371,8 +4385,17 @@ def _schema_check(data: dict, schema_name: str) -> list:
     logic or a pre-existing malformed file, not bad agent output. No P4
     self-correction-retry step, just fail loud and don't persist -- same
     contract as write-contract's own validation failure path."""
-    schemas, registry = load_registry()
-    return validate_instance(data, schema_name, schemas, registry)
+    # Instrumented because load_registry() re-globs and re-parses all ~34
+    # schema files on every call, with no cache, and this runs INSIDE locks --
+    # so its cost is paid in held lock time, which bounds how well anything
+    # can parallelise. T2 proposes caching it; this span is what will show
+    # whether that was worth doing.
+    with trace_mod.span("validate.schema", category="validate",
+                        schema_name=schema_name) as sp:
+        schemas, registry = load_registry()
+        errors = validate_instance(data, schema_name, schemas, registry)
+        sp.set(error_count=len(errors))
+        return errors
 
 
 # ---------------------------------------------------------------- run state ops --
@@ -4703,6 +4726,7 @@ def cmd_get_last_passed_stage(args):
     return 0
 
 
+@trace_mod.traced("dao.snapshot", category="io")
 def _build_snapshot_atomic(case_id: str, stage: str, prospective_state: dict) -> Path:
     """Build a full cumulative snapshot of a case's outputs (P10) and place it
     at its final _backups/step_<N>_<stage>/ path atomically.
@@ -4753,6 +4777,7 @@ def _build_snapshot_atomic(case_id: str, stage: str, prospective_state: dict) ->
     return dest
 
 
+@trace_mod.traced("dao.finalize_stage")
 def _finalize_stage(case_id, run_id, stage, held_by):
     """Atomically pass a stage: dependency-check -> build+validate snapshot ->
     record status=passed + backup_path + completed_at under one run-state lock.
