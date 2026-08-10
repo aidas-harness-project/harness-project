@@ -21,6 +21,8 @@ import base64
 import json
 import mimetypes
 import os
+import random
+import re
 import subprocess
 import tempfile
 import time
@@ -39,11 +41,95 @@ SUPPORTED_PROVIDERS = (
 DEFAULT_PROVIDER = "claude-cli"
 DEFAULT_ENV_PREFIX = "HARNESS_LLM"
 
-# claude-cli transient-failure retry: total attempts and fixed sleep between
-# them. Applies only to subprocess-level failures (non-zero exit / timeout),
-# never to content agreement -- see ClaudeCliProvider._run.
+# claude-cli transient-failure retry. Applies only to subprocess-level failures
+# (non-zero exit / timeout), never to content agreement -- see
+# ClaudeCliProvider._run.
+#
+# The wait is exponential with FULL JITTER: attempt n sleeps a uniform random
+# value in [0, min(cap, base * 2**(n-1))]. Both halves are load-bearing and
+# neither works alone.
+#
+#   * Exponential: a rate limit is a "wait and it clears" condition, so a
+#     failing call must back off rather than re-knock at a constant rate. The
+#     previous fixed 2.0s gave a total of 4s of waiting across the two gaps,
+#     which is shorter than a typical limit window -- all three attempts could
+#     burn inside one window and the page would die.
+#   * Jitter: page-level concurrency means N calls are in flight at once, so a
+#     shared limit fails them at nearly the same instant. With a fixed (or
+#     un-jittered exponential) wait, all N re-arrive TOGETHER -- a thundering
+#     herd against the exact limit that just rejected them. Randomizing spreads
+#     the retries out; measured on 8 simulated workers, arrival spread goes
+#     from 0.00s to ~1-3s.
+#
+# The herd cost grows with worker count, which is why DEFAULT_OCR_WORKERS could
+# not safely be raised before this existed (see
+# docs/run-notes/OCR_PARALLEL_20260810_001.md).
 _CLAUDE_CLI_MAX_ATTEMPTS = 3
-_CLAUDE_CLI_RETRY_SLEEP_SECONDS = 2.0
+_CLAUDE_CLI_RETRY_BASE_SECONDS = 2.0
+_CLAUDE_CLI_RETRY_CAP_SECONDS = 30.0
+
+# A server that says WHEN to come back is more authoritative than any local
+# backoff curve, so a parsed Retry-After wins -- but it is still clamped to the
+# cap, since the value arrives from outside and an absurd one must not hang a
+# 12-page document behind a single call.
+_RETRY_AFTER_PATTERN = re.compile(
+    r"retry[-\s_]?after[\"'\s:=]+(\d+(?:\.\d+)?)", re.IGNORECASE
+)
+# Rate-limit / overload signatures. Matched against the CLI's own diagnostic
+# text because a subprocess gives us no status code -- the child prints the
+# server's complaint and exits non-zero.
+_RATE_LIMIT_PATTERN = re.compile(
+    r"\b429\b|rate[-\s_]?limit|too many requests|overloaded|"
+    r"\b529\b|quota exceeded|capacity",
+    re.IGNORECASE,
+)
+
+
+def _parse_retry_after(text: str) -> float | None:
+    """Seconds the server asked us to wait, if it said so at all.
+
+    Only the delta-seconds form is read. HTTP also allows an absolute date, but
+    the CLI surfaces server errors as free text rather than headers, so a date
+    would be both rare and ambiguous to parse out of prose -- returning None
+    falls back to the ordinary backoff, which is the safe direction.
+    """
+    if not text:
+        return None
+    match = _RETRY_AFTER_PATTERN.search(text)
+    if match is None:
+        return None
+    try:
+        value = float(match.group(1))
+    except ValueError:  # pragma: no cover -- regex guarantees a number
+        return None
+    if value < 0:
+        return None
+    return min(value, _CLAUDE_CLI_RETRY_CAP_SECONDS)
+
+
+def _is_rate_limited(text: str) -> bool:
+    """Whether a failure diagnostic looks like a rate limit / overload."""
+    return bool(text) and _RATE_LIMIT_PATTERN.search(text) is not None
+
+
+def _retry_delay(attempt: int, detail: str = "") -> float:
+    """Seconds to wait before retrying, after `attempt` failed attempts (1-based).
+
+    Full jitter over an exponentially growing ceiling; a server-supplied
+    Retry-After replaces the ceiling when present. The floor is deliberately 0
+    rather than some minimum -- spreading arrivals is the point, and a call that
+    happens to retry immediately is exactly one call, not a herd.
+    """
+    ceiling = min(
+        _CLAUDE_CLI_RETRY_CAP_SECONDS,
+        _CLAUDE_CLI_RETRY_BASE_SECONDS * (2 ** max(0, attempt - 1)),
+    )
+    asked = _parse_retry_after(detail)
+    if asked is not None:
+        # Honour the server's number as a floor on the wait -- jitter still
+        # applies ON TOP so N held-back callers do not resume in lockstep.
+        return asked + random.uniform(0, min(_CLAUDE_CLI_RETRY_BASE_SECONDS, ceiling))
+    return random.uniform(0, ceiling)
 
 # `compare_text` default. 60s was tuned for the short OCR agreement verdict
 # (ocr_extract.compare); the policy-polarity path reuses this same method for a
@@ -300,6 +386,9 @@ class ClaudeCliProvider(BaseProvider):
         # touch P8 -- content agreement/disagreement is judged by compare(),
         # not here, so no disagreement tolerance is affected.
         last_exc: ProviderExecutionError | None = None
+        # Diagnostic text from the most recent failure, fed to _retry_delay so a
+        # server-supplied Retry-After can override the local backoff curve.
+        last_detail = ""
         # Structured-output correction belongs to the caller (P4: exactly one
         # correction after validation failure). Do not hide extra whole-model
         # retries here. Ordinary subprocess calls retain their transient retry.
@@ -334,6 +423,9 @@ class ClaudeCliProvider(BaseProvider):
             except subprocess.TimeoutExpired as exc:
                 last_exc = ProviderExecutionError(f"claude-cli call timed out after {timeout}s")
                 last_exc.__cause__ = exc
+                # A timeout carries no server diagnostic, so there is no
+                # Retry-After to honour -- plain exponential backoff applies.
+                last_detail = ""
             else:
                 out = result.stdout.strip()
                 # Fail closed on empty output even at exit 0. A blank string is
@@ -382,9 +474,12 @@ class ClaudeCliProvider(BaseProvider):
                 # last-resort exit-code note so the message is never empty.
                 detail = result.stderr.strip() or out or f"exit {result.returncode}, no output"
                 last_exc = ProviderExecutionError(f"claude-cli call failed: {detail}")
+                last_detail = detail
 
             if attempt < max_attempts - 1:
-                time.sleep(_CLAUDE_CLI_RETRY_SLEEP_SECONDS)
+                # attempt is 0-based; _retry_delay takes the 1-based count of
+                # attempts already burned.
+                time.sleep(_retry_delay(attempt + 1, last_detail))
 
         assert last_exc is not None
         raise last_exc
