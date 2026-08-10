@@ -243,6 +243,14 @@ def main() -> None:
     parser.add_argument("--model", default=os.environ.get("HARNESS_REDACTION_MODEL"))
     args = parser.parse_args()
 
+    # Without this every span below is a no-op: trace.enabled() stays False
+    # until a case/run is configured, so the redact.page and subprocess.dao
+    # spans this tool raises are silently discarded. Found by running a real
+    # 17-page redaction and getting an empty rollup for the very path the
+    # runtime plan calls the pipeline's worst (B1) -- the instrumentation was
+    # planted here but never switched on.
+    trace_mod.configure(args.case_id, args.run_id)
+
     try:
         redactor = _redactor_for(args.case_id, args.doc_id, args.provider, args.model)
         result = redact_document(args.case_id, args.doc_id, args.held_by, args.run_id, redactor)

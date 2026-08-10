@@ -496,3 +496,34 @@ def test_concurrency_probe_records_peak_not_total(tmp_path):
         with sequential.enter():
             pass
     assert sequential.max_observed == 1
+
+
+# ------------------------------------------ entry points switch tracing on --
+
+def test_cli_entry_points_that_raise_spans_also_configure_tracing():
+    """A tool can be fully instrumented and still record nothing.
+
+    trace.enabled() is False until configure() runs, so every span a CLI
+    raises is silently discarded unless its main() configures first. That is
+    not a hypothetical: redact_document.py had redact.page and subprocess.dao
+    spans planted and never called configure(), so a real 17-page redaction --
+    the very path the runtime plan calls the pipeline's worst -- produced an
+    empty rollup. Nothing failed; the numbers were simply absent.
+
+    Libraries are exempt: they raise spans under whatever run their caller
+    configured (llm_providers and ocr_extract are used this way, and do record
+    spans in a real run). This pins the CLI entry points only.
+    """
+    tools = Path(__file__).resolve().parent.parent / "tools"
+    entry_points = ["redact_document.py", "run_checkpoint1.py", "segment_case.py"]
+    missing = []
+    for name in entry_points:
+        src = (tools / name).read_text(encoding="utf-8")
+        raises_spans = "trace_mod.span(" in src or "trace_mod.traced(" in src
+        configures = "trace_mod.configure(" in src
+        if raises_spans and not configures:
+            missing.append(name)
+    assert not missing, (
+        f"these CLI tools raise spans but never call trace.configure(), so "
+        f"their spans are discarded: {missing}"
+    )

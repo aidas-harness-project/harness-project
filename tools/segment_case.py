@@ -3736,6 +3736,15 @@ def main(argv=None):
     p.set_defaults(fn=_cmd_split)
 
     args = parser.parse_args(argv)
+    # Same gap redact_document.py had: the segment.judge spans below are
+    # no-ops until a case/run is configured. Subcommands vary in whether they
+    # carry a run id (propose/show do not), so this is best-effort -- a
+    # subcommand without one is simply not traced rather than misfiled under
+    # someone else's run.
+    _case_id = getattr(args, "case_id", None)
+    _run_id = getattr(args, "run_id", None)
+    if _case_id and _run_id:
+        trace_mod.configure(_case_id, _run_id)
     try:
         return args.fn(args)
     except SegmentationError as exc:
