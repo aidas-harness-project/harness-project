@@ -28,6 +28,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -55,6 +57,30 @@ DEFAULT_REDACTION_PROVIDER = "codex-cli"
 # -- that is what fingerprint() covers). An old entry with a different version
 # is treated as a miss rather than migrated.
 CACHE_FORMAT_VERSION = 1
+
+# Matches ocr_extract's default. The work is provider round-trips, not local
+# computation, so the ceiling is the backend's rate limit and (for CLI
+# providers) one child process per concurrent call -- not CPU count.
+DEFAULT_REDACT_WORKERS = 4
+REDACT_WORKERS_ENV = "HARNESS_REDACT_WORKERS"
+
+
+def _resolve_workers(max_workers: int | None) -> int:
+    """Explicit argument wins, then HARNESS_REDACT_WORKERS, then the default.
+    An unparseable or non-positive env value falls back rather than raising --
+    a malformed worker count must not turn every redaction into a hard
+    configuration failure, and 0 or negative would mean no workers at all."""
+    if max_workers is not None:
+        return max(1, max_workers)
+    raw = str(os.environ.get(REDACT_WORKERS_ENV, "")).strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            return DEFAULT_REDACT_WORKERS
+        if value > 0:
+            return value
+    return DEFAULT_REDACT_WORKERS
 
 
 def _resume_cache_dir(case_id: str, doc_id: str) -> Path:
@@ -192,7 +218,7 @@ def _dao(*args: str, capability: str | None = None) -> str:
 
 
 def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redactor,
-                    *, resume: bool = True) -> dict:
+                    *, resume: bool = True, max_workers: int | None = None) -> dict:
     # read_contract_data is the DAO's own in-process contract read -- same
     # path resolution and traversal guard as the CLI, without paying an
     # interpreter start to get it.
@@ -218,48 +244,110 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
     # nothing more. An analysis agent shelling out to dao.py cannot produce
     # this, so --caller-stage alone stops being enough.
     capability, capability_path = dao._issue_page_text_capability(case_id, doc_id)
-    try:
-        for page in ocr_result.get("pages", []):
-            page_number = page["page"]
-            with trace_mod.span("redact.page", category="io", case_id=case_id,
-                                doc_id=doc_id, page=page_number) as sp:
-                # In-process, not a subprocess: this is the per-PAGE call, so
-                # the ~0.38s of interpreter startup (measured) was multiplied
-                # by page count -- 11.2% of redaction wall-clock on a real
-                # 17-page document. Both DAO gates still run, in the same
-                # order, and the capability now travels as an argument instead
-                # of through the child environment, so it never appears in a
-                # process listing. read_page_text_data raises on refusal, so a
-                # denial cannot be mistaken for page content.
-                text = dao.read_page_text_data(
-                    case_id, doc_id, page_number,
-                    caller_stage="document-pipeline", capability=capability)
-                sp.set(bytes_in=len(text))
-                fingerprint = _cache_fingerprint(text, redactor)
-                outcome = (_load_cached_page(cache_dir, page_number, fingerprint)
-                           if resume else None)
-                if outcome is not None:
+    pages = list(ocr_result.get("pages", []))
+    total = len(pages)
+    # Page-indexed slots, never append: the output order must be SOURCE order
+    # no matter which page finishes first, because the assembled text is
+    # concatenated in list order and an order-of-completion list would file one
+    # page's redacted text under another's <<<PAGE>>> marker.
+    slots: list[dict | None] = [None] * total
+    workers = _resolve_workers(max_workers)
+    concurrency = trace_mod.ConcurrencyProbe()
+    counter_lock = threading.Lock()
+
+    def process_page(index: int, page: dict) -> None:
+        nonlocal cache_hits
+        page_number = page["page"]
+        with trace_mod.span("redact.page", category="io", case_id=case_id,
+                            doc_id=doc_id, page=page_number) as sp, concurrency.enter():
+            # In-process, not a subprocess: this is the per-PAGE call, so
+            # the ~0.38s of interpreter startup (measured) was multiplied
+            # by page count -- 11.2% of redaction wall-clock on a real
+            # 17-page document. Both DAO gates still run, in the same
+            # order, and the capability now travels as an argument instead
+            # of through the child environment, so it never appears in a
+            # process listing. read_page_text_data raises on refusal, so a
+            # denial cannot be mistaken for page content.
+            text = dao.read_page_text_data(
+                case_id, doc_id, page_number,
+                caller_stage="document-pipeline", capability=capability)
+            sp.set(bytes_in=len(text))
+            fingerprint = _cache_fingerprint(text, redactor)
+            outcome = (_load_cached_page(cache_dir, page_number, fingerprint)
+                       if resume else None)
+            if outcome is not None:
+                with counter_lock:
                     cache_hits += 1
-                    sp.set_status("cache_hit")
-                else:
-                    # redact_page HARD-FAILS (RedactionLeakError) on any detected
-                    # possible PII leak -- that propagates out of this function and
-                    # nothing is written, blocking the document exactly like a P8
-                    # disagreement. Only a leak-free page returns an outcome.
-                    outcome = redactor.redact_page(text)
-                    # Cache only after the leak check has passed, so a blocked
-                    # document leaves nothing reusable behind.
-                    if resume:
-                        _save_cached_page(cache_dir, page_number, fingerprint, outcome)
-                sp.set(bytes_out=len(outcome.redacted_text))
-                redacted_pages.append(f"<<<PAGE page={page_number}>>>\n{outcome.redacted_text}")
-                total_items += outcome.items_redacted
-                categories.update(outcome.categories)
-                provider_metadata = outcome.provider_metadata
-                for warning in outcome.review_warnings:
-                    review_warnings.append(f"page {page_number}: {warning}")
+                sp.set_status("cache_hit")
+            else:
+                # redact_page HARD-FAILS (RedactionLeakError) on any detected
+                # possible PII leak -- that propagates out of this function and
+                # nothing is written, blocking the document exactly like a P8
+                # disagreement. Only a leak-free page returns an outcome.
+                outcome = redactor.redact_page(text)
+                # Cache only after the leak check has passed, so a blocked
+                # document leaves nothing reusable behind.
+                if resume:
+                    _save_cached_page(cache_dir, page_number, fingerprint, outcome)
+            sp.set(bytes_out=len(outcome.redacted_text))
+            slots[index] = {"page": page_number, "outcome": outcome}
+
+    try:
+        with trace_mod.span("pool.redact_pages", category="compute",
+                            case_id=case_id, doc_id=doc_id,
+                            worker_count=min(workers, total) if total else 0,
+                            items=total) as pool_span:
+            if workers <= 1 or total <= 1:
+                for index, page in enumerate(pages):
+                    process_page(index, page)
+            else:
+                with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
+                    # copy_context per submit: concurrent.futures does not
+                    # propagate contextvars, so without this every redact.page
+                    # span records parent_span_id None and the pool's own cost
+                    # becomes unattributable (see trace.run_in_context).
+                    submit = trace_mod.run_in_context(process_page)
+                    futures = [pool.submit(submit, index, page)
+                               for index, page in enumerate(pages)]
+                    # Drain before re-raising. A page that already finished has
+                    # been cached, and killing the pool early would throw that
+                    # work away -- the property the sequential loop had for
+                    # free. Crucially this does NOT downgrade a leak: the first
+                    # error is re-raised below, so a leaking document still
+                    # aborts with nothing written. Completed pages survive only
+                    # in the cache, never in a "successful document".
+                    first_error = None
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except BaseException as exc:  # noqa: BLE001 -- re-raised
+                            first_error = first_error or exc
+                    if first_error is not None:
+                        raise first_error
+            pool_span.set(observed_max_concurrency=concurrency.max_observed)
     finally:
         dao.release_page_text_capability(capability_path)
+
+    # Assemble in source order from the slots.
+    for slot in slots:
+        if slot is None:
+            continue
+        outcome = slot["outcome"]
+        redacted_pages.append(f"<<<PAGE page={slot['page']}>>>\n{outcome.redacted_text}")
+        total_items += outcome.items_redacted
+        categories.update(outcome.categories)
+        provider_metadata = outcome.provider_metadata
+        for warning in outcome.review_warnings:
+            review_warnings.append(f"page {slot['page']}: {warning}")
+
+    if total and len(redacted_pages) != total:
+        # Belt-and-braces: a slot left empty without an exception would mean a
+        # page silently vanished from the document. Refuse rather than write a
+        # document that is missing pages nobody was told about.
+        missing = [p["page"] for p, s in zip(pages, slots) if s is None]
+        raise RuntimeError(
+            f"checkpoint 2 blocked: {doc_id} produced no redaction for page(s) "
+            f"{missing}; refusing to write a document with silently missing pages")
 
     if not redacted_pages:
         raise RuntimeError(f"checkpoint 2 blocked: {doc_id} has no validated pages")
@@ -380,6 +468,12 @@ def main() -> None:
     parser.add_argument("--provider", choices=SUPPORTED_PROVIDERS,
                         default=os.environ.get("HARNESS_REDACTION_PROVIDER", DEFAULT_REDACTION_PROVIDER))
     parser.add_argument("--model", default=os.environ.get("HARNESS_REDACTION_MODEL"))
+    parser.add_argument("--workers", type=int, default=None, metavar="N",
+                        help="Pages redacted concurrently (default %d, or "
+                             "HARNESS_REDACT_WORKERS). 1 = the strictly sequential "
+                             "loop. Output is identical either way -- pages are "
+                             "always assembled in source order."
+                             % DEFAULT_REDACT_WORKERS)
     parser.add_argument("--no-resume", action="store_true",
                         help="Ignore and do not write the per-page redaction cache. "
                              "The cache is keyed on prompt version, redactor identity "
@@ -398,7 +492,8 @@ def main() -> None:
     try:
         redactor = _redactor_for(args.case_id, args.doc_id, args.provider, args.model)
         result = redact_document(args.case_id, args.doc_id, args.held_by,
-                                 args.run_id, redactor, resume=not args.no_resume)
+                                 args.run_id, redactor, resume=not args.no_resume,
+                                 max_workers=args.workers)
     except RedactionLeakError as exc:
         # Possible PII leak detected -- nothing was written. Block the document.
         sys.exit(f"REDACTION BLOCKED ({args.doc_id}): possible PII leak -- {exc}")
