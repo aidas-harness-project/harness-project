@@ -70,6 +70,12 @@ DEFAULT_ENV_PREFIX = "HARNESS_LLM"
 # The herd cost grows with worker count, which is why DEFAULT_OCR_WORKERS could
 # not safely be raised before this existed (see
 # docs/run-notes/OCR_PARALLEL_20260810_001.md).
+# NOTE (2026-08-10, T4d): these three are no longer claude-only --
+# CodexCliProvider._run now uses the identical curve. The names are kept
+# because tests/test_llm_provider_backoff.py and tests/test_llm_providers.py
+# reference them, and renaming a shared constant to fix a naming nit is a
+# wider change than the retry work itself warrants. Read them as "the CLI
+# provider retry policy".
 _CLAUDE_CLI_MAX_ATTEMPTS = 3
 _CLAUDE_CLI_RETRY_BASE_SECONDS = 2.0
 _CLAUDE_CLI_RETRY_CAP_SECONDS = 30.0
@@ -684,34 +690,79 @@ class CodexCliProvider(BaseProvider):
             run_env = _child_safe_env(keep_prefixes=("CODEX",))
             if self.env.get("CODEX_API_KEY"):
                 run_env["CODEX_API_KEY"] = self.env["CODEX_API_KEY"]
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=timeout,
-                    cwd=str(self.root),
-                    env=run_env,
-                )
-            except FileNotFoundError as exc:
-                raise ProviderExecutionError(f"codex-cli command not found: {self.command}") from exc
 
-            raw_metadata = {
-                "command": cmd[0],
-                "returncode": result.returncode,
-                "stderr": result.stderr.strip(),
-            }
-            if result.returncode != 0:
-                detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}, no output"
-                raise ProviderExecutionError(f"codex-cli call failed: {detail}")
-            text = output_path.read_text(encoding="utf-8").strip()
-            # Fail closed on empty output (same reason as the claude path): a
-            # blank result is never valid content, so never write it downstream.
-            if not text:
-                raise ProviderExecutionError("codex-cli returned empty output")
-            return self._result(text, prompt_version, raw_metadata)
+            # Bounded retry on transient subprocess-level failures, mirroring
+            # ClaudeCliProvider._run. This provider had NO retry path at all,
+            # which mattered because it is checkpoint 2's dev-phase default:
+            # the redaction loop was the least resilient path in the pipeline
+            # (see the plan's B1) and page-level parallelism (T4c) makes a
+            # transient failure more likely, not less, since N calls now hit
+            # the backend at once.
+            #
+            # Scope is deliberately identical to the claude path: only the
+            # subprocess CALL is retried. FileNotFoundError is not transient
+            # (a missing binary stays missing) and is raised immediately.
+            # Nothing here touches content judgment -- P8 agreement is decided
+            # by compare(), and a redaction leak is decided by
+            # redaction.py's own checks, so no tolerance is introduced.
+            last_exc: ProviderExecutionError | None = None
+            last_detail = ""
+            for attempt in range(_CLAUDE_CLI_MAX_ATTEMPTS):
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=timeout,
+                        cwd=str(self.root),
+                        env=run_env,
+                    )
+                except FileNotFoundError as exc:
+                    raise ProviderExecutionError(f"codex-cli command not found: {self.command}") from exc
+                except subprocess.TimeoutExpired as exc:
+                    # Previously unhandled here: a timeout escaped as a raw
+                    # subprocess exception rather than a ProviderExecutionError,
+                    # so callers that catch the provider error type saw an
+                    # unexpected exception class instead of a normal failure.
+                    last_exc = ProviderExecutionError(
+                        f"codex-cli call timed out after {timeout}s")
+                    last_exc.__cause__ = exc
+                    last_detail = ""  # a timeout carries no server Retry-After
+                else:
+                    raw_metadata = {
+                        "command": cmd[0],
+                        "returncode": result.returncode,
+                        "stderr": result.stderr.strip(),
+                        "attempts": attempt + 1,
+                    }
+                    if result.returncode == 0:
+                        text = output_path.read_text(encoding="utf-8").strip()
+                        # Fail closed on empty output (same reason as the claude
+                        # path): a blank result is never valid content, so never
+                        # write it downstream. Retried rather than raised
+                        # immediately, since an empty last-message file is the
+                        # shape a truncated/aborted run takes.
+                        if text:
+                            return self._result(text, prompt_version, raw_metadata)
+                        last_exc = ProviderExecutionError("codex-cli returned empty output")
+                        last_detail = ""
+                    else:
+                        detail = (result.stderr.strip() or result.stdout.strip()
+                                  or f"exit {result.returncode}, no output")
+                        last_exc = ProviderExecutionError(f"codex-cli call failed: {detail}")
+                        last_detail = detail
+
+                if attempt < _CLAUDE_CLI_MAX_ATTEMPTS - 1:
+                    # Same full-jitter exponential curve as claude-cli, and for
+                    # the same reason: page-level concurrency means several
+                    # calls fail against a shared limit at nearly the same
+                    # instant, so an un-jittered wait re-arrives as a herd.
+                    time.sleep(_retry_delay(attempt + 1, last_detail))
+
+            raise last_exc if last_exc is not None else ProviderExecutionError(
+                "codex-cli call failed with no diagnostic")
         finally:
             if output_path is not None:
                 output_path.unlink(missing_ok=True)

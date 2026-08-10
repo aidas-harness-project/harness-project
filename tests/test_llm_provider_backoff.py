@@ -252,3 +252,168 @@ def test_retry_loop_recovers_without_sleeping_after_success(monkeypatch, tmp_pat
     assert result.text == "recovered"
     assert len(slept) == 1
     assert result.metadata()["raw_metadata"]["attempts"] == 2
+
+
+# --------------------------------------------------------------------------
+# T4d: codex-cli gets the same bounded retry
+# --------------------------------------------------------------------------
+#
+# codex-cli is checkpoint 2's dev-phase default, and it had NO retry path at
+# all -- the redaction loop was the least resilient path in the pipeline (the
+# plan's B1). Page-level parallelism (T4c) makes a transient failure MORE
+# likely, not less, because N calls now hit the backend simultaneously.
+
+
+def _codex_run_factory(calls, *, returncode=1, stderr="transient boom",
+                       message_text=None, raises=None):
+    """Fake subprocess.run for codex-cli.
+
+    codex-cli returns its answer via --output-last-message, so a successful
+    fake has to write that file rather than return stdout.
+    """
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if raises is not None:
+            raise raises
+        if message_text is not None:
+            out_path = Path(cmd[cmd.index("--output-last-message") + 1])
+            out_path.write_text(message_text, encoding="utf-8")
+        result = mock.Mock()
+        result.returncode = returncode
+        result.stdout = ""
+        result.stderr = stderr
+        return result
+    return fake_run
+
+
+def test_codex_retries_a_transient_failure_then_raises(monkeypatch, tmp_path):
+    slept = []
+    monkeypatch.setattr(providers.time, "sleep", lambda s: slept.append(s))
+    calls = []
+    monkeypatch.setattr(providers.subprocess, "run", _codex_run_factory(calls))
+
+    provider = providers.CodexCliProvider(root=tmp_path)
+    with pytest.raises(providers.ProviderExecutionError) as exc:
+        provider.redact_text("prompt", "v1")
+
+    assert len(calls) == providers._CLAUDE_CLI_MAX_ATTEMPTS
+    assert len(slept) == providers._CLAUDE_CLI_MAX_ATTEMPTS - 1
+    assert "codex-cli call failed" in str(exc.value)
+
+
+def test_codex_recovers_when_a_later_attempt_succeeds(monkeypatch, tmp_path):
+    """The point of the retry: a transient blip must not kill the page."""
+    monkeypatch.setattr(providers.time, "sleep", lambda _s: None)
+    calls = []
+
+    def flaky(cmd, **kwargs):
+        calls.append(list(cmd))
+        result = mock.Mock()
+        result.stderr = "temporary failure"
+        result.stdout = ""
+        if len(calls) < 3:
+            result.returncode = 1
+            return result
+        Path(cmd[cmd.index("--output-last-message") + 1]).write_text(
+            "REDACTED", encoding="utf-8")
+        result.returncode = 0
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", flaky)
+    provider = providers.CodexCliProvider(root=tmp_path)
+    result = provider.redact_text("prompt", "v1")
+
+    assert result.text == "REDACTED"
+    assert len(calls) == 3
+    assert result.raw_metadata["attempts"] == 3
+
+
+def test_codex_backoff_grows_between_attempts(monkeypatch, tmp_path):
+    slept = []
+    monkeypatch.setattr(providers.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(providers.random, "uniform", lambda _lo, hi: hi)
+    calls = []
+    monkeypatch.setattr(providers.subprocess, "run", _codex_run_factory(calls))
+
+    provider = providers.CodexCliProvider(root=tmp_path)
+    with pytest.raises(providers.ProviderExecutionError):
+        provider.redact_text("prompt", "v1")
+    assert slept == sorted(slept)
+    assert slept[0] < slept[-1], "ceiling never doubled -- constant sleep?"
+
+
+def test_codex_honours_a_server_supplied_retry_after(monkeypatch, tmp_path):
+    slept = []
+    monkeypatch.setattr(providers.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(providers.random, "uniform", lambda lo, _hi: lo)
+    calls = []
+    monkeypatch.setattr(providers.subprocess, "run",
+                        _codex_run_factory(calls, stderr="429 rate limit, retry-after: 5"))
+
+    provider = providers.CodexCliProvider(root=tmp_path)
+    with pytest.raises(providers.ProviderExecutionError):
+        provider.redact_text("prompt", "v1")
+    assert slept and all(s >= 5.0 for s in slept), slept
+
+
+def test_codex_does_not_retry_a_missing_binary(monkeypatch, tmp_path):
+    """A missing binary stays missing -- retrying it burns the backoff budget
+    on a condition that cannot clear. This is also the live failure on this
+    machine: codex resolves to codex.CMD, which Windows CreateProcess will not
+    launch by the bare name."""
+    slept = []
+    monkeypatch.setattr(providers.time, "sleep", lambda s: slept.append(s))
+    calls = []
+    monkeypatch.setattr(providers.subprocess, "run",
+                        _codex_run_factory(calls, raises=FileNotFoundError()))
+
+    provider = providers.CodexCliProvider(root=tmp_path)
+    with pytest.raises(providers.ProviderExecutionError) as exc:
+        provider.redact_text("prompt", "v1")
+    assert "command not found" in str(exc.value)
+    assert len(calls) == 1, "a missing binary must not be retried"
+    assert slept == []
+
+
+def test_codex_timeout_becomes_a_provider_error_and_is_retried(monkeypatch, tmp_path):
+    """Previously a TimeoutExpired escaped raw: callers catching
+    ProviderExecutionError saw an unexpected exception class instead."""
+    monkeypatch.setattr(providers.time, "sleep", lambda _s: None)
+    calls = []
+    monkeypatch.setattr(
+        providers.subprocess, "run",
+        _codex_run_factory(calls, raises=providers.subprocess.TimeoutExpired("codex", 5)))
+
+    provider = providers.CodexCliProvider(root=tmp_path)
+    with pytest.raises(providers.ProviderExecutionError) as exc:
+        provider.redact_text("prompt", "v1")
+    assert "timed out" in str(exc.value)
+    assert len(calls) == providers._CLAUDE_CLI_MAX_ATTEMPTS
+
+
+def test_codex_empty_output_is_retried_then_fails_closed(monkeypatch, tmp_path):
+    """An empty last-message file is the shape a truncated run takes, so it is
+    retried -- but it must never be returned as content."""
+    monkeypatch.setattr(providers.time, "sleep", lambda _s: None)
+    calls = []
+    monkeypatch.setattr(providers.subprocess, "run",
+                        _codex_run_factory(calls, returncode=0, stderr="",
+                                           message_text="   "))
+
+    provider = providers.CodexCliProvider(root=tmp_path)
+    with pytest.raises(providers.ProviderExecutionError) as exc:
+        provider.redact_text("prompt", "v1")
+    assert "empty output" in str(exc.value)
+    assert len(calls) == providers._CLAUDE_CLI_MAX_ATTEMPTS
+
+
+def test_codex_scratch_file_is_cleaned_up_after_exhausted_retries(monkeypatch, tmp_path):
+    monkeypatch.setattr(providers.time, "sleep", lambda _s: None)
+    calls = []
+    monkeypatch.setattr(providers.subprocess, "run", _codex_run_factory(calls))
+    provider = providers.CodexCliProvider(root=tmp_path)
+    with pytest.raises(providers.ProviderExecutionError):
+        provider.redact_text("prompt", "v1")
+    leftovers = list((tmp_path / "_ocr_scratch").glob("codex-last-message-*"))
+    assert leftovers == [], f"temp files leaked across retries: {leftovers}"
