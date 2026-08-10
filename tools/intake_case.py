@@ -90,6 +90,77 @@ KST = timezone(timedelta(hours=9))
 DEFAULT_GT_PATTERNS = ["*손해사정서*", "*지급 근거*", "*지급내역*"]
 IGNORE = {".DS_Store", "Thumbs.db"}
 
+# ------------------------------------------- adjuster-supplied case type --
+
+
+def _axis_values(def_name: str) -> list[str]:
+    """Reads an axis enum out of case_type_result.schema.json rather than
+    restating it here. The taxonomy has drifted between a writer and a checker
+    before (the forbidden-expression table, 2026-07-17); a CLI choices list is
+    exactly that shape of duplicate, so it is derived, not copied."""
+    schema = json.loads(
+        (ROOT / "schemas" / "case_type_result.schema.json").read_text(encoding="utf-8")
+    )
+    return [v for v in schema["$defs"][def_name]["enum"] if v is not None]
+
+
+COVERAGE_BASIS_VALUES = _axis_values("coverage_basis")
+LOSS_TYPE_VALUES = _axis_values("loss_type")
+
+# 실손 has no templates/registry.json contract, so a draft for one cannot render.
+# Accepting it at intake is fine -- silently accepting it and failing at draft
+# time is not, so intake says so up front (open-decisions.md #8a).
+LOSS_TYPES_WITHOUT_TEMPLATE = ["실손"]
+
+
+def build_adjuster_case_type(args) -> dict | None:
+    """Turns the case-type CLI arguments into the manifest's
+    `adjuster_case_type` object, or None when the adjuster supplied nothing.
+
+    Both axes are required together: a half-classified claim would let the
+    draft stage select a template from one axis alone. `supplied_by` is
+    mandatory whenever anything is supplied, because that provenance is what
+    stands in for the document quote P1 would otherwise demand -- no document
+    states a case's type, so an unattributed one is unverifiable."""
+    supplied = [args.coverage_basis, args.loss_type]
+    if args.non_claim_case:
+        if any(v is not None for v in supplied):
+            sys.exit("error: --non-claim-case means the material carries no claim at all, so it cannot "
+                     "also carry --coverage-basis/--loss-type. Drop whichever is wrong.")
+        if not args.supplied_by:
+            sys.exit("error: --non-claim-case needs --supplied-by -- recording who judged this to be "
+                     "non-claim material is the whole provenance of the claim.")
+        return {
+            "coverage_basis": None, "loss_type": None, "is_claim_case": False,
+            "supplied_by": args.supplied_by, "supplied_at": now_iso(),
+            **({"note": args.case_type_note} if args.case_type_note else {}),
+        }
+
+    if all(v is None for v in supplied):
+        if args.supplied_by or args.case_type_note:
+            sys.exit("error: --supplied-by/--case-type-note only mean something alongside a case type. "
+                     "Add --coverage-basis and --loss-type (or --non-claim-case).")
+        return None
+
+    if any(v is None for v in supplied):
+        sys.exit("error: --coverage-basis and --loss-type must be given together. They are two independent "
+                 "axes (보상 근거 / 손해 유형) and a claim has a value on each; supplying one alone would "
+                 "leave the case half-classified. See open-decisions.md #8a.")
+    if not args.supplied_by:
+        sys.exit("error: an adjuster-supplied case type needs --supplied-by. No document states a case's "
+                 "type, so the adjuster's attribution is the provenance that stands in for a source quote.")
+
+    if args.loss_type in LOSS_TYPES_WITHOUT_TEMPLATE:
+        print(f"warning: loss_type '{args.loss_type}' has no templates/registry.json contract yet, so the "
+              f"draft stage will fail at render time for this case. Recording it anyway -- surfacing this "
+              f"now rather than at draft time is deliberate (open-decisions.md #8a).", file=sys.stderr)
+
+    return {
+        "coverage_basis": args.coverage_basis, "loss_type": args.loss_type, "is_claim_case": True,
+        "supplied_by": args.supplied_by, "supplied_at": now_iso(),
+        **({"note": args.case_type_note} if args.case_type_note else {}),
+    }
+
 # --------------------------------------------------- content pre-check --
 
 CONTENT_SCAN_PAGES = 5
@@ -241,15 +312,22 @@ def file_format_for(ext: str) -> str:
     return FORMAT_BY_EXT.get(ext.lower(), "other")
 
 
-def write_manifest(case_id: str, run_id: str, documents: list[dict]) -> Path:
+def write_manifest(case_id: str, run_id: str, documents: list[dict],
+                   adjuster_case_type: dict | None = None) -> Path:
     """Writes document_manifest.json the same way dao.py write-contract does
     -- lock, schema-validate, atomic write, release -- reusing its helpers
-    directly rather than shelling out to itself."""
+    directly rather than shelling out to itself.
+
+    `adjuster_case_type` is omitted entirely when the adjuster supplied none,
+    so a manifest written without it is byte-identical to one written before
+    the field existed."""
     target = case_dir(case_id) / "document_manifest.json"
     manifest = {
         "case_id": case_id, "created_at": now_iso(), "updated_at": now_iso(),
         "documents": documents,
     }
+    if adjuster_case_type is not None:
+        manifest["adjuster_case_type"] = adjuster_case_type
     existing_lock = acquire_lock_blocking(target, "intake_case.py", run_id, "write document_manifest.json")
     if existing_lock is not None:
         sys.exit(f"error: {target} is locked by {existing_lock['held_by']} (run {existing_lock['run_id']}) -- "
@@ -307,7 +385,23 @@ def main():
     ap.add_argument("--scan-provider", choices=SUPPORTED_PROVIDERS,
                     help="Provider for D2 content pre-check; defaults to HARNESS_INTAKE_SCAN_PROVIDER or claude-cli")
     ap.add_argument("--scan-model", help="Model name for --scan-provider")
+    ap.add_argument("--coverage-basis", choices=COVERAGE_BASIS_VALUES, metavar="BASIS",
+                    help="Adjuster-supplied 보상 근거 (%s). Requires --loss-type and --supplied-by."
+                         % "|".join(COVERAGE_BASIS_VALUES))
+    ap.add_argument("--loss-type", choices=LOSS_TYPE_VALUES, metavar="TYPE",
+                    help="Adjuster-supplied 손해 유형 (%s). Requires --coverage-basis and --supplied-by."
+                         % "|".join(LOSS_TYPE_VALUES))
+    ap.add_argument("--non-claim-case", action="store_true",
+                    help="This material carries no claim at all (policy/증권/청약 only). Mutually exclusive with "
+                         "--coverage-basis/--loss-type; still requires --supplied-by.")
+    ap.add_argument("--supplied-by", metavar="NAME",
+                    help="Who supplied the case type. Mandatory whenever a type (or --non-claim-case) is given: it "
+                         "is the provenance that stands in for a document quote, since no document states a case's type.")
+    ap.add_argument("--case-type-note", metavar="TEXT",
+                    help="Optional free-text context from the adjuster about the case type.")
     args = ap.parse_args()
+
+    adjuster_case_type = build_adjuster_case_type(args)
 
     src_dir = Path(args.case_dir)
     if not src_dir.is_dir():
@@ -462,10 +556,14 @@ def main():
         dest = raw_dir / f"{doc_id}{f.suffix.lower()}"
         shutil.copy2(f, dest)
         raw_id_map[f.name] = (doc_id, dest)
+        file_format = file_format_for(f.suffix)
         manifest_documents.append({
             "document_id": doc_id, "file_name": dest.name, "file_path": f"data/raw/{args.case_id}/{dest.name}",
-            "file_format": file_format_for(f.suffix), "file_size_bytes": dest.stat().st_size,
+            "file_format": file_format, "file_size_bytes": dest.stat().st_size,
             "pre_flagged_type": None, "pages": None, "ocr_status": "pending",
+            "segmentation_status": "pending_review" if file_format == "pdf" else "not_applicable",
+            "segmentation_reviewed_by": None, "segmentation_reviewed_at": None,
+            "segmentation_review_note": None,
             "ocr_text_path": None, "ocr_quality": None, "uncertain_region_count": None,
             "cross_validation_status": None, "redacted_text_path": None,
             "document_type": None, "classification_confidence": None,
@@ -493,6 +591,9 @@ def main():
                     "file_path": f"data/raw/{args.case_id}/{out_path.name}",
                     "file_format": "pdf", "file_size_bytes": None,  # filled in after save() below
                     "pre_flagged_type": None, "pages": None, "ocr_status": "pending",
+                    "segmentation_status": "pending_review",
+                    "segmentation_reviewed_by": None, "segmentation_reviewed_at": None,
+                    "segmentation_review_note": None,
                     "ocr_text_path": None, "ocr_quality": None, "uncertain_region_count": None,
                     "cross_validation_status": None, "redacted_text_path": None,
                     "document_type": None, "classification_confidence": None,
@@ -508,9 +609,17 @@ def main():
             split_records.append({"source": fname, "pages": f"{start}-{end}", "dest": dest, "output": out_path.name})
         doc.close()
 
-    manifest_path = write_manifest(args.case_id, args.run_id or f"RUN_{datetime.now(KST).strftime('%Y%m%d')}_INTAKE", manifest_documents)
+    manifest_path = write_manifest(args.case_id, args.run_id or f"RUN_{datetime.now(KST).strftime('%Y%m%d')}_INTAKE",
+                                   manifest_documents, adjuster_case_type)
     print(f"Wrote {manifest_path} ({len(manifest_documents)} document(s), sequential DOC_XXX ids -- "
           f"original filenames are not preserved past this point, see _intake_record.json for the crosswalk).")
+    if adjuster_case_type is not None:
+        if adjuster_case_type["is_claim_case"]:
+            print(f"  adjuster case type: {adjuster_case_type['coverage_basis']} / "
+                  f"{adjuster_case_type['loss_type']} (supplied by {adjuster_case_type['supplied_by']})")
+        else:
+            print(f"  adjuster case type: non-claim material, no type on either axis "
+                  f"(supplied by {adjuster_case_type['supplied_by']})")
 
     # This crosswalk (original filename -> assigned id) is the ONLY place the
     # original, potentially PII-bearing filenames are recorded past intake --

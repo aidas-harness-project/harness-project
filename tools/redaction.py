@@ -382,6 +382,51 @@ class Redactor(Protocol):
     def redact_page(self, text: str) -> RedactionOutcome: ...
 
 
+class NoPiiClassRedactor:
+    """Pass-through for a document CLASS that structurally carries no PII.
+
+    For a published standard-form policy booklet (약관), redaction has nothing
+    to find: the text is the insurer's printed contract wording, identical for
+    every policyholder, with no claimant, patient, or account details in it.
+    Measured on CASE_112's real corpus: across 219 redaction results, exactly
+    ONE item was ever redacted, and it was in DOC_001 (`other`, a legal-opinion
+    letter) -- never in a policy document. Paying one LLM call per page (323
+    calls for CASE_907's two bundles) to re-derive "nothing here" is pure cost.
+
+    This is a class-scoped exemption, not a blanket skip: the caller decides
+    eligibility from `document_type`, and this redactor NEVER relaxes the
+    safety check. `scan_residual_pii` -- the same deterministic regex sweep
+    LlmRedactor runs on its own output -- still runs on every page here, and a
+    hit raises RedactionLeakError exactly as it would on the LLM path. So the
+    claim "this class has no PII" is verified per page rather than trusted: if
+    a policy bundle ever does contain structured PII, this path fails closed
+    and the document is blocked, not silently passed through.
+
+    What is genuinely given up is unstructured PII (a bare personal name),
+    which the regex sweep cannot see and only a model would catch. That is the
+    accepted risk of the exemption, and it is why eligibility is restricted to
+    a document class whose text is published boilerplate.
+    """
+
+    method = "no_pii_class_passthrough"
+    label = "no_pii_class_passthrough:deterministic"
+
+    def redact_page(self, text: str) -> RedactionOutcome:
+        residual = scan_residual_pii(text)
+        if residual:
+            raise RedactionLeakError(
+                "document class was declared PII-free but structured PII is present: "
+                + ", ".join(f"{h['kind']}={h['sample']!r}" for h in residual)
+            )
+        return RedactionOutcome(
+            redacted_text=text,
+            items_redacted=0,
+            categories=[],
+            provider_metadata=None,
+            review_warnings=[],
+        )
+
+
 class LlmRedactor:
     """Redactor backed by an llm_providers provider. The provider IDENTIFIES PII
     spans; substitution and all safety checks are deterministic and local."""

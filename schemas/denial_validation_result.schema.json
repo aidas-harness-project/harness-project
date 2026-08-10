@@ -1,22 +1,63 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "denial_validation_result.schema.json",
-  "title": "denial_validation_result.json -- denial reasons validated against case evidence v0.1",
-  "description": "Produced by denial-validation's checkpoint 1 (Evidence retrieval + validation). For each denial reason in denial_reason_result.json, whether the case's own evidence actually supports the insurer's stated reason.",
+  "title": "denial_validation_result.json -- denial reasons and policy links validated against case evidence v0.3",
+  "description": "Produced by denial-validation's checkpoint 1. For each denial/reduction reason, validates the insurer's position against case evidence and verifies every policy match before downstream reliance.",
   "allOf": [
-    { "$ref": "common_component_output.schema.json" },
+    {
+      "$ref": "common_component_output.schema.json"
+    },
     {
       "type": "object",
       "properties": {
         "validations": {
           "type": "array",
-          "items": { "$ref": "#/$defs/validation" }
+          "items": {
+            "$ref": "#/$defs/validation"
+          }
+        },
+        "acceptance_match_validations": {
+          "type": "array",
+          "description": "Verification records for policy_matches owned by an accepted_coverage rather than a denial reason. Separate from `validations` because an acceptance has no insurer reasoning to rebut -- it carries no decision_type and cannot be a reason -- so it has no `verdict`, only matches needing the same verification a denial's matches get. Before this array existed, an acceptance-owned match had nowhere to go: `validations.reason_id` is `^DR_[0-9]+$`, so recording it was rejected, and omitting it raised no error at all -- the contract reported full verification while that match was never checked. Optional: a case with no accepted_coverages omits it, and every pre-2026-08-04 contract still validates.",
+          "items": {
+            "$ref": "#/$defs/acceptance_match_validation"
+          }
+        },
+        "source_denial_contract_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the denial_reason_result.json this validation was built from -- specifically of the reason ids, decision types, taxonomy codes, and owned policy_match_ids it resolves against, not the whole file (an unrelated reworded summary must not invalidate a still-correct validation). The DAO recomputes this from the contract on disk at write time and refuses the write on a mismatch, so a validation of reasons that have since changed cannot be persisted. Rewriting denial_reason_result.json flips this stage back to pending in run-state rather than deleting anything."
         }
       },
-      "required": ["validations"]
+      "required": [
+        "validations"
+      ]
     }
   ],
   "$defs": {
+    "acceptance_match_validation": {
+      "type": "object",
+      "description": "One accepted coverage's policy-match verifications. Held to the identical standard as a denial's -- an acceptance grounded in a clause that does not exist is no better than a denial grounded that way.",
+      "properties": {
+        "accepted_coverage_id": {
+          "type": "string",
+          "pattern": "^AC_[0-9]+$",
+          "description": "References denial_reason_result.json's accepted_coverages[].accepted_coverage_id."
+        },
+        "policy_match_validations": {
+          "type": "array",
+          "description": "One verification record per policy match owned by this acceptance.",
+          "items": {
+            "$ref": "#/$defs/policy_match_validation"
+          }
+        }
+      },
+      "required": [
+        "accepted_coverage_id",
+        "policy_match_validations"
+      ],
+      "additionalProperties": false
+    },
     "validation": {
       "type": "object",
       "properties": {
@@ -26,7 +67,12 @@
           "description": "References denial_reason_result.json's reason_id."
         },
         "verdict": {
-          "enum": ["supported", "not_supported", "partially_supported", "insufficient_evidence"],
+          "enum": [
+            "supported",
+            "not_supported",
+            "partially_supported",
+            "insufficient_evidence"
+          ],
           "description": "insufficient_evidence is distinct from not_supported: the evidence contradicts the insurer's reason (not_supported) vs. there isn't enough evidence either way (insufficient_evidence, likely not rebuttal-worthy)."
         },
         "verdict_explanation": {
@@ -36,26 +82,194 @@
         "retrieved_chunk_ids": {
           "type": "array",
           "description": "PoC dev-phase requirement: every chunk id (from page_chunks.json) retrieval surfaced for this reason, not just what got cited below. Revisit whether this stays required post-PoC.",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
+        },
+        "policy_match_validations": {
+          "type": "array",
+          "description": "One verification record per policy match on the referenced denial reason. Empty only when that reason has no policy matches.",
+          "items": {
+            "$ref": "#/$defs/policy_match_validation"
+          }
         },
         "evidence_references": {
           "type": "array",
           "description": "Final cited evidence backing the verdict. May be empty only when verdict is insufficient_evidence.",
-          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
+          }
         },
-        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
-        "review_required": { "type": "boolean" },
-        "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+        "confidence": {
+          "$ref": "common_component_output.schema.json#/$defs/confidence"
+        },
+        "review_required": {
+          "type": "boolean"
+        },
+        "reviewer_role": {
+          "$ref": "common_component_output.schema.json#/$defs/reviewer_role"
+        }
       },
-      "required": ["reason_id", "verdict", "verdict_explanation", "retrieved_chunk_ids", "evidence_references", "confidence", "review_required"],
+      "required": [
+        "reason_id",
+        "verdict",
+        "verdict_explanation",
+        "retrieved_chunk_ids",
+        "policy_match_validations",
+        "evidence_references",
+        "confidence",
+        "review_required"
+      ],
       "allOf": [
         {
           "description": "Rule: any verdict other than insufficient_evidence must cite at least one evidence_reference.",
           "if": {
-            "not": { "properties": { "verdict": { "const": "insufficient_evidence" } }, "required": ["verdict"] }
+            "not": {
+              "properties": {
+                "verdict": {
+                  "const": "insufficient_evidence"
+                }
+              },
+              "required": [
+                "verdict"
+              ]
+            }
           },
           "then": {
-            "properties": { "evidence_references": { "minItems": 1 } }
+            "properties": {
+              "evidence_references": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "review_required": {
+                "const": true
+              }
+            },
+            "required": [
+              "review_required"
+            ]
+          },
+          "then": {
+            "required": [
+              "reviewer_role"
+            ]
+          }
+        }
+      ]
+    },
+    "policy_match_validation": {
+      "type": "object",
+      "properties": {
+        "policy_match_id": {
+          "type": "string",
+          "pattern": "^PM_[0-9]+$"
+        },
+        "verification_status": {
+          "enum": [
+            "verified",
+            "invalid",
+            "unverifiable"
+          ],
+          "description": "invalid means the referenced document/clause/location is wrong or does not support the match; unverifiable means required source material is unavailable. Neither may be used as a trusted policy basis."
+        },
+        "verification_explanation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_references": {
+          "type": "array",
+          "description": "Source locations used to verify or reject the policy match. Verified matches require at least one.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
+          }
+        },
+        "review_required": {
+          "type": "boolean"
+        },
+        "reviewer_role": {
+          "$ref": "common_component_output.schema.json#/$defs/reviewer_role"
+        },
+        "match_source": {
+          "enum": [
+            "insurer_cited",
+            "agent_inferred"
+          ],
+          "description": "Carried forward from this match's `match_source` in denial_reason_result.json, and REQUIRED here, because `verification_status: verified` is otherwise read as \"the insurer's policy basis checks out\" when it means only \"the clause exists where the match claims it does\". Those come apart completely: on CASE_909 all three matches verified byte-exact AND the insurer cited no policy clause anywhere (0 hits for 약관/보통약관/특별약관/면책/제3조/천재지변/지진/분화/홍수/해일 across all 15 pages of its response) -- its argument ran entirely on 민법 750/758조 and case law. A downstream stage that rebuts an `agent_inferred` match as though the insurer had asserted it is rebutting an argument nobody made. Duplicating the upstream field is deliberate: a consumer reading only this contract could not otherwise recover the distinction, and it had been carried in prose alone."
+        }
+      },
+      "required": [
+        "policy_match_id",
+        "verification_status",
+        "verification_explanation",
+        "evidence_references",
+        "review_required",
+        "match_source"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verification_status": {
+                "const": "verified"
+              }
+            },
+            "required": [
+              "verification_status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "evidence_references": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verification_status": {
+                "enum": [
+                  "invalid",
+                  "unverifiable"
+                ]
+              }
+            },
+            "required": [
+              "verification_status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "review_required": {
+                "const": true
+              }
+            },
+            "required": [
+              "reviewer_role"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "review_required": {
+                "const": true
+              }
+            },
+            "required": [
+              "review_required"
+            ]
+          },
+          "then": {
+            "required": [
+              "reviewer_role"
+            ]
           }
         }
       ]

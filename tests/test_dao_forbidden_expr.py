@@ -215,7 +215,9 @@ def test_forbidden_table_not_restated_outside_authoritative_source():
         p = Path(c) if Path(c).is_absolute() else root / c
         if not p.exists():
             continue
-        rel = str(p.resolve().relative_to(root))
+        # as_posix() so the allowlist (forward-slash) matches on Windows too,
+        # where relative_to() would otherwise yield backslash separators.
+        rel = p.resolve().relative_to(root).as_posix()
         if rel in allowlist:
             continue
         if phrase_count(p) >= 2:

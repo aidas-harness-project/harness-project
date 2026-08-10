@@ -145,6 +145,39 @@ def test_compare_prompt_asks_about_one_sided_extraneous_content():
     assert "hallucinated" in prompt.lower()
 
 
+def test_compare_prompt_forbids_a_second_revised_verdict():
+    """CASE_907: the single-line rule was the prompt's LAST line and carried no
+    more weight than the checks above it, so the comparator wrote its reasoning,
+    emitted a verdict, then corrected itself and emitted a SECOND one:
+
+        DISAGREE: <reason>
+        Correction: that reasoning supports AGREE, not DISAGREE.
+        AGREE: <reason>
+
+    parse_verdict searches the whole string, so it saw the leading DISAGREE and
+    blocked the page. 4 of 34 pages (12%) were blocked this way and every one was
+    a false block. The format rule must therefore lead, and must forbid revising
+    a verdict in place rather than merely asking for one line."""
+    prompt = oe.COMPARE_PROMPT_TEMPLATE
+    assert "OUTPUT FORMAT" in prompt
+    assert "ONCE" in prompt
+    assert "do not revise a verdict" in prompt
+    # The rule has to precede the transcriptions it governs, not trail them.
+    assert prompt.index("OUTPUT FORMAT") < prompt.index("--- Transcription A ---")
+
+
+def test_compare_prompt_scopes_the_one_sided_check_to_content_not_layout():
+    """The one-sided-content check above is about CONTENT, and the comparator
+    read it as covering layout too -- returning DISAGREE while its own reason
+    said 'no material difference' (a whitespace-only variant). Table borders and
+    line breaks differ freely between two vision reads of the same page, so
+    without this scoping every table-bearing page is a coin flip."""
+    prompt = oe.COMPARE_PROMPT_TEMPLATE
+    assert "not about layout" in prompt
+    for token in ("whitespace", "line breaks", "table borders"):
+        assert token in prompt, token
+
+
 def test_scratch_dir_distinct_per_process_id(monkeypatch):
     """PID-tagged so a retry racing a stale process can't collide on one path."""
     monkeypatch.setattr(oe.os, "getpid", lambda: 111)
@@ -378,3 +411,130 @@ def test_decode_undecodable_fails_closed(tmp_path):
     # bytes invalid in utf-8/cp949/euc-kr
     with pytest.raises(llm_providers.ProviderExecutionError):
         oe.decode_text_file(_write(tmp_path, b"\xff\xfe\x00\x81\xff"))
+
+
+# ---------------------------------------------------------------------------
+# Born-digital PDF passthrough (CASE_112): a PDF whose pages carry the
+# publisher's own text layer must never be sent to vision OCR.
+# ---------------------------------------------------------------------------
+
+def _pdf(tmp_path, name, pages):
+    """Build a PDF where pages is a list of str (text page) or None (blank/scan)."""
+    fitz = pytest.importorskip("fitz")
+    path = tmp_path / name
+    doc = fitz.open()
+    for text in pages:
+        page = doc.new_page()
+        if text:
+            page.insert_text((72, 72), text, fontname="helv", fontsize=11)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_born_digital_pdf_routes_to_embedded_text(tmp_path):
+    path = _pdf(tmp_path, "policy.pdf", ["Article 1 coverage", "Article 2 exclusions"])
+    texts = oe.pdf_embedded_page_texts(path)
+    assert texts is not None and len(texts) == 2
+    assert "Article 1" in texts[0] and "Article 2" in texts[1]
+
+
+def test_scanned_pdf_falls_through_to_ocr(tmp_path):
+    # No text layer on any page -- a genuine scan (CASE_112 DOC_214-DOC_224).
+    path = _pdf(tmp_path, "scan.pdf", [None, None])
+    assert oe.pdf_embedded_page_texts(path) is None
+
+
+def test_mixed_pdf_falls_through_rather_than_splitting_provenance(tmp_path):
+    # One text page + one scanned page: extraction_method is a single label per
+    # document, so a partially-digital bundle stays wholly on the OCR path.
+    path = _pdf(tmp_path, "mixed.pdf", ["Article 1 coverage", None])
+    assert oe.pdf_embedded_page_texts(path) is None
+
+
+def test_sparse_page_still_counts_as_embedded_text(tmp_path):
+    # CASE_112 DOC_077 was 4 characters ("업무내용") because the page genuinely
+    # holds only a form label -- not because the text layer was partial. Vision
+    # OCR of that page appended an insurer slogan absent from the source, so a
+    # character-count threshold would prefer the less faithful reading.
+    path = _pdf(tmp_path, "sparse.pdf", ["a"])
+    assert oe.pdf_embedded_page_texts(path) is not None
+
+
+def test_malformed_pdf_falls_through_without_raising(tmp_path):
+    path = tmp_path / "broken.pdf"
+    path.write_bytes(b"%PDF-1.4 not really a pdf")
+    assert oe.pdf_embedded_page_texts(path) is None
+
+
+def test_run_ocr_on_born_digital_pdf_makes_no_provider_call(tmp_path):
+    """The whole point: zero model calls, and an honest provenance label."""
+    path = _pdf(tmp_path, "policy.pdf", ["Article 1 coverage"])
+
+    def _boom(*a, **k):  # any reader/comparator use is a failure
+        raise AssertionError("a provider was called for a born-digital PDF")
+
+    result = oe.run_ocr(
+        "CASE_999", "DOC_001", path,
+        progress=lambda m: None,
+        reader_a=_boom, reader_b=_boom, comparator=_boom,
+    )
+    assert result["extraction_method"] == "embedded_text"
+    assert result["cross_validation_mode"] == "deferred_poc"
+    assert len(result["pages"]) == 1
+    page = result["pages"][0]
+    assert page["agreement"] == "agreed"
+    # reading_a is what the downstream page-write persists.
+    assert "Article 1" in page["reading_a"]
+    assert page["reading_a"] == page["reading_b"]
+
+
+# ------------------------------------------- self-corrected comparator verdicts --
+#
+# The comparator sometimes writes a verdict, notices its own reasoning does not
+# support it, and emits a corrected one. Measured on CASE_907's two scanned
+# documents: 4 of 34 pages (12%). Reading the FIRST token blocked all four, and
+# every one was a false block -- the readings differed only in whitespace.
+
+# The exact reply that blocked CASE_907/DOC_002 page 8.
+_REAL_SELF_CORRECTION = (
+    "DISAGREE: Transcription B's body text matches A on all names, dates, "
+    "numbers, and diagnoses, and neither adds extra commentary -- the only "
+    "differences are blank-line/indent spacing, which is formatting, not "
+    "content.\n\nCorrection: that reasoning supports AGREE, not DISAGREE. "
+    "Restating the answer as required:\n\nAGREE"
+)
+
+
+def test_self_corrected_disagree_to_agree_is_read_as_agree():
+    result = oe.compare("text A", "text B", FakeComparator(_REAL_SELF_CORRECTION))
+
+    assert result["agreement"] == "agreed"
+
+
+def test_self_correction_the_other_way_still_disagrees():
+    """P8 is not weakened: a model that corrects itself INTO a disagreement is
+    taken at its corrected word, exactly like the reverse case."""
+    verdict = ("AGREE: the readings look equivalent. Correction: B appends a "
+               "paragraph absent from A entirely. DISAGREE")
+
+    result = oe.compare("text A", "text B", FakeComparator(verdict))
+
+    assert result["agreement"] == "disagreed"
+
+
+def test_a_revised_verdict_is_recorded_even_when_it_lands_on_agree():
+    """An agreed page normally carries no details. A format violation must not
+    vanish just because its outcome was benign."""
+    result = oe.compare("text A", "text B", FakeComparator(_REAL_SELF_CORRECTION))
+
+    assert result["metadata"]["verdict_revised_in_place"] is True
+    assert result["disagreement_details"], \
+        "a multi-verdict reply must stay visible in the record"
+
+
+def test_an_ordinary_single_verdict_is_not_flagged_as_revised():
+    result = oe.compare("text A", "text B", FakeComparator("AGREE: same facts"))
+
+    assert result["metadata"]["verdict_revised_in_place"] is False
+    assert result["disagreement_details"] == []

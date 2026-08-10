@@ -238,3 +238,32 @@ def test_scan_catches_fleet_separator_and_region_variants(leak):
 ])
 def test_scan_no_fp_on_fleet_clean_cases(clean):
     assert scan_residual_pii(clean) == [], f"false positive on {clean!r}"
+
+
+# --- NoPiiClassRedactor: class-scoped exemption, still leak-checked ----------
+
+def test_no_pii_class_redactor_passes_clean_policy_text_through_verbatim():
+    from redaction import NoPiiClassRedactor
+    text = "제1조(보상하는 손해)\n회사는 영업배상책임보험 보통약관에 따라 보상합니다."
+    out = NoPiiClassRedactor().redact_page(text)
+    assert out.redacted_text == text
+    assert out.items_redacted == 0
+    assert out.review_warnings == []
+
+
+def test_no_pii_class_redactor_hard_fails_on_structured_pii():
+    """The exemption is a claim about a document CLASS, verified per page.
+    If structured PII is actually present, the document is blocked -- it is
+    never silently passed through."""
+    from redaction import NoPiiClassRedactor, RedactionLeakError
+    text = "제1조(보상하는 손해)\n피보험자 주민등록번호 800101-1234567"
+    with pytest.raises(RedactionLeakError):
+        NoPiiClassRedactor().redact_page(text)
+
+
+def test_no_pii_class_redactor_makes_no_provider_call():
+    """It must not need a provider at all -- that is the entire cost saving."""
+    from redaction import NoPiiClassRedactor
+    r = NoPiiClassRedactor()
+    assert not hasattr(r, "provider")
+    assert r.method == "no_pii_class_passthrough"

@@ -31,6 +31,7 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+import dao
 from llm_providers import (
     ProviderConfig,
     ProviderConfigError,
@@ -38,7 +39,8 @@ from llm_providers import (
     SUPPORTED_PROVIDERS,
     build_provider,
 )
-from redaction import PROMPT_VERSION, LlmRedactor, RedactionLeakError, RedactionParseError
+from redaction import (PROMPT_VERSION, LlmRedactor, NoPiiClassRedactor,
+                       RedactionLeakError, RedactionParseError)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,10 +48,22 @@ DAO = ROOT / "tools" / "dao.py"
 DEFAULT_REDACTION_PROVIDER = "codex-cli"
 
 
-def _dao(*args: str) -> str:
+def _dao(*args: str, capability: str | None = None) -> str:
+    """Run a DAO subcommand.
+
+    `capability` is checkpoint 2's per-run secret, passed only on the one call
+    that needs pre-redaction page text. It goes through the environment rather
+    than argv so it does not land in process listings, and it is minted fresh
+    per run so it cannot be replayed from a log. Every other DAO call runs
+    without it -- the capability is scoped to the reads that actually require
+    it, not granted for the whole process.
+    """
+    env = dict(os.environ)
+    if capability is not None:
+        env[dao.PAGE_TEXT_CAPABILITY_ENV] = capability
     result = subprocess.run(
         [sys.executable, str(DAO), *args], capture_output=True, text=True,
-        encoding="utf-8", errors="replace", cwd=str(ROOT),
+        encoding="utf-8", errors="replace", cwd=str(ROOT), env=env,
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
@@ -70,20 +84,33 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
     categories: set[str] = set()
     provider_metadata = None
     review_warnings: list[str] = []
-    for page in ocr_result.get("pages", []):
-        page_number = page["page"]
-        text = _dao("read-page-text", case_id, doc_id, str(page_number))
-        # redact_page HARD-FAILS (RedactionLeakError) on any detected possible
-        # PII leak -- that propagates out of this function and nothing is
-        # written, blocking the document exactly like a P8 disagreement. Only a
-        # leak-free page returns an outcome.
-        outcome = redactor.redact_page(text)
-        redacted_pages.append(f"<<<PAGE page={page_number}>>>\n{outcome.redacted_text}")
-        total_items += outcome.items_redacted
-        categories.update(outcome.categories)
-        provider_metadata = outcome.provider_metadata
-        for warning in outcome.review_warnings:
-            review_warnings.append(f"page {page_number}: {warning}")
+
+    # Scoped to this one document and revoked in the finally, so the window in
+    # which pre-redaction text is obtainable at all is the page loop and
+    # nothing more. An analysis agent shelling out to dao.py cannot produce
+    # this, so --caller-stage alone stops being enough.
+    capability, capability_path = dao._issue_page_text_capability(case_id, doc_id)
+    try:
+        for page in ocr_result.get("pages", []):
+            page_number = page["page"]
+            # --caller-stage is a hard DAO gate, not a label, and the
+            # capability is what makes the claim verifiable rather than
+            # self-asserted.
+            text = _dao("read-page-text", case_id, doc_id, str(page_number),
+                        "--caller-stage", "document-pipeline", capability=capability)
+            # redact_page HARD-FAILS (RedactionLeakError) on any detected
+            # possible PII leak -- that propagates out of this function and
+            # nothing is written, blocking the document exactly like a P8
+            # disagreement. Only a leak-free page returns an outcome.
+            outcome = redactor.redact_page(text)
+            redacted_pages.append(f"<<<PAGE page={page_number}>>>\n{outcome.redacted_text}")
+            total_items += outcome.items_redacted
+            categories.update(outcome.categories)
+            provider_metadata = outcome.provider_metadata
+            for warning in outcome.review_warnings:
+                review_warnings.append(f"page {page_number}: {warning}")
+    finally:
+        dao.release_page_text_capability(capability_path)
 
     if not redacted_pages:
         raise RuntimeError(f"checkpoint 2 blocked: {doc_id} has no validated pages")
@@ -121,6 +148,19 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
         "review_required": review_required,
         "warnings": warnings,
     }
+    if review_required:
+        # Schema rule (common_component_output.schema.json): review_required
+        # true requires reviewer_role set. Over-redaction risk is a masking-
+        # completeness question, not a medical/legal judgment call -- routes
+        # to 손해사정사, same role run_checkpoint1.py uses for its own
+        # review_required case (a P8 disagreement).
+        contract["reviewer_role"] = "손해사정사"
+        contract["review_reason"] = (
+            "Over-redaction risk: a span was left un-redacted because a safe "
+            "replacement could not be made without risking corruption of "
+            "surrounding kept text (privacy-safe direction, but needs a human "
+            "check). See warnings for the specific page(s)/span(s)."
+        )
 
     scratch_root = ROOT / "_redaction_scratch"
     scratch_root.mkdir(parents=True, exist_ok=True)
@@ -152,6 +192,31 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
     }
 
 
+# Document classes whose text is published standard-form contract wording,
+# identical for every policyholder, and therefore structurally free of claimant
+# PII. Eligibility is decided from the manifest's classified document_type --
+# never from a filename or an agent's assertion. See
+# redaction.NoPiiClassRedactor for what the exemption does and does not give up
+# (the deterministic residual-PII sweep still runs on every page and still
+# hard-fails, so the claim is verified per page rather than trusted).
+NO_PII_DOCUMENT_TYPES = frozenset({"insurance_policy"})
+
+
+def _redactor_for(case_id: str, doc_id: str, provider_name: str, model: str | None):
+    """Pick the redactor for this document: deterministic pass-through for a
+    PII-free document class, otherwise the real LLM span redactor."""
+    manifest = json.loads(_dao("read-contract", case_id, "document_manifest.json"))
+    entry = next((d for d in manifest.get("documents", [])
+                  if d.get("document_id") == doc_id), None)
+    if entry and entry.get("document_type") in NO_PII_DOCUMENT_TYPES:
+        print(f"{doc_id}: document_type={entry['document_type']} is a PII-free class -- "
+              "deterministic pass-through, no redaction model called "
+              "(residual-PII scan still enforced per page)", file=sys.stderr)
+        return NoPiiClassRedactor()
+    provider = build_provider(ProviderConfig(provider_name, model), env=os.environ, root=ROOT)
+    return LlmRedactor(provider)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("case_id")
@@ -164,8 +229,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        provider = build_provider(ProviderConfig(args.provider, args.model), env=os.environ, root=ROOT)
-        redactor = LlmRedactor(provider)
+        redactor = _redactor_for(args.case_id, args.doc_id, args.provider, args.model)
         result = redact_document(args.case_id, args.doc_id, args.held_by, args.run_id, redactor)
     except RedactionLeakError as exc:
         # Possible PII leak detected -- nothing was written. Block the document.

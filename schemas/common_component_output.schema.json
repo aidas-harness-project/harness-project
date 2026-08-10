@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "common_component_output.schema.json",
-  "title": "Common component output contract v0.3",
-  "description": "Fields every pipeline component's output JSON includes in common. Judgment-type outputs add the safety fields (source_grounded, hallucination_risk_check, prohibited_language_check). See harness-guardrails (P1) for the rules this schema enforces.",
+  "title": "Common component output contract v0.5",
+  "description": "Fields every pipeline component's output JSON includes in common. Judgment-type outputs add the safety fields (source_grounded, hallucination_risk_check, prohibited_language_check). See harness-guardrails (P1) for the rules this schema enforces. v0.4 (P0-7) gives strict_evidence_reference optional start_char/end_char and adds canonical_evidence_reference: under canonical_v1 the DAO requires those exact offsets on clause/condition evidence and resolves them against the registered source revision, so evidence names one exact occurrence rather than any occurrence of a matching quote. The fields are schema-optional so legacy artifacts stay readable -- enforcement is the DAO's, not the schema's.",
   "type": "object",
   "properties": {
     "case_id": { "$ref": "#/$defs/case_id" },
@@ -103,6 +103,7 @@
       "enum": [
         "insurance_certificate",
         "insurance_policy",
+        "application_form",
         "diagnosis_certificate",
         "medical_record",
         "imaging_report",
@@ -111,36 +112,44 @@
         "other"
       ]
     },
+    "decision_type": {
+      "description": "Insurer decision for one claim coverage or claim item. denial means no payment for that item; reduction means payment liability is recognized but the payable amount is reduced. A case may contain separate reasons of both types.",
+      "enum": ["denial", "reduction"]
+    },
+    "payment_status": {
+      "description": "Observed payment outcome, kept separate from decision_type. No automatic decision_type-to-payment_status rule is enforced until enough real data exists.",
+      "enum": ["unpaid", "partially_paid", "paid", "unknown"]
+    },
     "taxonomy_code": {
-      "description": "Denial/reduction-reason R-code. See pipeline.md's taxonomy section. x-codebook carries the loss-adjuster-reviewed Korean label and observed frequency tier; frequency is taxonomy metadata, not evidence or model confidence.",
+      "description": "Denial/reduction-reason R-code. See pipeline.md's taxonomy section. x-codebook carries the loss-adjuster-reviewed Korean label, observed frequency tier, and applicable decision types. These are taxonomy metadata, not case evidence or model confidence. An empty applicable_decision_types array means the adjuster's source table left the classification blank; it does not mean the code can never apply.",
       "enum": [
         "R01", "R02", "R03", "R04", "R05", "R06", "R07", "R08", "R09",
         "R10", "R11", "R12", "R13", "R14", "R15", "R16", "R17", "R18",
         "R19", "R20", "R21", "R99"
       ],
       "x-codebook": {
-        "R01": { "label_ko": "기왕증 / 기존 질환 기여도", "frequency": "high" },
-        "R02": { "label_ko": "장해율 과다", "frequency": "high" },
-        "R03": { "label_ko": "손해액 과다", "frequency": "high" },
-        "R04": { "label_ko": "약관상 지급요건 미충족", "frequency": "high" },
-        "R05": { "label_ko": "면책사항", "frequency": "high" },
-        "R06": { "label_ko": "치료 필요성 부족", "frequency": "high" },
-        "R07": { "label_ko": "과잉진료 / 비급여 적정성", "frequency": "medium" },
-        "R08": { "label_ko": "서류 부족", "frequency": "low" },
-        "R09": { "label_ko": "동일 사유 재청구", "frequency": "low" },
-        "R10": { "label_ko": "기존장해·동일 부위 장해 공제", "frequency": "high" },
-        "R11": { "label_ko": "피해자 과실상계", "frequency": "high" },
-        "R12": { "label_ko": "자기부담금·약정 공제금액 적용", "frequency": "low" },
-        "R13": { "label_ko": "중복보상·실손 비례보상", "frequency": "medium" },
-        "R14": { "label_ko": "가입금액·보상한도·일수한도 적용", "frequency": "low" },
-        "R15": { "label_ko": "면책기간·감액기간 적용", "frequency": "medium" },
-        "R16": { "label_ko": "치료기간·입원일수 일부 불인정", "frequency": "medium" },
-        "R17": { "label_ko": "치료항목·비급여 비용 일부 불인정", "frequency": "medium" },
-        "R18": { "label_ko": "소득·휴업기간·가동기간 일부 불인정", "frequency": "high" },
-        "R19": { "label_ko": "의료자문 결과에 따른 감액", "frequency": "high" },
-        "R20": { "label_ko": "계약 전 알릴의무 위반에 따른 비례감액", "frequency": "high" },
-        "R21": { "label_ko": "산재·타보험·제3자 기지급액 공제", "frequency": "medium" },
-        "R99": { "label_ko": "기타 / 분류 불가", "frequency": "medium" }
+        "R01": { "label_ko": "기왕증 / 기존 질환 기여도", "frequency": "high", "applicable_decision_types": ["reduction"] },
+        "R02": { "label_ko": "장해율 과다", "frequency": "high", "applicable_decision_types": ["reduction"] },
+        "R03": { "label_ko": "손해액 과다", "frequency": "high", "applicable_decision_types": ["reduction"] },
+        "R04": { "label_ko": "약관상 지급요건 미충족", "frequency": "high", "applicable_decision_types": ["denial"] },
+        "R05": { "label_ko": "면책사항", "frequency": "high", "applicable_decision_types": ["denial"] },
+        "R06": { "label_ko": "치료 필요성 부족", "frequency": "high", "applicable_decision_types": ["reduction"] },
+        "R07": { "label_ko": "과잉진료 / 비급여 적정성", "frequency": "medium", "applicable_decision_types": ["reduction"] },
+        "R08": { "label_ko": "서류 부족", "frequency": "low", "applicable_decision_types": ["denial"] },
+        "R09": { "label_ko": "동일 사유 재청구", "frequency": "low", "applicable_decision_types": ["denial"] },
+        "R10": { "label_ko": "기존장해·동일 부위 장해 공제", "frequency": "high", "applicable_decision_types": ["reduction"] },
+        "R11": { "label_ko": "피해자 과실상계", "frequency": "high", "applicable_decision_types": ["reduction"] },
+        "R12": { "label_ko": "자기부담금·약정 공제금액 적용", "frequency": "low", "applicable_decision_types": [] },
+        "R13": { "label_ko": "중복보상·실손 비례보상", "frequency": "medium", "applicable_decision_types": ["reduction"] },
+        "R14": { "label_ko": "가입금액·보상한도·일수한도 적용", "frequency": "low", "applicable_decision_types": [] },
+        "R15": { "label_ko": "면책기간·감액기간 적용", "frequency": "medium", "applicable_decision_types": ["reduction", "denial"] },
+        "R16": { "label_ko": "치료기간·입원일수 일부 불인정", "frequency": "medium", "applicable_decision_types": ["reduction"] },
+        "R17": { "label_ko": "치료항목·비급여 비용 일부 불인정", "frequency": "medium", "applicable_decision_types": ["reduction"] },
+        "R18": { "label_ko": "소득·휴업기간·가동기간 일부 불인정", "frequency": "high", "applicable_decision_types": ["reduction"] },
+        "R19": { "label_ko": "의료자문 결과에 따른 감액", "frequency": "high", "applicable_decision_types": ["reduction"] },
+        "R20": { "label_ko": "계약 전 알릴의무 위반에 따른 비례감액", "frequency": "high", "applicable_decision_types": ["reduction"] },
+        "R21": { "label_ko": "산재·타보험·제3자 기지급액 공제", "frequency": "medium", "applicable_decision_types": ["reduction"] },
+        "R99": { "label_ko": "기타 / 분류 불가", "frequency": "medium", "applicable_decision_types": ["reduction", "denial"] }
       }
     },
     "severity": {
@@ -167,6 +176,50 @@
         "quote": { "type": "string", "minLength": 1 }
       },
       "required": ["quote"]
+    },
+    "strict_evidence_reference": {
+      "type": "object",
+      "description": "A reference to a source quote where NONE of document_id/page/quote may be omitted -- used where provenance must be independently verifiable and structure must not be relied on to make document/page 'obvious' (see normalized_policy_clause and the denial/reduction contract family). quote must contain at least one non-whitespace character; cross-contract validation additionally verifies the quote appears verbatim on the cited page of the processed text. start_char/end_char are schema-OPTIONAL here so pre-P0-7 (legacy) contracts stay readable and migratable -- they are MANDATORY under canonical_v1, where the DAO refuses a normalized-clause write or a policy_clause_processing finalization whose clause/condition evidence carries no exact range (see canonical_evidence_reference). A quote alone cannot say WHICH occurrence of a repeated phrase it means, so quote equality -- even whitespace-normalized quote equality -- is no longer the canonical evidence-binding relation.",
+      "properties": {
+        "document_id": { "$ref": "#/$defs/document_id" },
+        "document_type": { "$ref": "#/$defs/document_type" },
+        "page": { "type": "integer", "minimum": 1 },
+        "quote": { "type": "string", "pattern": "\\S" },
+        "start_char": { "type": "integer", "minimum": 0 },
+        "end_char": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["document_id", "page", "quote"],
+      "dependentRequired": {
+        "start_char": ["end_char"],
+        "end_char": ["start_char"]
+      }
+    },
+    "canonical_evidence_reference": {
+      "$comment": "Not $ref'd by any contract property: canonical_v1 enforcement lives in the DAO (policy_uid_resolver.resolve_exact_evidence_reference), because a legacy artifact must stay READABLE while a new canonical write must be REFUSED -- one JSON Schema cannot express both for the same field. This def is the normative statement of the shape the DAO requires, kept beside strict_evidence_reference so the two cannot drift.",
+      "description": "A strict_evidence_reference that additionally pins the EXACT source range the cited passage occupies. Offsets use the same coordinate system as canonical_source_span: Python string indices into the processed page body (the text AFTER that page's <<<PAGE page=N>>> marker) of the source_text_revision this contract is bound to. quote must equal page_text[start_char:end_char] verbatim -- no strip, no whitespace collapse, no Unicode substitution. The offsets are a PROVENANCE SELECTOR, not identity: they say which occurrence of a repeated phrase this evidence is, and they never enter a UID hash, so canonical_v1 UID values are unchanged by their presence.",
+      "type": "object",
+      "properties": {
+        "document_id": { "$ref": "#/$defs/document_id" },
+        "document_type": { "$ref": "#/$defs/document_type" },
+        "page": { "type": "integer", "minimum": 1 },
+        "quote": { "type": "string", "pattern": "\\S" },
+        "start_char": { "type": "integer", "minimum": 0 },
+        "end_char": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["document_id", "page", "quote", "start_char", "end_char"]
+    },
+    "canonical_source_span": {
+      "type": "object",
+      "description": "An exact character range in a processed page body (the text AFTER that page's <<<PAGE page=N>>> marker). This is UID provenance, not evidence: under canonical_v1 the DAO recomputes the element's identifier from (immutable source digest, physical page, NFC-normalized bytes at these offsets, occurrence ordinal), so a quote/value alone -- which cannot distinguish two identical phrases on one page -- is not sufficient. quote must equal the page text at [start_char:end_char] verbatim. start_char/end_char select WHICH occurrence is meant and are then discarded; they never enter the identifier, so unrelated edits elsewhere on the page do not move the UID. occurrence_ordinal is optional and advisory only -- the DAO derives it from the registered page text and refuses a value that disagrees rather than trusting the submitted one.",
+      "properties": {
+        "page": { "type": "integer", "minimum": 1 },
+        "start_char": { "type": "integer", "minimum": 0 },
+        "end_char": { "type": "integer", "minimum": 1 },
+        "quote": { "type": "string", "minLength": 1 },
+        "occurrence_ordinal": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["page", "start_char", "end_char", "quote"],
+      "additionalProperties": false
     }
   }
 }

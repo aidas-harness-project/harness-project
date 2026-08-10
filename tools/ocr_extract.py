@@ -52,7 +52,16 @@ from llm_providers import (
 ROOT = Path(__file__).resolve().parent.parent
 SCRATCH_ROOT = ROOT / "_ocr_scratch"
 OCR_PROMPT_VERSION = "ocr_extraction_v0.1"
-COMPARE_PROMPT_VERSION = "ocr_compare_v0.1"
+# v0.2 (2026-08-03): the single-line instruction was the prompt's last line and
+# carried no more weight than the checks above it, so the comparator routinely
+# wrote its reasoning first, emitted a verdict, then corrected itself and
+# emitted a SECOND verdict. Measured on CASE_907's two scanned documents: 4 of
+# 34 pages (12%) came back "DISAGREE: <reason> / Correction: ... / AGREE: ...",
+# and the parser -- which searches the whole string -- saw only the first token
+# and blocked the page. Every one of those 4 was a false block. The format rule
+# is now stated first, as a governing instruction, and explicitly forbids
+# revising a verdict in place.
+COMPARE_PROMPT_VERSION = "ocr_compare_v0.2"
 
 TRANSCRIBE_PROMPT = (
     "Transcribe every piece of text visible in this page/image exactly as written, "
@@ -71,12 +80,29 @@ COMPARE_PROMPT_TEMPLATE = (
     "One transcription containing text the source page doesn't actually have (hallucinated "
     "content) is exactly the failure this check exists to catch. Treat any such one-sided "
     "addition as a disagreement, not just conflicting facts.\n\n"
-    "Reply with exactly one line: AGREE or DISAGREE: <brief reason>.\n\n"
+    "This second check is about CONTENT that one reading has and the other does not. "
+    "It is not about layout. Differences in whitespace, line breaks, paragraph breaks, "
+    "indentation, table borders (| or +---+), column alignment, or cell ordering are "
+    "presentation, not content: if every name, date, number, code and diagnosis is "
+    "present in both, the answer is AGREE even when the two readings look nothing "
+    "alike as strings.\n\n"
+    "OUTPUT FORMAT -- this governs your entire reply:\n"
+    "Decide FIRST, then write. Your reply must be exactly one line, beginning "
+    "with the single word AGREE or DISAGREE, followed by ': ' and a brief "
+    "reason. State the verdict word ONCE. Do not think aloud, do not write a "
+    "preamble, and do not revise a verdict after writing it -- if you find "
+    "yourself about to correct your own answer, stop and emit only the "
+    "corrected verdict as that single line.\n\n"
     "--- Transcription A ---\n{a}\n\n--- Transcription B ---\n{b}"
 )
 
 DISAGREE_RE = re.compile(r"\bDISAGREE\b")
 AGREE_RE = re.compile(r"\bAGREE\b")
+# Both tokens in one pass, in order, so a reply carrying more than one verdict
+# can be read as the sequence it is. DISAGREE is listed first so the alternation
+# prefers it -- otherwise "AGREE" would match inside "DISAGREE" at a position
+# where \b holds on the right but the token is the wrong one.
+VERDICT_RE = re.compile(r"\bDISAGREE\b|\bAGREE\b")
 
 # File suffixes handled as embedded plain text rather than page images. A
 # plain-text source is a lossless byte decode, not a probabilistic OCR/vision
@@ -86,6 +112,17 @@ AGREE_RE = re.compile(r"\bAGREE\b")
 # hallucinated readings and a spurious P8 disagreement (CASE_024/DOC_001, a
 # CP949 Korean note read as "an AI assistant's message about running iconv").
 TEXT_SUFFIXES = {".txt", ".md", ".text"}
+# Minimum non-whitespace characters on a PDF page for its embedded text layer to
+# count as real content. Deliberately 1, not a tuned threshold: measured on
+# CASE_112, the low-character pages (DOC_077/DOC_094/DOC_124/DOC_183, 4-41 chars)
+# were short because the page genuinely holds only a form blank or a one-line
+# 준용규정 -- not because the text layer was partial. Vision OCR of those same
+# pages returned identical content plus a hallucinated insurer slogan
+# ("당신에게 좋은보험 삼성화재") absent from the source, so a character-count
+# threshold would route the *more* faithful reading to the *less* faithful path.
+# A genuine scan has a strictly empty text layer (0 chars), which is the only
+# case this distinguishes.
+PDF_EMBEDDED_TEXT_MIN_CHARS = 1
 # Encodings tried in order for a text-file decode. utf-8-sig FIRST -- not cp949 --
 # on purpose: UTF-8 is self-validating (invalid UTF-8 reliably raises), so a real
 # UTF-8 file always decodes here and a cp949/euc-kr file falls through cleanly
@@ -154,14 +191,39 @@ def compare(text_a: str, text_b: str, comparator=None) -> dict:
 
     # Word-boundary search, not startswith -- the model doesn't always lead
     # with the bare token despite the prompt asking for exactly that (e.g. a
-    # full sentence like "The two transcriptions AGREE on..."). Check
-    # DISAGREE before AGREE for readability; \b makes the order irrelevant
-    # for correctness since "AGREE" as a substring of "DISAGREE" doesn't sit
-    # on a word boundary and won't match AGREE_RE.
-    if DISAGREE_RE.search(verdict_upper):
-        return {"agreement": "disagreed", "disagreement_details": [verdict], "metadata": metadata}
-    if AGREE_RE.search(verdict_upper):
-        return {"agreement": "agreed", "disagreement_details": [], "metadata": metadata}
+    # full sentence like "The two transcriptions AGREE on...").
+    #
+    # Take the LAST verdict token, not the first. v0.2's prompt forbids
+    # revising a verdict in place, but a prompt is a request, not a guarantee,
+    # and the failure it addresses is a real observed one: on CASE_907's two
+    # scanned documents 4 of 34 pages (12%) came back "DISAGREE: <reason> /
+    # Correction: that reasoning supports AGREE / AGREE", and reading the first
+    # token blocked all 4 -- every one a false block, on pages whose readings
+    # differed only in whitespace. When a model corrects itself, the correction
+    # is its answer; honouring the retracted token instead means a page is
+    # blocked by reasoning the model itself withdrew.
+    #
+    # This does NOT weaken P8. A genuine "AGREE ... actually DISAGREE" self-
+    # correction still lands on disagreed, and anything unparseable below still
+    # fails closed. A multi-verdict reply is recorded either way so the format
+    # violation stays visible rather than being silently normalised away.
+    verdicts = [
+        ("disagreed" if match.group(0) == "DISAGREE" else "agreed")
+        for match in VERDICT_RE.finditer(verdict_upper)
+    ]
+    if verdicts:
+        agreement = verdicts[-1]
+        revised = len(set(verdicts)) > 1
+        details = [verdict] if agreement == "disagreed" else []
+        if revised:
+            details = details or [
+                f"comparator emitted {len(verdicts)} verdicts and revised "
+                f"itself to AGREE; last verdict taken: {verdict!r}"]
+        return {
+            "agreement": agreement,
+            "disagreement_details": details,
+            "metadata": {**metadata, "verdict_revised_in_place": revised},
+        }
 
     # Neither token found -- the model didn't follow the expected format.
     # Fail safe as disagreed (P8: no tolerance, never silently assume
@@ -360,6 +422,19 @@ def run_ocr(
     if doc_path.suffix.lower() in TEXT_SUFFIXES:
         return _run_embedded_text(case_id, doc_id, doc_path, progress=progress)
 
+    # A born-digital PDF carries the publisher's own text; transcribing it by
+    # vision is strictly worse (measured on CASE_112: identical content, plus
+    # reordered footnotes, substituted quote glyphs, and an appended insurer
+    # slogan that is not on the page). Checked before provider construction so
+    # such a document costs zero model calls. Returns None -- falling through to
+    # OCR -- for a genuine scan or a mixed bundle.
+    if doc_path.suffix.lower() == ".pdf":
+        page_texts = pdf_embedded_page_texts(doc_path)
+        if page_texts is not None:
+            return _run_embedded_pdf(
+                case_id, doc_id, doc_path, page_texts, progress=progress
+            )
+
     if reader_a is None or reader_b is None or comparator is None:
         providers = build_ocr_providers()
         reader_a = reader_a or providers["reader_a"]
@@ -420,6 +495,97 @@ def run_ocr(
         "cross_validation_mode": cross_validation_mode,
         "cross_validation_note": cross_validation_note,
         "pages": pages_out,
+    }
+
+
+def pdf_embedded_page_texts(pdf_path: Path) -> list[str] | None:
+    """Return per-page embedded text for a born-digital PDF, or None.
+
+    None means "this PDF is not a whole-document embedded-text source" and the
+    caller must fall through to vision OCR. That is returned in two cases:
+
+      * no page carries a text layer -- a genuine scan (the CASE_112 medical
+        records: DOC_214-DOC_224 all extract 0 characters), and
+      * only SOME pages carry one -- a mixed bundle. Deliberately not handled
+        per-page here: mixing a lossless decode and a probabilistic vision read
+        inside one document would make extraction_method a single label over two
+        different provenances, and `cross_validation_mode` likewise. Such a
+        document stays wholly on the OCR path until that distinction can be
+        carried per page in the schema.
+
+    A PDF whose every page has real text is the case worth taking: measured
+    across CASE_112's 202 comparable documents, the embedded layer matched the
+    vision transcription at 0.976 mean similarity, and every top divergence was
+    the vision read reordering a footnote, substituting quote glyphs, or
+    appending an insurer slogan that is not on the page at all."""
+    try:
+        import fitz
+    except ImportError:
+        return None
+    try:
+        with fitz.open(str(pdf_path)) as document:
+            if document.page_count < 1:
+                return None
+            texts = [document[i].get_text() for i in range(document.page_count)]
+    except Exception:
+        # A malformed/encrypted PDF is not an embedded-text source; the OCR path
+        # rasterizes and reports its own error rather than this one masking it.
+        return None
+    if not all(len(t.strip()) >= PDF_EMBEDDED_TEXT_MIN_CHARS for t in texts):
+        return None
+    return texts
+
+
+def _run_embedded_pdf(
+    case_id: str, doc_id: str, doc_path: Path, page_texts: list[str], progress=None
+) -> dict:
+    """Embedded-text passthrough for a born-digital PDF, shaped exactly like
+    run_ocr()'s dual-path output so run_checkpoint1._assemble_ocr_result
+    consumes it unchanged.
+
+    Same honesty contract as _run_embedded_text: reading_a == reading_b is not a
+    fake second read, it is the single decoded text carried in the slot the
+    downstream page-write reads; `deferred_poc` records that no dual-read
+    cross-check happened, and `agreed` reflects that a text-layer extraction is
+    its own ground truth rather than a probabilistic read that could be
+    confidently wrong."""
+    pages = []
+    total = len(page_texts)
+    for i, text in enumerate(page_texts, start=1):
+        pages.append({
+            "page": i,
+            "reading_a": text,
+            "reading_b": text,
+            "agreement": "agreed",
+            "disagreement_details": [],
+            "provider_metadata": {
+                "reader_a": {"provider_name": "embedded-text", "model_name": "pdf:text-layer"},
+                "reader_b": {"provider_name": "embedded-text", "model_name": "pdf:text-layer"},
+                "comparator": {
+                    "shortcut": "embedded_text_no_cross_validation",
+                    "comparator_called": False,
+                },
+            },
+        })
+    msg = f"pages 1-{total}: embedded PDF text layer (no OCR/cross-validation)"
+    progress(msg) if progress else print(msg, file=sys.stderr)
+    return {
+        "document_path": str(doc_path),
+        "providers": {
+            "reader_a": {"provider_name": "embedded-text", "model_name": "pdf:text-layer"},
+            "reader_b": {"provider_name": "embedded-text", "model_name": "pdf:text-layer"},
+            "comparator": {"provider_name": "embedded-text", "model_name": "none"},
+        },
+        "extraction_method": "embedded_text",
+        "encoding_detected": None,
+        "cross_validation_mode": "deferred_poc",
+        "cross_validation_note": (
+            f"Born-digital PDF: all {total} page(s) carry an embedded text layer, extracted "
+            "losslessly. No OCR or vision read was performed, so P8's dual-path "
+            "cross-validation does not apply (there is no independent second reading that "
+            "could disagree). Deterministic extraction, not a probabilistic read."
+        ),
+        "pages": pages,
     }
 
 

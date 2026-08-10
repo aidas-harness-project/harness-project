@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "human_review_ledger.schema.json",
+  "title": "_human_review_ledger.json -- DAO-only record of genuine human review decisions v0.1",
+  "description": "One per case (leading-underscore shared state, like _conflict_ledger.json). Records every human decision that a machine-written contract is forbidden to self-declare: accepting a policy-audit finding as a residual risk, verifying an unpaged administrative exclusion, resolving a page/table to a human reading. Written ONLY through dao.py record-human-review, never through write-contract. Each record binds an immutable review UID to the exact bytes of the artifact reviewed (artifact_sha256, computed by the DAO from the on-disk file at record time -- an agent cannot supply its own hash). A downstream contract that claims a human decision must reference a review_uid here; the DAO re-verifies the UID exists, the referenced artifact's current hash still matches artifact_sha256, and the recorded decision is one this artifact kind allows. This is the same trust model as mark-human-review-complete (the CLI invocation is trusted to be a genuine human action); what it removes is the ability to fabricate 'a human decided X' inside a machine-authored JSON contract with a bare name string.",
+  "type": "object",
+  "properties": {
+    "case_id": {
+      "type": "string",
+      "pattern": "^CASE_[0-9]{3}$"
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/review_record"
+      }
+    }
+  },
+  "required": [
+    "case_id",
+    "records"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "review_record": {
+      "type": "object",
+      "properties": {
+        "review_uid": {
+          "type": "string",
+          "pattern": "^HR-[a-f0-9]{16}$",
+          "description": "Immutable content-derived identifier, computed by the DAO from case_id|artifact_kind|artifact_id|target_key|artifact_sha256|reviewed_at. Never supplied by a caller."
+        },
+        "reviewer": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The human reviewer's identity, as recorded by the trusted CLI invocation (same accountability field as mark-human-review-complete --reviewer and set-ledger-status)."
+        },
+        "artifact_kind": {
+          "enum": [
+            "policy_audit_finding",
+            "unpaged_physical_exclusion",
+            "classification_review"
+          ],
+          "description": "Which class of decision this is. Determines which downstream contract may reference the record and which decisions are allowed. classification_review covers a document_type classification produced from PRE-REDACTION page text (classification_text_source: raw_page_text), which is permitted but must not finalize unreviewed -- see classification_result.schema.json."
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^DOC_[0-9]+$",
+          "description": "The document the reviewed artifact belongs to (e.g. the audit's / parent-coverage's source document)."
+        },
+        "target_key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Identifies the specific item within the artifact the human reviewed: a finding_uid for policy_audit_finding, or a 'physical:<N>' physical-page key for unpaged_physical_exclusion. For classification_review it is the fixed string 'classification_text_source:raw_page_text' -- the condition that raised the flag."
+        },
+        "artifact_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 of the exact on-disk artifact bytes at record time, computed by the DAO. A downstream reference is only honoured while the current artifact still hashes to this value -- editing the artifact after review invalidates the human decision, which must then be re-made."
+        },
+        "decision": {
+          "enum": [
+            "accepted_risk",
+            "verified",
+            "rejected"
+          ],
+          "description": "The human's disposition. accepted_risk: a policy-audit finding is a known, accepted residual risk. verified: an unpaged exclusion is a genuine administrative page. rejected: the reviewed item is wrong and must not be relied on downstream (never satisfies a completion gate). For classification_review, 'verified' means a human read the classification produced from pre-redaction text and confirmed the label stands -- in practice by checking that the evidence quote survives redaction, since a label reachable from the redacted layer had no PII doing load-bearing work."
+        },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The human's rationale. Required -- a decision with no stated reason is not a review."
+        }
+      },
+      "required": [
+        "review_uid",
+        "reviewer",
+        "artifact_kind",
+        "artifact_id",
+        "target_key",
+        "artifact_sha256",
+        "decision",
+        "reviewed_at",
+        "note"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

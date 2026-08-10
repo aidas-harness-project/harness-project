@@ -3,6 +3,7 @@ stopping at a P8 disagreement; resolve_from_raw_ocr() continues past one
 once a human decides). Provider calls are mocked -- these tests never shell
 out to a real CLI or call an external API.
 """
+import hashlib
 import json
 
 import pytest
@@ -30,12 +31,18 @@ def _seed_manifest(tmp_path, case_id, doc_id):
     dao.atomic_write_json(out_dir / "document_manifest.json", {
         "case_id": case_id, "created_at": dao.now_iso(),
         "documents": [{"document_id": doc_id, "file_name": f"{doc_id}.pdf", "file_path": f"data/raw/{case_id}/{doc_id}.pdf",
-                       "file_format": "pdf", "file_size_bytes": 1000, "ocr_status": "pending"}],
+                       "file_format": "pdf", "file_size_bytes": 1000, "ocr_status": "pending",
+                       "segmentation_status": "not_required",
+                       "segmentation_reviewed_by": "fixture reviewer",
+                       "segmentation_reviewed_at": dao.now_iso()}],
     })
 
 
 def _mock_ocr(monkeypatch, pages):
     """pages: list of (reading_a, reading_b, agreement) tuples."""
+    monkeypatch.setattr(
+        rc1, "source_pdf_page_count", lambda _path: len(pages))
+
     def fake_run_ocr(case_id, doc_id, pdf_path, progress=None, **kwargs):
         return {"document_path": str(pdf_path), "pages": [
             {"page": i, "reading_a": a, "reading_b": b, "agreement": agree,
@@ -63,6 +70,69 @@ class FakeClassifier:
     def classify_document(self, prompt, prompt_version):
         self.prompts.append((prompt, prompt_version))
         return ProviderResult(self.provider_name, self.model_name, prompt_version, self.response)
+
+
+def test_an_unreviewed_pdf_is_processed_rather_than_blocked(tmp_path, monkeypatch):
+    """Reading a bundle is the point of the inverted order, not a violation.
+
+    Checkpoint 1 used to refuse any PDF whose bundle question a human had not
+    answered. That protected an order where segmentation ran first and an
+    unsplit bundle would be classified as one document. With OCR first, whether
+    a PDF is a bundle is something segmentation ANSWERS from the text this run
+    produces -- it cannot be a precondition for producing it.
+    """
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dao.atomic_write_json(out_dir / "document_manifest.json", {
+        "case_id": "CASE_009", "created_at": dao.now_iso(),
+        "documents": [{
+            "document_id": "DOC_001", "file_name": "DOC_001.pdf",
+            "file_path": "data/raw/CASE_009/DOC_001.pdf", "file_format": "pdf",
+            "file_size_bytes": 1000, "ocr_status": "pending",
+            "segmentation_status": "pending_review",
+        }],
+    })
+    _mock_ocr(monkeypatch, [("page one", "page one b", "agreed")])
+    _mock_classify(monkeypatch)
+
+    result = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260721_001")
+
+    assert result["status"] == "passed"
+    assert (out_dir / "ocr_result_DOC_001.json").exists()
+
+
+def test_a_superseded_bundle_is_still_refused(tmp_path, monkeypatch):
+    """The one refusal that remains, and it applies in both modes.
+
+    After a split the parent represents nothing its children do not; reading it
+    again would duplicate every page. Unlike the bundle question, this is not a
+    judgement anyone has to make in advance -- the split itself records it.
+    """
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dao.atomic_write_json(out_dir / "document_manifest.json", {
+        "case_id": "CASE_009", "created_at": dao.now_iso(),
+        "documents": [{
+            "document_id": "DOC_001", "file_name": "DOC_001.pdf",
+            "file_path": "data/raw/CASE_009/DOC_001.pdf", "file_format": "pdf",
+            "file_size_bytes": 1000, "ocr_status": "not_applicable",
+            "segmentation_status": "completed",
+            "downstream_disposition": "superseded_bundle",
+        }],
+    })
+    monkeypatch.setattr(
+        rc1, "run_ocr",
+        lambda *a, **k: pytest.fail("a superseded bundle must never be re-read"))
+
+    for classify in (True, False):
+        result = rc1.run_checkpoint1(
+            "CASE_009", "DOC_001", "missing.pdf", "tester", "RUN_20260721_001",
+            classify=classify,
+            reader_a=object(), reader_b=object(), comparator=object(),
+            classifier=object())
+        assert result["status"] == "blocked_segmentation"
+    assert not (out_dir / "ocr_result_DOC_001.json").exists()
 
 
 def test_page_range_pdf_falls_back_to_pypdf(tmp_path, monkeypatch):
@@ -248,7 +318,8 @@ def test_blocked_run_resets_manifest_instead_of_leaving_it_stale(tmp_path, monke
         "document_type": "insurer_response", "classification_confidence": 0.9,
     })
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    dao._update_run_state("CASE_009", "RUN_OLD", "document_processing", "passed", "tester")
+    # Simulate the fork source's prior legitimate finalize (snapshot + passed).
+    dao._finalize_stage("CASE_009", "RUN_OLD", "document_processing", "tester")
 
     _mock_ocr(monkeypatch, [("A", "B", "disagreed")])
     monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
@@ -337,6 +408,67 @@ def test_resolve_from_raw_ocr_partial_when_multiple_disagreements(tmp_path, monk
     assert result["status"] == "partially_resolved"
     assert result["still_unresolved"] == [2]
     assert not (tmp_path / "outputs" / "CASE_009" / "classification_result_DOC_001.json").exists()
+
+
+def test_resolve_from_raw_ocr_accepts_human_corrected_transcription(
+        tmp_path, monkeypatch):
+    _seed_manifest(tmp_path, "CASE_009", "DOC_001")
+    _mock_ocr(monkeypatch, [("wrong A", "wrong B", "disagreed")])
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
+    blocked = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001")
+    assert blocked["status"] == "blocked_disagreement"
+
+    ocr_data = json.loads(
+        (tmp_path / "_ocr_scratch" / "CASE_009_DOC_001_raw.json").read_text(
+            encoding="utf-8"))
+    corrected_text = "Human-verified complete page transcription"
+    _mock_classify(monkeypatch, doc_type="medical_record", label="의무기록")
+
+    result = rc1.resolve_from_raw_ocr(
+        "CASE_009", "DOC_001", ocr_data, page=1, chosen_reading=None,
+        corrected_text=corrected_text, resolved_by="Reviewer",
+        note="Neither automated reading was correct; verified against the source page.",
+        held_by="tester", run_id="RUN_20260713_002")
+
+    assert result["status"] == "passed"
+    page_path = tmp_path / "data" / "processed" / "CASE_009" / "DOC_001" / "page_001.md"
+    assert page_path.read_text(encoding="utf-8") == corrected_text
+    ocr_result = json.loads(
+        (tmp_path / "outputs" / "CASE_009" / "ocr_result_DOC_001.json").read_text(
+            encoding="utf-8"))
+    resolution = ocr_result["pages"][0]["cross_validation"]["resolution"]
+    assert resolution["chosen_reading"] == "human_corrected"
+    assert resolution["corrected_text_sha256"] == hashlib.sha256(
+        corrected_text.encode("utf-8")).hexdigest()
+    assert ocr_data["pages"][0]["reading_a"] == "wrong A"
+    assert ocr_data["pages"][0]["reading_b"] == "wrong B"
+
+
+def test_cli_resolve_disagreement_reads_human_corrected_text_file(
+        tmp_path, monkeypatch, capsys):
+    _seed_manifest(tmp_path, "CASE_009", "DOC_001")
+    _mock_ocr(monkeypatch, [("wrong A", "wrong B", "disagreed")])
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
+    blocked = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001")
+    assert blocked["status"] == "blocked_disagreement"
+    corrected_path = tmp_path / "corrected-page.md"
+    corrected_path.write_text("verified corrected page", encoding="utf-8")
+    _mock_classify(monkeypatch, doc_type="medical_record", label="의무기록")
+
+    rc1.main([
+        "resolve-disagreement", "CASE_009", "DOC_001",
+        "--page", "1", "--corrected-text-file", str(corrected_path),
+        "--resolved-by", "Reviewer", "--note", "verified full page",
+        "--held-by", "document-pipeline", "--run-id", "RUN_20260713_002",
+        "--classifier-provider", "fixture",
+    ])
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "passed"
+    page_path = tmp_path / "data" / "processed" / "CASE_009" / "DOC_001" / "page_001.md"
+    assert page_path.read_text(encoding="utf-8") == "verified corrected page"
 
 
 def test_resolve_as_non_text_preserves_disagreement_and_writes_no_text(tmp_path, monkeypatch):
@@ -446,6 +578,50 @@ def test_cli_resolve_disagreement_loads_scratch_dump_and_resolves(tmp_path, monk
     assert ocr_result["pages"][0]["cross_validation"]["resolution"]["resolved_by"] == "Pyun"
 
 
+def test_cli_resolve_disagreement_uses_explicit_classifier_provider(
+        tmp_path, monkeypatch, capsys):
+    _seed_manifest(tmp_path, "CASE_009", "DOC_001")
+    _mock_ocr(monkeypatch, [("A reading", "B reading", "disagreed")])
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {})
+    blocked = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001")
+    assert blocked["status"] == "blocked_disagreement"
+
+    classifier = object()
+    provider_args = {}
+
+    def fake_build_classifier_provider(**kwargs):
+        provider_args.update(kwargs)
+        return classifier
+
+    monkeypatch.setattr(rc1, "build_classifier_provider", fake_build_classifier_provider)
+
+    def fake_classify(text, selected_classifier=None):
+        assert selected_classifier is classifier
+        return {
+            "predicted_document_type": "medical_record",
+            "document_type_label": "의무기록",
+            "confidence": 0.9,
+            "quote": text[:20],
+        }
+
+    monkeypatch.setattr(rc1, "classify_document", fake_classify)
+    rc1.main([
+        "resolve-disagreement", "CASE_009", "DOC_001",
+        "--page", "1", "--chosen-reading", "reading_b",
+        "--resolved-by", "Pyun", "--note", "verified against the source page",
+        "--held-by", "document-pipeline", "--run-id", "RUN_20260713_002",
+        "--classifier-provider", "codex-cli", "--classifier-model", "gpt-test",
+    ])
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "passed"
+    assert provider_args == {
+        "classifier_provider_name": "codex-cli",
+        "classifier_model": "gpt-test",
+    }
+
+
 def test_cli_resolve_disagreement_errors_when_scratch_dump_missing(tmp_path):
     with pytest.raises(SystemExit):
         rc1.main([
@@ -493,3 +669,486 @@ def test_classify_document_rejects_unknown_document_type():
 
     with pytest.raises(SystemExit):
         rc1.classify_document("some text", classifier)
+
+
+# --- classification inheritance for text-anchor policy slices -----------------
+
+def _inherit_case(tmp_path, *, child=None, parent=None, proposal=None):
+    """Writes a manifest + proposal on disk and returns the manifest dict."""
+    case_id = "CASE_905"
+    out = tmp_path / "outputs" / case_id
+    out.mkdir(parents=True, exist_ok=True)
+    prop = {"review_status": "approved",
+            "method": {"mode": "text_anchor"},
+            "segments": [{"page_start": 5, "page_end": 6,
+                          "provisional_type_label": "구내치료비 추가특별약관"}]}
+    prop.update(proposal or {})
+    (out / "segmentation_proposal_DOC_003.json").write_text(
+        json.dumps(prop, ensure_ascii=False), encoding="utf-8")
+
+    parent_doc = {"document_id": "DOC_003", "file_name": "DOC_003.pdf",
+                  "downstream_disposition": "superseded_bundle"}
+    parent_doc.update(parent or {})
+    child_doc = {"document_id": "DOC_007", "file_name": "DOC_007.pdf",
+                 "extraction_method": "embedded_text",
+                 "source_file_name": "DOC_003.pdf", "source_page_start": 5,
+                 "segmentation_proposal_path":
+                     f"outputs/{case_id}/segmentation_proposal_DOC_003.json"}
+    child_doc.update(child or {})
+    return {"documents": [parent_doc, child_doc]}
+
+
+def test_inherited_classification_uses_the_split_evidence_not_the_parent_type(isolated_roots):
+    """The parent is a superseded bundle and never gets a document_type of its
+    own; the proposal's text-anchor title line is what establishes the type."""
+    m = _inherit_case(isolated_roots)
+    got = rc1.inherited_classification("CASE_905", "DOC_007", m)
+    assert got["predicted_document_type"] == "insurance_policy"
+    assert got["document_type_label"] == "구내치료비 추가특별약관"
+    assert got["_inherited_from"] == "DOC_003"
+
+
+def test_inherited_classification_accepts_an_ocr_sourced_text_anchor_slice(isolated_roots):
+    """Where the TEXT came from does not decide how the BOUNDARY was found.
+
+    This condition used to require extraction_method == 'embedded_text', on the
+    reasoning that a vision-OCR'd slice might come from a scan whose boundaries
+    are a model's reading. But `mode == 'text_anchor'` already excludes exactly
+    that: those boundaries are cut on printed 약관 title lines, never by a
+    model. extraction_method was standing in for a question it cannot answer.
+
+    Measured on CASE_112's two policy bundles (323 pages): boundaries derived
+    from the OCR-produced page text are IDENTICAL to those derived from the
+    embedded text layer -- same 173 boundaries, precision 1.0000 against the
+    human-approved baseline for both. A text-anchor slice is therefore the same
+    evidence whichever reader produced the text it was cut from.
+
+    P8 is untouched: the slice still carries its own cross-validation. What is
+    skipped is only the classifier call.
+    """
+    m = _inherit_case(isolated_roots, child={"extraction_method": "ocr"})
+    got = rc1.inherited_classification("CASE_905", "DOC_007", m)
+    assert got["predicted_document_type"] == "insurance_policy"
+    assert got["_inherited_from"] == "DOC_003"
+
+
+def test_inherited_classification_refuses_a_vision_mode_proposal(isolated_roots):
+    """Vision boundaries are a model's reading, so a slice from them is
+    classified on its own evidence."""
+    m = _inherit_case(isolated_roots, proposal={"method": {"mode": "vision_proposal"}})
+    assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None
+
+
+def test_inherited_classification_refuses_an_unapproved_proposal(isolated_roots):
+    m = _inherit_case(isolated_roots, proposal={"review_status": "pending"})
+    assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None
+
+
+def test_inherited_classification_refuses_a_non_policy_title(isolated_roots):
+    """A slice whose title is not a 약관 heading is not a policy by
+    construction -- e.g. a 진단서 bundle cut on some other anchor."""
+    m = _inherit_case(isolated_roots, proposal={"segments": [
+        {"page_start": 5, "page_end": 6, "provisional_type_label": "진단서"}]})
+    assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None
+
+
+def test_inherited_classification_refuses_an_unsegmented_document(isolated_roots):
+    m = _inherit_case(isolated_roots, child={"source_file_name": None,
+                                             "segmentation_proposal_path": None})
+    assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None
+
+
+def test_inherited_classification_refuses_a_missing_parent(isolated_roots):
+    m = _inherit_case(isolated_roots, child={"source_file_name": "GONE.pdf"})
+    assert rc1.inherited_classification("CASE_905", "DOC_007", m) is None
+
+
+# --------------------------------------------- default downstream disposition --
+#
+# Normalizing a policy bundle is the expensive obligation (800+ conditions on a
+# single 145-page 약관) and nothing downstream consumes its output, so a policy
+# document is classified into text_only_no_normalization and promoted to
+# automated_text_pipeline only when a case actually disputes it. Every other
+# document type is unaffected.
+
+def test_policy_documents_default_to_no_normalization():
+    assert rc1.default_disposition("insurance_policy") == \
+        "text_only_no_normalization"
+
+
+@pytest.mark.parametrize("document_type", [
+    "insurer_response", "diagnosis_certificate", "medical_record",
+    "receipt", "other", None,
+])
+def test_non_policy_documents_keep_the_full_pipeline(document_type):
+    assert rc1.default_disposition(document_type) == "automated_text_pipeline"
+
+
+def test_both_defaults_are_text_processed():
+    """Neither default may exclude the document from text processing -- that is
+    expert_review_only's job, and reaching it by classification would silently
+    stop the pipeline reading a document it is supposed to read."""
+    from policy_completeness import _TEXT_PROCESSED
+    for document_type in ("insurance_policy", "insurer_response"):
+        assert rc1.default_disposition(document_type) in _TEXT_PROCESSED
+
+
+# --- pre-segmentation bundle OCR ---------------------------------------------
+#
+# Running OCR before segmentation lets boundaries be derived from real page
+# text instead of a downscaled contact-sheet crop. That inverts what the
+# Stage-1 gate must block: the gate exists because document_type is a
+# PER-DOCUMENT value and one label cannot be right for a bundle mixing a
+# 진단서, a 검사보고서 and an 입퇴원확인서. OCR itself is page-wise and carries
+# no such assumption, so it is safe on an unsplit bundle -- classification is
+# not. The gate therefore narrows from "no Stage 2 work at all" to "no
+# CLASSIFICATION before the split".
+
+
+def _pending_bundle_manifest(tmp_path, case_id="CASE_009"):
+    out_dir = tmp_path / "outputs" / case_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dao.atomic_write_json(out_dir / "document_manifest.json", {
+        "case_id": case_id, "created_at": dao.now_iso(),
+        "documents": [{
+            "document_id": "DOC_001", "file_name": "DOC_001.pdf",
+            "file_path": f"data/raw/{case_id}/DOC_001.pdf", "file_format": "pdf",
+            "file_size_bytes": 1000, "ocr_status": "pending",
+            "segmentation_status": "required",
+        }],
+    })
+    return out_dir
+
+
+def test_bundle_ocr_mode_is_allowed_while_segmentation_is_still_pending(
+        tmp_path, monkeypatch):
+    """OCR on an unsplit bundle is the whole point of the inverted order.
+
+    Asserted by reaching OCR: the gate is evaluated before any PDF work, so a
+    call that gets as far as run_ocr has passed it. The bundle is `required`,
+    the exact state that blocks a classifying call.
+    """
+    _pending_bundle_manifest(tmp_path)
+    _mock_ocr(monkeypatch, [("bundle page one", "bundle page one b", "agreed"),
+                            ("bundle page two", "bundle page two b", "agreed")])
+    monkeypatch.setattr(
+        rc1, "classify_document",
+        lambda *a, **k: pytest.fail("a bundle must never be classified as one document"),
+    )
+
+    result = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260721_001",
+        classify=False,
+        reader_a=object(), reader_b=object(), comparator=object(),
+    )
+
+    assert result["status"] == "bundle_ocr_complete"
+    assert result["pages"] == 2
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    # The OCR record exists for segmentation to read; no classification does.
+    assert (out_dir / "ocr_result_DOC_001.json").exists()
+    assert not (out_dir / "classification_result_DOC_001.json").exists()
+
+
+def test_bundle_ocr_mode_writes_no_classification(tmp_path, monkeypatch):
+    """What --bundle-ocr actually withholds is the document_type, not the read.
+
+    `document_type` is a per-document value, so one label cannot be right for a
+    bundle mixing a 진단서, a 검사 판독지 and a 진료비 명세서. That is the whole
+    content of the flag now that reading a bundle is unremarkable.
+    """
+    _pending_bundle_manifest(tmp_path)
+    _mock_ocr(monkeypatch, [("bundle page one", "bundle page one b", "agreed")])
+    monkeypatch.setattr(
+        rc1, "classify_document",
+        lambda *a, **k: pytest.fail("a bundle must never be classified as one document"))
+
+    result = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260721_001",
+        classify=False, reader_a=object(), reader_b=object(), comparator=object())
+
+    assert result["status"] == "bundle_ocr_complete"
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    assert (out_dir / "ocr_result_DOC_001.json").exists()
+    assert not (out_dir / "classification_result_DOC_001.json").exists()
+
+
+def test_bundle_ocr_mode_still_refuses_a_superseded_bundle(tmp_path, monkeypatch):
+    """After the split the parent is off-limits, even in bundle-OCR mode.
+
+    The same document is the ONLY valid OCR target before the split and a
+    forbidden one after it; downstream_disposition is what separates the two,
+    and it is set by the split itself.
+    """
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dao.atomic_write_json(out_dir / "document_manifest.json", {
+        "case_id": "CASE_009", "created_at": dao.now_iso(),
+        "documents": [{
+            "document_id": "DOC_001", "file_name": "DOC_001.pdf",
+            "file_path": "data/raw/CASE_009/DOC_001.pdf", "file_format": "pdf",
+            "file_size_bytes": 1000, "ocr_status": "not_applicable",
+            "segmentation_status": "completed",
+            "downstream_disposition": "superseded_bundle",
+        }],
+    })
+    monkeypatch.setattr(
+        rc1, "run_ocr",
+        lambda *a, **k: pytest.fail("a superseded bundle must never be re-OCR'd"),
+    )
+    result = rc1.run_checkpoint1(
+        "CASE_009", "DOC_001", "missing.pdf", "tester", "RUN_20260721_001",
+        classify=False,
+        reader_a=object(), reader_b=object(), comparator=object(),
+    )
+    assert result["status"] == "blocked_segmentation"
+
+
+def test_resolving_a_bundles_disagreement_does_not_classify_it(tmp_path, monkeypatch):
+    """P8 resolution must not smuggle in the classification --bundle-ocr withheld.
+
+    Found on the real CASE_909 run: DOC_005's bundle OCR correctly wrote no
+    document_type, then resolving its 8 disagreed pages classified the whole
+    19-page bundle as `diagnosis_certificate` -- its first page's type, applied
+    to a bundle that also holds two imaging REPORTs, an 입퇴원확인서 and two
+    진료비 명세서. That is precisely the failure the flag exists to prevent, and
+    the resolve path reached the shared tail without the flag.
+    """
+    _pending_bundle_manifest(tmp_path)
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    proc = tmp_path / "data" / "processed" / "CASE_009" / "DOC_001"
+    proc.mkdir(parents=True, exist_ok=True)
+    (proc / "page_001.md").write_text("bundle page one", encoding="utf-8")
+    dao.atomic_write_json(out_dir / "ocr_result_DOC_001.json", {
+        "case_id": "CASE_009", "run_id": "RUN_20260721_001",
+        "component": "document-pipeline", "status": "success",
+        "created_at": dao.now_iso(),
+        "model_info": {"model_name": "reader_a=x; reader_b=x", "prompt_version": "ocr_extraction_v0.1"},
+        "document_id": "DOC_001", "ocr_engine": "x", "vision_model_name": "y",
+        "uncertain_confidence_threshold": 1.0, "extraction_method": "ocr",
+        "ocr_status": "completed", "ocr_quality": "low",
+        "cross_validation_status": "disagreed_pending_review",
+        "cross_validation_mode": "single_technology_weak_p8_poc",
+        "cross_validation_note": "test", "review_required": True,
+        "pages": [{
+            "page": 1, "text_path": None, "mean_confidence": None,
+            "uncertain_regions": [],
+            "cross_validation": {"agreement": "disagreed", "vision_model_reading": "b",
+                                  "disagreement_details": ["DISAGREE: mock"]},
+        }],
+    })
+    raw_ocr = {
+        "document_path": "fake.pdf",
+        "pages": [{"page": 1, "reading_a": "bundle page one", "reading_b": "b",
+                   "agreement": "disagreed", "disagreement_details": ["x"]}],
+    }
+    monkeypatch.setattr(
+        rc1, "classify_document",
+        lambda *a, **k: pytest.fail("a bundle must never be classified as one document"))
+
+    result = rc1.resolve_from_raw_ocr(
+        "CASE_009", "DOC_001", raw_ocr, page=1, chosen_reading="reading_a",
+        resolved_by="tester", note="verification", held_by="document-pipeline",
+        run_id="RUN_20260721_001", classify=False)
+
+    assert result["status"] == "bundle_ocr_complete"
+    assert not (out_dir / "classification_result_DOC_001.json").exists()
+
+
+# --- classify an already-read document -----------------------------------------
+#
+# A split child inherits its pages from the bundle, so by the time it needs a
+# document_type its text already exists. Before this there was no way to say
+# "classify what is here": the only entry point was `run`, which starts by
+# OCR'ing. Calling it on a child re-read pages that had just been redistributed
+# and overwrote their P8 history with a fresh verdict -- which is what happened
+# to CASE_909's DOC_006-013.
+
+
+def _child_with_inherited_pages(tmp_path, doc_id="DOC_006"):
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    proc = tmp_path / "data" / "processed" / "CASE_009" / doc_id
+    proc.mkdir(parents=True, exist_ok=True)
+    (proc / "page_001.md").write_text("진 단 서\n환자의 성명", encoding="utf-8")
+    dao.atomic_write_json(out_dir / "document_manifest.json", {
+        "case_id": "CASE_009", "created_at": dao.now_iso(),
+        "documents": [{
+            "document_id": doc_id, "file_name": f"{doc_id}.pdf",
+            "file_path": f"data/raw/CASE_009/{doc_id}.pdf", "file_format": "pdf",
+            "file_size_bytes": 100, "ocr_status": "completed",
+            "segmentation_status": "completed", "source_file_name": "DOC_005.pdf",
+            "source_page_start": 1, "source_page_end": 1,
+            "segmentation_proposal_path":
+                "outputs/CASE_009/segmentation_proposal_DOC_005.json",
+        }],
+    })
+    dao.atomic_write_json(out_dir / f"ocr_result_{doc_id}.json", {
+        "case_id": "CASE_009", "run_id": "RUN_20260805_001",
+        "component": "document-pipeline", "status": "success",
+        "created_at": dao.now_iso(),
+        "model_info": {"model_name": "reader_a=x; reader_b=x",
+                        "prompt_version": "ocr_extraction_v0.1"},
+        "document_id": doc_id, "ocr_engine": "x", "vision_model_name": "y",
+        "uncertain_confidence_threshold": 1.0, "extraction_method": "ocr",
+        "ocr_status": "completed", "ocr_quality": "low",
+        "cross_validation_status": "disagreed_resolved",
+        "cross_validation_mode": "single_technology_weak_p8_poc",
+        "cross_validation_note": "inherited from the bundle", "review_required": False,
+        "pages": [{
+            "page": 1, "text_path": f"data/processed/CASE_009/{doc_id}/page_001.md",
+            "mean_confidence": None, "uncertain_regions": [],
+            "cross_validation": {
+                "agreement": "disagreed", "vision_model_reading": "b",
+                "disagreement_details": ["DISAGREE: mock"],
+                "resolution": {"chosen_reading": "reading_a", "resolved_by": "h",
+                                "resolved_at": dao.now_iso(), "note": "n"},
+            },
+        }],
+    })
+    return out_dir
+
+
+def test_classify_only_does_not_re_read_the_document(tmp_path, monkeypatch):
+    """The inherited P8 record must survive classification untouched."""
+    out_dir = _child_with_inherited_pages(tmp_path)
+    monkeypatch.setattr(
+        rc1, "run_ocr",
+        lambda *a, **k: pytest.fail("classify-only must never re-OCR"))
+    _mock_classify(monkeypatch, doc_type="diagnosis_certificate", label="진단서")
+
+    result = rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline",
+        run_id="RUN_20260805_002")
+
+    assert result["status"] == "passed"
+    assert result["document_type"] == "diagnosis_certificate"
+    ocr = json.loads((out_dir / "ocr_result_DOC_006.json").read_text(encoding="utf-8"))
+    assert ocr["cross_validation_status"] == "disagreed_resolved", \
+        "the inherited P8 history must not be replaced by a fresh read"
+    assert ocr["pages"][0]["cross_validation"]["resolution"]["chosen_reading"] == "reading_a"
+
+
+def test_running_full_checkpoint1_on_an_already_read_document_is_refused(tmp_path, monkeypatch):
+    """The guard that would have prevented the CASE_909 overwrite.
+
+    `run` starts by OCR'ing, so calling it on a document whose pages were
+    inherited destroys exactly the record redistribution just created. Refuse
+    it and name the alternative rather than silently paying twice.
+    """
+    _child_with_inherited_pages(tmp_path)
+    monkeypatch.setattr(
+        rc1, "run_ocr",
+        lambda *a, **k: pytest.fail("must refuse before reaching OCR"))
+
+    result = rc1.run_checkpoint1(
+        "CASE_009", "DOC_006", "missing.pdf", "tester", "RUN_20260805_002",
+        reader_a=object(), reader_b=object(), comparator=object(),
+        classifier=object())
+
+    assert result["status"] == "already_extracted"
+    assert "classify-only" in result["next_action"]
+
+
+def test_a_form_naming_title_classifies_without_calling_the_model(tmp_path, monkeypatch):
+    """The split's own title decides the type when it names a form.
+
+    The boundary was cut on that printed title at precision 1.0000, so asking a
+    model to re-read the same page and name a type is a second opinion on
+    evidence already held exactly. Verified against the model on CASE_909: all
+    four titles it maps agreed with the classifier, none differed.
+    """
+    _child_with_inherited_pages(tmp_path)
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    dao.atomic_write_json(out_dir / "segmentation_proposal_DOC_005.json", {
+        "review_status": "approved", "method": {"mode": "text_anchor"},
+        "segments": [{"page_start": 1, "page_end": 1,
+                      "provisional_type_label": "진 단 서"}],
+    })
+    monkeypatch.setattr(
+        rc1, "classify_document",
+        lambda *a, **k: pytest.fail("a form-naming title needs no model call"))
+
+    result = rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline", run_id="RUN_20260805_002")
+
+    assert result["document_type"] == "diagnosis_certificate"
+    written = json.loads(
+        (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
+    assert written["classification_source"] == "printed_form_title"
+    assert "진 단 서" in written["evidence_references"][0]["quote"]
+
+
+def test_a_genre_naming_title_still_calls_the_model(tmp_path, monkeypatch):
+    """"REPORT" names a genre, so the page still has to be read."""
+    _child_with_inherited_pages(tmp_path)
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    dao.atomic_write_json(out_dir / "segmentation_proposal_DOC_005.json", {
+        "review_status": "approved", "method": {"mode": "text_anchor"},
+        "segments": [{"page_start": 1, "page_end": 1,
+                      "provisional_type_label": "REPORT"}],
+    })
+    _mock_classify(monkeypatch, doc_type="imaging_report", label="영상판독지")
+
+    result = rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline", run_id="RUN_20260805_002")
+
+    assert result["document_type"] == "imaging_report"
+
+
+def test_classification_reads_the_redacted_text_when_it_exists(tmp_path, monkeypatch):
+    """Classification must prefer redacted text over the raw page.
+
+    `page_NNN.md` still carries claimant PII -- dao.read-page-text guards it
+    behind checkpoint 2's one-shot capability precisely so no analysis stage
+    reads it -- and classification reaching it by following ocr_result's
+    text_path bypassed that. A split child inherits the bundle's redaction, so
+    the redacted text is normally there.
+    """
+    out_dir = _child_with_inherited_pages(tmp_path)
+    proc = tmp_path / "data" / "processed" / "CASE_009" / "DOC_006"
+    (proc / "page_001.md").write_text("환자 홍길동 진 단 서", encoding="utf-8")
+    (proc / "redacted_text.md").write_text(
+        "<<<PAGE page=1>>>\n환자 [REDACTED] 진 단 서\n", encoding="utf-8")
+    seen = {}
+
+    def fake_classify(text, classifier=None):
+        seen["text"] = text
+        return {"predicted_document_type": "diagnosis_certificate",
+                "document_type_label": "진단서", "confidence": 0.9, "quote": text[:20]}
+
+    monkeypatch.setattr(rc1, "classify_document", fake_classify)
+
+    result = rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline",
+        run_id="RUN_20260805_002")
+
+    assert "[REDACTED]" in seen["text"]
+    assert "홍길동" not in seen["text"]
+    assert result["classification_text_source"] == "redacted_text"
+    written = json.loads(
+        (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
+    assert written.get("classification_text_source") == "redacted_text"
+
+
+def test_falling_back_to_raw_page_text_is_recorded(tmp_path, monkeypatch):
+    """The fallback stays, but never silently.
+
+    A document redacted after classification (or one whose redaction failed)
+    still has to be classifiable. What must not happen is reading raw PII
+    without that being visible afterwards, so the source is recorded on the
+    contract either way.
+    """
+    out_dir = _child_with_inherited_pages(tmp_path)
+    _mock_classify(monkeypatch, doc_type="medical_record", label="의무기록")
+
+    result = rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline",
+        run_id="RUN_20260805_002")
+
+    assert result["classification_text_source"] == "raw_page_text"
+    written = json.loads(
+        (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
+    assert written["classification_text_source"] == "raw_page_text"
+    assert written["review_required"] is True, \
+        "reading unredacted text is a fact a reviewer should see"

@@ -1,5 +1,5 @@
 {
-  "$comment": "Machine-readable section contracts derived from templates/*.md -- consumed by tools/document_assembly.py's --template flag (open-decisions.md #2's enforcement wrapper). Each heading_pattern is a regex matched (re.search) against the rendered section headings in order; allow_extra_sections=false means the document must have exactly these sections, one per pattern, in this order. rebuttal_points has no entry on purpose: its structure repeats per denial reason (dynamic section count), so fixed-list enforcement can't express it -- templates/rebuttal-points.md stays prompt-enforced and critic-verified. When templates/*.md changes section structure, this file changes in the same commit (D4).",
+  "$comment": "Machine-readable section contracts derived from templates/*.md -- consumed by tools/document_assembly.py's --template flag (open-decisions.md #2's enforcement wrapper). Each heading_pattern is a regex matched (re.search) against the rendered section headings in order; allow_extra_sections=false means the document must have exactly these sections, one per pattern, in this order. rebuttal_points has no entry on purpose: its structure repeats per denial reason (dynamic section count), so fixed-list enforcement can't express it -- templates/rebuttal-points.md stays prompt-enforced and critic-verified. When templates/*.md changes section structure, this file changes in the same commit (D4). analytical_heading_patterns marks the sections that argue from law/policy toward a conclusion -- the scope dao.py check-untagged-claims searches, since only there does an untagged sentence assert something owing evidence (a facts summary or exhibit list does not).",
   "templates": {
     "배상책임_후유장해형": {
       "source": "templates/draft-report.md (변형 A)",
@@ -14,7 +14,12 @@
         "^VI\\. 손해배상금 사정",
         "^VII\\. 증빙자료"
       ],
-      "allow_extra_sections": false
+      "allow_extra_sections": false,
+      "analytical_heading_patterns": [
+        "^IV\\. 관계법규 및 보상책임",
+        "^V\\. 사정 기초",
+        "^VI\\. 손해배상금 사정"
+      ]
     },
     "진단수술비형": {
       "source": "templates/draft-report.md (변형 B)",
@@ -28,7 +33,11 @@
         "^V\\. 보험금 사정",
         "^VI\\. 증빙자료"
       ],
-      "allow_extra_sections": false
+      "allow_extra_sections": false,
+      "analytical_heading_patterns": [
+        "^IV\\. 관계법규 및 약관의 적용·판단",
+        "^V\\. 보험금 사정"
+      ]
     },
     "screening_report": {
       "source": "templates/screening-report.md",
@@ -42,7 +51,11 @@
         "^6\\. 전문가 검수 포인트",
         "^7\\. 1차 판단"
       ],
-      "allow_extra_sections": false
+      "allow_extra_sections": false,
+      "analytical_heading_patterns": [
+        "^3\\. 핵심 쟁점",
+        "^7\\. 1차 판단"
+      ]
     }
   }
 }

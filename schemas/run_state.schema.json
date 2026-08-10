@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "run_state.schema.json",
-  "title": "_run_state.json -- pipeline run-state and backup tracker v0.2",
-  "description": "The single source of truth for where a run stopped -- see harness-guardrails P7 and P10. Every stage's status is recorded here with timestamps; a crash or resume reads this file (via the DAO's get_last_passed_stage query) instead of re-deriving progress from scattered output files. After every stage passes, the orchestrator takes a full cumulative snapshot and records its path here -- one snapshot per passed stage, kept for the life of the run, never overwritten. v0.2: stage_name is an enum of the canonical stage names -- CASE_021's first full end-to-end run showed that free-form names silently fork one stage into several entries (document_processing vs document-pipeline, critic vs critic_v1) whenever a tool and an agent pick different spellings, which breaks get_last_passed_stage's resume logic and every consumer keying on stage_name.",
+  "title": "_run_state.json -- pipeline run-state and backup tracker v0.3",
+  "description": "The single source of truth for where a run stopped -- see harness-guardrails P7 and P10. Every stage's status is recorded here with timestamps; a crash or resume reads this file (via the DAO's get_last_passed_stage query) instead of re-deriving progress from scattered output files. After every stage passes, the orchestrator takes a full cumulative snapshot and records its path here -- one snapshot per passed stage, kept for the life of the run, never overwritten. v0.2: stage_name is an enum of the canonical stage names -- CASE_021's first full end-to-end run showed that free-form names silently fork one stage into several entries (document_processing vs document-pipeline, critic vs critic_v1) whenever a tool and an agent pick different spellings, which breaks get_last_passed_stage's resume logic and every consumer keying on stage_name. v0.3: (a) a 'skipped' status for optional stages (the Stage-3 indexing adapter) -- distinct from 'pending' (not reached) or a missing entry; an optional stage that never ran is recorded 'skipped', never silently treated as satisfied. (b) A passed stage MUST carry a non-null backup_path -- CASE_030 had policy_clause_processing 'passed' with backup_path:null while document_processing was still in_progress, exactly the half-finalized state P10's atomic snapshot-then-passed contract exists to make impossible.",
   "type": "object",
   "properties": {
     "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
@@ -17,14 +17,20 @@
       "type": "array",
       "description": "Tracks P7's human-input waits. Entries are never deleted, only updated in place (waiting -> received), so the full history of what was waited on stays visible.",
       "items": { "$ref": "#/$defs/human_input_entry" }
+    },
+    "migration_history": {
+      "type": "array",
+      "description": "Append-only audit history for explicit DAO-owned run-state schema migrations. A migration never fabricates a passed stage or silently deletes legacy state.",
+      "items": { "$ref": "#/$defs/migration_entry" }
     }
   },
   "required": ["case_id", "run_id", "stages"],
   "$defs": {
     "stage_name": {
-      "description": "Canonical stage names -- the ONLY values any producer (tool or agent) may write. Snake_case, versioned where the pipeline genuinely runs the stage once per draft version. If a new stage is added to the pipeline, it gets added here in the same change (D4).",
+      "description": "Canonical stage names -- the ONLY values any producer (tool or agent) may write. Snake_case, versioned where the pipeline genuinely runs the stage once per draft version. If a new stage is added to the pipeline, it gets added here in the same change (D4). 'document_segmentation' is DEPRECATED and must not be written by anything new: once OCR moved ahead of the split (2026-08-05), segmentation stopped being a stage that runs before document processing and became a checkpoint inside it -- the bundle is OCR'd and redacted, THEN split, then its children are classified and redacted, so a run that recorded the two as separate stages could not say which was in progress. The value is retained only so runs written before that change (CASE_112) still validate; their record is accurate for how they actually executed and is deliberately not rewritten.",
       "enum": [
         "intake",
+        "document_segmentation",
         "document_processing",
         "indexing",
         "policy_clause_processing",
@@ -44,9 +50,26 @@
       "type": "object",
       "properties": {
         "stage_name": { "$ref": "#/$defs/stage_name" },
-        "status": { "enum": ["pending", "in_progress", "passed", "failed"] },
-        "started_at": { "type": ["string", "null"], "format": "date-time" },
-        "completed_at": { "type": ["string", "null"], "format": "date-time" },
+        "status": { "enum": ["pending", "in_progress", "passed", "failed", "skipped"] },
+        "started_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "When this stage FIRST went in_progress -- set once and never overwritten, so on a retried stage it is the first attempt's start, not the current one's. This is a MARKER-MOVEMENT time, not a measure of work: it is null when a stage passed without ever being marked in_progress, and the span to completed_at includes human review, overnight gaps, and orchestrator delay. Do NOT use (completed_at - started_at) as a cost figure -- CASE_907 recorded 998 minutes for document_processing (an overnight wall-clock gap) and 0.0 for draft_report_v2 (finalize called right after the marker moved). Use current_attempt_started_at for the latest attempt's span; for real cost, measure the work itself, not this field."
+        },
+        "completed_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "When this stage was last marked passed/failed/skipped. Overwritten on each such transition, so it reflects the most recent outcome. Marker-movement time, same caveat as started_at."
+        },
+        "current_attempt_started_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "When the CURRENT (most recent) attempt went in_progress -- overwritten on every in_progress transition, unlike started_at. Present so a retried stage's latest run is distinguishable from its first: with only started_at, a stage retried the next morning reports the whole overnight span as its duration. Still a marker-movement time, and still includes any gate wait inside the attempt. Optional/additive -- run-state files written before 2026-08-04 omit it and remain valid."
+        },
+        "timing_note": {
+          "type": ["string", "null"],
+          "description": "Set by the DAO when this stage reached a terminal status with no start marker ever recorded, so the gap is stated rather than left as a hole that reads like missing data. No start time can be invented after the fact. Optional/additive."
+        },
         "attempt_count": {
           "type": "integer",
           "minimum": 0,
@@ -54,10 +77,33 @@
         },
         "backup_path": {
           "type": ["string", "null"],
-          "description": "outputs/CASE_XXX/_backups/step_<N>_<stage_name>/ -- null until this stage has passed."
+          "description": "outputs/CASE_XXX/_backups/step_<N>_<stage_name>/ -- null until this stage has passed. When status is 'passed' this MUST be non-null: a stage is only ever recorded passed atomically with the snapshot that backs it (see finalize-stage), so a passed stage with no backup is a structurally impossible half-finalized state. A stage later invalidated by an upstream change keeps the path of the snapshot that did back it -- that snapshot is a real historical artifact and is never deleted or rewritten."
+        },
+        "invalidated_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "When this stage's recorded result was invalidated because an upstream input it was derived from changed. Set together with status='failed' and invalidation_reason by the DAO's cascade, never by an agent."
+        },
+        "invalidation_reason": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Why the stage was invalidated -- names the upstream stage and the artifact that changed (e.g. \"upstream document_processing changed: redacted text rewritten for DOC_005\"). A stage whose inputs moved must not stay 'passed': every boundary offset, evidence quote, and page mapping is expressed against exact upstream bytes, so a passed status derived from superseded bytes is a false claim about work that was never done against the current source."
         }
       },
-      "required": ["stage_name", "status", "attempt_count"]
+      "required": ["stage_name", "status", "attempt_count"],
+      "allOf": [
+        {
+          "description": "P10 atomicity: a passed stage always has the snapshot that finalized it. finalize-stage records status=passed and backup_path in one run-state lock; nothing else may set passed.",
+          "if": {
+            "properties": { "status": { "const": "passed" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": { "backup_path": { "type": "string", "minLength": 1 } },
+            "required": ["backup_path"]
+          }
+        }
+      ]
     },
     "human_input_entry": {
       "type": "object",
@@ -72,6 +118,21 @@
         "received_at": { "type": ["string", "null"], "format": "date-time" }
       },
       "required": ["stage_name", "status", "description", "requested_at"]
+    },
+    "migration_entry": {
+      "type": "object",
+      "properties": {
+        "migration_id": { "type": "string", "minLength": 1 },
+        "migrated_at": { "type": "string", "format": "date-time" },
+        "held_by": { "type": "string", "minLength": 1 },
+        "changes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "required": ["migration_id", "migrated_at", "held_by", "changes"],
+      "additionalProperties": false
     }
   }
 }

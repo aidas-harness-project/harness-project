@@ -54,6 +54,7 @@ scenario/branch-testing script) can inspect the outcome programmatically.
 """
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -74,16 +75,27 @@ from llm_providers import (
     build_provider,
 )
 from ocr_extract import build_ocr_providers, run_ocr
+import segment_case as _segment_case
 
 ROOT = Path(__file__).resolve().parent.parent
 
-DOCUMENT_TYPES = ["insurance_certificate", "insurance_policy", "diagnosis_certificate",
-                   "medical_record", "imaging_report", "receipt", "insurer_response", "other"]
-CLASSIFICATION_PROMPT_VERSION = "classification_v0.1"
+DOCUMENT_TYPES = ["insurance_certificate", "insurance_policy", "application_form",
+                   "diagnosis_certificate", "medical_record", "imaging_report",
+                   "receipt", "insurer_response", "other"]
+CLASSIFICATION_PROMPT_VERSION = "classification_v0.2"
 
+# The three easily-confused Korean insurance forms all carry policy-like
+# language, so a bare type list collapses them into insurance_policy (CASE_030:
+# a 증권 and a 청약 both misclassified that way). This guidance names the
+# distinguishing signal for each so the model separates them.
 CLASSIFY_PROMPT_TEMPLATE = """You are classifying an insurance claim document by its type, from its
 already-transcribed text (not the raw image). Choose exactly one of these types:
 {types}
+
+These three Korean forms look similar -- distinguish them by their defining marker:
+- insurance_policy (보험약관): the full contract terms/clauses -- articles like 제N조, 지급사유, 면책, a table of contents of 특별약관. It is the rulebook, not a record of one contract.
+- insurance_certificate (증권서류): a "보험증권" issued as proof of ONE concluded contract -- a 계약번호/증권번호, 보험기간, 보장내용 with 가입금액 per coverage, 총보험료. It references the 약관 but is not the 약관 itself.
+- application_form (청약서류): a "청약서"/가입 신청서 the applicant fills in and signs to APPLY -- 청약일, applicant/피보험자 자필서명, 계약전 알릴의무 질문서, 상품설명서 cover pages. It precedes the contract; it is not the contract terms and not the issued certificate.
 
 Reply with ONLY a JSON object, no other text, in exactly this shape:
 {{"predicted_document_type": "<one of the types above>", "document_type_label": "<Korean display label>",
@@ -149,6 +161,127 @@ def classify_document(text: str, classifier=None) -> dict:
     return parsed
 
 
+# A title line that identifies a policy booklet part, as printed by Korean
+# insurers. Mirrors the anchors segment_case.text_anchor_boundaries() cuts on;
+# a slice carrying one of these IS a policy document by construction.
+_POLICY_TITLE_RE = re.compile(r"(?:보통약관|특별약관|특약|약관)\s*$")
+# Inherited types are not a classifier verdict, so they do not borrow a
+# classifier's confidence. This is the deterministic-provenance value: the
+# split evidence is exact, but no model examined this document's own content.
+PARENT_INHERITED_CONFIDENCE = 0.95
+
+
+def default_disposition(document_type: str | None) -> str:
+    """The downstream disposition a freshly classified document starts at.
+
+    A policy document starts at `text_only_no_normalization`: processed,
+    chunked and citable, but owing no normalized clause contract. Normalizing
+    is opt-IN, because it is the expensive obligation (one 145-page bundle
+    carries 800+ conditions) and nothing downstream consumes its output --
+    clauses are addressed by document/page/quote, verified verbatim against the
+    processed source. A case that genuinely disputes a specific policy document
+    promotes just that one to `automated_text_pipeline`.
+
+    Every other document type is unaffected: the disposition only ever gates
+    the policy-normalization obligation, so a diagnosis certificate or an
+    insurer response keeps the full-pipeline value it always had.
+    """
+    if document_type == "insurance_policy":
+        return "text_only_no_normalization"
+    return "automated_text_pipeline"
+
+
+def inherited_classification(case_id: str, doc_id: str, manifest: dict | None = None) -> dict | None:
+    """The parent bundle's classification, when this document is a text-anchor
+    slice of it. None means "classify normally".
+
+    Why this is sound rather than a shortcut: a text-anchor segment is not a
+    model's guess about where a document starts -- `segment_case.text_anchor_
+    boundaries()` cuts strictly on the publisher's own typed title lines
+    (`...보통약관`/`...특별약관`/`...특약`), measured at precision 1.0000 across
+    173 boundaries on CASE_112's two policy bundles. Every slice is therefore a
+    part of the same physical policy booklet the parent already was, and asking
+    a model 176 separate times whether each piece of one 약관 bundle is an
+    insurance policy re-derives, probabilistically, something the split itself
+    established deterministically.
+
+    Deliberately narrow. It requires ALL of:
+      * a recorded parent (`source_file_name`) that is present in the manifest,
+      * the parent carrying a real `document_type` and confidence,
+      * the parent's type being `insurance_policy` -- the only type whose
+        subdivisions are the same type by construction. A 진단서 bundle sliced
+        into per-patient documents is NOT self-similar this way, so it still
+        pays for its own classification.
+
+    It deliberately does NOT require the slice to be `embedded_text`. That
+    condition was standing in for "the boundary was not a model's guess", which
+    `mode == 'text_anchor'` already establishes directly -- those cuts are made
+    on printed 약관 title lines, never by a model. Where the TEXT came from does
+    not decide how the BOUNDARY was found. Measured on CASE_112's two policy
+    bundles (323 pages): boundaries derived from the OCR-produced page text are
+    identical to those from the embedded text layer, same 173 boundaries,
+    precision 1.0000 against the human-approved baseline for both.
+
+    P8 is untouched -- each slice still carries its own cross-validation. The
+    only thing skipped is the classifier call.
+
+    Anything else returns None and the normal provider call runs.
+    """
+    if manifest is None:
+        manifest_path = case_dir(case_id) / "document_manifest.json"
+        if not manifest_path.exists():
+            return None
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    by_id = {d.get("document_id"): d for d in manifest.get("documents", [])}
+    child = by_id.get(doc_id)
+    if not child:
+        return None
+    parent_name = child.get("source_file_name")
+    proposal_rel = child.get("segmentation_proposal_path")
+    if not parent_name or not proposal_rel:
+        return None
+
+    parent = next((d for d in manifest.get("documents", [])
+                   if d.get("file_name") == parent_name), None)
+    if not parent:
+        return None
+
+    # The evidence is the split itself, read back from the proposal -- not the
+    # parent's own document_type, which a superseded bundle never has (it is
+    # excluded from checkpoint 1 by design), and not the segment's
+    # provisional_document_type, which pipeline.md says is never trusted
+    # downstream. What IS trustworthy is the boundary evidence: `text_anchor`
+    # mode cuts only on a printed 약관 title line, so a slice whose own title
+    # ends in 약관/특약 is part of a policy booklet by construction.
+    proposal_path = ROOT / proposal_rel
+    if not proposal_path.exists():
+        return None
+    try:
+        proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (proposal.get("method") or {}).get("mode") != "text_anchor":
+        return None
+    if proposal.get("review_status") != "approved":
+        return None
+
+    label = next((s.get("provisional_type_label") for s in proposal.get("segments", [])
+                  if s.get("page_start") == child.get("source_page_start")), None)
+    if not label or not _POLICY_TITLE_RE.search(label):
+        return None
+
+    return {
+        "predicted_document_type": "insurance_policy",
+        "document_type_label": label,
+        "confidence": PARENT_INHERITED_CONFIDENCE,
+        "quote": "",
+        "_inherited_from": parent["document_id"],
+        "_inherited_label": label,
+        "_provider_metadata": {},
+    }
+
+
 def build_classifier_provider(
     *,
     classifier_provider_name: str | None = None,
@@ -211,7 +344,8 @@ def _classification_model_info(provider_metadata: dict) -> dict:
     return info
 
 
-def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
+def _assemble_ocr_result(
+        case_id, doc_id, run_id, ocr_data, source_total_pages=None):
     providers = ocr_data.get("providers", {})
     reader_a_label = _provider_label(providers.get("reader_a"))
     reader_b_label = _provider_label(providers.get("reader_b"))
@@ -249,6 +383,7 @@ def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
         "vision_model_name": f"{reader_b_label}; comparator={comparator_label}",
         "uncertain_confidence_threshold": 1.0,
         "extraction_method": extraction_method, "ocr_status": "completed", "pages": pages_out,
+        "source_total_pages": source_total_pages,
         "encoding_detected": ocr_data.get("encoding_detected"),
         "document_mean_confidence": None,
         # Embedded text is a lossless decode, not a probabilistic read -- its
@@ -275,6 +410,17 @@ def _assemble_ocr_result(case_id, doc_id, run_id, ocr_data):
     return result
 
 
+def source_pdf_page_count(pdf_path: Path) -> int:
+    """Read immutable physical page count before any page-range extraction."""
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(str(pdf_path)).pages)
+    except Exception as exc:
+        raise RuntimeError(
+            f"cannot determine immutable source PDF page count for "
+            f"{pdf_path}: {exc}") from exc
+
+
 def _reset_manifest_for_blocked_ocr(case_id, doc_id, ocr_result, held_by, run_id):
     """Called only on the blocked_disagreement path -- clears every field
     checkpoint 1 owns back to 'not validly known right now' rather than
@@ -286,6 +432,7 @@ def _reset_manifest_for_blocked_ocr(case_id, doc_id, ocr_result, held_by, run_id
     not a local read-then-_write_contract -- see known-gaps.md item 7."""
     fields = {
         "pages": len(ocr_result["pages"]),
+        "source_total_pages": ocr_result.get("source_total_pages"),
         "ocr_status": "failed",
         "ocr_text_path": None,
         "ocr_quality": None,
@@ -389,8 +536,57 @@ def run_checkpoint1(
     classifier_model: str | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
+    classify: bool = True,
 ) -> dict:
+    # Evaluated before provider construction, PDF rendering, or any output
+    # write, so a blocked call cannot spend tokens. What it refuses is now only
+    # the retained superseded bundle -- reading it again would duplicate every
+    # page under a document its children replaced.
+    #
+    # A bundle awaiting its split is NOT refused: reading it is the point of the
+    # inverted order. Boundaries derived from real page text beat those read off
+    # a downscaled contact-sheet crop (CASE_112, 323 pages, precision 1.0000 vs
+    # 0.84-0.95), and unlike the embedded text layer they are available for a
+    # scan. What still must wait for the split is CLASSIFICATION, because
+    # `document_type` is a per-document value and one label cannot be right for
+    # a bundle mixing a 진단서, a 검사보고서 and an 입퇴원확인서 -- that is what
+    # `classify=False` expresses, and it is a narrower request, not a bypass.
+    segmentation = _dao.check_segmentation_ready(case_id, doc_id)
+    if segmentation["blockers"] or segmentation.get("error"):
+        return {
+            "status": "blocked_segmentation",
+            "case_id": case_id,
+            "doc_id": doc_id,
+            "blockers": segmentation["blockers"],
+            "error": segmentation.get("error"),
+            "next_action": (
+                "Process the bundle's logical children, not the retained "
+                "superseded bundle itself."
+            ),
+        }
+
+    # Refuse to re-read a document that already has extracted text. `run` starts
+    # by OCR'ing, so calling it on a split child -- whose pages were inherited
+    # from its bundle -- destroys the very record redistribution just created,
+    # replacing an inherited P8 history with a fresh verdict. CASE_909's
+    # DOC_006-013 lost theirs exactly this way. Naming the alternative matters:
+    # the caller usually wants a document_type, not a second reading.
+    existing_ocr = case_dir(case_id) / f"ocr_result_{doc_id}.json"
+    if existing_ocr.exists():
+        return {
+            "status": "already_extracted",
+            "case_id": case_id,
+            "doc_id": doc_id,
+            "ocr_result_path": str(existing_ocr),
+            "next_action": (
+                "This document already has extracted text. To give it a "
+                "document_type without re-reading it, use classify-only. To "
+                "genuinely re-extract, delete the existing ocr_result first."
+            ),
+        }
+
     pdf_path = Path(pdf_path)
+    source_total_pages = source_pdf_page_count(pdf_path)
     if reader_a is None or reader_b is None or comparator is None:
         providers = build_ocr_providers(
             reader_a_name=reader_a_name,
@@ -403,7 +599,10 @@ def run_checkpoint1(
         reader_a = reader_a or providers["reader_a"]
         reader_b = reader_b or providers["reader_b"]
         comparator = comparator or providers["comparator"]
-    if classifier is None:
+    if classifier is None and classify:
+        # Not built in bundle-OCR mode: no classification happens, so
+        # constructing a provider for it would resolve credentials and a model
+        # for a call that is never made.
         classifier = build_classifier_provider(
             classifier_provider_name=classifier_provider_name,
             classifier_model=classifier_model,
@@ -425,7 +624,9 @@ def run_checkpoint1(
         if p["agreement"] == "agreed":
             _write_page_text(case_id, doc_id, p["page"], p["reading_a"], held_by, run_id)
 
-    ocr_result = _assemble_ocr_result(case_id, doc_id, run_id, ocr_data)
+    ocr_result = _assemble_ocr_result(
+        case_id, doc_id, run_id, ocr_data,
+        source_total_pages=source_total_pages)
     _write_contract(case_id, f"ocr_result_{doc_id}.json", ocr_result, "ocr_result.schema.json", held_by, run_id)
 
     any_disagreement = ocr_result["review_required"]
@@ -450,15 +651,145 @@ def run_checkpoint1(
                 "ocr_result_path": str(case_dir(case_id) / f"ocr_result_{doc_id}.json"),
                 "raw_ocr_path": str(raw_ocr_path)}
 
+    if not classify:
+        # Bundle OCR for the inverted order: the text exists and segmentation
+        # reads it to place boundaries, but this document is about to stop
+        # existing as a processing target -- split_bundle supersedes it and
+        # redistributes these pages to its children, which classify
+        # individually. Writing a document_type here would be asserting one
+        # label for a bundle, the very thing the gate above protects against.
+        _dao._update_run_state(case_id, run_id, "document_processing", "in_progress", held_by)
+        return {"status": "bundle_ocr_complete", "case_id": case_id, "doc_id": doc_id,
+                "pages": len(ocr_data["pages"]),
+                "cross_validation_status": ocr_result["cross_validation_status"],
+                "next_action": "derive boundaries from this text, then split; children classify individually"}
+
     return _finish_checkpoint1(case_id, doc_id, run_id, held_by, ocr_data["pages"][0]["reading_a"], classifier=classifier)
 
 
-def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, classifier=None):
+def printed_title_classification(case_id: str, doc_id: str,
+                                  manifest: dict | None = None) -> dict | None:
+    """The document_type its own printed title determines, or None.
+
+    The split cut this document's boundary ON that title, at precision 1.0000
+    against the human baseline, so the title is not a guess to be checked -- it
+    is recorded evidence. Asking a model to re-read the same page and name a
+    type is a second opinion on something already held exactly.
+
+    Narrow by construction. `document_type_from_title` maps only titles that
+    name a FORM, never a genre: "REPORT" says a report exists, not which kind,
+    and CASE_909's p6/p7 are imaging readings only by coincidence of that
+    bundle. Anything unmapped returns None and the model classifies as before.
+
+    Verified against the model on CASE_909 before being trusted: of the 12
+    segments, 4 mapped and all 4 agreed with the classifier's own verdict, 0
+    differed, and the 5 it declined include exactly the ambiguous ones (both
+    REPORTs, the untitled page, and 입퇴원확인서 -- which the model itself
+    answered at only 0.72).
+    """
+    if manifest is None:
+        manifest_path = case_dir(case_id) / "document_manifest.json"
+        if not manifest_path.exists():
+            return None
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    child = next((d for d in manifest.get("documents", [])
+                  if d.get("document_id") == doc_id), None)
+    if not child:
+        return None
+    proposal_rel = child.get("segmentation_proposal_path")
+    page_start = child.get("source_page_start")
+    if not proposal_rel or page_start is None:
+        return None
+    proposal_path = ROOT / proposal_rel
+    if not proposal_path.exists():
+        return None
+    try:
+        proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    # Only a human-approved deterministic split. A vision proposal's label is a
+    # model's reading of a downscaled crop, which is exactly the kind of guess
+    # pipeline.md says never to trust downstream.
+    if (proposal.get("method") or {}).get("mode") != "text_anchor":
+        return None
+    if proposal.get("review_status") != "approved":
+        return None
+    label = next((s.get("provisional_type_label") for s in proposal.get("segments", [])
+                  if s.get("page_start") == page_start), None)
+    doc_type = _segment_case.document_type_from_title(label)
+    if doc_type is None:
+        return None
+    return {
+        "predicted_document_type": doc_type,
+        "document_type_label": label,
+        "confidence": PARENT_INHERITED_CONFIDENCE,
+        "quote": label,
+        "_title_classified": label,
+        "_provider_metadata": {},
+    }
+
+
+def classify_existing(case_id: str, doc_id: str, *, held_by: str, run_id: str,
+                       classifier=None) -> dict:
+    """Classify a document whose pages already exist, without re-reading it.
+
+    A split child inherits its pages from the bundle, so its text is on disk
+    before it ever needs a document_type. Without this entry point the only way
+    to get one was `run`, which begins by OCR'ing -- re-reading pages that were
+    just redistributed and replacing their inherited P8 history with a fresh
+    verdict. That is not hypothetical: it happened to CASE_909's DOC_006-013.
+    """
+    ocr_path = case_dir(case_id) / f"ocr_result_{doc_id}.json"
+    if not ocr_path.exists():
+        sys.exit(f"error: {ocr_path} does not exist -- this document has no "
+                  f"extracted text yet, so run checkpoint 1 for it first")
+    ocr_result = json.loads(ocr_path.read_text(encoding="utf-8"))
+    first_page_text, text_source = _classification_input_text(case_id, doc_id, ocr_result)
+    return _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text,
+                                classifier=classifier, text_source=text_source)
+
+
+def _classification_input_text(case_id: str, doc_id: str, ocr_result: dict) -> tuple[str, str]:
+    """Page 1's text for classification, redacted layer preferred.
+
+    `page_NNN.md` still carries claimant PII -- dao.read-page-text guards it
+    behind checkpoint 2's one-shot capability precisely so no analysis stage
+    reads it -- and following ocr_result's text_path walked straight past that.
+    A split child inherits the bundle's redaction, so the redacted text is
+    normally already there.
+
+    The raw fallback stays, because a document not yet redacted still has to be
+    classifiable, but it is never silent: the caller records which source was
+    used on the contract, so reading unredacted text is visible afterwards
+    rather than being an invisible default.
+    """
+    redacted = ROOT / "data" / "processed" / case_id / doc_id / "redacted_text.md"
+    if redacted.exists():
+        pages = [block for block in redacted.read_text(encoding="utf-8").split("<<<PAGE")
+                  if block.strip()]
+        if pages:
+            first = pages[0].split(">>>", 1)[-1].strip()
+            if first:
+                return first, "redacted_text"
+    first_page = ocr_result["pages"][0]
+    text_path = first_page.get("text_path")
+    if not text_path:
+        sys.exit(f"error: {doc_id} page 1 has no text_path; nothing to classify from")
+    return (ROOT / text_path).read_text(encoding="utf-8"), "raw_page_text"
+
+
+def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, classifier=None,
+                         text_source: str = "raw_page_text"):
     """Shared tail: classify from page 1's text, write
     classification_result_{doc_id}.json, update document_manifest.json.
     Called both by run_checkpoint1() (no disagreement) and
     apply_disagreement_resolution() (once every page is resolved)."""
-    classification = classify_document(first_page_text, classifier) if classifier is not None else classify_document(first_page_text)
+    classification = inherited_classification(case_id, doc_id)
+    if classification is None:
+        classification = printed_title_classification(case_id, doc_id)
+    if classification is None:
+        classification = (classify_document(first_page_text, classifier) if classifier is not None
+                          else classify_document(first_page_text))
     ocr_result = json.loads((case_dir(case_id) / f"ocr_result_{doc_id}.json").read_text(encoding="utf-8"))
     provider_metadata = classification.get("_provider_metadata", {})
 
@@ -473,11 +804,46 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         "evidence_references": [{"page": 1, "quote": classification.get("quote", "")}],
         "review_required": False,
     }
+    classification_result["classification_text_source"] = text_source
+    if text_source == "raw_page_text":
+        # Not an error -- a document not yet redacted still has to be
+        # classifiable -- but reading unredacted text is a fact a reviewer
+        # should see rather than an invisible default.
+        classification_result["review_required"] = True
+        classification_result["reviewer_role"] = "손해사정사"
+        classification_result["review_reason"] = (
+            "classified from raw page text: no redacted_text.md existed for this "
+            "document at classification time, so the input still carried any PII "
+            "the page holds"
+        )
+
+    title_classified = classification.get("_title_classified")
+    if title_classified:
+        # Record that no classifier ran and what decided instead, so an audit
+        # can tell a printed-title verdict from a model's.
+        classification_result["classification_source"] = "printed_form_title"
+        classification_result["evidence_references"] = [{
+            "page": 1,
+            "quote": (f"printed form title {title_classified!r}: the approved "
+                      "text-anchor split cut this document's boundary on it"),
+        }]
+    inherited_from = classification.get("_inherited_from")
+    if inherited_from:
+        # Record that no classifier ran, and from where the type came, so an
+        # audit can tell an inherited type from a model verdict.
+        classification_result["classification_source"] = "inherited_from_parent_bundle"
+        classification_result["inherited_from_document_id"] = inherited_from
+        classification_result["evidence_references"] = [{
+            "page": 1,
+            "quote": (f"inherited from {inherited_from}: deterministic text-anchor slice of an "
+                      "already-classified insurance_policy bundle; no classifier call made"),
+        }]
     _write_contract(case_id, f"classification_result_{doc_id}.json", classification_result,
                      "classification_result.schema.json", held_by, run_id)
 
     fields = {
         "pages": len(ocr_result["pages"]),
+        "source_total_pages": ocr_result.get("source_total_pages"),
         "ocr_status": "completed",
         "ocr_quality": ocr_result["ocr_quality"],
         "uncertain_region_count": 0,
@@ -485,7 +851,8 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         "document_type": classification["predicted_document_type"],
         "classification_confidence": classification.get("confidence", 0.5),
         "extraction_method": ocr_result.get("extraction_method", "ocr"),
-        "downstream_disposition": "automated_text_pipeline",
+        "downstream_disposition": default_disposition(
+            classification["predicted_document_type"]),
         "non_text_verification": None,
     }
     ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)
@@ -501,6 +868,7 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
 
     return {"status": "passed", "case_id": case_id, "doc_id": doc_id,
             "document_type": classification["predicted_document_type"],
+            "classification_text_source": text_source,
             "cross_validation_status": ocr_result["cross_validation_status"]}
 
 
@@ -634,9 +1002,10 @@ def resolve_as_non_text(
     }
 
 
-def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, chosen_reading: str,
+def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, chosen_reading: str | None,
                           resolved_by: str, note: str, held_by: str, run_id: str,
-                          classifier=None) -> dict:
+                          classifier=None, corrected_text: str | None = None,
+                          classify: bool = True) -> dict:
     """Resolves one disagreed page using the original run_ocr() result
     (which has both reading_a and reading_b) plus a human's decision of
     which one is correct and why. Writes that page's text, updates
@@ -644,12 +1013,26 @@ def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, c
     resolution record. If every page is now agreed-or-resolved, continues
     on to classification + manifest update (same tail run_checkpoint1()
     uses when there's no disagreement at all)."""
-    if chosen_reading not in ("reading_a", "reading_b"):
+    if (chosen_reading is None) == (corrected_text is None):
+        sys.exit(
+            "error: provide exactly one of chosen_reading or corrected_text")
+    if chosen_reading is not None and chosen_reading not in ("reading_a", "reading_b"):
         sys.exit(f"error: chosen_reading must be reading_a or reading_b -- got {chosen_reading!r}")
     page_data = next((p for p in ocr_data["pages"] if p["page"] == page), None)
     if page_data is None:
         sys.exit(f"error: no page {page} in this OCR result")
-    chosen_text = page_data[chosen_reading]
+    if corrected_text is not None:
+        if not corrected_text.strip():
+            sys.exit("error: corrected_text must contain a complete non-empty page transcription")
+        if corrected_text in (page_data["reading_a"], page_data["reading_b"]):
+            sys.exit(
+                "error: corrected_text exactly matches an original reading; "
+                "use --chosen-reading so the audit record identifies that reading")
+        chosen_text = corrected_text
+        resolution_choice = "human_corrected"
+    else:
+        chosen_text = page_data[chosen_reading]
+        resolution_choice = chosen_reading
 
     _write_page_text(case_id, doc_id, page, chosen_text, held_by, run_id)
 
@@ -657,9 +1040,16 @@ def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, c
     ocr_result = json.loads(ocr_result_path.read_text(encoding="utf-8"))
     page_entry = next(p for p in ocr_result["pages"] if p["page"] == page)
     page_entry["text_path"] = f"data/processed/{case_id}/{doc_id}/page_{page:03d}.md"
-    page_entry["cross_validation"]["resolution"] = {
-        "chosen_reading": chosen_reading, "resolved_by": resolved_by, "resolved_at": now_iso(), "note": note,
+    resolution = {
+        "chosen_reading": resolution_choice,
+        "resolved_by": resolved_by,
+        "resolved_at": now_iso(),
+        "note": note,
     }
+    if corrected_text is not None:
+        resolution["corrected_text_sha256"] = hashlib.sha256(
+            corrected_text.encode("utf-8")).hexdigest()
+    page_entry["cross_validation"]["resolution"] = resolution
 
     still_unresolved = [p["page"] for p in ocr_result["pages"]
                          if p["cross_validation"]["agreement"] == "disagreed"
@@ -673,6 +1063,19 @@ def resolve_from_raw_ocr(case_id: str, doc_id: str, ocr_data: dict, page: int, c
     ocr_result["review_required"] = False
     ocr_result["review_reason"] = "All disagreements resolved -- see each page's cross_validation.resolution."
     _write_contract(case_id, f"ocr_result_{doc_id}.json", ocr_result, "ocr_result.schema.json", held_by, run_id)
+
+    if not classify:
+        # A bundle's disagreements being resolved does not make it one document.
+        # Reaching the shared tail here would write the very document_type
+        # --bundle-ocr withheld -- found on CASE_909, where resolving DOC_005's
+        # 8 pages labelled a 19-page bundle `diagnosis_certificate` from its
+        # first page, over two imaging REPORTs, an 입퇴원확인서 and two
+        # 진료비 명세서.
+        _dao._update_run_state(case_id, run_id, "document_processing", "in_progress", held_by)
+        return {"status": "bundle_ocr_complete", "case_id": case_id, "doc_id": doc_id,
+                "pages": len(ocr_result["pages"]),
+                "cross_validation_status": ocr_result["cross_validation_status"],
+                "next_action": "derive boundaries from this text, then split; children classify individually"}
 
     first_page_agreed_or_resolved = ocr_result["pages"][0]
     first_page_text = Path(ROOT / first_page_agreed_or_resolved["text_path"]).read_text(encoding="utf-8")
@@ -697,13 +1100,14 @@ def _run_from_args(args):
             classifier_model=args.classifier_model,
             page_start=args.page_start,
             page_end=args.page_end,
+            classify=not args.bundle_ocr,
         )
     except ProviderConfigError as exc:
         sys.exit(f"error: {exc}")
     except ProviderExecutionError as exc:
         sys.exit(f"error: {exc}")
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    if result["status"] == "blocked_disagreement":
+    if result["status"] in {"blocked_disagreement", "blocked_segmentation"}:
         sys.exit(1)
 
 
@@ -730,6 +1134,19 @@ def _resolve_from_args(args):
         sys.exit(f"error: could not read raw dual-read dump {raw_path}: {exc}")
 
     try:
+        classifier = None if args.bundle_ocr else build_classifier_provider(
+            classifier_provider_name=args.classifier_provider,
+            classifier_model=args.classifier_model,
+        )
+        corrected_text = None
+        if args.corrected_text_file is not None:
+            corrected_path = Path(args.corrected_text_file)
+            try:
+                corrected_text = corrected_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                sys.exit(
+                    f"error: could not read corrected transcription file "
+                    f"{corrected_path}: {exc}")
         result = resolve_from_raw_ocr(
             args.case_id,
             args.doc_id,
@@ -740,6 +1157,9 @@ def _resolve_from_args(args):
             note=args.note,
             held_by=args.held_by,
             run_id=args.run_id,
+            classify=not args.bundle_ocr,
+            classifier=classifier,
+            corrected_text=corrected_text,
         )
     except ProviderConfigError as exc:
         sys.exit(f"error: {exc}")
@@ -778,12 +1198,19 @@ def _add_run_arguments(parser):
     parser.add_argument("--classifier-model", help="Model name for --classifier-provider")
     parser.add_argument("--page-start", type=int, help="1-based first source PDF page for this logical document")
     parser.add_argument("--page-end", type=int, help="1-based last source PDF page for this logical document")
+    parser.add_argument(
+        "--bundle-ocr", action="store_true",
+        help="OCR an unsplit bundle without classifying it, so segmentation can "
+             "derive boundaries from real page text. Skips classification and the "
+             "document_type manifest write -- split_bundle then redistributes "
+             "these pages to the children, which classify individually. Still "
+             "refuses a superseded bundle.")
 
 
 # Reserved subcommand names dispatched explicitly; anything else is treated as
 # the legacy positional `run` invocation (CASE DOC PDF ...) for backward
 # compatibility with document-pipeline.md and existing callers.
-_SUBCOMMANDS = {"run", "resolve-disagreement", "resolve-non-text"}
+_SUBCOMMANDS = {"run", "resolve-disagreement", "resolve-non-text", "classify-only"}
 
 
 def main(argv=None):
@@ -802,12 +1229,38 @@ def main(argv=None):
     resolve_parser.add_argument("case_id")
     resolve_parser.add_argument("doc_id")
     resolve_parser.add_argument("--page", type=int, required=True, help="1-based page number of the disagreed page")
-    resolve_parser.add_argument("--chosen-reading", choices=["reading_a", "reading_b"], required=True,
-                                help="Which of the two independent reads the human verified as correct")
+    resolution_source = resolve_parser.add_mutually_exclusive_group(required=True)
+    resolution_source.add_argument(
+        "--chosen-reading",
+        choices=["reading_a", "reading_b"],
+        help="Which of the two independent reads the human verified as correct",
+    )
+    resolution_source.add_argument(
+        "--corrected-text-file",
+        help=(
+            "UTF-8 file containing the complete page transcription verified by a human "
+            "when neither independent reading is correct"
+        ),
+    )
     resolve_parser.add_argument("--resolved-by", required=True, help="Name of the human (e.g. 손해사정사) making the call")
     resolve_parser.add_argument("--note", required=True, help="Why this reading is correct")
     resolve_parser.add_argument("--held-by", required=True)
     resolve_parser.add_argument("--run-id", required=True)
+    resolve_parser.add_argument(
+        "--bundle-ocr", action="store_true",
+        help="This document is an unsplit bundle: resolve its page(s) but do "
+             "not classify it. Resolving a disagreement does not make a bundle "
+             "one document -- without this the shared tail writes the very "
+             "document_type the bundle OCR withheld.")
+    resolve_parser.add_argument(
+        "--classifier-provider",
+        choices=SUPPORTED_PROVIDERS,
+        help="Provider for post-resolution document classification",
+    )
+    resolve_parser.add_argument(
+        "--classifier-model",
+        help="Model name for --classifier-provider",
+    )
 
     non_text_parser = sub.add_parser(
         "resolve-non-text",
@@ -824,6 +1277,18 @@ def main(argv=None):
     non_text_parser.add_argument("--held-by", required=True)
     non_text_parser.add_argument("--run-id", required=True)
 
+    classify_parser = sub.add_parser(
+        "classify-only",
+        help="Classify a document whose pages already exist, without re-reading it",
+    )
+    classify_parser.add_argument("case_id")
+    classify_parser.add_argument("doc_id")
+    classify_parser.add_argument("--held-by", required=True)
+    classify_parser.add_argument("--run-id", required=True)
+    classify_parser.add_argument("--classifier-provider", choices=SUPPORTED_PROVIDERS,
+                                  help="Provider for classification")
+    classify_parser.add_argument("--classifier-model", help="Model for --classifier-provider")
+
     # Backward compatibility: the legacy form is `... CASE DOC PDF --held-by ...`
     # with no subcommand token. If the first arg isn't a known subcommand (and
     # isn't a help flag), route to the `run` parser so old invocations keep working.
@@ -833,6 +1298,19 @@ def main(argv=None):
         return
 
     args = ap.parse_args(argv)
+    if args.command == "classify-only":
+        # The provider is built lazily: a printed form title decides most types
+        # with no model call, and constructing one would resolve credentials for
+        # a call that never happens.
+        classifier = None
+        if args.classifier_provider or args.classifier_model:
+            classifier = build_classifier_provider(
+                classifier_provider_name=args.classifier_provider,
+                classifier_model=args.classifier_model)
+        result = classify_existing(args.case_id, args.doc_id, held_by=args.held_by,
+                                    run_id=args.run_id, classifier=classifier)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     if args.command == "resolve-disagreement":
         _resolve_from_args(args)
     elif args.command == "resolve-non-text":

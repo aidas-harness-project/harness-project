@@ -29,6 +29,12 @@ def test_doc_suffixed_filename_strips_suffix():
     assert schema_name_for(Path("normalized_policy_clause_DOC_001.json")) == "normalized_policy_clause.schema.json"
 
 
+def test_reference_table_doc_suffixed_filename_resolves():
+    assert schema_name_for(
+        Path("reference_table_DOC_004.json")) == \
+        "reference_table.schema.json"
+
+
 def test_ocr_result_doc_suffixed_filename_resolves():
     """ocr_result.json was found to have the exact same silent-overwrite
     risk as normalized_policy_clause.json -- fixed the same way, one file
@@ -115,6 +121,61 @@ def test_registry_loads_every_schema_and_resolves_cross_file_refs():
         }],
     }
     assert validate_instance(sample, "coverage_result.schema.json", schemas, registry) == []
+
+
+def test_coverage_reference_requires_stable_clause_uid():
+    schemas, registry = load_registry()
+    base = {
+        "case_id": "CASE_009", "component": "claim-analysis",
+        "status": "success", "coverages": [{
+            "coverage_name": "a", "standardized_coverage_name": "b",
+            "applicable": True, "matched_clause_ref": {
+                "document_id": "DOC_001",
+                "clause_uid": "PC-1111111111111111",
+                "display_clause_id": "C-7",
+            },
+            "confidence": 0.9,
+            "evidence_references": [{"document_id": "DOC_001", "quote": "q"}],
+            "review_required": False,
+        }],
+    }
+    assert validate_instance(
+        base, "coverage_result.schema.json", schemas, registry) == []
+    base["coverages"][0]["matched_clause_ref"] = {
+        "document_id": "DOC_001", "clause_id": "C-7"}
+    errors = validate_instance(
+        base, "coverage_result.schema.json", schemas, registry)
+    assert any("clause_uid" in error or "clause_id" in error for error in errors)
+
+
+def test_requirement_reference_requires_stable_condition_uid():
+    schemas, registry = load_registry()
+    instance = {
+        "case_id": "CASE_009", "component": "claim-analysis",
+        "status": "success", "coverage_requirements": [{
+            "standardized_coverage_name": "b",
+            "requirements": [{
+                "requirement_id": "REQ-1",
+                "requirement_text": "진단 시 지급",
+                "clause_ref": {
+                    "document_id": "DOC_001",
+                    "clause_uid": "PC-1111111111111111",
+                    "condition_uid": "CI-1111111111111111",
+                },
+                "status": "uncertain", "confidence": 0.7,
+                "evidence_references": [], "review_required": True,
+            }],
+        }],
+    }
+    assert validate_instance(
+        instance, "requirement_matching_result.schema.json",
+        schemas, registry) == []
+    del instance["coverage_requirements"][0]["requirements"][0][
+        "clause_ref"]["condition_uid"]
+    errors = validate_instance(
+        instance, "requirement_matching_result.schema.json",
+        schemas, registry)
+    assert any("condition_uid" in error for error in errors)
 
 
 def _claim_fields_instance(fields):

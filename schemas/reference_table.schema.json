@@ -1,0 +1,288 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "reference_table.schema.json",
+  "title": "reference_table_DOC_XXX.json -- structured policy appendices and decision tables v0.4",
+  "description": "Cell-level representation of policy appendices such as disability-rate, fracture, burn, diagnosis-code, and benefit-grade tables. Every title and cell is independently grounded in the processed source. v0.2 adds row/table SOURCE STRUCTURE (row.source_span, table.source_regions, table.header_spans): grounding each cell individually proved insufficient -- transposing values between rows (source 'A 10 / B 20' extracted as 'A 20 / B 10') passed every check because each value did exist on the page. A row must now carry the exact source range of the physical row it came from, every cell value must be found inside that range and in declared column order, and every non-whitespace character of the table's source region must be accounted for by a row or an explicit header span, which is what makes an omitted source row detectable. v0.3 adds cell.source_spans and optional row.source_spans/table multi-region support so the RT/RR/RC UIDs can be RECOMPUTED from source rather than merely pattern-matched: before this, cell identity had no offsets at all, so two cells holding the same value in different rows were indistinguishable and any well-formed RC string passed. v0.4 adds table.table_region_receipt_id (P0-8): every check above enforces completeness DOWNWARDS from source_regions, but source_regions was itself the extracting agent's declaration, so a region drawn narrowly hid every row outside it and a header_span with kind 'note' hid rows inside it -- both while passing reverse coverage perfectly. The receipt binds source_regions to an extent the DAO derived by running a real table detector over the registered PDF. All of these fields are schema-optional only so legacy tables stay readable and migratable -- under canonical_v1 the DAO requires them and refuses the write without them.",
+  "allOf": [
+    {
+      "$ref": "common_component_output.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "source_document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id"
+        },
+        "tables": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/table"
+          }
+        },
+        "source_text_revision": {
+          "type": "object",
+          "description": "Which registered source-text revision this contract's offsets, quotes and source-derived UIDs were computed against (Part 11J). A single hash cannot express a contract that reads several documents, so this is a per-document map -- the same shape as upstream_policy_snapshot in Part 11I, deliberately, since using two shapes for one idea is itself a drift source. Absent on legacy (v0.1) contracts, which stay readable and migratable but cannot be written or finalized as new work; required once the document is canonical_v1.",
+          "properties": {
+            "documents": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "document_id": {
+                    "$ref": "common_component_output.schema.json#/$defs/document_id"
+                  },
+                  "revision_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "document_id",
+                  "revision_sha256"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "documents"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "source_document_id",
+        "tables"
+      ]
+    }
+  ],
+  "$defs": {
+    "source_span": {
+      "type": "object",
+      "description": "An exact character range in a processed page body (the text AFTER that page's <<<PAGE page=N>>> marker), same offset convention as policy_boundary_inventory. quote must equal the page text at [start_char:end_char] verbatim -- the DAO checks this, so a span cannot be asserted loosely.",
+      "properties": {
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start_char": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_char": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "quote": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "page",
+        "start_char",
+        "end_char",
+        "quote"
+      ],
+      "additionalProperties": false
+    },
+    "cell": {
+      "type": "object",
+      "properties": {
+        "cell_uid": {
+          "type": "string",
+          "pattern": "^RC-[a-f0-9]{16,64}$",
+          "description": "Derived from (parent row UID + this cell's exact source spans + column_key). Under canonical_v1 the DAO recomputes it and refuses a mismatch. column_key is the one normalized label canonical_v1 admits into identity, which means renaming a column moves the UID of unchanged source bytes -- a known wart frozen into the scheme, removable only in a future canonical_v2 (see known-gaps.md), never by editing what canonical_v1 computes."
+        },
+        "source_spans": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The exact source range(s) of THIS CELL, inside its own row's source span -- the DAO enforces containment and requires the normalized concatenated span text to equal value. Required under canonical_v1 (the DAO refuses the write without it); optional in the schema only so legacy v0.2 tables stay readable. `value` alone is not sufficient identity: a table with 10 in two different rows would give both cells the same inputs, so the two would be indistinguishable. Because the cell's UID also carries its parent row, transposing values between rows changes both cells' identifiers, not just their containment check. Distinct cells may not overlap in source. A cell wrapped across lines or continued on another page lists a span each.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/canonical_source_span"
+          }
+        },
+        "column_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
+          }
+        },
+        "review_required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cell_uid",
+        "column_key",
+        "value",
+        "evidence_references",
+        "review_required"
+      ],
+      "additionalProperties": false
+    },
+    "row": {
+      "type": "object",
+      "properties": {
+        "row_uid": {
+          "type": "string",
+          "pattern": "^RR-[a-f0-9]{16,64}$",
+          "description": "Derived from (parent table UID + this row's exact source spans). Under canonical_v1 the DAO recomputes it and refuses a mismatch."
+        },
+        "source_span": {
+          "$ref": "#/$defs/source_span",
+          "description": "The exact source range of THIS ROW in the processed page -- the whole physical row line(s), not a per-cell fragment. Every cell value must be found inside this span, which is what makes a row a real row rather than a set of values that merely exist somewhere on the page. Without it, transposing values between rows (source 'A 10 / B 20' extracted as 'A 20 / B 10') is undetectable because each value is individually present. Still required: it is what Part 11E's containment and reverse-coverage checks read. When the row occupies several ranges, this is its FIRST range in source order and source_spans carries all of them."
+        },
+        "source_spans": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Every source range this row occupies, for a row wrapped across lines or continued on the next page. Omit for the ordinary single-range row, where source_span alone is the row's provenance and the DAO computes the identical UID from it -- one code path, so a one-range row's identifier does not depend on which field expressed it.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/canonical_source_span"
+          }
+        },
+        "cells": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/cell"
+          }
+        }
+      },
+      "required": [
+        "row_uid",
+        "source_span",
+        "cells"
+      ],
+      "additionalProperties": false
+    },
+    "header_span": {
+      "type": "object",
+      "description": "A non-data line inside the table's source region: the column header, a repeated header on a continuation page, a units line, a rule/separator. Declared explicitly so the reverse row-coverage check can tell 'not a data row' from 'a data row that was dropped'.",
+      "properties": {
+        "span": {
+          "$ref": "#/$defs/source_span"
+        },
+        "kind": {
+          "enum": [
+            "column_header",
+            "repeated_header",
+            "caption",
+            "separator",
+            "note"
+          ]
+        }
+      },
+      "required": [
+        "span",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "column": {
+      "type": "object",
+      "properties": {
+        "column_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "column_key",
+        "label"
+      ],
+      "additionalProperties": false
+    },
+    "table": {
+      "type": "object",
+      "properties": {
+        "table_uid": {
+          "type": "string",
+          "pattern": "^RT-[a-f0-9]{16,64}$",
+          "description": "Stable source-derived machine identifier."
+        },
+        "table_id": {
+          "type": "string",
+          "pattern": "^T-[0-9]+$",
+          "description": "Sequential display label only."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/column"
+          }
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/row"
+          }
+        },
+        "table_region_receipt_id": {
+          "type": "string",
+          "pattern": "^TRR-[a-f0-9]{64}$",
+          "description": "The DAO-issued table_region_v1 receipt (see table_region_index.schema.json) whose derived extent this table's source_regions must equal exactly, and whose data_row bands its rows must correspond to one-for-one (P0-8). Issued only by `dao.py register-table-region`, which derives the extent by running a real table detector over the registered PDF -- so the region stops being a self-declaration. Schema-optional so pre-P0-8 tables stay readable and migratable; under canonical_v1 the DAO refuses a new write, a rewrite, or policy_clause_processing finalization without a CURRENT one. Deliberately not an input to the RT UID: RT is derived from source_regions, so feeding the receipt into it would make the region authorize the receipt that authorizes the region."
+        },
+        "source_regions": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The exact source range(s) this table occupies, one entry per page it spans (a multi-page table lists each page's region). Every non-whitespace character inside these regions must be accounted for by a row source_span or a header_span -- that reverse accounting is what detects a source row present in the document but MISSING from the extraction. Same completeness principle as policy_boundary_inventory's page coverage. Under canonical_v1 this set must equal the derived extent in the table's table_region_receipt_id EXACTLY: reverse coverage can only prove an extraction is complete with respect to the region it declared, never that the declared region is the whole table.",
+          "items": {
+            "$ref": "#/$defs/source_span"
+          }
+        },
+        "header_spans": {
+          "type": "array",
+          "description": "Non-data lines inside source_regions (column headers, headers repeated on a continuation page, captions, separators). Required so a repeated header on page 2 of a multi-page table is not mistaken for a dropped data row.",
+          "items": {
+            "$ref": "#/$defs/header_span"
+          }
+        },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/strict_evidence_reference"
+          }
+        },
+        "review_required": {
+          "type": "boolean",
+          "description": "true when the flat processed text cannot establish the row/column structure with certainty (merged cells, ambiguous column boundaries, a layout that only a real table extractor could resolve). A review_required table blocks policy_clause_processing finalization. Never rearrange values to avoid setting this."
+        }
+      },
+      "required": [
+        "table_uid",
+        "table_id",
+        "title",
+        "columns",
+        "rows",
+        "source_regions",
+        "header_spans",
+        "evidence_references",
+        "review_required"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -18,63 +18,75 @@
         "field_name": "diagnosis_name",
         "predicted_value": "기타 명시된 뇌혈관질환 (I67.8)",
         "actual_value": "기타 명시된 뇌혈관질환 (I678) — GT 주요 상병명 / 최종진단",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "kcd_code",
         "predicted_value": "I67.8",
         "actual_value": "I67.8 (GT: I67 within 통합뇌질병 분류표 기타 뇌혈관질환)",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "claim_coverage",
         "predicted_value": "뇌혈관질환진단비 특별약관",
         "actual_value": "통합 뇌질병진단비(뇌혈관질환(뇌졸중제외))진단비III (GT 사정 대상 담보)",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "accident_date (보험사고일)",
         "predicted_value": "2025-10-16",
         "actual_value": "2025-10-16 (GT: '2025년 10월 16일 발생한 보험사고')",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "imaging_date",
         "predicted_value": "2025-10-10",
         "actual_value": "2025-10-10 (GT 진단경위: 2025.10.10 시행 뇌 MRI)",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "policy_contract_date (KB)",
         "predicted_value": "2023-10-16",
         "actual_value": "2023-10-16 (GT 보험계약사항 KB 보험기간 시기)",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "product_name_KB",
         "predicted_value": "KB 3.5.5 오! 슬기로운간편건강보험Plus(무배당)(23.09)",
         "actual_value": "KB 3.5.5 오!슬기로운간편건강보험Plus(무배당)(23.09)(24149) (GT 사정근거)",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "product_name_삼성",
         "predicted_value": "무배당 삼성화재 간편보험 새로고침(2304.1)(자동갱신형)",
         "actual_value": "무배당 삼성화재 간편보험 새로고침(2304.1) (GT_003 사정근거)",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "product_name_한화",
         "predicted_value": "한화 3N5 WELL100 간편건강보험(연만기 갱신형)2310",
         "actual_value": "한화손해보험 한화 3N5 WELL100 간편건강보험(연만기 갱신형)2310 무배당 (GT_004 사정근거)",
-        "match": true
+        "match": true,
+        "field_kind": "fact"
       },
       {
         "field_name": "onset_date",
         "predicted_value": "2025-09-30",
         "actual_value": null,
-        "match": false
+        "match": false,
+        "field_kind": "fact"
       }
-    ]
+    ],
+    "fact_extraction_score": 0.9,
+    "discretionary_agreement_score": null
   },
   "case_type_accuracy": {
     "applicable": true,
