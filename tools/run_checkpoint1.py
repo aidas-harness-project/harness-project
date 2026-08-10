@@ -537,6 +537,7 @@ def run_checkpoint1(
     page_start: int | None = None,
     page_end: int | None = None,
     classify: bool = True,
+    max_workers: int | None = None,
 ) -> dict:
     # Evaluated before provider construction, PDF rendering, or any output
     # write, so a blocked call cannot spend tokens. What it refuses is now only
@@ -618,6 +619,7 @@ def run_checkpoint1(
             reader_a=reader_a,
             reader_b=reader_b,
             comparator=comparator,
+            max_workers=max_workers,
         )
 
     for p in ocr_data["pages"]:
@@ -1101,6 +1103,7 @@ def _run_from_args(args):
             page_start=args.page_start,
             page_end=args.page_end,
             classify=not args.bundle_ocr,
+            max_workers=args.workers,
         )
     except ProviderConfigError as exc:
         sys.exit(f"error: {exc}")
@@ -1198,6 +1201,11 @@ def _add_run_arguments(parser):
     parser.add_argument("--classifier-model", help="Model name for --classifier-provider")
     parser.add_argument("--page-start", type=int, help="1-based first source PDF page for this logical document")
     parser.add_argument("--page-end", type=int, help="1-based last source PDF page for this logical document")
+    parser.add_argument(
+        "--workers", type=int, default=None, metavar="N",
+        help="Pages OCR'd concurrently (default 4, or HARNESS_OCR_WORKERS). 1 = "
+             "sequential. Wall-time only: pages are independent, and results are "
+             "returned in source order either way.")
     parser.add_argument(
         "--bundle-ocr", action="store_true",
         help="OCR an unsplit bundle without classifying it, so segmentation can "

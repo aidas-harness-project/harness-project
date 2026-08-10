@@ -36,6 +36,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -386,6 +388,34 @@ def _save_cached_page(cache_dir: Path, page: int, page_result: dict) -> None:
     tmp.replace(cache_dir / f"page_{page:03d}.json")
 
 
+DEFAULT_OCR_WORKERS = 4
+
+
+def _resolve_workers(max_workers: int | None) -> int:
+    """Page-level concurrency. Explicit argument wins, then HARNESS_OCR_WORKERS,
+    then DEFAULT_OCR_WORKERS.
+
+    The ceiling is deliberately modest and not CPU-derived: the work is
+    provider round-trips, not local computation, so the real limits are the
+    backend's rate limit and -- for the CLI providers -- one child process per
+    in-flight call. A value <= 1 restores the strictly sequential loop, which is
+    also what a single-page document gets.
+    """
+    if max_workers is None:
+        raw = os.environ.get("HARNESS_OCR_WORKERS")
+        if raw is None or not raw.strip():
+            return DEFAULT_OCR_WORKERS
+        try:
+            max_workers = int(raw)
+        except ValueError:
+            raise ProviderConfigError(
+                f"HARNESS_OCR_WORKERS must be an integer, got {raw!r}"
+            ) from None
+    if max_workers < 1:
+        return 1
+    return max_workers
+
+
 def run_ocr(
     case_id: str,
     doc_id: str,
@@ -395,6 +425,7 @@ def run_ocr(
     reader_b=None,
     comparator=None,
     resume: bool = True,
+    max_workers: int | None = None,
 ) -> dict:
     """The actual dual-path OCR loop, extracted out of main() so callers
     (run_checkpoint1.py) can invoke it in-process instead of shelling out
@@ -412,7 +443,16 @@ def run_ocr(
     pages, otherwise loses everything on any interruption since ocr_result is
     only written after the whole document finishes). The cache is cleared on
     full completion. Page images are deterministic per PDF, so a cached page N
-    always corresponds to the same source page."""
+    always corresponds to the same source page.
+
+    max_workers controls how many PAGES are in flight at once (see
+    _resolve_workers). Pages are independent -- each is two reads plus one
+    comparison over one image -- so this is a wall-time change only: results are
+    collected into page-indexed slots and returned in source order, each page's
+    two reads still see the same image, and a page still costs exactly one pass.
+    The two readers of a single page stay sequential relative to each other, so
+    P8's pairing cannot drift. Pass max_workers=1 for the original strictly
+    sequential behaviour."""
     if not doc_path.exists():
         sys.exit(f"error: document not found -- {doc_path}")
 
@@ -442,27 +482,46 @@ def run_ocr(
         comparator = comparator or providers["comparator"]
 
     cache_dir = _resume_cache_dir(case_id, doc_id)
+    workers = _resolve_workers(max_workers)
 
-    pages_out = []
     with scratch_dir(case_id, doc_id) as tmp_dir:
         if doc_path.suffix.lower() == ".pdf":
             page_images = split_to_page_images(doc_path, tmp_dir)
         else:
             page_images = [doc_path]  # already a single image
 
-        for i, img_path in enumerate(page_images, start=1):
-            cached = _load_cached_page(cache_dir, i) if resume else None
-            if cached is not None:
-                pages_out.append(cached)
-                msg = f"page {i}/{len(page_images)}: {cached['agreement']} (cached)"
-                progress(msg) if progress else print(msg, file=sys.stderr)
-                continue
+        total = len(page_images)
+        # Results are collected into a page-indexed slot, never appended, so the
+        # output order is the SOURCE order no matter which page finishes first.
+        # Downstream writes pages[i] as page i+1's text, so an
+        # order-of-completion list would silently file one page's text under
+        # another's number.
+        slots: list[dict | None] = [None] * total
+        progress_lock = threading.Lock()
 
+        def report(msg: str) -> None:
+            # progress() is called from worker threads once workers > 1; a
+            # caller's callback (and plain print) is not guaranteed thread-safe.
+            with progress_lock:
+                progress(msg) if progress else print(msg, file=sys.stderr)
+
+        def process_page(index: int, img_path: Path) -> None:
+            page_no = index + 1
+            cached = _load_cached_page(cache_dir, page_no) if resume else None
+            if cached is not None:
+                slots[index] = cached
+                report(f"page {page_no}/{total}: {cached['agreement']} (cached)")
+                return
+
+            # reader_a and reader_b are deliberately BOTH given img_path: P8's
+            # premise is two independent reads of the same page. They stay
+            # sequential relative to each other -- the parallelism is across
+            # pages, so pairing can never drift.
             reading_a = transcribe_once(img_path, reader_a)
             reading_b = transcribe_once(img_path, reader_b)
             result = compare(reading_a["text"], reading_b["text"], comparator)
             page_result = {
-                "page": i,
+                "page": page_no,
                 "reading_a": reading_a["text"],
                 "reading_b": reading_b["text"],
                 "agreement": result["agreement"],
@@ -473,11 +532,44 @@ def run_ocr(
                     "comparator": result["metadata"],
                 },
             }
+            # Cache before publishing the slot: an interrupt between the two
+            # loses nothing (the page is re-read), whereas the reverse could
+            # report a page as done that was never persisted.
             if resume:
-                _save_cached_page(cache_dir, i, page_result)
-            pages_out.append(page_result)
-            msg = f"page {i}/{len(page_images)}: {result['agreement']}"
-            progress(msg) if progress else print(msg, file=sys.stderr)
+                _save_cached_page(cache_dir, page_no, page_result)
+            slots[index] = page_result
+            report(f"page {page_no}/{total}: {result['agreement']}")
+
+        if workers <= 1 or total <= 1:
+            for index, img_path in enumerate(page_images):
+                process_page(index, img_path)
+        else:
+            with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
+                futures = {
+                    pool.submit(process_page, index, img_path): index
+                    for index, img_path in enumerate(page_images)
+                }
+                # Surface the first failure, but only after every in-flight page
+                # has settled -- a page that already finished has been cached,
+                # and killing the pool early would throw that work away. That is
+                # the property the sequential loop had for free: a crash on page
+                # 7 kept pages 1-6.
+                first_error = None
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except BaseException as exc:  # noqa: BLE001 -- re-raised below
+                        first_error = first_error or exc
+                if first_error is not None:
+                    raise first_error
+
+        pages_out = [slot for slot in slots if slot is not None]
+        if len(pages_out) != total:
+            missing = [i + 1 for i, slot in enumerate(slots) if slot is None]
+            raise ProviderExecutionError(
+                f"OCR produced no result for page(s) {missing} of {doc_path}; "
+                "refusing to return a document with silently missing pages"
+            )
 
     # Full document finished -> the per-page resume cache is no longer needed.
     if resume:
@@ -678,6 +770,10 @@ def main():
     ap.add_argument("--reader-a-model", help="Model name for --reader-a")
     ap.add_argument("--reader-b-model", help="Model name for --reader-b")
     ap.add_argument("--comparator-model", help="Model name for --comparator")
+    ap.add_argument("--workers", type=int, default=None, metavar="N",
+                    help="Pages transcribed concurrently (default %d, or HARNESS_OCR_WORKERS). "
+                         "1 = the strictly sequential loop. Output is identical either way -- "
+                         "pages are always returned in source order." % DEFAULT_OCR_WORKERS)
     args = ap.parse_args()
 
     try:
@@ -696,6 +792,7 @@ def main():
             reader_a=providers["reader_a"],
             reader_b=providers["reader_b"],
             comparator=providers["comparator"],
+            max_workers=args.workers,
         )
     except ProviderConfigError as exc:
         sys.exit(f"error: {exc}")
