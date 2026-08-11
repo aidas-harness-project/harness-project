@@ -3,7 +3,7 @@
 All case data access goes through tools/dao.py. Redaction itself goes through
 the `redaction.Redactor` abstraction (today: `LlmRedactor` over any configured
 provider), so a future dedicated de-identification model can drop in without
-changing this tool. Dev-phase default provider is `codex-cli`.
+changing this tool. Dev-phase default provider is `claude-cli`.
 
 Redaction is span-substitution, not page rewriting: the model only IDENTIFIES
 PII values and `redaction.py` deterministically replaces them in the source, so
@@ -17,7 +17,7 @@ review_required. A redaction is never trusted silently.
 Usage:
     python tools/redact_document.py CASE_ID DOC_ID \
         --held-by document-pipeline --run-id RUN_ID \
-        --provider codex-cli --model MODEL
+        --provider claude-cli --model MODEL
 """
 from __future__ import annotations
 
@@ -50,7 +50,13 @@ from redaction import (PROMPT_VERSION, LlmRedactor, NoPiiClassRedactor,
 
 ROOT = Path(__file__).resolve().parent.parent
 DAO = ROOT / "tools" / "dao.py"
-DEFAULT_REDACTION_PROVIDER = "codex-cli"
+# claude-cli, not codex-cli: on Windows the codex npm shim installs as
+# `codex.CMD`, which `shutil.which` resolves but `subprocess.run(["codex"])`
+# cannot launch (WinError 2) -- a batch file needs a shell, not execve. The
+# default has to be a provider that actually starts, so an operator who passes
+# no --provider gets a working redaction rather than a FileNotFoundError.
+# codex-cli remains selectable via --provider / HARNESS_REDACTION_PROVIDER.
+DEFAULT_REDACTION_PROVIDER = "claude-cli"
 
 
 # Bumped when the CACHE ENTRY's own shape changes (not when redaction changes

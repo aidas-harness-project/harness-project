@@ -249,3 +249,38 @@ def test_no_resume_ignores_an_existing_cache(monkeypatch, tmp_path):
     result = rd.redact_document("CASE_009", "DOC_001", "document-pipeline", "RUN_1",
                                 _fixture_redactor(items), resume=False)
     assert result["cache_hits"] == 0
+
+
+# ------------------------------------------------- default provider is usable --
+
+def test_default_redaction_provider_resolves_to_a_launchable_command():
+    """The default must be a provider that can actually start.
+
+    codex-cli was the default until 2026-08-11, and on Windows it cannot be
+    launched at all: the npm shim installs as `codex.CMD`, which `shutil.which`
+    resolves happily but `subprocess.run(["codex"])` rejects with WinError 2 --
+    a batch file needs a shell, not execve. An operator who passed no
+    --provider got a FileNotFoundError instead of a redaction.
+
+    Asserting the constant's spelling would only restate the code. This builds
+    the provider the default actually selects and checks the command it would
+    launch is a real executable file, which is the property that broke.
+    """
+    import shutil
+    from pathlib import Path as _Path
+
+    from llm_providers import ProviderConfig, build_provider
+
+    provider = build_provider(
+        ProviderConfig(provider_name=rd.DEFAULT_REDACTION_PROVIDER))
+    command = getattr(provider, "command", None)
+    assert command, "the default provider must expose the command it launches"
+
+    resolved = shutil.which(command) or (command if _Path(command).exists() else None)
+    assert resolved, (
+        f"default provider {rd.DEFAULT_REDACTION_PROVIDER!r} resolves to "
+        f"{command!r}, which is not on PATH and is not an existing file")
+    assert _Path(resolved).suffix.lower() not in (".cmd", ".bat", ".ps1"), (
+        f"{resolved!r} is a shell script shim; subprocess.run(shell=False) "
+        "cannot launch it on Windows, and the cmd.exe layer truncates "
+        "multi-line prompts at the first blank line")
