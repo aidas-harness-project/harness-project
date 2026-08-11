@@ -3422,3 +3422,66 @@ separately:
 
 What this item establishes is that the risk is **live and reproducible**, not
 theoretical: one run caught it, the next one did not, on the same page.
+
+---
+
+## 47. Lock-poll policy (T7): measured under real document parallelism, and dropped -- RESOLVED 2026-08-11
+
+P5 polls a held lock every **30 seconds** for up to 15 minutes. That cadence
+suits what P5 was written for -- a lock held by a person or a long stage,
+where polling faster only burns cycles -- and is badly wrong for a parallel
+batch of short commits, where a waiter can sleep out most of a 30s interval
+after the lock has already been released.
+
+`dao.py`'s own comment records the counter-example: `analyze-policy-polarity`
+held the index lock for milliseconds to append one receipt, and ten concurrent
+workers with nine cache hits spent **4.5 minutes in pure polling** on CASE_907.
+
+The runtime plan deferred this deliberately ("measure first, then decide"),
+and the first measurements said zero: lock wait 0ms and 0 polls across
+CASE_950/951/952. But those three runs had **no document-level parallelism at
+all**, so the honest reading was "not painful yet because nothing contends,"
+not "the policy is fine" -- and the plan said so, making the item
+**deferred until T8 rather than closed**.
+
+**T8 landed on 2026-08-11, so the deferral condition was met and this was
+measured under the intended conditions**: `run_document_stage.py`, 3 documents
+processed by 3 concurrent workers, 44 pages, real claude-cli calls, 2m26s.
+
+| | |
+|---|---|
+| `lock.acquire` spans | 41 |
+| total lock wait | **0.0000s** |
+| total poll count | **0** |
+| acquisitions that waited at all | **0 / 41** |
+| `document_manifest.json` acquisitions | 5, all immediate |
+
+**Why there is no contention, and why the counter-example does not transfer.**
+A document worker touches the manifest once or twice, for milliseconds, and
+spends the rest of its life inside provider calls (a single
+`provider.transcribe_image` span in this run measured 27.0s). Three workers
+arriving at the same lock in the same millisecond is vanishingly unlikely --
+the provider calls scatter their arrival times. `analyze-policy-polarity` was
+the opposite shape: ten workers, nine of them cache hits, so they did *no*
+work between lock acquisitions and therefore met at the lock every time.
+
+Two further points make this a close rather than another deferral:
+
+* **The code that produced the counter-example no longer exists.** The LLM
+  polarity layer was deleted on 2026-08-04 (813 provider calls per bundle,
+  never once completed on any case, nothing downstream consumed it).
+* **T3, the same day, shortened lock hold time further** by removing the
+  hold-and-wait in `patch_manifest_document`, so the manifest lock is now held
+  across strictly less work than when the 4.5-minute figure was recorded.
+
+**Decision: dropped.** Neither candidate is implemented -- not the two-phase
+wait (fast 50ms+jitter polling for the first ~2s, then the existing 30s), nor
+the benchmark-only env override. Changing the cadence would require syncing
+the `harness-guardrails` P5 text under D4, and there is no measured gain to
+pay for that.
+
+`HARNESS_LOCK_POLL_INTERVAL_SECONDS` already exists for a future batch driver
+whose workers genuinely do no work between acquisitions. If such a driver is
+ever added, re-measure with its `lock.acquire` spans rather than assuming
+either result -- both the 4.5-minute figure and this 0-poll figure are true,
+of different workloads.
