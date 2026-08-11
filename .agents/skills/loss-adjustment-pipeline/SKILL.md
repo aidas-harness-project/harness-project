@@ -9,6 +9,54 @@ Coordinates 10 agents across two phases to turn case intake into a screening rep
 
 **Execution mode: sub-agent pipeline.** Every stage below is dispatched as a subagent call naming that agent's definition file (`.claude/agents/{name}.md`), with `model: opus`. All inter-agent data passes through the DAO as files — agent return values carry only a summary and warnings, never the actual contract data.
 
+### What a dispatch briefing may contain
+
+An agent's *procedure* already lives in its definition file, which is injected
+as its system prompt. The briefing you write is only the part that definition
+cannot know: which case, which run, and which decisions the orchestrator has
+already made. Anything else you add is either redundant or harmful.
+
+**Put in the briefing:**
+
+- `case_id`, `run_id`, `held_by`, and the instruction to pass `--run-id` on
+  every DAO call including reads.
+- **Orchestrator-owned decisions the agent must not make or revisit** — a P8
+  reduction (`HARNESS_SINGLE_READER` / `--on-disagreement`), a delegated human
+  gate and the name to record for it, a scoping decision such as which
+  documents are in scope.
+- Where to resume, named as a checkpoint (`"checkpoint 1 is complete; start
+  from checkpoint 2"`), and what to produce.
+- The stop rule: report a blocked state and halt; do not work around it, patch
+  tools, or investigate root causes in the code.
+
+**Keep out of the briefing — this is the rule that gets broken:**
+
+- **Contract state.** Never list per-document `document_type`, page counts,
+  `ocr_status`, `cross_validation_status`, or any other value the agent can
+  read from `document_manifest.json` and its contracts. Tell it what to do and
+  let it read what is true. Handing it the state means (a) you cannot tell
+  whether it read the DAO at all or just trusted your summary, (b) a stale
+  briefing silently overrides current fact, and (c) a timed run stops paying
+  the read cost a real run pays, so the SLA number measures a run nobody will
+  ever perform.
+- **Expected findings.** Never say what a document contains, what a bundle will
+  split into, or what a classification should come out as — even from a
+  previous run of the same source. An agent told a 19-page bundle holds "a
+  진단서, two REPORTs, an 입퇴원확인서 and two 진료비 명세서" can produce exactly
+  that partition without the page text supporting it, and nothing downstream
+  can distinguish that from a real reading. This is the difference between
+  dispatching a stage and dictating its answer.
+- **Restatements of the agent's own definition.** Checkpoint order, DAO-only
+  access, "do not call finalize-stage", schema-validation behaviour — all
+  already in the spec. Repeating them creates a second copy that drifts (the
+  2026-07-17 forbidden-expression shape) and makes it ambiguous which text
+  governs when they disagree.
+
+The test to apply before dispatching: **if the briefing were deleted and
+replaced with "resume CASE_X from checkpoint N", would the agent still reach
+the right answer?** If no, find what is missing and add only that. If a line
+would merely save the agent a DAO read, cut it.
+
 There is no standalone `run_pipeline.py` process. This skill is the executable
 orchestration contract: a case-processing request must follow every gate below
 in order. Calling a later tool directly bypasses orchestration and is not a
