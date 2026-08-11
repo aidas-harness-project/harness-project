@@ -146,21 +146,29 @@ def test_limit_resolution(monkeypatch, raw, expected):
     assert lp._resolve_max_inflight() == expected
 
 
-def test_default_cap_is_sixteen(monkeypatch):
-    """Raised 6 -> 16 on 2026-08-11 on measurement, not headroom.
+def test_default_is_uncapped(monkeypatch):
+    """Uncapped by default since 2026-08-11 (user decision).
 
-    At 6 the cap was the binding constraint and was eating the gain it was
-    meant to protect: running two documents concurrently made each document
-    individually slower (CASE_953 DOC_003: 53.5s -> 87.9s) because 16 requests
-    were squeezed through 6 slots. Per-document time SUM went 154.6s -> 214.4s
-    at cap 6, versus 156.4s at cap 16.
+    The full CASE_953 end-to-end run measured the cap out of the picture: 99
+    provider calls, ZERO provider.queue spans -- not one call ever waited on a
+    permit -- and zero rate-limit errors. A limiter that never engages is not
+    protecting anything. Concurrency is governed by the pool sizes (page
+    workers x document workers), which is what to change for throughput.
 
-    Pinned because the value is invisible at runtime -- a silent revert to 6
-    shows up only as a slower run that still passes everything else.
+    Pinned because the semaphore must stay REACHABLE: setting the env to a
+    positive value has to re-arm it, so the knob still exists if a backend
+    ever starts rate-limiting.
     """
     monkeypatch.delenv(lp.LLM_MAX_INFLIGHT_ENV, raising=False)
-    assert lp.DEFAULT_LLM_MAX_INFLIGHT == 16
-    assert lp._resolve_max_inflight() == 16
+    lp.reset_inflight_semaphore()
+    assert lp.DEFAULT_LLM_MAX_INFLIGHT == 0
+    assert lp._resolve_max_inflight() == 0
+    assert lp._get_inflight_semaphore() is None, "no cap means no semaphore"
+
+    monkeypatch.setenv(lp.LLM_MAX_INFLIGHT_ENV, "16")
+    lp.reset_inflight_semaphore()
+    assert lp._get_inflight_semaphore() is not None, (
+        "the limiter must re-arm when a positive value is set")
 
 
 def test_changing_the_env_rebuilds_the_semaphore(monkeypatch):

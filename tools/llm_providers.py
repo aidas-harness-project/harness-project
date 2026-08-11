@@ -205,14 +205,29 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 # squeezed through 6 slots -- the parallel win was handed straight back as
 # queueing. At 16 that overhead is essentially gone (60s -> 1.8s).
 #
-# 16 rather than higher: the run peaked at 12 with zero rate-limit errors, so
-# 12 concurrent calls is measured-safe and 16 sits just above it without
-# binding. Anything larger is unmeasured on this backend, and being wrong
-# there costs rate-limit failures. Note the ceiling is not this constant
+# UNCAPPED by default since 2026-08-11 (user decision), after the full
+# CASE_953 end-to-end run measured the cap out of the picture entirely: 99
+# provider calls, ZERO `provider.queue` spans -- not one call ever waited on a
+# permit -- and zero rate-limit errors. A limiter that never engages is not
+# protecting anything; it is only a second place a future throughput change
+# has to be remembered.
+#
+# What actually governs concurrency is the pool sizes: page workers x document
+# workers is the demand, so raising throughput means raising those, not this.
+# The semaphore remains in the code and re-arms the moment this is set to a
+# positive value (HARNESS_LLM_MAX_INFLIGHT=16 restores the previous default),
+# which is the knob to reach for if a backend ever starts rate-limiting.
+#
+# The earlier reasoning for a finite value, kept because it explains what the
+# limiter is FOR: at 6 it was the binding constraint and was eating the gain
+# it was meant to protect. Anything larger than 16 was unmeasured on this
+# backend, and being wrong costs rate-limit failures rather than slowness --
+# which is why this is now a deliberate uncapping rather than a bigger guess.
+# Note the ceiling is not this constant
 # alone -- page workers x document workers is the demand, and 8 x 1 = 8 today,
 # so this value only becomes load-bearing once document-level parallelism
 # (T8) exists.
-DEFAULT_LLM_MAX_INFLIGHT = 16
+DEFAULT_LLM_MAX_INFLIGHT = 0  # 0 == no cap; see the note above
 LLM_MAX_INFLIGHT_ENV = "HARNESS_LLM_MAX_INFLIGHT"
 
 _inflight_semaphore: threading.BoundedSemaphore | None = None
