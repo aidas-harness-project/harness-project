@@ -156,3 +156,91 @@ def test_cli_wrapper_reads_fields_from_file(isolated_dao, make_args, tmp_path):
     doc = json.loads((isolated_dao / "outputs" / "CASE_009" / "document_manifest.json").read_text(encoding="utf-8"))["documents"][0]
     assert doc["ocr_status"] == "completed"
     assert doc["pages"] == 2
+
+
+# ------------------------------------------------------- lock ordering (T3) --
+
+def test_run_state_is_updated_after_the_manifest_lock_is_released(isolated_dao, monkeypatch):
+    """The manifest lock must NOT still be held while run-state is updated.
+
+    patch_manifest_document held the manifest lock across its
+    _update_run_state call, which acquires a SECOND lock (_run_state.json).
+    Holding one lock while requesting another is the hold-and-wait condition:
+    with document-level workers (T8), one worker holding the manifest lock and
+    waiting for run-state, while another holds run-state and waits for the
+    manifest, is a deadlock. P5 polls for 15 minutes before giving up, so it
+    would surface as a long stall rather than a crash -- and only sometimes,
+    which is the worst shape to debug.
+
+    Asserted as a property (was the lock file present?) rather than by racing
+    two threads, so it cannot pass by winning a timing coin flip.
+    """
+    _seed_manifest(isolated_dao)
+    manifest_lock = dao.case_dir("CASE_009") / "document_manifest.json.lock"
+    observed = {}
+
+    real_update = dao._update_run_state
+
+    def spy(*args, **kwargs):
+        observed["manifest_lock_held"] = manifest_lock.exists()
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(dao, "_update_run_state", spy)
+
+    ok, message = dao.patch_manifest_document(
+        "CASE_009", "DOC_001", {"ocr_status": "completed"}, "tester",
+        "RUN_20260713_001", stage="document_processing")
+
+    assert ok, message
+    assert observed.get("manifest_lock_held") is False, (
+        "run-state was updated while the manifest lock was still held -- "
+        "that is the lock-order inversion T3 exists to remove")
+
+
+def test_run_state_marker_still_lands_after_the_reorder(isolated_dao):
+    """Moving the call must not silently drop the progress marker."""
+    _seed_manifest(isolated_dao)
+
+    ok, message = dao.patch_manifest_document(
+        "CASE_009", "DOC_001", {"ocr_status": "completed"}, "tester",
+        "RUN_20260713_001", stage="document_processing")
+
+    assert ok, message
+    state = json.loads(dao.run_state_path("CASE_009").read_text(encoding="utf-8"))
+    stages = {s["stage_name"]: s for s in state["stages"]}
+    assert stages["document_processing"]["status"] == "in_progress", (
+        "the soft progress marker must still be recorded")
+
+
+def test_two_concurrent_patches_both_complete(isolated_dao, monkeypatch):
+    """The scenario T8 creates: two document workers patching two different
+    documents at the same time. Both must finish, and both edits must survive
+    -- neither may be lost to the other's read-modify-write."""
+    monkeypatch.setattr(dao, "LOCK_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(dao, "LOCK_MAX_WAIT_SECONDS", 20)
+    other = {
+        "document_id": "DOC_002", "file_name": "DOC_002.pdf",
+        "file_path": "data/raw/CASE_009/DOC_002.pdf", "file_format": "pdf",
+        "file_size_bytes": 2000, "ocr_status": "pending",
+    }
+    manifest_path = _seed_manifest(isolated_dao, extra_docs=[other])
+    results = {}
+
+    def worker(doc_id):
+        results[doc_id] = dao.patch_manifest_document(
+            "CASE_009", doc_id, {"ocr_status": "completed"}, f"worker-{doc_id}",
+            "RUN_20260713_001", stage="document_processing")
+
+    threads = [threading.Thread(target=worker, args=(d,))
+               for d in ("DOC_001", "DOC_002")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not any(t.is_alive() for t in threads), "a patch never returned -- deadlock"
+    assert all(ok for ok, _ in results.values()), results
+    docs = {d["document_id"]: d
+            for d in json.loads(manifest_path.read_text(encoding="utf-8"))["documents"]}
+    assert docs["DOC_001"]["ocr_status"] == "completed"
+    assert docs["DOC_002"]["ocr_status"] == "completed", "one worker's edit was lost"

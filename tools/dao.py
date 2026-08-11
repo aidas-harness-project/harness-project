@@ -3207,22 +3207,31 @@ def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_b
             return False, "FAIL: segment-lineage validation errors for " + str(target) + " -- not written:\n" + \
                 "\n".join(f"  - {e}" for e in lineage_errors)
         atomic_write_json(target, manifest)
-        if stage:
-            # in_progress, not passed -- see cmd_write_contract: patching one
-            # document's manifest fields is progress within document_processing,
-            # never the whole stage finalizing. dep_check='soft' so a manifest
-            # patch never fails on run-state dependencies.
-            state = _update_run_state(case_id, run_id, stage, "in_progress", held_by, dep_check="soft")
-            if state is None:
-                result = True, f"PASS: patched {document_id} in {target}\n" \
-                    "WARNING: patch succeeded, but run-state could not be updated (lock contention) -- " \
-                    "run-state may now lag behind actual progress; retry the run-state update."
-            else:
-                result = True, f"PASS: patched {document_id} in {target}"
-        else:
-            result = True, f"PASS: patched {document_id} in {target}"
+        result = True, f"PASS: patched {document_id} in {target}"
     finally:
         release_lock(target)
+    # Run-state marker outside the manifest lock, for the same reason the
+    # cascade below is outside it -- and additionally because _update_run_state
+    # acquires a SECOND lock (_run_state.json). Holding the manifest lock while
+    # requesting that one is hold-and-wait: with document-level workers (T8),
+    # worker A holding the manifest and waiting for run-state, while worker B
+    # holds run-state and waits for the manifest, is a deadlock. P5 polls for
+    # 15 minutes before giving up, so it would surface as an intermittent long
+    # stall rather than a crash. Taking one lock at a time removes the
+    # condition outright instead of managing the ordering.
+    #
+    # Nothing is lost by moving it: the marker is in_progress, not passed (see
+    # cmd_write_contract -- patching one document's fields is progress within
+    # document_processing, never the whole stage finalizing), it runs with
+    # dep_check='soft' so it never fails the patch on run-state dependencies,
+    # and a failure here was already only a warning on an otherwise successful
+    # return. The manifest write above is durable before this runs.
+    if stage:
+        state = _update_run_state(case_id, run_id, stage, "in_progress", held_by, dep_check="soft")
+        if state is None:
+            result = True, f"PASS: patched {document_id} in {target}\n" \
+                "WARNING: patch succeeded, but run-state could not be updated (lock contention) -- " \
+                "run-state may now lag behind actual progress; retry the run-state update."
     # Cascade outside the manifest lock: a changed page_map/source identity
     # moves the ground every downstream stage's provenance was checked against.
     # The patch is durable by now, so a failed cascade cannot be rolled back --
