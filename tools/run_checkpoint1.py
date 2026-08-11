@@ -795,7 +795,17 @@ def run_checkpoint1(
         source_total_pages=source_total_pages)
     _write_contract(case_id, f"ocr_result_{doc_id}.json", ocr_result, "ocr_result.schema.json", held_by, run_id)
 
-    any_disagreement = ocr_result["review_required"]
+    # Keyed on real disagreed pages, NOT on review_required. Those were the same
+    # thing only while 'disagreed' was the only reason to require review; both
+    # deferral modes then broke that identity, and this read it as a P8 block.
+    # --single-reader sets review_required to be honest that nothing was
+    # cross-validated, and every scanned document came back
+    # `blocked_disagreement` with an EMPTY disagreed_pages list -- the
+    # throughput mode blocking exactly the documents it exists to carry through.
+    # (assume-reading-a survived only because _apply_assume_reading_a rewrites
+    # 'disagreed' away before this line, so nothing was left to block on.)
+    any_disagreement = any(
+        p["agreement"] == "disagreed" for p in ocr_data["pages"])
     if any_disagreement:
         scratch_root = ROOT / "_ocr_scratch"
         scratch_root.mkdir(exist_ok=True)

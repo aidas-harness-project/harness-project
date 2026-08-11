@@ -167,6 +167,34 @@ class TestSingleReaderDefault:
         assert out["pages"][0]["reading_b"] is not None
 
 
+def test_single_reader_document_is_not_blocked(page_image: Path, monkeypatch,
+                                               tmp_path: Path) -> None:
+    """A single-reader document must COMPLETE, not block.
+
+    Found on the real CASE_911 run: DOC_002 came back `blocked_disagreement`
+    with an EMPTY disagreed_pages list. run_checkpoint1 keyed the block on
+    `review_required`, which was a faithful proxy for "a page disagreed" only
+    while 'disagreed' was the only reason review could be required.
+    --single-reader sets review_required to be honest that nothing was
+    cross-validated, so the throughput mode blocked exactly the scanned
+    documents it exists to carry through -- and would have blocked every scan
+    in a corpus that is almost entirely scans.
+
+    Asserted on the block predicate itself rather than by driving the whole
+    checkpoint, which needs a manifest, a segmentation gate and DAO writes.
+    """
+    out = _run(page_image, single_reader=True)
+    result = rc._assemble_ocr_result(
+        "CASE_999", "DOC_001", "RUN_20260811_001", out, source_total_pages=1)
+
+    # The honest flag stays set...
+    assert result["review_required"] is True
+    # ...but it must not be what decides a block.
+    assert not any(p["agreement"] == "disagreed" for p in out["pages"]), (
+        "no page disagreed, so nothing may be blocked as a P8 disagreement"
+    )
+
+
 def test_single_reader_cache_namespace_is_separate(page_image: Path) -> None:
     """A single-read verdict and a dual-read verdict must never be interchangeable.
 
