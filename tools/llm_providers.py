@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import functools
 import json
 import mimetypes
@@ -26,6 +27,7 @@ import random
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -170,6 +172,93 @@ def compare_text_timeout(env: Mapping[str, str] | None = None) -> int:
         return _COMPARE_TEXT_DEFAULT_TIMEOUT_SECONDS
     return value if value > 0 else _COMPARE_TEXT_DEFAULT_TIMEOUT_SECONDS
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+# ---------------------------------------------------------------- T6: in-flight cap --
+#
+# A process-wide ceiling on concurrent provider calls. It exists because the
+# pools nest: page workers already run 4-8 wide, and document-level workers
+# (T8) multiply that -- 2 documents x 8 pages is 16 concurrent CLI children,
+# each a full node process, against a shared rate limit.
+#
+# PROCESS-wide is sufficient, and only became sufficient once T4a removed
+# redaction's per-page dao subprocess: a cross-PROCESS ceiling would need a
+# file lock, which is exactly the 30s-poll cost this layer exists to avoid.
+#
+# Acquired around the LEAF call only -- the single subprocess.run/urlopen --
+# never around a whole P8 chain. reader_a -> reader_b -> compare runs inside
+# one page worker: if that worker held a permit for the whole chain while its
+# own leaf calls waited for permits, it would deadlock against itself. The
+# permit is also released across a retry backoff sleep, so a retrying call
+# does not hold capacity it is not using.
+DEFAULT_LLM_MAX_INFLIGHT = 6
+LLM_MAX_INFLIGHT_ENV = "HARNESS_LLM_MAX_INFLIGHT"
+
+_inflight_semaphore: threading.BoundedSemaphore | None = None
+_inflight_limit: int | None = None
+_inflight_lock = threading.Lock()
+
+
+def _resolve_max_inflight(env: Mapping[str, str] | None = None) -> int:
+    """Explicit env wins, then the default. 0 (or a negative/unparseable
+    value) disables the cap entirely -- the documented rollback."""
+    source = os.environ if env is None else env
+    raw = str(source.get(LLM_MAX_INFLIGHT_ENV, "")).strip()
+    if not raw:
+        return DEFAULT_LLM_MAX_INFLIGHT
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_LLM_MAX_INFLIGHT
+    return value if value > 0 else 0
+
+
+def _get_inflight_semaphore():
+    """The process-wide semaphore, built once. Returns None when disabled.
+
+    Rebuilt if the resolved limit changes, so a test (or a caller that sets
+    the env after import) is not stuck with the first value ever seen.
+    """
+    global _inflight_semaphore, _inflight_limit
+    limit = _resolve_max_inflight()
+    if limit <= 0:
+        return None
+    with _inflight_lock:
+        if _inflight_semaphore is None or _inflight_limit != limit:
+            _inflight_semaphore = threading.BoundedSemaphore(limit)
+            _inflight_limit = limit
+        return _inflight_semaphore
+
+
+def reset_inflight_semaphore() -> None:
+    """Drop the cached semaphore so the next call re-reads the env."""
+    global _inflight_semaphore, _inflight_limit
+    with _inflight_lock:
+        _inflight_semaphore = None
+        _inflight_limit = None
+
+
+@contextlib.contextmanager
+def provider_slot(op: str = "provider.call"):
+    """Hold one in-flight permit for the duration of a single leaf call.
+
+    The wait is traced as `provider.queue`, which is the only way queue time
+    becomes visible at all -- without the semaphore there is no queue and the
+    measurement does not exist.
+    """
+    sem = _get_inflight_semaphore()
+    if sem is None:
+        yield
+        return
+    acquired = sem.acquire(blocking=False)
+    if not acquired:
+        # Only pay for a span when the call actually waits; the uncontended
+        # path stays free.
+        with trace_mod.span("provider.queue", category="wait", op_name=op):
+            sem.acquire()
+    try:
+        yield
+    finally:
+        sem.release()
 
 # A child subprocess that reads untrusted claim-document images has no reason
 # to hold other providers' credentials. Any env var whose name ends in one of
@@ -491,17 +580,20 @@ class ClaudeCliProvider(BaseProvider):
                 # the ANSI code page and crashes on Korean output
                 # (UnicodeDecodeError -> stdout None). Same treatment
                 # CodexCliProvider already applies.
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=timeout,
-                    cwd=cwd,
-                    stdin=subprocess.DEVNULL,
-                    env=run_env,
-                )
+                # The permit is held around this call ONLY -- not around the
+                # retry backoff below, and never around a whole P8 chain.
+                with provider_slot("claude-cli"):
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=timeout,
+                        cwd=cwd,
+                        stdin=subprocess.DEVNULL,
+                        env=run_env,
+                    )
             except FileNotFoundError as exc:
                 raise ProviderExecutionError(f"claude-cli command not found: {self.command}") from exc
             except subprocess.TimeoutExpired as exc:
@@ -709,16 +801,17 @@ class CodexCliProvider(BaseProvider):
             last_detail = ""
             for attempt in range(_CLAUDE_CLI_MAX_ATTEMPTS):
                 try:
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=timeout,
-                        cwd=str(self.root),
-                        env=run_env,
-                    )
+                    with provider_slot("codex-cli"):
+                        result = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=timeout,
+                            cwd=str(self.root),
+                            env=run_env,
+                        )
                 except FileNotFoundError as exc:
                     raise ProviderExecutionError(f"codex-cli command not found: {self.command}") from exc
                 except subprocess.TimeoutExpired as exc:
@@ -893,7 +986,8 @@ class OpenAIApiProvider(_ApiProviderStub):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with provider_slot("openai-api"), \
+                    urllib.request.urlopen(request, timeout=timeout) as response:
                 response_body = response.read().decode("utf-8")
                 status_code = getattr(response, "status", None)
         except urllib.error.HTTPError as exc:

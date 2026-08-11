@@ -335,8 +335,33 @@ def test_run_ocr_caches_pages_and_resume_skips_reader_calls(monkeypatch, tmp_pat
     doc = _patch_two_page_split(monkeypatch, tmp_path)
 
     # First run: only page 1 succeeds, page 2 raises mid-way (simulated crash).
-    reader_a = FakeReader("fixture", "m", ["A1", "A2"])
-    reader_b = FakeReader("fixture", "m", ["B1"])  # runs out on page 2 -> IndexError
+    #
+    # Keyed on the PAGE, not on call count. The original fake popped from a
+    # shared list, so "page 2 fails" really meant "the second call to arrive
+    # fails" -- true only while pages reached the readers in order. Once the
+    # provider in-flight cap (T6) changed the scheduling, the page that
+    # arrived second was sometimes page 1, and this test failed while the
+    # behaviour it describes was intact. Page-keyed fakes state the intent
+    # directly and cannot be reordered into a different meaning.
+    class _PageKeyedReader:
+        provider_name = "fixture"
+        model_name = "m"
+
+        def __init__(self, tag, fail_on=()):
+            self.tag = tag
+            self.fail_on = set(fail_on)
+            self.calls = []
+
+        def transcribe_image(self, image_path, prompt, prompt_version):
+            page = int(Path(image_path).stem.split("_")[-1])
+            self.calls.append(page)
+            if page in self.fail_on:
+                raise IndexError(f"{self.tag} exhausted on page {page}")
+            return ProviderResult(self.provider_name, self.model_name,
+                                  prompt_version, f"{self.tag}{page}")
+
+    reader_a = _PageKeyedReader("A")
+    reader_b = _PageKeyedReader("B", fail_on=[2])
     comparator = FakeComparator("AGREE")
     with pytest.raises(IndexError):
         oe.run_ocr("CASE_009", "DOC_001", doc, reader_a=reader_a, reader_b=reader_b, comparator=comparator)
@@ -367,13 +392,31 @@ def test_run_ocr_resume_false_ignores_cache(monkeypatch, tmp_path):
     oe._save_cached_page(cache, 1, {"page": 1, "reading_a": "STALE", "reading_b": "STALE",
                                     "agreement": "agreed", "disagreement_details": [], "provider_metadata": {}})
 
-    reader_a = FakeReader("fixture", "m", ["A1", "A2"])
-    reader_b = FakeReader("fixture", "m", ["B1", "B2"])
+    # Page-keyed rather than call-ordered: the point is that the seeded page-1
+    # entry is IGNORED and both pages are genuinely re-read, which does not
+    # depend on which page reaches a reader first (see the note in the resume
+    # test above).
+    class _PageKeyedReader:
+        provider_name = "fixture"
+        model_name = "m"
+
+        def __init__(self, tag):
+            self.tag = tag
+            self.calls = []
+
+        def transcribe_image(self, image_path, prompt, prompt_version):
+            page = int(Path(image_path).stem.split("_")[-1])
+            self.calls.append(page)
+            return ProviderResult(self.provider_name, self.model_name,
+                                  prompt_version, f"{self.tag}{page}")
+
+    reader_a = _PageKeyedReader("A")
+    reader_b = _PageKeyedReader("B")
     result = oe.run_ocr("CASE_009", "DOC_001", doc, reader_a=reader_a, reader_b=reader_b,
                         comparator=FakeComparator("AGREE"), resume=False)
 
     assert result["pages"][0]["reading_a"] == "A1"  # freshly read, not "STALE"
-    assert len(reader_a.calls) == 2  # both pages read
+    assert sorted(reader_a.calls) == [1, 2]  # both pages read
 
 
 # --- decode_text_file: encoding robustness (R6) ---
