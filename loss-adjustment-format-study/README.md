@@ -15,6 +15,8 @@ Corpus research derived from a protected local PDF corpus under `../sources/`. T
 - All boundaries passed both primary and independent OCR/text review; all 95 independent decisions matched, and five representative forms also passed visual boundary sampling
 - The validator checks live source-inventory closure, review-artifact hashes, OCR-cache/source binding, exact extracted text, and rendered equality of every selected source/output page
 
+Current candidate status: the corpus validator passes against the authorized local fixture. Metric freshness remains blocked until the protected `analysis/report-index.csv` is migrated to the current canonical headers and the metrics are regenerated.
+
 ## Scope and assurance terms
 
 - The source inventory includes every file whose `.pdf` suffix matches case-insensitively, recursively under `sources/`. Stable `DOC_###` identifiers follow the normalized relative-path sort order.

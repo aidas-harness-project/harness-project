@@ -2,8 +2,15 @@
   "schema_version": "loss_adjustment_format_study_validation.v3",
   "candidate_evidence": {
     "protected_fixture_present": false,
-    "corpus_validation": "not_run_protected_fixture_absent",
-    "metrics_staleness_check": "not_run_protected_fixture_absent",
+    "protected_fixture_scope": "absent from the branch checkout; an authorized external local fixture was used read-only for corpus validation",
+    "corpus_validation": "passed_against_authorized_external_fixture",
+    "metrics_staleness_check": "failed_report_index_header_migration_required",
+    "external_fixture_result": {
+      "source_documents": 95,
+      "reports": 94,
+      "no_report_documents": 1,
+      "errors": 0
+    },
     "example_validation": "passed",
     "focused_tests": {
       "passed": 82,
@@ -16,10 +23,15 @@
       ]
     },
     "repository_tests": {
-      "passed": 515,
-      "failed": 0
+      "status": "not_green_in_fresh_origin_main_worktree",
+      "passed": 1825,
+      "failed": 21,
+      "errors": 14,
+      "skipped": 29,
+      "study_test_failures": 0,
+      "context": "Unrelated current-main tests require ignored outputs fixtures that are absent from a fresh worktree; one independent canonical-UID baseline test also fails."
     },
-    "note": "The protected source, manifest, reviews, OCR cache, report index, and extracted derivatives are intentionally absent from the pull-request checkout. Current-candidate corpus validation and metric staleness checking therefore were not run and are not claimed."
+    "note": "Protected artifacts remain absent from the branch and pull-request diff. The current candidate was checked read-only against an authorized external local fixture: corpus validation passed, while metric freshness failed closed because the protected report index still uses the prior header contract."
   },
   "historical_completed_study_snapshot": {
     "source_documents": 95,
@@ -37,13 +49,13 @@
     "page_markers": 864,
     "rendered_source_output_pages_verified": 864,
     "exact_reviewed_text_slices_verified": 94,
-    "scope_note": "These are aggregate facts retained from the completed protected-fixture study. They are not a validation result for the current pull-request commit."
+    "scope_note": "These aggregate facts come from the completed protected-fixture study. The current candidate validator confirmed the 95-document inventory and all extracted outputs against the authorized external fixture; metric regeneration remains pending."
   },
   "historical_ocr_cache_provenance": {
     "source_bound_documents": 95,
     "recomputed_from_source": 12,
     "reviewed_legacy_sidecar": 83,
-    "scope_note": "Historical provenance snapshot only. Current tooling requires source- and sidecar-hash metadata; the protected fixture must be migrated or refreshed before current-candidate corpus validation."
+    "scope_note": "The 12/83 provenance split is historical, but the current candidate validator accepted every source- and sidecar-bound cache record in the authorized external fixture."
   },
   "historical_visual_boundary_sample": {
     "documents": [
@@ -87,6 +99,6 @@
     "report_index_hash_embedded": true,
     "regex_definitions_embedded": true,
     "independently_adjudicated_semantic_labels": false,
-    "current_candidate_staleness_check": "not_run_protected_fixture_absent"
+    "current_candidate_staleness_check": "failed_report_index_header_migration_required"
   }
 }
