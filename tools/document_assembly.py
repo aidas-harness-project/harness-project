@@ -39,10 +39,11 @@ Usage:
 
 Structured draft input is a schema-valid loss_adjustment_report.v1 object.
 The registry supplies deterministic grouping and headings; evidence IDs resolve
-to exact document/page/quote citations:
+to exact document/page/quote citations. The structured contract must already
+have been written through dao.py at the canonical case/version path:
 
     python tools/document_assembly.py \\
-        --structured-report-file /tmp/loss_adjustment_report_v1.json \\
+        --structured-report-file outputs/CASE_003/loss_adjustment_report_v1.json \\
         --template 개인보험_후유장해형 \\
         --output-path outputs/CASE_003/draft_report_v1.md \\
         --held-by draft-report --run-id RUN_20260710_001
@@ -55,14 +56,53 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-from dao import acquire_lock_blocking, release_lock, atomic_write_text, atomic_write_json, now_iso
+from dao import (
+    acquire_lock_blocking,
+    atomic_write_json,
+    atomic_write_text,
+    now_iso,
+    read_contract_data,
+    release_lock,
+)
 from _validation import load_registry, validate_instance
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
 
 
-_CASE_ID_RE = re.compile(r"(CASE_[0-9]{3})")
+_CASE_OUTPUT_PATH_RE = re.compile(
+    r"^outputs/(?P<case_id>CASE_[0-9]{3})/[^/]+$"
+)
+_DRAFT_REPORT_PATH_RE = re.compile(
+    r"^outputs/(?P<case_id>CASE_[0-9]{3})/draft_report_v(?P<version>[12])\.md$"
+)
+
+
+def structured_contract_location(
+    structured_report_file: str, output_path: str
+) -> tuple[str, str]:
+    """Return the DAO case and filename for a canonical structured render.
+
+    The output path establishes both case identity and draft version. Requiring
+    the matching canonical input path keeps this CLI from becoming an
+    arbitrary-file reader and prevents a v1 contract from silently producing a
+    v2 narrative (or vice versa).
+    """
+    output_match = _DRAFT_REPORT_PATH_RE.fullmatch(output_path)
+    if output_match is None:
+        raise ValueError(
+            "structured output_path must be "
+            "outputs/CASE_NNN/draft_report_v1.md or draft_report_v2.md"
+        )
+    case_id = output_match.group("case_id")
+    version = output_match.group("version")
+    filename = f"loss_adjustment_report_v{version}.json"
+    expected = f"outputs/{case_id}/{filename}"
+    if structured_report_file != expected:
+        raise ValueError(
+            f"structured report must be the canonical DAO contract {expected!r}"
+        )
+    return case_id, filename
 
 
 def verify_citation_quotes(sidecar: dict, case_id: str) -> list[str]:
@@ -276,7 +316,7 @@ def main():
     source.add_argument("--sections-file", help="Path to the section-spec JSON described above")
     source.add_argument(
         "--structured-report-file",
-        help="Path to a validated loss_adjustment_report_vN.json contract",
+        help="Canonical outputs/CASE_NNN/loss_adjustment_report_vN.json contract",
     )
     ap.add_argument(
         "--output-path",
@@ -294,9 +334,18 @@ def main():
             sys.exit("error: --structured-report-file requires --template")
         if not args.output_path:
             sys.exit("error: --structured-report-file requires --output-path")
-        document = json.loads(
-            Path(args.structured_report_file).read_text(encoding="utf-8")
-        )
+        try:
+            case_id, contract_filename = structured_contract_location(
+                args.structured_report_file, args.output_path
+            )
+        except ValueError as exc:
+            sys.exit(f"error: {exc} -- nothing written")
+        document = read_contract_data(case_id, contract_filename)
+        if document is None:
+            sys.exit(
+                "error: canonical DAO contract does not exist at "
+                f"{args.structured_report_file!r} -- nothing written"
+            )
         schemas, registry = load_registry()
         report_errors = validate_instance(
             document, "loss_adjustment_report.schema.json", schemas, registry
@@ -307,9 +356,8 @@ def main():
                 "-- nothing written:\n"
                 + "\n".join(f"  - {error}" for error in report_errors)
             )
-        output_case = _CASE_ID_RE.search(args.output_path)
         report_case = document.get("case_reference", {}).get("case_id")
-        if output_case and output_case.group(1) != report_case:
+        if case_id != report_case:
             sys.exit(
                 "error: structured report case_reference.case_id does not match "
                 "the output_path case -- nothing written"
@@ -353,21 +401,22 @@ def main():
     # document whose citations do not resolve must not reach disk, because
     # every checker downstream (read-evidence-tags, check-untagged-claims)
     # reads the tag layer and would report it clean.
-    case_match = _CASE_ID_RE.search(rel)
-    if case_match:
-        quote_errors = verify_citation_quotes(sidecar, case_match.group(1))
-        if quote_errors:
-            sys.exit(
-                "error: citation quotes do not appear in the processed source "
-                "-- nothing written:\n"
-                + "\n".join(f"  - {e}" for e in quote_errors)
-                + "\n  Quote from data/processed/<CASE>/<DOC>/redacted_text.md, "
-                  "do not reconstruct from memory. Whitespace differences are "
-                  "tolerated; wrong words and wrong documents are not.")
-    else:
-        print(f"WARNING: output_path {rel!r} carries no CASE_NNN, so citation "
-              "quotes could not be verified against a processed source.",
-              file=sys.stderr)
+    case_match = _CASE_OUTPUT_PATH_RE.fullmatch(rel)
+    if case_match is None:
+        sys.exit(
+            f"error: output_path {rel!r} must identify its case as "
+            "outputs/CASE_NNN/<filename> so citation quotes can be verified "
+            "-- nothing written"
+        )
+    quote_errors = verify_citation_quotes(sidecar, case_match.group("case_id"))
+    if quote_errors:
+        sys.exit(
+            "error: citation quotes do not appear in the processed source "
+            "-- nothing written:\n"
+            + "\n".join(f"  - {e}" for e in quote_errors)
+            + "\n  Quote from data/processed/<CASE>/<DOC>/redacted_text.md, "
+              "do not reconstruct from memory. Whitespace differences are "
+              "tolerated; wrong words and wrong documents are not.")
 
     schemas, registry = load_registry()
     errors = validate_instance(sidecar, "evidence_sidecar.schema.json", schemas, registry)
