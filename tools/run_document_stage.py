@@ -226,18 +226,24 @@ def main(argv=None):
              "continues, recording the deferral on every affected page. See "
              "run_checkpoint1.py --help for the full contract.")
     ap.add_argument(
-        "--single-reader", action="store_true",
+        "--dual-read", dest="single_reader", action="store_false", default=None,
+        help="Force full dual-read P8 even when HARNESS_SINGLE_READER is set in "
+             "the environment. Use for any run whose text accuracy is judged.")
+    ap.add_argument(
+        "--single-reader", dest="single_reader", action="store_true", default=None,
         help="DEVELOPMENT THROUGHPUT MODE -- runs the case with P8 OFF (one "
              "read per page, no comparison), roughly halving provider calls "
              "and wall time. Every page records agreement='single_reader', "
              "never 'agreed'. Mutually exclusive with --on-disagreement. Not "
-             "admissible for PoC evaluation -- see run_checkpoint1.py --help.")
+             "admissible for PoC evaluation -- see run_checkpoint1.py --help. "
+             "Defaults to the HARNESS_SINGLE_READER environment variable when "
+             "neither this nor --dual-read is given.")
     args = ap.parse_args(argv)
 
     # Same rejection as run_checkpoint1.py, enforced here too: this driver has
     # its own parser, so a check that lived only in the single-document tool
     # would not fire for a case-wide run.
-    if args.single_reader and args.on_disagreement != "block":
+    if args.single_reader is True and args.on_disagreement != "block":
         ap.error(
             "--single-reader and --on-disagreement are mutually exclusive. "
             "--single-reader performs no comparison, so no disagreement can "

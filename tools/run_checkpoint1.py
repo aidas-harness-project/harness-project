@@ -74,7 +74,7 @@ from llm_providers import (
     SUPPORTED_PROVIDERS,
     build_provider,
 )
-from ocr_extract import build_ocr_providers, run_ocr
+from ocr_extract import build_ocr_providers, resolve_single_reader, run_ocr
 import segment_case as _segment_case
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
@@ -666,7 +666,7 @@ def run_checkpoint1(
     classify: bool = True,
     max_workers: int | None = None,
     on_disagreement: str = "block",
-    single_reader: bool = False,
+    single_reader: bool | None = None,
 ) -> dict:
     # Evaluated before provider construction, PDF rendering, or any output
     # write, so a blocked call cannot spend tokens. What it refuses is now only
@@ -717,6 +717,17 @@ def run_checkpoint1(
 
     pdf_path = Path(pdf_path)
     source_total_pages = source_pdf_page_count(pdf_path)
+    # Resolved here as well as inside run_ocr: this function decides which
+    # providers to BUILD, and that decision must match the mode run_ocr will
+    # actually run in. Resolving in only one of the two would build reader_b for
+    # a run that never calls it (or worse, leave it unbuilt for one that does).
+    if single_reader is None and on_disagreement != "block":
+        # An explicit disagreement policy is a request for dual-read: it only
+        # has meaning if a comparison happens. Honouring the env default here
+        # would silently give the caller neither -- no P8 and no deferral --
+        # while the command line says otherwise.
+        single_reader = False
+    single_reader = resolve_single_reader(single_reader)
     if single_reader:
         # Only reader_a is built. Constructing reader_b/comparator here would
         # resolve credentials and a model for calls run_ocr never makes, and
@@ -1374,8 +1385,16 @@ def _add_run_arguments(parser):
              "judgement, not a finding that reading_a was correct: on "
              "CASE_911/DOC_005 the source was scanned 90 degrees rotated and BOTH "
              "reads were wrong on 8 of 19 pages.")
+    # Three-state on purpose: unspecified (None) consults HARNESS_SINGLE_READER,
+    # --single-reader forces it on, --dual-read forces it off. Without the
+    # explicit off-switch a dev shell exporting the env var would have no way to
+    # run real dual-read P8 for an evaluation case.
     parser.add_argument(
-        "--single-reader", action="store_true",
+        "--dual-read", dest="single_reader", action="store_false", default=None,
+        help="Force full dual-read P8 even when HARNESS_SINGLE_READER is set in "
+             "the environment. Use for any run whose text accuracy is judged.")
+    parser.add_argument(
+        "--single-reader", dest="single_reader", action="store_true", default=None,
         help="DEVELOPMENT THROUGHPUT MODE -- turns P8 OFF rather than relaxing "
              "it. Only reader_a runs: no second read, no comparison, roughly "
              "half the provider calls and wall time. Every page is recorded as "
@@ -1387,7 +1406,8 @@ def _add_run_arguments(parser):
              "extraction cannot produce. Not admissible for PoC evaluation: the "
              "four real faults P8 caught on this corpus (CASE_012, CASE_021 x2, "
              "CASE_022) were each visible only as a disagreement between two "
-             "reads.")
+             "reads. Defaults to the HARNESS_SINGLE_READER environment variable "
+             "when neither this nor --dual-read is given.")
     parser.add_argument(
         "--bundle-ocr", action="store_true",
         help="OCR an unsplit bundle without classifying it, so segmentation can "
@@ -1510,7 +1530,10 @@ def main(argv=None):
     # disagreement, and --single-reader guarantees no disagreement can exist
     # because nothing is compared. Accepting both would let a command line
     # asking for a resolution policy run with P8 off and report neither.
-    if getattr(args, "single_reader", False) and getattr(args, "on_disagreement", "block") != "block":
+    # Only an EXPLICIT --single-reader conflicts. An env-var default must not
+    # reject a command line that asks for --on-disagreement: the explicit flag
+    # is the more specific instruction, so it wins and dual-read stays on.
+    if getattr(args, "single_reader", None) is True and getattr(args, "on_disagreement", "block") != "block":
         sys.exit(
             "error: --single-reader and --on-disagreement are mutually exclusive. "
             "--single-reader performs no comparison, so no disagreement can arise "

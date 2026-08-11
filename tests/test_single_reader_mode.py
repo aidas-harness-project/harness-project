@@ -118,6 +118,55 @@ def test_rule4_rejects_single_reader_claiming_agreement(page_image: Path) -> Non
     )
 
 
+class TestSingleReaderDefault:
+    """HARNESS_SINGLE_READER makes P8-off the default for a dev shell.
+
+    Deliberately an env var rather than flipping the flag's default to True: a
+    True default would leave no way to ASK for dual-read P8 on the command
+    line, and evaluation runs need exactly that. So the flag is three-state --
+    unspecified consults the environment, --single-reader forces on,
+    --dual-read forces off.
+    """
+
+    @pytest.mark.parametrize(
+        "env,arg,expected",
+        [
+            (None, None, False),          # nothing set anywhere -> P8 stays on
+            ("1", None, True),            # dev shell default
+            ("true", None, True),
+            ("on", None, True),
+            ("0", None, False),
+            ("maybe", None, False),       # unparseable is not "on"
+            ("1", False, False),          # --dual-read overrides the env
+            ("0", True, True),            # --single-reader overrides the env
+        ],
+    )
+    def test_precedence(self, monkeypatch, env, arg, expected) -> None:
+        monkeypatch.delenv(ocr_extract.SINGLE_READER_ENV, raising=False)
+        if env is not None:
+            monkeypatch.setenv(ocr_extract.SINGLE_READER_ENV, env)
+        assert ocr_extract.resolve_single_reader(arg) is expected
+
+    def test_env_var_reaches_the_real_ocr_path(
+            self, page_image: Path, monkeypatch) -> None:
+        """The precedence helper being right proves nothing on its own.
+
+        run_ocr must actually consult it -- a resolver nothing calls is the
+        same 'implemented but not wired' shape this repo has hit before.
+        """
+        monkeypatch.setenv(ocr_extract.SINGLE_READER_ENV, "1")
+        out = _run(page_image)  # note: no single_reader argument at all
+        assert out["pages"][0]["agreement"] == "single_reader"
+        assert out["cross_validation_mode"] == "single_reader_no_cross_validation"
+
+    def test_explicit_dual_read_beats_env(
+            self, page_image: Path, monkeypatch) -> None:
+        monkeypatch.setenv(ocr_extract.SINGLE_READER_ENV, "1")
+        out = _run(page_image, single_reader=False)
+        assert out["pages"][0]["agreement"] != "single_reader"
+        assert out["pages"][0]["reading_b"] is not None
+
+
 def test_single_reader_cache_namespace_is_separate(page_image: Path) -> None:
     """A single-read verdict and a dual-read verdict must never be interchangeable.
 

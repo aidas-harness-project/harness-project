@@ -80,6 +80,15 @@ a document that blocked:
   and the document reads `cross_validation_status:
   single_reader_no_cross_validation`, `ocr_quality: low`.
 
+**Development sessions set `HARNESS_SINGLE_READER=1`**, which makes P8-off the
+default for every OCR call without passing the flag each time. It is an env var
+rather than a changed default so an evaluation run can still force real
+dual-read P8 with `--dual-read`; an explicit flag always beats the environment,
+and passing `--on-disagreement` also implies dual-read (a disagreement policy is
+meaningless without a comparison). Check the variable before treating a run's
+output as evaluation-grade — a case can be P8-off without any flag appearing in
+the command you see.
+
 Mutually exclusive, rejected together at parse. Neither is gated by
 `finalize-stage` — a run using either completes normally and the resulting
 `review_required: true` is an honest grade on the text, not a work order. That

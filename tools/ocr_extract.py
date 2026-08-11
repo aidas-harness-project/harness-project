@@ -519,6 +519,30 @@ def _save_cached_page(cache_dir: Path, page: int, page_result: dict,
 # that product in mind.
 DEFAULT_OCR_WORKERS = 16
 
+# Turns P8 off for every OCR call in the process, so a development session does
+# not have to remember --single-reader on each invocation. Set
+# HARNESS_SINGLE_READER=1 in the dev environment; unset (or 0) keeps full dual-read
+# P8, which is what an evaluation run needs.
+#
+# Deliberately an env var rather than flipping the flag's default: a default of
+# True would leave no way to ask for P8 on the command line, and the PoC's
+# evaluation runs need exactly that. Precedence matches every other knob here --
+# an explicit argument wins, then the env var, then the default (off).
+SINGLE_READER_ENV = "HARNESS_SINGLE_READER"
+
+
+def resolve_single_reader(single_reader: bool | None) -> bool:
+    """Whether to run with P8 off. Explicit argument wins, then the env var.
+
+    `None` means "not specified" -- only then is the environment consulted.
+    Passing True or False explicitly is always honoured, so an evaluation run
+    can force dual-read P8 even inside a shell that exports the dev default.
+    """
+    if single_reader is not None:
+        return bool(single_reader)
+    raw = os.environ.get(SINGLE_READER_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
 
 def _resolve_workers(max_workers: int | None) -> int:
     """Page-level concurrency. Explicit argument wins, then HARNESS_OCR_WORKERS,
@@ -558,7 +582,7 @@ def run_ocr(
     resume: bool = True,
     max_workers: int | None = None,
     dpi: int | None = None,
-    single_reader: bool = False,
+    single_reader: bool | None = None,
 ) -> dict:
     """The actual dual-path OCR loop, extracted out of main() so callers
     (run_checkpoint1.py) can invoke it in-process instead of shelling out
@@ -599,6 +623,8 @@ def run_ocr(
     each visible ONLY as a disagreement between two reads, and a single read
     would have carried all four downstream silently. Use it for timing and
     plumbing runs; leave it off for any case whose text accuracy is judged."""
+    single_reader = resolve_single_reader(single_reader)
+
     if not doc_path.exists():
         sys.exit(f"error: document not found -- {doc_path}")
 
