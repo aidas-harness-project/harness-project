@@ -3270,6 +3270,32 @@ So the cheap experiment has not been run:
 **Until that runs, do not describe these as "scan quality limits"** -- that
 claim has not been tested, and the 400dpi human read is evidence against it.
 
+**2026-08-11 -- a blocker found while setting the experiment up, now fixed
+(commit `ae9c21b`).** Step 1 above could not have produced a valid result as
+written. `ocr_extract.py`'s resume cache was keyed on `case_id`/`doc_id`/`page`
+alone, with nothing recording what settings produced an entry, so re-reading
+the same pages at 400dpi would have been served the **cached 200dpi verdicts
+as hits** -- zero provider calls, identical output, and the experiment would
+have concluded "resolution makes no difference" without a single page having
+been re-read. 33 unfingerprinted entries were on disk across 3 documents when
+this was found.
+
+The blast radius is wider than this experiment: the cached value is a **P8
+agreement verdict**, so a stale hit asserts that two readers agreed under
+settings they were never run at -- and P8 is the gate every downstream stage
+trusts. Any re-run after a provider change, a model change, or a prompt
+revision was exposed to the same thing. The cache now fingerprints the page
+image bytes (which subsumes dpi and render backend), `OCR_PROMPT_VERSION`, and
+both readers' plus the comparator's provider+model; pre-fingerprint entries
+carry no fingerprint key and are treated as misses.
+
+Render dpi was also hardcoded at two separate sites (pymupdf and pdftoppm), so
+it could not be varied at all and the two backends could have silently drifted
+apart -- the dpi is a property of the image the READER sees, so letting it
+depend on which backend is installed would make P8 agreement depend on the
+host. Both now resolve through one `--dpi` / `HARNESS_OCR_DPI` path, default
+200 unchanged.
+
 Related: the P8 Go/No-Go criterion had to be revised in the same session.
 "P8 disagreement rate unchanged" is not a satisfiable gate -- running the
 identical file twice with zero code changes produced 0/11 then 1/11, and
