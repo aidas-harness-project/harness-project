@@ -77,3 +77,4 @@ frontend/backend/venv/
 frontend/backend/_uploads/
 frontend/backend/_runs.json
 frontend/backend/_run_logs/
+*.stackdump
