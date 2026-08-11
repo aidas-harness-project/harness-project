@@ -366,3 +366,55 @@ def test_a_pre_fingerprint_cache_entry_is_a_miss(scratch, monkeypatch):
 
     assert sorted(reader_a.calls) == [1, 2]
     assert all(p["reading_a"] != "LEGACY" for p in result["pages"])
+
+
+# ---------------------------------------------- default worker count (T12) --
+
+def test_default_worker_count_is_eight(monkeypatch):
+    """Raised 4 -> 8 on 2026-08-11: measured 141.32s -> 86.06s on a real
+    12-page scan, a 1.64x speedup from this constant alone.
+
+    Pinned because the value is load-bearing and invisible -- nothing else in
+    the pipeline states it, and a silent revert to 4 would show up only as a
+    slower run that still passes every other test.
+    """
+    monkeypatch.delenv("HARNESS_OCR_WORKERS", raising=False)
+    assert oe.DEFAULT_OCR_WORKERS == 8
+    assert oe._resolve_workers(None) == 8
+
+
+def test_env_still_overrides_the_default(monkeypatch):
+    monkeypatch.setenv("HARNESS_OCR_WORKERS", "3")
+    assert oe._resolve_workers(None) == 3
+
+
+def test_explicit_argument_beats_env(monkeypatch):
+    monkeypatch.setenv("HARNESS_OCR_WORKERS", "3")
+    assert oe._resolve_workers(5) == 5
+
+
+def test_one_worker_restores_the_sequential_loop(monkeypatch):
+    monkeypatch.delenv("HARNESS_OCR_WORKERS", raising=False)
+    assert oe._resolve_workers(1) == 1
+    assert oe._resolve_workers(0) == 1
+    assert oe._resolve_workers(-4) == 1
+
+
+def test_eight_workers_still_produce_source_ordered_pages(scratch, monkeypatch):
+    """The property that must survive raising the count: more concurrency must
+    not reorder pages, since pages[i] is written as page i+1's text."""
+    monkeypatch.delenv("HARNESS_OCR_WORKERS", raising=False)
+    doc = _patch_split(monkeypatch, scratch, 12)
+
+    class _DescendingDelay(PathKeyedReader):
+        def transcribe_image(self, image_path, prompt, prompt_version):
+            self.delay = 0.005 * (13 - _page_number(image_path))
+            return super().transcribe_image(image_path, prompt, prompt_version)
+
+    result = oe.run_ocr("CASE_900", "DOC_001", doc,
+                        reader_a=_DescendingDelay("A"), reader_b=_DescendingDelay("B"),
+                        comparator=CountingComparator())
+
+    assert [p["page"] for p in result["pages"]] == list(range(1, 13))
+    for p in result["pages"]:
+        assert p["reading_a"] == f"A{p['page']}"

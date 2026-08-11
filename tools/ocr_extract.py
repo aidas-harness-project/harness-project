@@ -489,18 +489,30 @@ def _save_cached_page(cache_dir: Path, page: int, page_result: dict,
     tmp.replace(cache_dir / f"page_{page:03d}.json")
 
 
-DEFAULT_OCR_WORKERS = 4
+# Raised 4 -> 8 on 2026-08-11. Measured on a real 12-page scan at dd6d8aa:
+# 141.32s -> 86.06s, a 1.64x speedup from this constant alone. The new corpus
+# is entirely scans, so this applies to every case rather than a subset.
+#
+# 8 is not known to be a ceiling -- only 4 and 8 were measured. Raising it
+# further is a question for a sweep, not a guess, because the cost of being
+# wrong is rate-limit failures rather than slowness.
+#
+# Safe to raise only because the provider in-flight cap (T6) now bounds the
+# process-wide total. Before it, page workers x document workers was
+# unbounded; this constant is a per-document knob, not a global one.
+DEFAULT_OCR_WORKERS = 8
 
 
 def _resolve_workers(max_workers: int | None) -> int:
     """Page-level concurrency. Explicit argument wins, then HARNESS_OCR_WORKERS,
     then DEFAULT_OCR_WORKERS.
 
-    The ceiling is deliberately modest and not CPU-derived: the work is
-    provider round-trips, not local computation, so the real limits are the
-    backend's rate limit and -- for the CLI providers -- one child process per
-    in-flight call. A value <= 1 restores the strictly sequential loop, which is
-    also what a single-page document gets.
+    The ceiling is not CPU-derived: the work is provider round-trips, not local
+    computation, so the real limits are the backend's rate limit and -- for the
+    CLI providers -- one child process per in-flight call. That per-call child
+    is why this value is bounded in turn by HARNESS_LLM_MAX_INFLIGHT, which
+    caps the whole process rather than one document. A value <= 1 restores the
+    strictly sequential loop, which is also what a single-page document gets.
     """
     if max_workers is None:
         raw = os.environ.get("HARNESS_OCR_WORKERS")
