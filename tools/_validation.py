@@ -13,15 +13,33 @@ from referencing import Registry, Resource
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schemas"
 TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
+LOSS_ADJUSTMENT_SCHEMA = (
+    ROOT
+    / "loss-adjustment-format-study"
+    / "analysis"
+    / "loss-adjustment-report.schema.json"
+)
+LOSS_ADJUSTMENT_SCHEMA_NAME = "loss_adjustment_report.schema.json"
 
 
 def load_registry():
     schemas = {}
     for p in sorted(SCHEMA_DIR.glob("*.schema.json")):
         schemas[p.name] = json.loads(p.read_text(encoding="utf-8"))
-    registry = Registry().with_resources(
-        (name, Resource.from_contents(s)) for name, s in schemas.items()
+    resources = [
+        (name, Resource.from_contents(schema))
+        for name, schema in schemas.items()
+    ]
+    canonical_report_schema = json.loads(
+        LOSS_ADJUSTMENT_SCHEMA.read_text(encoding="utf-8")
     )
+    resources.append(
+        (
+            canonical_report_schema["$id"],
+            Resource.from_contents(canonical_report_schema),
+        )
+    )
+    registry = Registry().with_resources(resources)
     return schemas, registry
 
 
@@ -74,6 +92,11 @@ def validate_instance(instance: dict, schema_name: str, schemas: dict, registry)
     every `format` keyword -- CASE_021's run surfaced that a malformed date
     would have validated. (date-time additionally needs rfc3339-validator
     installed to be checked; date is built in.)"""
+    if schema_name == LOSS_ADJUSTMENT_SCHEMA_NAME:
+        from validate_loss_adjustment_report import validate_document
+
+        return validate_document(instance, LOSS_ADJUSTMENT_SCHEMA)
+
     validator = Draft202012Validator(schemas[schema_name], registry=registry,
                                      format_checker=Draft202012Validator.FORMAT_CHECKER)
     errors = sorted(validator.iter_errors(instance), key=lambda e: list(e.absolute_path))
