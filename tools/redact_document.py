@@ -223,6 +223,42 @@ def _dao(*args: str, capability: str | None = None) -> str:
         return result.stdout
 
 
+# Which extraction outcomes checkpoint 2 will redact.
+#
+# What this gate exists to stop is a document whose extraction question is
+# still OPEN -- `disagreed_pending_review`, where two reads conflict and no
+# human has said which is right. Redacting that would build a deliverable on
+# text nobody has settled, and every downstream stage would treat the result as
+# established fact.
+#
+# It is NOT a quality bar, and reading it as one is what broke it twice. Both
+# throughput modes produce text whose extraction question is CLOSED -- closed by
+# a recorded policy rather than by agreement, which is exactly what their status
+# value says out loud:
+#
+#   * assume_reading_a_unreviewed -- the reads disagreed and reading_a was taken
+#     under an explicit --on-disagreement policy (added 2026-08-11; this set was
+#     never updated, so that flag could not reach checkpoint 2 at all).
+#   * single_reader_no_cross_validation -- one read, no comparison, under
+#     --single-reader. Nothing is pending, because nothing was ever compared.
+#
+# Both keep review_required true and carry ocr_quality 'low', so the honest
+# grade travels with the document. Blocking them here does not make the text
+# safer -- it makes the mode unusable, which is how CASE_911 stalled with its
+# only two scanned documents unredactable while the three born-digital ones
+# sailed through on the embedded-text path.
+#
+# `not_run` and `non_text_verified` stay OUT deliberately: the first has no
+# text to redact, the second is expert-review-only visual evidence that must
+# never be fed to the text redactor.
+REDACTABLE_CROSS_VALIDATION_STATUS = frozenset({
+    "agreed",
+    "disagreed_resolved",
+    "assume_reading_a_unreviewed",
+    "single_reader_no_cross_validation",
+})
+
+
 def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redactor,
                     *, resume: bool = True, max_workers: int | None = None) -> dict:
     # read_contract_data is the DAO's own in-process contract read -- same
@@ -231,10 +267,14 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
     ocr_result = dao.read_contract_data(case_id, f"ocr_result_{doc_id}.json")
     if ocr_result is None:
         raise RuntimeError(f"checkpoint 2 blocked: no ocr_result for {doc_id}")
-    if ocr_result.get("cross_validation_status") not in {"agreed", "disagreed_resolved"}:
+    if ocr_result.get("cross_validation_status") not in REDACTABLE_CROSS_VALIDATION_STATUS:
         raise RuntimeError(
             f"checkpoint 2 blocked: {doc_id} cross_validation_status is "
-            f"{ocr_result.get('cross_validation_status')!r}"
+            f"{ocr_result.get('cross_validation_status')!r}. Redaction proceeds "
+            "only for a document whose extraction question is settled -- either "
+            "the readers agreed, a human resolved them, or a recorded policy "
+            "decided not to cross-validate at all. "
+            f"Allowed: {sorted(REDACTABLE_CROSS_VALIDATION_STATUS)}."
         )
 
     redacted_pages: list[str] = []
