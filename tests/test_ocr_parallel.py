@@ -370,17 +370,22 @@ def test_a_pre_fingerprint_cache_entry_is_a_miss(scratch, monkeypatch):
 
 # ---------------------------------------------- default worker count (T12) --
 
-def test_default_worker_count_is_eight(monkeypatch):
-    """Raised 4 -> 8 on 2026-08-11: measured 141.32s -> 86.06s on a real
-    12-page scan, a 1.64x speedup from this constant alone.
+def test_default_worker_count_is_sixteen(monkeypatch):
+    """4 -> 8 -> 16 over 2026-08-11.
+
+    The 4 -> 8 step was measured: 141.32s -> 86.06s on a real 12-page scan, a
+    1.64x speedup from this constant alone. The 8 -> 16 step was NOT -- it is a
+    deliberate bet taken because the CASE_953 end-to-end run made 99 provider
+    calls with zero rate-limit errors, i.e. the backend never showed strain at
+    8. Do not cite 16 as a measured optimum.
 
     Pinned because the value is load-bearing and invisible -- nothing else in
-    the pipeline states it, and a silent revert to 4 would show up only as a
-    slower run that still passes every other test.
+    the pipeline states it, and a silent revert would show up only as a slower
+    run that still passes every other test.
     """
     monkeypatch.delenv("HARNESS_OCR_WORKERS", raising=False)
-    assert oe.DEFAULT_OCR_WORKERS == 8
-    assert oe._resolve_workers(None) == 8
+    assert oe.DEFAULT_OCR_WORKERS == 16
+    assert oe._resolve_workers(None) == 16
 
 
 def test_env_still_overrides_the_default(monkeypatch):

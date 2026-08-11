@@ -96,7 +96,8 @@ _ALLOWED_ATTRS: dict[str, frozenset[str]] = {
         "argv0", "subcommand", "exit_code",
     }),
     "io": frozenset({
-        "bytes_in", "bytes_out", "page_count",
+        "bytes_in", "bytes_out", "page_count", "exit_code", "startup_s",
+        "hit_count", "documents_searched",
     }),
     "compute": frozenset({
         "worker_count", "observed_max_concurrency", "items",
@@ -106,7 +107,7 @@ _ALLOWED_ATTRS: dict[str, frozenset[str]] = {
         "gate_kind", "waited_s",
     }),
     "marker": frozenset({
-        "marker_kind",
+        "marker_kind", "stage_name", "attempt_outcome",
     }),
 }
 
@@ -124,7 +125,7 @@ _ALLOWED_ATTRS: dict[str, frozenset[str]] = {
 _ENUM_ATTRS = frozenset({
     "provider_name", "model_name", "prompt_version", "retry_reason_code",
     "lock_kind", "schema_name", "argv0", "subcommand", "gate_kind",
-    "marker_kind",
+    "marker_kind", "stage_name", "attempt_outcome",
 })
 _ENUM_MAX_LEN = 64
 _ENUM_EXTRA_CHARS = frozenset("._-:/")
@@ -399,7 +400,8 @@ def span(op: str, *, category: str, case_id: str | None = None,
 
 def event(op: str, *, category: str, case_id: str | None = None,
           doc_id: str | None = None, page: int | None = None,
-          status: str = "ok", **attrs: Any) -> str | None:
+          status: str = "ok", attempt: int | None = None,
+          **attrs: Any) -> str | None:
     """Record a zero-duration point in time (an SLA marker, a cache hit, a
     gate opening). Returns the span id, or None when tracing is off."""
     if not enabled():
@@ -408,7 +410,7 @@ def event(op: str, *, category: str, case_id: str | None = None,
     record = _build_record(
         op, category, case_id=case_id, doc_id=doc_id, page=page,
         parent=_current_span_id.get(), duration_s=0.0, status=status,
-        attempt=None, t_start_wall=datetime.now(timezone.utc).isoformat(),
+        attempt=attempt, t_start_wall=datetime.now(timezone.utc).isoformat(),
         t_start_mono=now_mono, attrs=attrs,
     )
     _emit(record)

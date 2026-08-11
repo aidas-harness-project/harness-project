@@ -98,12 +98,22 @@ def test_page_verdicts_live_under_nested_cross_validation():
 
 def test_no_real_ocr_result_has_an_unrecorded_page_verdict():
     """The claim the investigation actually tested: no page anywhere in
-    outputs/ is missing its P8 verdict."""
+    outputs/ is missing its P8 verdict.
+
+    The valid set is read from the schema rather than restated here. When
+    `assume_reading_a` was added on 2026-08-11 a hardcoded {"agreed",
+    "disagreed"} failed on 8 pages whose verdict WAS recorded -- the test
+    disagreeing with the contract, not the data being wrong. Deriving it means
+    a new verdict value cannot desync this check again.
+    """
+    schemas, _ = load_registry()
+    valid = set(schemas[SCHEMA_NAME]["$defs"]["cross_validation_result"]
+                ["properties"]["agreement"]["enum"])
     missing = []
     for path in real_ocr_results():
         for page in load(path).get("pages", []):
             verdict = page.get("cross_validation", {}).get("agreement")
-            if verdict not in {"agreed", "disagreed"}:
+            if verdict not in valid:
                 missing.append(f"{path.name} page {page.get('page')}: {verdict!r}")
     assert not missing, f"pages with no recorded P8 verdict: {missing}"
 

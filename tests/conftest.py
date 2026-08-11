@@ -161,6 +161,7 @@ def make_args():
             parent_document_id=None, expect_parent_sha256=None,
             artifact_kind=None, artifact_id=None, target_key=None,
             decision=None, document_id=None,
+            attempt_outcome=None,
         )
         defaults.update(overrides)
         return SimpleNamespace(**defaults)

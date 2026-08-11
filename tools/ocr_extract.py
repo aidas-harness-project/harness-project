@@ -415,7 +415,7 @@ OCR_CACHE_FORMAT_VERSION = 1
 
 
 def _cache_fingerprint(img_path: Path, reader_a, reader_b, comparator,
-                       dpi: int | None = None) -> str:
+                       dpi: int | None = None, single_reader: bool = False) -> str:
     """What the cached P8 verdict is only valid FOR.
 
     Until 2026-08-11 this cache was keyed on case_id/doc_id/page alone, so a
@@ -448,6 +448,16 @@ def _cache_fingerprint(img_path: Path, reader_a, reader_b, comparator,
     def _label(provider) -> str:
         return (f"{getattr(provider, 'provider_name', 'unknown')}"
                 f":{getattr(provider, 'model_name', None)}")
+
+    if single_reader:
+        # A single-reader page carries NO P8 verdict at all, so it must never be
+        # interchangeable with a dual-read cache entry in either direction: a
+        # single-reader hit would hand a throughput run's unvalidated text to a
+        # run that asked for cross-validation, and a dual-read hit would let a
+        # --single-reader run report an `agreed` it never paid for. Different
+        # namespace, not a different reader list.
+        return (f"{OCR_CACHE_FORMAT_VERSION}:{OCR_PROMPT_VERSION}:"
+                f"{_resolve_render_dpi(dpi)}:single_reader:{_label(reader_a)}:{digest}")
 
     readers = f"{_label(reader_a)}|{_label(reader_b)}|{_label(comparator)}"
     return (f"{OCR_CACHE_FORMAT_VERSION}:{OCR_PROMPT_VERSION}:"
@@ -493,14 +503,21 @@ def _save_cached_page(cache_dir: Path, page: int, page_result: dict,
 # 141.32s -> 86.06s, a 1.64x speedup from this constant alone. The new corpus
 # is entirely scans, so this applies to every case rather than a subset.
 #
-# 8 is not known to be a ceiling -- only 4 and 8 were measured. Raising it
-# further is a question for a sweep, not a guess, because the cost of being
-# wrong is rate-limit failures rather than slowness.
+# 2026-08-11: raised 8 -> 16 (user decision). Neither 8 nor 16 is a measured
+# ceiling -- 4 and 8 were compared on a real document, 16 was not, so this is a
+# deliberate bet, not a measurement. What justifies taking it: the full CASE_953
+# end-to-end run made 99 provider calls with ZERO rate-limit errors and zero
+# queueing, so the backend showed no sign of being near a limit at the previous
+# setting. If that changes, the symptom is rate-limit failures rather than
+# slowness, and HARNESS_OCR_WORKERS lowers it with no code change.
 #
-# Safe to raise only because the provider in-flight cap (T6) now bounds the
-# process-wide total. Before it, page workers x document workers was
-# unbounded; this constant is a per-document knob, not a global one.
-DEFAULT_OCR_WORKERS = 8
+# NOTE: this is a per-DOCUMENT knob and it is no longer bounded by anything
+# global. The provider in-flight cap (T6) that used to backstop it was
+# uncapped by default on 2026-08-11 after it was measured never to engage, so
+# the real process-wide ceiling is now this value x HARNESS_DOC_WORKERS
+# (16 x 3 = 48 concurrent calls at the defaults). Raise both at once only with
+# that product in mind.
+DEFAULT_OCR_WORKERS = 16
 
 
 def _resolve_workers(max_workers: int | None) -> int:
@@ -509,10 +526,11 @@ def _resolve_workers(max_workers: int | None) -> int:
 
     The ceiling is not CPU-derived: the work is provider round-trips, not local
     computation, so the real limits are the backend's rate limit and -- for the
-    CLI providers -- one child process per in-flight call. That per-call child
-    is why this value is bounded in turn by HARNESS_LLM_MAX_INFLIGHT, which
-    caps the whole process rather than one document. A value <= 1 restores the
-    strictly sequential loop, which is also what a single-page document gets.
+    CLI providers -- one child process per in-flight call. HARNESS_LLM_MAX_INFLIGHT
+    can still cap the whole process rather than one document, but it is
+    uncapped by default since 2026-08-11, so nothing bounds this globally
+    unless that env var is set. A value <= 1 restores the strictly sequential
+    loop, which is also what a single-page document gets.
     """
     if max_workers is None:
         raw = os.environ.get("HARNESS_OCR_WORKERS")
@@ -540,6 +558,7 @@ def run_ocr(
     resume: bool = True,
     max_workers: int | None = None,
     dpi: int | None = None,
+    single_reader: bool = False,
 ) -> dict:
     """The actual dual-path OCR loop, extracted out of main() so callers
     (run_checkpoint1.py) can invoke it in-process instead of shelling out
@@ -566,7 +585,20 @@ def run_ocr(
     two reads still see the same image, and a page still costs exactly one pass.
     The two readers of a single page stay sequential relative to each other, so
     P8's pairing cannot drift. Pass max_workers=1 for the original strictly
-    sequential behaviour."""
+    sequential behaviour.
+
+    single_reader=True is a DEVELOPMENT-ONLY throughput mode that turns P8 off
+    rather than relaxing it: reader_b and the comparator are never called, so a
+    page costs one read instead of two-plus-a-comparison. There is no agreement
+    to report, so every page is recorded as `single_reader` (never `agreed` --
+    nothing agreed) and the document's cross_validation_mode becomes
+    `single_reader_no_cross_validation`. Nothing produced this way is admissible
+    as PoC evaluation text: the four real extraction faults P8 caught on this
+    corpus (CASE_012's fabricated appendix, CASE_021's second fabricated
+    addition and its KCD I678 misread, CASE_022's context contamination) were
+    each visible ONLY as a disagreement between two reads, and a single read
+    would have carried all four downstream silently. Use it for timing and
+    plumbing runs; leave it off for any case whose text accuracy is judged."""
     if not doc_path.exists():
         sys.exit(f"error: document not found -- {doc_path}")
 
@@ -589,7 +621,15 @@ def run_ocr(
                 case_id, doc_id, doc_path, page_texts, progress=progress
             )
 
-    if reader_a is None or reader_b is None or comparator is None:
+    if single_reader:
+        # Only reader_a is ever used, so only reader_a is required. Building the
+        # other two would be harmless but misleading -- a constructed provider
+        # reads as a configured one, and nothing here calls them.
+        if reader_a is None:
+            reader_a = build_ocr_providers()["reader_a"]
+        reader_b = None
+        comparator = None
+    elif reader_a is None or reader_b is None or comparator is None:
         providers = build_ocr_providers()
         reader_a = reader_a or providers["reader_a"]
         reader_b = reader_b or providers["reader_b"]
@@ -626,7 +666,8 @@ def run_ocr(
             with trace_mod.span("ocr.page", category="io", case_id=case_id,
                                 doc_id=doc_id, page=page_no) as sp, concurrency.enter():
                 fingerprint = _cache_fingerprint(img_path, reader_a, reader_b,
-                                                 comparator, dpi)
+                                                 comparator, dpi,
+                                                 single_reader=single_reader)
                 cached = (_load_cached_page(cache_dir, page_no, fingerprint)
                           if resume else None)
                 if cached is not None:
@@ -640,20 +681,40 @@ def run_ocr(
                 # sequential relative to each other -- the parallelism is across
                 # pages, so pairing can never drift.
                 reading_a = transcribe_once(img_path, reader_a)
-                reading_b = transcribe_once(img_path, reader_b)
-                result = compare(reading_a["text"], reading_b["text"], comparator)
-                page_result = {
-                    "page": page_no,
-                    "reading_a": reading_a["text"],
-                    "reading_b": reading_b["text"],
-                    "agreement": result["agreement"],
-                    "disagreement_details": result["disagreement_details"],
-                    "provider_metadata": {
-                        "reader_a": reading_a["metadata"],
-                        "reader_b": reading_b["metadata"],
-                        "comparator": result["metadata"],
-                    },
-                }
+                if single_reader:
+                    # No second read and no comparison: there is no agreement to
+                    # report, so `agreement` says exactly that rather than
+                    # borrowing a P8 verdict word. reading_b is null (not a copy
+                    # of reading_a, which would read as two reads concurring)
+                    # and disagreement_details is empty because nothing was
+                    # compared -- not because nothing differed.
+                    page_result = {
+                        "page": page_no,
+                        "reading_a": reading_a["text"],
+                        "reading_b": None,
+                        "agreement": "single_reader",
+                        "disagreement_details": [],
+                        "provider_metadata": {
+                            "reader_a": reading_a["metadata"],
+                            "reader_b": None,
+                            "comparator": None,
+                        },
+                    }
+                else:
+                    reading_b = transcribe_once(img_path, reader_b)
+                    result = compare(reading_a["text"], reading_b["text"], comparator)
+                    page_result = {
+                        "page": page_no,
+                        "reading_a": reading_a["text"],
+                        "reading_b": reading_b["text"],
+                        "agreement": result["agreement"],
+                        "disagreement_details": result["disagreement_details"],
+                        "provider_metadata": {
+                            "reader_a": reading_a["metadata"],
+                            "reader_b": reading_b["metadata"],
+                            "comparator": result["metadata"],
+                        },
+                    }
                 # Cache before publishing the slot: an interrupt between the two
                 # loses nothing (the page is re-read), whereas the reverse could
                 # report a page as done that was never persisted.
@@ -709,14 +770,27 @@ def run_ocr(
     if resume:
         shutil.rmtree(cache_dir, ignore_errors=True)
 
-    cross_validation_mode, cross_validation_note = _classify_cross_validation(reader_a, reader_b)
+    if single_reader:
+        cross_validation_mode = "single_reader_no_cross_validation"
+        cross_validation_note = (
+            f"P8 was NOT performed: --single-reader ran one read "
+            f"({_metadata_for(reader_a).get('provider_name')}, model "
+            f"{_metadata_for(reader_a).get('model_name')}) per page with no "
+            "second reader and no comparison. Every page is `single_reader`, "
+            "never `agreed` -- nothing agreed. This text is unvalidated: a "
+            "misread, a fabricated addition, or context contamination would be "
+            "carried downstream with nothing able to detect it. Development "
+            "throughput mode only; not admissible for PoC evaluation."
+        )
+    else:
+        cross_validation_mode, cross_validation_note = _classify_cross_validation(reader_a, reader_b)
 
     return {
         "document_path": str(doc_path),
         "providers": {
             "reader_a": _metadata_for(reader_a),
-            "reader_b": _metadata_for(reader_b),
-            "comparator": _metadata_for(comparator),
+            "reader_b": _metadata_for(reader_b) if reader_b is not None else None,
+            "comparator": _metadata_for(comparator) if comparator is not None else None,
         },
         "cross_validation_mode": cross_validation_mode,
         "cross_validation_note": cross_validation_note,

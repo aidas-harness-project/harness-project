@@ -66,7 +66,8 @@ Subcommands:
     read-timing-summary CASE_ID
     update-run-state CASE_ID RUN_ID STAGE STATUS --held-by NAME
         (STATUS in pending|in_progress|failed|skipped; 'passed' is refused here --
-         a stage passes only via finalize-stage, atomically with its snapshot)
+         a stage passes only via finalize-stage, atomically with its snapshot;
+         failed accepts --attempt-outcome for T13/P9 diagnostics)
     migrate-run-state-v03 CASE_ID RUN_ID --held-by NAME
         (audited one-time repair for legacy dependency-invalid or
          passed-without-backup entries; invalid passes are downgraded, never
@@ -140,6 +141,7 @@ Subcommands:
     read-table-region-index CASE_ID
 """
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -174,6 +176,13 @@ import human_review
 import llm_providers
 import trace as trace_mod
 import trace_aggregate
+
+# Captured at import so a traced read can report part of the per-process cost it
+# was charged before its own body began. Each CLI subcommand is its own process,
+# so this is paid per call and is invisible to any span inside it. It is a LOWER
+# BOUND -- the interpreter boot and the imports above this line are already spent
+# by the time it runs. See _startup_seconds().
+_PROCESS_START_WALL = time.time()
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
@@ -411,6 +420,66 @@ def save_run_state(case_id: str, state: dict) -> None:
 
 # ------------------------------------------------------------------ nouns --
 
+
+def traced_read(op: str):
+    """Instrument a read subcommand so its cost stops landing in unattributed time.
+
+    Read paths were the largest measurement hole T13 exposed. On CASE_910 the
+    `claim_analysis` attempt measured 394.96s active wall, of which instrumented
+    tool spans explained 0.034s -- and the agent had made 41 DAO calls, almost
+    all of them reads. dao.py instrumented exactly two things (`lock.acquire`,
+    `validate.schema`), both on write paths, so a stage that only reads looked
+    free while occupying the entire interval.
+
+    Two costs are recorded separately because they have different fixes:
+    `duration_s` is the work inside the command, while `startup_s` is the
+    interpreter-plus-import time paid before this function could run at all
+    (measured at ~0.30s of a ~0.38s median `read-contract` call -- with 41 calls
+    that is 12-16s of a stage's wall clock, and no amount of optimising the read
+    body touches it).
+
+    A read command that fails to record is a no-op, never an error: tracing is
+    diagnostic, and P2's read paths must not acquire a failure mode they did not
+    have before.
+    """
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(args):
+            if not trace_mod.enabled():
+                return fn(args)
+            with trace_mod.span(op, category="io",
+                                case_id=getattr(args, "case_id", None),
+                                doc_id=getattr(args, "doc_id", None)) as sp:
+                rc = fn(args)
+                try:
+                    sp.set(exit_code=int(rc or 0), startup_s=_startup_seconds())
+                except Exception:  # noqa: BLE001 -- never break a read
+                    pass
+                return rc
+        return wrapper
+    return decorate
+
+
+def _startup_seconds() -> float:
+    """Seconds from this module's import to the traced read, per process.
+
+    Deliberately NOT the full interpreter startup: the clock starts when dao.py
+    is imported, so the interpreter boot and dao's own import chain that ran
+    BEFORE that line are excluded and this is a lower bound. Measuring the true
+    process start needs psutil, which is not worth a DAO dependency for a
+    diagnostic.
+
+    The gap is not small and should not be read as noise. Externally timed, a
+    `read-contract` subprocess takes ~0.376s median while bare `import dao`
+    alone accounts for ~0.298s of it -- so a per-call figure of ~0.01s here
+    means the remaining ~0.29s was spent before this clock started. The honest
+    statement is that per-call CLI overhead is bounded below by this field and
+    measured externally at roughly 0.3s.
+    """
+    return round(max(time.time() - _PROCESS_START_WALL, 0.0), 6)
+
+
+@traced_read("dao.read_document_text")
 def cmd_read_document_text(args):
     manifest = read_contract_data(args.case_id, "document_manifest.json")
     if manifest is not None:
@@ -536,6 +605,7 @@ def _search_one_document(case_id: str, doc_id: str, needle_norm: str,
 _SEARCH_EXCLUDED = {"expert_review_only", "superseded_bundle"}
 
 
+@traced_read("dao.search_document_text")
 def cmd_search_document_text(args):
     """Whitespace/NFKC-insensitive search over processed text -- the floor under
     a negative claim.
@@ -750,6 +820,7 @@ def read_page_text_data(case_id: str, doc_id: str, page: int, *,
     return page_path.read_text(encoding="utf-8")
 
 
+@traced_read("dao.read_page_text")
 def cmd_read_page_text(args):
     """Read one validated checkpoint-1 page from the processed layer.
 
@@ -984,6 +1055,7 @@ def cmd_read_ground_truth(args):
     return 0
 
 
+@traced_read("dao.read_contract")
 def cmd_read_contract(args):
     p = _require_within(case_dir(args.case_id), args.filename)
     if not p.exists():
@@ -3100,7 +3172,8 @@ def cmd_write_contract(args):
             # so an unmet upstream dependency doesn't fail an otherwise-valid
             # contract write -- it just declines to advance the stage.
             state = _update_run_state(args.case_id, args.run_id, args.stage, "in_progress",
-                                      args.held_by, dep_check="soft")
+                                      args.held_by, dep_check="soft",
+                                      explicit_attempt=False)
             if state is None:
                 print("WARNING: contract write succeeded, but run-state could not be updated (see LOCKED above) -- "
                       "run-state may now lag behind actual progress; retry the run-state update.")
@@ -3227,7 +3300,9 @@ def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_b
     # and a failure here was already only a warning on an otherwise successful
     # return. The manifest write above is durable before this runs.
     if stage:
-        state = _update_run_state(case_id, run_id, stage, "in_progress", held_by, dep_check="soft")
+        state = _update_run_state(
+            case_id, run_id, stage, "in_progress", held_by,
+            dep_check="soft", explicit_attempt=False)
         if state is None:
             result = True, f"PASS: patched {document_id} in {target}\n" \
                 "WARNING: patch succeeded, but run-state could not be updated (lock contention) -- " \
@@ -3398,6 +3473,7 @@ def replace_manifest_documents(case_id: str, bundle_id: str, bundle_fields: dict
     if existing_lock is not None:
         return False, (f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
                         f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+    result = None
     try:
         if not target.exists():
             return False, f"FAIL: no document_manifest.json for {case_id}"
@@ -3427,20 +3503,21 @@ def replace_manifest_documents(case_id: str, bundle_id: str, bundle_fields: dict
             return False, "FAIL: schema validation errors for " + str(target) + " -- not written:\n" + \
                 "\n".join(f"  - {e}" for e in errors)
         atomic_write_json(target, manifest)
-        if stage:
-            # A passed stage must always be coupled to its P10 snapshot.
-            # Segmentation previously called _update_run_state(..., "passed")
-            # directly, which is now deliberately refused.  Finalize only
-            # after the updated manifest is durable so the snapshot captures
-            # the exact split that this stage approved.
-            state = _finalize_stage(case_id, run_id, stage, held_by)
-            if state is None:
-                return True, f"PASS: split {bundle_id} into {len(new_documents)} document(s) in {target}\n" \
-                    "WARNING: split succeeded, but the stage could not be finalized with its snapshot -- " \
-                    "run-state may now lag behind actual progress; retry finalize-stage."
-        return True, f"PASS: split {bundle_id} into {len(new_documents)} document(s) in {target}"
+        result = (True, f"PASS: split {bundle_id} into {len(new_documents)} document(s) in {target}")
     finally:
         release_lock(target)
+    if stage:
+        # Segmentation is a checkpoint inside document_processing. It cannot
+        # finalize the stage while child classification, redaction and
+        # case-wide chunking still remain. The orchestrator owns attempt
+        # boundaries and finalization.
+        state = _update_run_state(
+            case_id, run_id, stage, "in_progress", held_by,
+            dep_check="soft", explicit_attempt=False)
+        if state is None:
+            result = (True, result[1] + "\nWARNING: split succeeded, but run-state "
+                      "could not be updated -- retry the progress update.")
+    return result
 
 
 def cmd_replace_manifest_documents(args):
@@ -4022,6 +4099,7 @@ def source_ledger_path(case_id: str) -> Path:
     return case_dir(case_id) / "_source_ledger.json"
 
 
+@traced_read("dao.read_ledger")
 def cmd_read_ledger(args):
     p = source_ledger_path(args.case_id)
     if not p.exists():
@@ -4476,7 +4554,8 @@ def _schema_check(data: dict, schema_name: str) -> list:
 # ---------------------------------------------------------------- run state ops --
 
 def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
-                       finalize=False, dep_check="hard"):
+                       finalize=False, dep_check="hard", explicit_attempt=True,
+                       attempt_outcome=None):
     """Holds the run-state lock across the whole read+modify+write, not just
     the write -- see acquire_lock_blocking. Returns the updated state on
     success, or None if the lock never cleared, a dependency is unmet, or the
@@ -4510,6 +4589,8 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return None
     demoted_from = None
+    emit_marker = None
+    marker_attempt = None
     try:
         state = load_run_state(case_id)
         state["run_id"] = run_id or state.get("run_id")
@@ -4535,6 +4616,7 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
             entry = {"stage_name": stage, "status": "pending", "started_at": None,
                       "completed_at": None, "attempt_count": 0, "backup_path": None}
             stages.append(entry)
+        previous_status = entry.get("status")
         # A stage leaving `passed` un-grounds everything derived from it, so
         # note the demotion here (inside the lock, where the old status is
         # authoritative) and cascade after the lock is released -- the cascade
@@ -4543,15 +4625,41 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
                 and status in ("failed", "pending", "in_progress")):
             demoted_from = "passed"
         if status == "in_progress":
-            # started_at keeps the FIRST attempt (unchanged behaviour -- it is
-            # the stage's own origin). current_attempt_started_at tracks the
-            # latest, because with only the former a stage retried the next
-            # morning reports the entire overnight gap as its duration:
-            # CASE_907's document_processing showed 998 minutes that way.
-            now = now_iso()
-            entry["started_at"] = entry["started_at"] or now
-            entry["current_attempt_started_at"] = now
-            entry["attempt_count"] += 1
+            if explicit_attempt:
+                if previous_status == "in_progress" and entry.get("attempt_count", 0) > 0:
+                    # An orchestrator replay is not a P9 retry. A retry must
+                    # first close the prior attempt as failed/partial; treating
+                    # a duplicate begin as idempotent prevents one invocation
+                    # from becoming several attempts merely because a command
+                    # was repeated.
+                    #
+                    # attempt_count > 0 is what makes this an *explicit* attempt
+                    # rather than merely the in_progress status: an incidental
+                    # contract write advances pending->in_progress while leaving
+                    # attempt_count at 0, and treating that as an open attempt
+                    # swallowed the real dispatch that followed -- the stage then
+                    # ran, passed, and contributed no measured interval at all.
+                    return state
+                # started_at keeps the stage's first explicit origin;
+                # current_attempt_started_at tracks this dispatch only.
+                now = now_iso()
+                entry["started_at"] = entry["started_at"] or now
+                entry["current_attempt_started_at"] = now
+                entry["attempt_count"] += 1
+                marker_attempt = entry["attempt_count"]
+                emit_marker = "start"
+            elif previous_status not in ("failed", "passed", "skipped"):
+                # Contract writes are checkpoints inside an invocation, not
+                # invocation boundaries. Preserve the historical best-effort
+                # pending->in_progress projection but do not move attempt
+                # timestamps or increment the retry counter. If orchestration
+                # skipped the explicit begin, aggregate-trace reports missing
+                # coverage instead of inventing a start at the first output.
+                pass
+            else:
+                # A durable output may still land after a stage failed, but an
+                # incidental writer is not authorized to start a retry.
+                return state
         if status in ("passed", "failed", "skipped"):
             entry["completed_at"] = now_iso()
             # A stage can reach a terminal status without ever having been
@@ -4574,6 +4682,11 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
             return None
         save_run_state(case_id, state)
         updated = state
+        if (status == "failed" and previous_status == "in_progress"
+                and entry.get("attempt_count", 0) > 0):
+            marker_attempt = entry["attempt_count"]
+            emit_marker = ("abandoned" if attempt_outcome == "interrupted"
+                           else "end")
     finally:
         release_lock(target)
 
@@ -4598,11 +4711,28 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
         # captured, and returning the pre-cascade snapshot would hand the
         # caller stages that are already invalidated.
         updated = load_run_state(case_id)
+    if emit_marker == "start":
+        _emit_stage_attempt_marker(
+            case_id, run_id, stage, marker_attempt, "start")
+    elif emit_marker == "end":
+        _emit_stage_attempt_marker(
+            case_id, run_id, stage, marker_attempt, "end",
+            outcome=attempt_outcome or "failed")
+    elif emit_marker == "abandoned":
+        _emit_stage_attempt_marker(
+            case_id, run_id, stage, marker_attempt, "abandoned",
+            outcome="interrupted")
     return updated
 
 
 def cmd_update_run_state(args):
-    state = _update_run_state(args.case_id, args.run_id, args.stage, args.status, args.held_by)
+    outcome = getattr(args, "attempt_outcome", None)
+    if outcome is not None and args.status != "failed":
+        print("REFUSED: --attempt-outcome is valid only with status 'failed'")
+        return 1
+    state = _update_run_state(
+        args.case_id, args.run_id, args.stage, args.status, args.held_by,
+        attempt_outcome=outcome)
     if state is None:
         return 1
     print(f"OK: {args.stage} -> {args.status}")
@@ -4810,6 +4940,7 @@ def cmd_mark_human_review_complete(args):
     return 0
 
 
+@traced_read("dao.get_last_passed_stage")
 def cmd_get_last_passed_stage(args):
     state = load_run_state(args.case_id)
     passed = [s["stage_name"] for s in state["stages"] if s["status"] == "passed"]
@@ -4899,6 +5030,8 @@ def _finalize_stage(case_id, run_id, stage, held_by):
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return None
     published = None
+    finalized_attempt = None
+    finalized_state = None
     try:
         # Keep the run-state lock from dependency check through snapshot
         # publication and the live state write, so no run-state transition can
@@ -5063,6 +5196,8 @@ def _finalize_stage(case_id, run_id, stage, held_by):
                 "attempt_count": 0, "backup_path": None,
             }
             state["stages"].append(entry)
+        if entry.get("status") == "in_progress" and entry.get("attempt_count", 0) > 0:
+            finalized_attempt = entry["attempt_count"]
 
         # Reserve the path while holding the run-state lock. The builder uses
         # the same first-unused rule, so the prospective state and snapshot
@@ -5109,9 +5244,14 @@ def _finalize_stage(case_id, run_id, stage, held_by):
             print("FAIL: snapshot published but run-state write failed -- "
                   f"stage NOT passed: {exc}")
             return None
-        return state
+        finalized_state = state
     finally:
         release_lock(target)
+    if finalized_attempt is not None:
+        _emit_stage_attempt_marker(
+            case_id, run_id, stage, finalized_attempt, "end",
+            outcome="passed")
+    return finalized_state
 
 
 def cmd_snapshot_backup(args):
@@ -5255,6 +5395,7 @@ CONFLICT_GATED_STAGES = frozenset({
 })
 
 
+@traced_read("dao.check_conflicts_clear")
 def cmd_check_conflicts_clear(args):
     pending = pending_conflict_ids(args.case_id)
     clear = not pending
@@ -8287,6 +8428,7 @@ def cmd_read_revision_index(args):
     return 0
 
 
+@traced_read("dao.policy_snapshot")
 def cmd_policy_snapshot(args):
     """Print the upstream_policy_snapshot value for the given documents.
 
@@ -8512,6 +8654,52 @@ TIMING_SUMMARY_SCHEMA = "timing_summary.schema.json"
 SLA_END_STAGE = "draft_report_v1"
 
 
+def _emit_stage_attempt_marker(case_id: str, run_id: str | None, stage: str,
+                               attempt: int | None, kind: str,
+                               outcome: str | None = None) -> bool:
+    """Emit one idempotent stage-attempt lifecycle event.
+
+    The governed run-state transition is committed first. This trace event is
+    diagnostic and may be missing after a crash; it never repairs itself from
+    run-state timestamps, because those are marker-movement times rather than
+    measured work boundaries. A per-attempt O_EXCL stamp prevents a replayed
+    command from emitting a second marker for the same lifecycle edge.
+    """
+    if not run_id or not isinstance(attempt, int) or attempt < 1:
+        return False
+    if kind not in {"start", "end", "abandoned"}:
+        return False
+    try:
+        trace_mod.configure(case_id, run_id, root=OUTPUTS)
+        if not trace_mod.enabled():
+            return False
+        marker_dir = trace_spans_dir(case_id, run_id).parent / "markers"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        stamp = marker_dir / f"stage.attempt.{kind}.{stage}.{attempt}.json"
+        try:
+            fd = os.open(stamp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        op = f"stage.attempt.{kind}"
+        marker_kind = f"stage_attempt_{kind}"
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({
+                "op": op, "case_id": case_id, "run_id": run_id,
+                "stage_name": stage, "attempt": attempt,
+                "attempt_outcome": outcome, "emitted_at": now_iso(),
+            }, fh, ensure_ascii=False)
+        attrs = {"marker_kind": marker_kind, "stage_name": stage}
+        if outcome is not None:
+            attrs["attempt_outcome"] = outcome
+        trace_mod.event(
+            op, category="marker", case_id=case_id, attempt=attempt,
+            status="ok" if outcome in (None, "passed") else "error",
+            **attrs)
+        return True
+    except Exception:  # noqa: BLE001 -- diagnostics must never break a run
+        return False
+
+
 def _emit_human_wait_span(case_id: str, run_id: str | None, stage: str,
                           requested_at: str | None, received_at: str | None) -> bool:
     """Record a closed human-input wait so active_s can deduct it.
@@ -8620,11 +8808,15 @@ def cmd_aggregate_trace(args):
               f"({dropped_lines} unparseable line(s) discarded)")
         return 1
 
+    run_state = load_run_state(args.case_id)
+    run_state_stages = (run_state.get("stages")
+                        if run_state.get("run_id") == args.run_id else None)
     summary = trace_aggregate.summarize(
         spans, case_id=args.case_id, run_id=args.run_id,
         generated_at=now_iso(), dropped_span_lines=dropped_lines,
         shard_count=shard_count, input_class=args.input_class,
-        cold_or_warm=args.cold_or_warm)
+        cold_or_warm=args.cold_or_warm,
+        run_state_stages=run_state_stages)
 
     target = _require_within(case_dir(args.case_id), TIMING_SUMMARY_FILENAME)
     existing_lock = acquire_lock_blocking(
@@ -8657,6 +8849,11 @@ def cmd_aggregate_trace(args):
         print(f"  sla_wall_clock_s={summary['sla_wall_clock_s']} "
               f"human_wait_s={summary['human_wait_s']} "
               f"active_s={summary['active_s']}")
+    coverage = summary.get("stage_coverage") or {}
+    print(f"  stage_coverage={'complete' if coverage.get('coverage_complete') else 'incomplete'} "
+          f"closed={coverage.get('complete_attempts', 0)} "
+          f"open={coverage.get('open_attempts', 0)} "
+          f"missing={coverage.get('missing_marker_attempts', 0)}")
     top = sorted(summary["by_category"].items(),
                  key=lambda kv: kv[1]["self_time_s"], reverse=True)[:5]
     for name, entry in top:
@@ -8683,6 +8880,7 @@ def build_parser():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("read-document-text"); p.add_argument("case_id"); p.add_argument("doc_id")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_read_document_text)
 
     p = sub.add_parser("split-core-field-accuracy",
@@ -8711,6 +8909,7 @@ def build_parser():
                    help="Search every processed document in the case instead of one.")
     p.add_argument("--context", type=int, default=60,
                    help="Characters of surrounding source text per hit (default 60).")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_search_document_text)
 
     p = sub.add_parser("read-page-text"); p.add_argument("case_id"); p.add_argument("doc_id")
@@ -8718,6 +8917,7 @@ def build_parser():
     p.add_argument("--caller-stage", required=True,
                    help="Stage making the call. Pre-redaction text is restricted to "
                         f"{sorted(PAGE_TEXT_ALLOWED_STAGES)}; anything else is DENIED.")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_read_page_text)
 
     p = sub.add_parser("read-ground-truth"); p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)
@@ -8736,6 +8936,7 @@ def build_parser():
     p.set_defaults(fn=cmd_read_ground_truth)
 
     p = sub.add_parser("read-contract"); p.add_argument("case_id"); p.add_argument("filename")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_read_contract)
 
     p = sub.add_parser("check-segmentation-ready")
@@ -8810,6 +9011,7 @@ def build_parser():
     p.set_defaults(fn=cmd_check_lock)
 
     p = sub.add_parser("read-ledger"); p.add_argument("case_id")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_read_ledger)
 
     p = sub.add_parser("set-ledger-status")
@@ -8841,6 +9043,11 @@ def build_parser():
     # validator rejects it for any non-skippable stage.
     p.add_argument("status", choices=["pending", "in_progress", "failed", "skipped"])
     p.add_argument("--held-by", required=True)
+    p.add_argument(
+        "--attempt-outcome",
+        choices=["failed", "partial", "schema_failed", "finalize_refused",
+                 "interrupted"],
+        help="Closed diagnostic outcome for status=failed. interrupted leaves the attempt duration open.")
     p.set_defaults(fn=cmd_update_run_state)
 
     p = sub.add_parser("migrate-run-state-v03")
@@ -8867,6 +9074,7 @@ def build_parser():
     p.set_defaults(fn=cmd_mark_human_review_complete)
 
     p = sub.add_parser("get-last-passed-stage"); p.add_argument("case_id")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_get_last_passed_stage)
 
     p = sub.add_parser("snapshot-backup")
@@ -8895,6 +9103,7 @@ def build_parser():
     p.set_defaults(fn=cmd_set_conflict_verdict)
 
     p = sub.add_parser("check-conflicts-clear"); p.add_argument("case_id")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_check_conflicts_clear)
 
     p = sub.add_parser("read-human-review-ledger"); p.add_argument("case_id")
@@ -9061,6 +9270,7 @@ def build_parser():
     p.add_argument("case_id")
     p.add_argument("--document-id", required=True, action="append",
                    help="referenced policy document; repeat for each one")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_policy_snapshot)
 
     p = sub.add_parser("aggregate-trace",

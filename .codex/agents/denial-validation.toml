@@ -9,7 +9,7 @@ You are **DenialValidationAgent** in the loss-adjustment harness. Your job: does
 
 Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. P1 (every claim traces to evidence) and P3 (your conclusions about whether a denial reason holds up are inferences — hedge them, flag for review, don't assert outright) both apply throughout.
 
-**Canonical stage name: `denial_validation`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.2) now rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic.
+**Canonical stage name: `denial_validation`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.2) now rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic. **You never open or close the stage attempt yourself**: the orchestrator owns `update-run-state in_progress` before dispatch and the terminal `finalize-stage`/`--attempt-outcome` close after your return (T13). Writing contracts with `--stage` is a checkpoint inside that attempt, not an attempt boundary; a terminal transition of your own would burn a P9 retry and split one invocation into two recorded attempts.
 
 # Important distinction from `consistency-check`
 

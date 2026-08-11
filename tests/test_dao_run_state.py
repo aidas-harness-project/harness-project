@@ -25,26 +25,45 @@ def test_update_run_state_creates_new_stage_entry(isolated_dao, make_args, run_i
     assert entry["attempt_count"] == 1
 
 
-def test_attempt_count_increments_on_each_in_progress(isolated_dao, make_args, run_id):
-    # document_processing has no hard prereq when no intake entry exists, so it
-    # can go in_progress on a fresh case (mirrors run_checkpoint1's real use).
+def test_duplicate_in_progress_is_an_idempotent_replay(isolated_dao, make_args, run_id):
+    # A retry must first close the prior attempt. Replaying the begin command
+    # while it is still active cannot turn one invocation into three attempts.
     args = make_args(run_id=run_id, stage="document_processing", status="in_progress")
     dao.cmd_update_run_state(args)
-    dao.cmd_update_run_state(args)  # simulates a P9 retry
+    dao.cmd_update_run_state(args)
     dao.cmd_update_run_state(args)
 
     state = dao.load_run_state("CASE_009")
-    assert state["stages"][0]["attempt_count"] == 3
+    assert state["stages"][0]["attempt_count"] == 1
 
 
 def test_started_at_does_not_reset_across_retries(isolated_dao, make_args, run_id):
     args = make_args(run_id=run_id, stage="document_processing", status="in_progress")
     dao.cmd_update_run_state(args)
     first_started = dao.load_run_state("CASE_009")["stages"][0]["started_at"]
+    dao.cmd_update_run_state(make_args(
+        run_id=run_id, stage="document_processing", status="failed",
+        attempt_outcome="failed"))
     dao.cmd_update_run_state(args)
     second_started = dao.load_run_state("CASE_009")["stages"][0]["started_at"]
 
     assert first_started == second_started, "a retry must not look like a fresh start"
+
+
+def test_incidental_checkpoint_does_not_begin_or_increment_attempt(
+        isolated_dao, run_id):
+    state = dao._update_run_state(
+        "CASE_009", run_id, "document_processing", "in_progress", "writer",
+        dep_check="soft", explicit_attempt=False)
+    entry = state["stages"][0]
+    assert entry["status"] == "in_progress"
+    assert entry["attempt_count"] == 0
+    assert entry["started_at"] is None
+
+    state = dao._update_run_state(
+        "CASE_009", run_id, "document_processing", "in_progress", "writer",
+        dep_check="soft", explicit_attempt=False)
+    assert state["stages"][0]["attempt_count"] == 0
 
 
 def _finalize(make_args, run_id, stage):

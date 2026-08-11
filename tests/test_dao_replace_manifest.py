@@ -141,7 +141,7 @@ def test_replace_reads_fresh_after_the_lock(isolated_dao, monkeypatch):
         "must have read the manifest after the lock released, not a stale pre-wait copy"
 
 
-def test_replace_with_stage_updates_run_state(isolated_dao):
+def test_replace_with_stage_records_checkpoint_without_finalizing(isolated_dao):
     """The stage a split records is document_processing, not a stage of its own.
 
     Segmentation runs between two halves of document processing (bundle OCR and
@@ -155,7 +155,9 @@ def test_replace_with_stage_updates_run_state(isolated_dao):
     assert ok, message
     state = dao.load_run_state("CASE_900")
     assert state["stages"][0]["stage_name"] == "document_processing"
-    assert state["stages"][0]["status"] == "passed"
+    assert state["stages"][0]["status"] == "in_progress"
+    assert state["stages"][0]["attempt_count"] == 0
+    assert state["stages"][0]["backup_path"] is None
 
 
 def test_cli_wrapper_reads_both_files(isolated_dao, tmp_path):

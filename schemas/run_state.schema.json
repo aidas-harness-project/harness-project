@@ -54,7 +54,7 @@
         "started_at": {
           "type": ["string", "null"],
           "format": "date-time",
-          "description": "When this stage FIRST went in_progress -- set once and never overwritten, so on a retried stage it is the first attempt's start, not the current one's. This is a MARKER-MOVEMENT time, not a measure of work: it is null when a stage passed without ever being marked in_progress, and the span to completed_at includes human review, overnight gaps, and orchestrator delay. Do NOT use (completed_at - started_at) as a cost figure -- CASE_907 recorded 998 minutes for document_processing (an overnight wall-clock gap) and 0.0 for draft_report_v2 (finalize called right after the marker moved). Use current_attempt_started_at for the latest attempt's span; for real cost, measure the work itself, not this field."
+          "description": "When this stage FIRST began an explicit orchestrator dispatch -- set once and never overwritten, so on a retried stage it is the first attempt's start, not the current one's. Incidental contract checkpoints do not set it. This is a MARKER-MOVEMENT time, not a measure of work: it is null when a stage passed without an explicit begin, and the span to completed_at can include human review, overnight gaps, and orchestrator delay. Do NOT use (completed_at - started_at) as a cost figure -- CASE_907 recorded 998 minutes for document_processing (an overnight wall-clock gap) and 0.0 for draft_report_v2 (finalize called right after the marker moved). Real work attribution comes from paired T13 trace events, never by subtracting these fields."
         },
         "completed_at": {
           "type": ["string", "null"],
@@ -64,7 +64,7 @@
         "current_attempt_started_at": {
           "type": ["string", "null"],
           "format": "date-time",
-          "description": "When the CURRENT (most recent) attempt went in_progress -- overwritten on every in_progress transition, unlike started_at. Present so a retried stage's latest run is distinguishable from its first: with only started_at, a stage retried the next morning reports the whole overnight span as its duration. Still a marker-movement time, and still includes any gate wait inside the attempt. Optional/additive -- run-state files written before 2026-08-04 omit it and remain valid."
+          "description": "When the CURRENT (most recent) explicit dispatch went in_progress -- overwritten only after the prior attempt reached a terminal status and the orchestrator begins a retry. A duplicate begin while already in_progress is idempotent, and incidental contract checkpoints do not move it. Present so a retried stage's latest run is distinguishable from its first. Still a marker-movement time, not cost measurement. Optional/additive -- run-state files written before 2026-08-04 omit it and remain valid."
         },
         "timing_note": {
           "type": ["string", "null"],
@@ -73,7 +73,7 @@
         "attempt_count": {
           "type": "integer",
           "minimum": 0,
-          "description": "Fixed retries under P9 -- max 3 for a partial/failed stage before it halts for user audit."
+          "description": "Count of explicit orchestrator dispatch attempts. Contract checkpoints inside one invocation do not increment it. P9 permits at most 3 attempts for a partial/failed stage before halt and user audit."
         },
         "backup_path": {
           "type": ["string", "null"],

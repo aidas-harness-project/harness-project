@@ -18,6 +18,61 @@ pipeline run.
 
 `document_segmentation` is **deprecated and must never be written**. It remains in the schema enum only so runs recorded before 2026-08-05 (CASE_112) still validate; their record is accurate for how they actually executed and is deliberately not rewritten. Segmentation is now a checkpoint *inside* `document_processing`: the bundle is OCR'd and redacted, then split, then its children are classified and redacted — so document processing runs on both sides of the split and the two cannot be separate stages without one of them being wrong about what is in progress.
 
+## Stage-attempt lifecycle (T13 — required around every dispatch)
+
+The orchestrator owns stage attempt boundaries and finalization. Stage agents
+write their governed outputs and return a summary/warnings; they do **not**
+call `finalize-stage` themselves.
+
+After the ordinary conflict/lock/dependency gates clear and immediately before
+dispatching a stage, begin exactly one attempt:
+
+```text
+python tools/dao.py update-run-state CASE_ID RUN_ID STAGE in_progress --held-by orchestrator
+```
+
+A replay while that attempt is already `in_progress` is idempotent: it neither
+increments `attempt_count` nor emits another timing marker. Contract writes
+with `--stage` are checkpoints inside this invocation; they do not begin an
+attempt and do not count as P9 retries.
+
+After a successful agent return, the orchestrator alone calls:
+
+```text
+python tools/dao.py finalize-stage CASE_ID RUN_ID STAGE --held-by orchestrator
+```
+
+Only a successful P10 finalization closes the attempt as `passed`. A refused
+finalize emits no passed marker. Close a non-successful invocation explicitly:
+
+```text
+python tools/dao.py update-run-state CASE_ID RUN_ID STAGE failed \
+  --attempt-outcome {failed|partial|schema_failed|finalize_refused} \
+  --held-by orchestrator
+```
+
+For a process interruption whose real end time is unknowable, use
+`--attempt-outcome interrupted` before retrying. This records the state as
+failed and leaves the timing interval open rather than turning an overnight
+gap into work cost. Then begin the retry with a new `in_progress` transition.
+P9's three-attempt limit applies to these explicit dispatch attempts, not to
+the number of contract checkpoints written inside one attempt.
+
+The timing layer is diagnostic: `HARNESS_TRACE=0` or a trace-write failure
+does not change any gate or state transition. `aggregate-trace` reports
+incomplete stage coverage instead of reconstructing missing timings from
+run-state marker timestamps.
+
+**Pass `--run-id` on read commands too**, and require the same of every
+dispatched agent. `read-contract`, `read-document-text`, `read-page-text`,
+`search-document-text`, `policy-snapshot`, `read-ledger`,
+`check-conflicts-clear` and `get-last-passed-stage` accept an optional
+`--run-id`; supplying it records that read's cost into the run's trace, and
+omitting it means the read still works but records nothing. Measured on
+CASE_910 this accounts for under 2% of an analysis stage, so it is not a
+performance lever — it is what lets a stage's remaining unattributed time be
+stated honestly instead of merely assumed.
+
 ## Phase 0 — context and gating (every run)
 
 1. **Resolve `run_id`**: new run → issue `RUN_{YYYYMMDD}_{NNN}`. Resuming → read `_run_state.json` via the DAO's `get_last_passed_stage(case_id)` query; resume from the next stage after the last one that passed. Do not restart from scratch just because a run was interrupted — that's what P10's per-step backups exist for.
@@ -52,6 +107,7 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
    Records under the `document_processing` stage — segmentation is one of its checkpoints, not a stage of its own. Segmentation's own output is document STRUCTURE, not text or type: `document-pipeline` still owns real classification, and a `provisional_type_label` is never copied into `document_type`.
 3. **Conflict-ledger check**: before dispatching *any* stage, call `check_conflicts_clear(case_id)`. If not clear, halt and report every pending entry (old and new) — do not proceed past an unresolved conflict, no matter which stage raised it.
 4. **Lock check**: if a stage's target file already has a `.lock` present at run start/resume, do not poll and do not assume it's stale — halt, report the lock's full contents, wait for human confirmation (P5).
+5. **Begin the stage attempt** using the T13 lifecycle command above, then dispatch. Never infer an attempt start from the first output write.
 
 ## Phase 1 — initial claim review
 
@@ -90,7 +146,7 @@ Only two genuinely new stages — everything else is Phase 1's agents reused on 
 | Situation | Response |
 |---|---|
 | Schema validation fails twice (P4) | Halt, present ignore-and-proceed / retry-N-times / fix-manually to the user |
-| Stage returns `partial` or fails (P9) | Retry the stage (from its last internal checkpoint, not from scratch) up to 3 fixed attempts, then halt for user audit |
+| Stage returns `partial` or fails (P9) | Close the current attempt with `--attempt-outcome partial` or `failed`, then retry from its last internal checkpoint up to 3 explicit dispatch attempts; after 3, halt for user audit |
 | Conflict-ledger has any `pending` entry (P6) | Halt before dispatching the next stage, list all pending entries |
 | Extraction cross-validation disagrees (P8) | Halt immediately, no tolerance threshold, even for one field on one document |
 | Human input pending (P7) | Wait — `human_input_status` in `_run_state.json` (written via `dao.py set-human-input-status`/`request-expert-review`) shows exactly what's pending; never fabricate a stand-in, and never call `mark-human-review-complete` yourself |

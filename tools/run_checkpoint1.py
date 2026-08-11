@@ -346,6 +346,50 @@ def _classification_model_info(provider_metadata: dict) -> dict:
     return info
 
 
+ASSUME_READING_A_NOTE = (
+    "P8 disagreement auto-resolved to reading_a under the operator's "
+    "assume-reading-a policy. No human compared the two readings and no image "
+    "was re-examined. In production a person adjudicates this page; this run "
+    "defers that judgement rather than performing it."
+)
+
+
+def _apply_assume_reading_a(ocr_data: dict) -> list[int]:
+    """Convert every P8 disagreement into a recorded reading_a selection.
+
+    Deliberately NOT a relaxation of P8's comparison -- the two reads still run
+    blind and are still diffed, and the disagreement is still recorded on the
+    page. What changes is only who resolves it: the operator has declared that
+    in real practice a human adjudicates the page, so for a PoC timing run the
+    pipeline takes reading_a and carries the page forward instead of halting.
+
+    The honesty contract is the point. The page is marked `assume_reading_a`,
+    never `agreed`, so nothing downstream can mistake a policy default for two
+    readers actually concurring; `review_required` stays true on the document
+    and every affected page keeps both readings plus the original
+    disagreement_details, so a later human resolution loses nothing.
+
+    Known cost, measured on CASE_911/DOC_005: 8 of 19 pages disagreed because
+    the source was scanned 90 degrees rotated, and BOTH blind reads were wrong.
+    reading_a is not "the correct one" -- it is "the one we agreed to take
+    without looking". Use this for throughput runs, not for a case whose text
+    accuracy is being judged.
+    """
+    resolved = []
+    for p in ocr_data.get("pages", []):
+        if p.get("agreement") != "disagreed":
+            continue
+        p["agreement"] = "assume_reading_a"
+        p["auto_resolution"] = {
+            "policy": "assume_reading_a",
+            "chosen_reading": "reading_a",
+            "resolved_at": now_iso(),
+            "note": ASSUME_READING_A_NOTE,
+        }
+        resolved.append(p["page"])
+    return resolved
+
+
 def _assemble_ocr_result(
         case_id, doc_id, run_id, ocr_data, source_total_pages=None):
     providers = ocr_data.get("providers", {})
@@ -354,20 +398,33 @@ def _assemble_ocr_result(
     comparator_label = _provider_label(providers.get("comparator"))
     pages_out = []
     for p in ocr_data["pages"]:
-        agreed = p["agreement"] == "agreed"
+        # An assume_reading_a page has real text on disk (reading_a was
+        # written), so it carries a text_path exactly like an agreed page --
+        # what distinguishes it is `agreement`, which never says "agreed", and
+        # the auto_resolution block recording that a policy, not a person,
+        # chose it.
+        auto = p.get("auto_resolution")
+        has_text = p["agreement"] in ("agreed", "assume_reading_a", "single_reader")
+        cross_validation = {
+            "vision_model_reading": p["reading_b"],
+            "agreement": p["agreement"],
+            "disagreement_details": p.get("disagreement_details", []),
+        }
+        if auto:
+            cross_validation["auto_resolution"] = auto
         pages_out.append({
             "page": p["page"],
             "content_kind": "text",
-            "text_path": f"data/processed/{case_id}/{doc_id}/page_{p['page']:03d}.md" if agreed else None,
+            "text_path": f"data/processed/{case_id}/{doc_id}/page_{p['page']:03d}.md" if has_text else None,
             "mean_confidence": None,
             "uncertain_regions": [],
-            "cross_validation": {
-                "vision_model_reading": p["reading_b"],
-                "agreement": p["agreement"],
-                "disagreement_details": p.get("disagreement_details", []),
-            },
+            "cross_validation": cross_validation,
         })
     any_disagreement = any(p["agreement"] == "disagreed" for p in ocr_data["pages"])
+    assumed_pages = [p["page"] for p in ocr_data["pages"]
+                     if p["agreement"] == "assume_reading_a"]
+    single_reader_pages = [p["page"] for p in ocr_data["pages"]
+                           if p["agreement"] == "single_reader"]
     # Embedded-text (plain-text passthrough) documents carry their own honest
     # extraction_method/encoding from ocr_extract._run_embedded_text -- a
     # lossless decode, not OCR. Default to the OCR values for the image/PDF path.
@@ -405,10 +462,42 @@ def _assemble_ocr_result(
         "cross_validation_note": ocr_data.get("cross_validation_note", ""),
         "review_required": any_disagreement,
     }
-    if any_disagreement:
+    if single_reader_pages:
+        # Checked FIRST and unconditionally: a single-reader document has no
+        # agreement of any kind, so the default `agreed`/high computed above is
+        # wrong for it in a way that would read as a clean P8 pass. There is no
+        # disagreement branch to fall through to precisely because nothing was
+        # compared.
+        result["ocr_quality"] = "low"
+        result["cross_validation_status"] = "single_reader_no_cross_validation"
+        result["review_required"] = True
+        result["reviewer_role"] = "손해사정사"
+        result["review_reason"] = (
+            f"Page(s) {single_reader_pages}: read ONCE, with no second reader "
+            "and no comparison (--single-reader). No P8 cross-validation was "
+            "performed on this document, so a misread or a fabricated addition "
+            "would be undetected. Development throughput text -- re-run without "
+            "--single-reader before this document's text is relied on."
+        )
+    elif any_disagreement:
         disagreed_pages = [p["page"] for p in ocr_data["pages"] if p["agreement"] == "disagreed"]
         result["reviewer_role"] = "손해사정사"
         result["review_reason"] = f"Page(s) {disagreed_pages}: the two independent reads disagree -- P8, no tolerance threshold, blocked pending human resolution."
+    elif assumed_pages:
+        # The run continues, but the document is NOT clean: these pages were
+        # decided by policy, not by a reader agreement or a human. Quality and
+        # status say so, and review stays required so the deferred judgement
+        # remains visible downstream instead of vanishing into a passed stage.
+        result["ocr_quality"] = "low"
+        result["cross_validation_status"] = "assume_reading_a_unreviewed"
+        result["review_required"] = True
+        result["reviewer_role"] = "손해사정사"
+        result["review_reason"] = (
+            f"Page(s) {assumed_pages}: the two independent reads disagreed and "
+            "reading_a was taken automatically under the assume-reading-a "
+            "policy. No human compared the readings. These pages need human "
+            "adjudication before this text is relied on."
+        )
     return result
 
 
@@ -576,6 +665,8 @@ def run_checkpoint1(
     page_end: int | None = None,
     classify: bool = True,
     max_workers: int | None = None,
+    on_disagreement: str = "block",
+    single_reader: bool = False,
 ) -> dict:
     # Evaluated before provider construction, PDF rendering, or any output
     # write, so a blocked call cannot spend tokens. What it refuses is now only
@@ -626,7 +717,19 @@ def run_checkpoint1(
 
     pdf_path = Path(pdf_path)
     source_total_pages = source_pdf_page_count(pdf_path)
-    if reader_a is None or reader_b is None or comparator is None:
+    if single_reader:
+        # Only reader_a is built. Constructing reader_b/comparator here would
+        # resolve credentials and a model for calls run_ocr never makes, and
+        # would put two more provider labels into a contract that must record
+        # that only one reader ran.
+        if reader_a is None:
+            reader_a = build_ocr_providers(
+                reader_a_name=reader_a_name,
+                reader_a_model=reader_a_model,
+            )["reader_a"]
+        reader_b = None
+        comparator = None
+    elif reader_a is None or reader_b is None or comparator is None:
         providers = build_ocr_providers(
             reader_a_name=reader_a_name,
             reader_b_name=reader_b_name,
@@ -645,7 +748,10 @@ def run_checkpoint1(
         classifier = build_classifier_provider(
             classifier_provider_name=classifier_provider_name,
             classifier_model=classifier_model,
-            comparator_provider=comparator,
+            # In --single-reader mode there IS no comparator to fall back on, so
+            # reader_a stands in as the provider-of-record. Classification is a
+            # separate call from P8 and is unaffected by the reader count.
+            comparator_provider=comparator if comparator is not None else reader_a,
         )
 
     with _page_range_pdf(pdf_path, case_id, doc_id, page_start, page_end) as extraction_path:
@@ -658,10 +764,19 @@ def run_checkpoint1(
             reader_b=reader_b,
             comparator=comparator,
             max_workers=max_workers,
+            single_reader=single_reader,
         )
 
+    if on_disagreement == "assume-reading-a":
+        _apply_assume_reading_a(ocr_data)
+
     for p in ocr_data["pages"]:
-        if p["agreement"] == "agreed":
+        # assume_reading_a pages are written too, and must be: _assemble_ocr_result
+        # stamps them with a text_path, so skipping the write here produced a
+        # contract pointing at files that do not exist (CASE_911/DOC_005 claimed
+        # 19 page paths with only 11 on disk). Either both agree that the page
+        # has text or neither does.
+        if p["agreement"] in ("agreed", "assume_reading_a"):
             _write_page_text(case_id, doc_id, p["page"], p["reading_a"], held_by, run_id)
 
     ocr_result = _assemble_ocr_result(
@@ -1143,6 +1258,8 @@ def _run_from_args(args):
             page_end=args.page_end,
             classify=not args.bundle_ocr,
             max_workers=args.workers,
+            on_disagreement=args.on_disagreement,
+            single_reader=args.single_reader,
         )
     except ProviderConfigError as exc:
         sys.exit(f"error: {exc}")
@@ -1245,6 +1362,32 @@ def _add_run_arguments(parser):
         help="Pages OCR'd concurrently (default 4, or HARNESS_OCR_WORKERS). 1 = "
              "sequential. Wall-time only: pages are independent, and results are "
              "returned in source order either way.")
+    parser.add_argument(
+        "--on-disagreement", choices=["block", "assume-reading-a"],
+        default="block",
+        help="What to do when the two P8 reads disagree. 'block' (default) "
+             "halts the document pending human resolution, per harness-guardrails "
+             "P8. 'assume-reading-a' takes reading_a and continues, recording "
+             "agreement='assume_reading_a' plus an auto_resolution block on every "
+             "affected page and keeping review_required true -- for throughput "
+             "runs where a human adjudicates later. It is a DEFERRAL of the "
+             "judgement, not a finding that reading_a was correct: on "
+             "CASE_911/DOC_005 the source was scanned 90 degrees rotated and BOTH "
+             "reads were wrong on 8 of 19 pages.")
+    parser.add_argument(
+        "--single-reader", action="store_true",
+        help="DEVELOPMENT THROUGHPUT MODE -- turns P8 OFF rather than relaxing "
+             "it. Only reader_a runs: no second read, no comparison, roughly "
+             "half the provider calls and wall time. Every page is recorded as "
+             "agreement='single_reader' (never 'agreed' -- nothing agreed), the "
+             "document gets cross_validation_status/mode "
+             "'single_reader_no_cross_validation', ocr_quality 'low', and "
+             "review_required stays true. Mutually exclusive with "
+             "--on-disagreement, which resolves a disagreement that single-read "
+             "extraction cannot produce. Not admissible for PoC evaluation: the "
+             "four real faults P8 caught on this corpus (CASE_012, CASE_021 x2, "
+             "CASE_022) were each visible only as a disagreement between two "
+             "reads.")
     parser.add_argument(
         "--bundle-ocr", action="store_true",
         help="OCR an unsplit bundle without classifying it, so segmentation can "
@@ -1362,6 +1505,19 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
     _configure_trace(args)
+    # Rejected here rather than silently ignoring one: the two flags express
+    # incompatible intents. --on-disagreement decides what to do about a P8
+    # disagreement, and --single-reader guarantees no disagreement can exist
+    # because nothing is compared. Accepting both would let a command line
+    # asking for a resolution policy run with P8 off and report neither.
+    if getattr(args, "single_reader", False) and getattr(args, "on_disagreement", "block") != "block":
+        sys.exit(
+            "error: --single-reader and --on-disagreement are mutually exclusive. "
+            "--single-reader performs no comparison, so no disagreement can arise "
+            "for --on-disagreement to resolve. Pick one: --single-reader for a "
+            "throughput run with P8 off, or --on-disagreement for a dual-read run "
+            "that defers the human adjudication."
+        )
     if args.command == "classify-only":
         # The provider is built lazily: a printed form title decides most types
         # with no model call, and constructing one would resolve credentials for

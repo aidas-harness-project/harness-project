@@ -24,10 +24,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
 
 SLA_START_OP = "sla.phase1.start"
 SLA_END_OP = "sla.phase1.end"
+STAGE_ATTEMPT_START_OP = "stage.attempt.start"
+STAGE_ATTEMPT_END_OP = "stage.attempt.end"
+STAGE_ATTEMPT_ABANDONED_OP = "stage.attempt.abandoned"
+STAGE_ATTEMPT_OPS = frozenset({
+    STAGE_ATTEMPT_START_OP,
+    STAGE_ATTEMPT_END_OP,
+    STAGE_ATTEMPT_ABANDONED_OP,
+})
 
 
 def read_shards(spans_dir: Path) -> tuple[list[dict], int, int]:
@@ -264,6 +272,253 @@ def _human_wait_all(spans: list[dict]) -> float:
     return round(_union_length(intervals), 6)
 
 
+def _subtract_intervals(base: tuple[float, float], cuts: Iterable[tuple[float, float]]):
+    """Return the portions of *base* not covered by the union of *cuts*."""
+    remaining = [base]
+    for cut_start, cut_end in sorted(cuts):
+        next_remaining = []
+        for start, end in remaining:
+            if cut_end <= start or cut_start >= end:
+                next_remaining.append((start, end))
+                continue
+            if cut_start > start:
+                next_remaining.append((start, min(cut_start, end)))
+            if cut_end < end:
+                next_remaining.append((max(cut_end, start), end))
+        remaining = next_remaining
+    return [(start, end) for start, end in remaining if end > start]
+
+
+def _wall_interval(span: dict) -> tuple[float, float] | None:
+    anchor = _parse_wall(span.get("t_start_wall"))
+    if anchor is None:
+        return None
+    start = anchor.timestamp()
+    duration = float(span.get("duration_s") or 0.0)
+    return start, start + max(duration, 0.0)
+
+
+def _stage_marker_key(span: dict) -> tuple[str, int] | None:
+    attrs = span.get("attrs") or {}
+    stage = attrs.get("stage_name")
+    attempt = span.get("attempt")
+    if not isinstance(stage, str) or not stage or not isinstance(attempt, int) or attempt < 1:
+        return None
+    return stage, attempt
+
+
+def _sla_window(spans: list[dict]) -> tuple[float, float] | None:
+    starts = [w.timestamp() for w in (_parse_wall(s.get("t_start_wall")) for s in spans
+              if s.get("op") == SLA_START_OP) if w]
+    ends = [w.timestamp() for w in (_parse_wall(s.get("t_start_wall")) for s in spans
+            if s.get("op") == SLA_END_OP) if w]
+    if not starts or not ends:
+        return None
+    start, end = min(starts), max(ends)
+    return (start, end) if end >= start else None
+
+
+def summarize_stage_attempts(spans: list[dict],
+                             run_state_stages: list[dict] | None = None):
+    """Pair cross-process stage markers and build separate wall-time rollups.
+
+    These derived intervals never enter ordinary span self-time. They answer
+    which orchestration attempt occupied the wall clock; the unexplained
+    remainder is deliberately named unattributed rather than model reasoning.
+    """
+    grouped: dict[tuple[str, int], dict[str, list[dict]]] = {}
+    for span in spans:
+        op = span.get("op")
+        if op not in STAGE_ATTEMPT_OPS:
+            continue
+        key = _stage_marker_key(span)
+        if key is None:
+            continue
+        bucket = grouped.setdefault(key, {"start": [], "end": [], "abandoned": []})
+        if op == STAGE_ATTEMPT_START_OP:
+            bucket["start"].append(span)
+        elif op == STAGE_ATTEMPT_END_OP:
+            bucket["end"].append(span)
+        else:
+            bucket["abandoned"].append(span)
+
+    human_intervals = [interval for span in spans
+                       if span.get("category") == "human_wait"
+                       for interval in [_wall_interval(span)] if interval is not None]
+    tool_intervals = [interval for span in spans
+                      if span.get("category") not in ("marker", "human_wait")
+                      and span.get("op") not in STAGE_ATTEMPT_OPS
+                      for interval in [_wall_interval(span)] if interval is not None]
+    sla_window = _sla_window(spans)
+
+    attempts: list[dict] = []
+    valid_windows: dict[tuple[str, int], tuple[float, float]] = {}
+    for (stage, attempt), markers in sorted(grouped.items()):
+        starts, ends = markers["start"], markers["end"]
+        pairing = "complete"
+        start_wall = end_wall = None
+        if len(starts) > 1 or len(ends) > 1:
+            pairing = "duplicate_marker"
+        elif not starts and ends:
+            pairing = "orphan_end"
+        elif starts and not ends:
+            pairing = "open"
+        elif not starts and not ends:
+            pairing = "open"  # abandoned-only diagnostic
+        else:
+            start_wall = _parse_wall(starts[0].get("t_start_wall"))
+            end_wall = _parse_wall(ends[0].get("t_start_wall"))
+            if start_wall is None or end_wall is None or end_wall < start_wall:
+                pairing = "invalid_order"
+
+        outcome = "open"
+        if len(ends) == 1:
+            raw_outcome = (ends[0].get("attrs") or {}).get("attempt_outcome")
+            outcome = raw_outcome if isinstance(raw_outcome, str) and raw_outcome else "unknown"
+        elif markers["abandoned"]:
+            outcome = "interrupted"
+
+        item = {
+            "stage_name": stage,
+            "attempt": attempt,
+            "outcome": outcome,
+            "pairing_status": pairing,
+            "started_at": starts[0].get("t_start_wall") if len(starts) == 1 else None,
+            "ended_at": ends[0].get("t_start_wall") if len(ends) == 1 else None,
+            "raw_wall_s": None,
+            "human_wait_s": 0.0,
+            "active_wall_s": None,
+            "observed_tool_overlap_s": None,
+            "unattributed_active_s": None,
+            "attribution_status": pairing if pairing != "complete" else "complete",
+            "in_sla_window": False,
+        }
+        if pairing == "complete" and start_wall is not None and end_wall is not None:
+            start_ts, end_ts = start_wall.timestamp(), end_wall.timestamp()
+            valid_windows[(stage, attempt)] = (start_ts, end_ts)
+            clipped_human = list(_clip(human_intervals, start_ts, end_ts))
+            human_s = _union_length(clipped_human)
+            raw_s = end_ts - start_ts
+            active_parts = _subtract_intervals((start_ts, end_ts), clipped_human)
+            observed_parts = []
+            for active_start, active_end in active_parts:
+                observed_parts.extend(_clip(tool_intervals, active_start, active_end))
+            observed_s = _union_length(observed_parts)
+            active_s = max(raw_s - human_s, 0.0)
+            item.update({
+                "raw_wall_s": round(raw_s, 6),
+                "human_wait_s": round(human_s, 6),
+                "active_wall_s": round(active_s, 6),
+                "observed_tool_overlap_s": round(min(observed_s, active_s), 6),
+                "unattributed_active_s": round(max(active_s - observed_s, 0.0), 6),
+                "in_sla_window": bool(sla_window and end_ts > sla_window[0]
+                                      and start_ts < sla_window[1]),
+            })
+        attempts.append(item)
+
+    # Timestamp-only attribution cannot decide ownership where stage windows
+    # overlap. Fail closed instead of charging one tool span to both stages.
+    overlapping: set[tuple[str, int]] = set()
+    valid_items = list(valid_windows.items())
+    for idx, (left_key, (left_start, left_end)) in enumerate(valid_items):
+        for right_key, (right_start, right_end) in valid_items[idx + 1:]:
+            if min(left_end, right_end) > max(left_start, right_start):
+                overlapping.update((left_key, right_key))
+    for item in attempts:
+        if (item["stage_name"], item["attempt"]) in overlapping:
+            item["attribution_status"] = "overlapping_stage_attempts"
+            item["observed_tool_overlap_s"] = None
+            item["unattributed_active_s"] = None
+
+    by_stage: dict[str, dict] = {}
+    for state in run_state_stages or []:
+        stage = state.get("stage_name")
+        if isinstance(stage, str):
+            by_stage.setdefault(stage, {
+                "attempt_count_observed": 0, "closed_attempt_count": 0,
+                "failed_attempt_count": 0, "open_attempt_count": 0,
+                "total_attempt_active_wall_s": 0.0,
+                "passed_attempt_active_wall_s": 0.0, "human_wait_s": 0.0,
+                "observed_tool_overlap_s": 0.0, "unattributed_active_s": 0.0,
+                "attribution_complete": True,
+                "skipped": state.get("status") == "skipped",
+            })
+    for item in attempts:
+        stage = by_stage.setdefault(item["stage_name"], {
+            "attempt_count_observed": 0, "closed_attempt_count": 0,
+            "failed_attempt_count": 0, "open_attempt_count": 0,
+            "total_attempt_active_wall_s": 0.0,
+            "passed_attempt_active_wall_s": 0.0, "human_wait_s": 0.0,
+            "observed_tool_overlap_s": 0.0, "unattributed_active_s": 0.0,
+            "attribution_complete": True, "skipped": False,
+        })
+        stage["attempt_count_observed"] += 1
+        if item["pairing_status"] == "complete":
+            stage["closed_attempt_count"] += 1
+            active_s = float(item["active_wall_s"] or 0.0)
+            stage["total_attempt_active_wall_s"] += active_s
+            stage["human_wait_s"] += float(item["human_wait_s"] or 0.0)
+            if item["outcome"] == "passed":
+                stage["passed_attempt_active_wall_s"] += active_s
+            else:
+                stage["failed_attempt_count"] += 1
+        elif item["pairing_status"] == "open":
+            stage["open_attempt_count"] += 1
+        if item["attribution_status"] != "complete":
+            stage["attribution_complete"] = False
+        elif item["observed_tool_overlap_s"] is not None:
+            stage["observed_tool_overlap_s"] += item["observed_tool_overlap_s"]
+            stage["unattributed_active_s"] += item["unattributed_active_s"]
+
+    for stage in by_stage.values():
+        for key in ("total_attempt_active_wall_s", "passed_attempt_active_wall_s",
+                    "human_wait_s"):
+            stage[key] = round(stage[key], 6)
+        if stage["attribution_complete"]:
+            stage["observed_tool_overlap_s"] = round(stage["observed_tool_overlap_s"], 6)
+            stage["unattributed_active_s"] = round(stage["unattributed_active_s"], 6)
+        else:
+            stage["observed_tool_overlap_s"] = None
+            stage["unattributed_active_s"] = None
+
+    expected_keys = set()
+    for state in run_state_stages or []:
+        if state.get("status") == "skipped":
+            continue
+        stage = state.get("stage_name")
+        count = state.get("attempt_count")
+        if isinstance(stage, str) and isinstance(count, int):
+            # A non-skipped terminal/in-progress stage necessarily executed.
+            # If incidental output writes advanced it with attempt_count=0,
+            # it still owes one explicit marker pair; report the missing
+            # coverage instead of treating zero as fully observed.
+            expected = max(count, 1) if state.get("status") != "pending" else count
+            expected_keys.update((stage, n) for n in range(1, expected + 1))
+    observed_keys = set(grouped)
+    missing = expected_keys - observed_keys
+    pairing_counts = {name: sum(1 for item in attempts if item["pairing_status"] == name)
+                      for name in ("complete", "open", "orphan_end",
+                                   "duplicate_marker", "invalid_order")}
+    coverage = {
+        "run_state_attempts_expected": len(expected_keys),
+        "trace_attempts_started": sum(len(v["start"]) for v in grouped.values()),
+        "trace_attempts_closed": sum(len(v["end"]) for v in grouped.values()),
+        "complete_attempts": pairing_counts["complete"],
+        "open_attempts": pairing_counts["open"],
+        "orphan_end_attempts": pairing_counts["orphan_end"],
+        "duplicate_marker_attempts": pairing_counts["duplicate_marker"],
+        "invalid_order_attempts": pairing_counts["invalid_order"],
+        "missing_marker_attempts": len(missing),
+        "coverage_complete": (not missing and not (observed_keys - expected_keys)
+                              and all(item["pairing_status"] == "complete"
+                                      for item in attempts))
+                             if run_state_stages is not None
+                             else all(item["pairing_status"] == "complete"
+                                      for item in attempts),
+    }
+    return attempts, by_stage, coverage
+
+
 def _pool_name(op: str) -> str:
     return op[len("pool."):] if op.startswith("pool.") else op
 
@@ -271,10 +526,14 @@ def _pool_name(op: str) -> str:
 def summarize(spans: list[dict], *, case_id: str, run_id: str,
               generated_at: str, dropped_span_lines: int, shard_count: int,
               input_class: str | None = None,
-              cold_or_warm: str | None = None) -> dict:
+              cold_or_warm: str | None = None,
+              run_state_stages: list[dict] | None = None) -> dict:
     """Build the full `_timing_summary.json` body."""
-    self_times = compute_self_times(spans)
+    work_spans = [s for s in spans if s.get("op") not in STAGE_ATTEMPT_OPS]
+    self_times = compute_self_times(work_spans)
     wall, human, active = compute_sla(spans)
+    stage_attempts, by_stage, stage_coverage = summarize_stage_attempts(
+        spans, run_state_stages)
 
     worker_config: dict[str, int] = {}
     observed: dict[str, int] = {}
@@ -285,7 +544,7 @@ def summarize(spans: list[dict], *, case_id: str, run_id: str,
     total_wait = max_wait = total_held = 0.0
     dropped_attrs = 0
 
-    for span in spans:
+    for span in work_spans:
         attrs = span.get("attrs") or {}
         dropped_attrs += int(span.get("dropped_attrs") or 0)
         op = str(span.get("op") or "")
@@ -333,10 +592,13 @@ def summarize(spans: list[dict], *, case_id: str, run_id: str,
         "sla_wall_clock_s": wall,
         "human_wait_s": human,
         "active_s": active,
-        "critical_path": compute_critical_path(spans, self_times),
-        "by_category": _rollup(spans, self_times, "category"),
-        "by_op": _rollup(spans, self_times, "op"),
+        "critical_path": compute_critical_path(work_spans, self_times),
+        "by_category": _rollup(work_spans, self_times, "category"),
+        "by_op": _rollup(work_spans, self_times, "op"),
         "total_self_time_s": round(sum(self_times.values()), 6),
+        "stage_attempts": stage_attempts,
+        "by_stage": by_stage,
+        "stage_coverage": stage_coverage,
         "worker_config": worker_config,
         "observed_max_concurrency": observed,
         "cache_stats": {
