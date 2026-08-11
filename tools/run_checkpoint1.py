@@ -484,16 +484,33 @@ def _page_range_pdf(pdf_path: Path, case_id: str, doc_id: str, page_start: int |
             temp_path.unlink(missing_ok=True)
         return
 
+    # select(), not insert_pdf(): insert_pdf rebuilds each page's resources into
+    # a fresh document and drops the glyphs of a page whose text is drawn in a
+    # subset TrueType font with a broken/WinAnsi-mislabelled encoding -- which
+    # is what Korean insurer PDFs use ("ABCDEE+바탕체"). select() keeps the
+    # page's own resources and reproduces the source byte-for-byte.
+    #
+    # segment_case.split_bundle already fixed exactly this and measured it
+    # (CASE_905, 323 pages: insert_pdf lost the text layer on 3 cover pages,
+    # select on 0). This slicer was never updated, so the same bug survived on
+    # the other path that cuts a PDF. Re-measured here on CASE_902 DOC_001
+    # (249p, 248 with text): insert_pdf lost pages 2-7 and 248, select lost none
+    # and reproduced every char count exactly.
+    #
+    # The failure is invisible except as cost and quality: a page that extracts
+    # 0 chars reads as a genuine scan to ocr_extract's embedded-text check,
+    # which routes the whole document to vision OCR -- paying for hundreds of
+    # provider calls to re-read text that was already perfect, on the very path
+    # where vision has been observed hallucinating an insurer slogan.
+    #
+    # select() mutates the document it is called on, so this opens its own
+    # handle rather than sharing the caller's.
     src = fitz.open(pdf_path)
     try:
         if page_end > src.page_count:
             sys.exit(f"error: page range {page_start}-{page_end} exceeds {pdf_path} ({src.page_count} pages)")
-        out = fitz.open()
-        try:
-            out.insert_pdf(src, from_page=page_start - 1, to_page=page_end - 1)
-            out.save(temp_path)
-        finally:
-            out.close()
+        src.select(list(range(page_start - 1, page_end)))
+        src.save(temp_path)
         yield temp_path
     finally:
         src.close()
@@ -501,6 +518,17 @@ def _page_range_pdf(pdf_path: Path, case_id: str, doc_id: str, page_start: int |
 
 
 def _write_page_range_pdf_pypdf(pdf_path: Path, temp_path: Path, page_start: int, page_end: int) -> None:
+    """Fallback slicer for hosts without pymupdf.
+
+    KNOWN LIMITATION, measured rather than assumed: like fitz's insert_pdf,
+    pypdf's add_page rebuilds the page into a new document and loses the text
+    layer of pages drawn in a subset TrueType font with a mislabelled encoding.
+    On CASE_902 DOC_001 it lost exactly the same 7 pages insert_pdf did.
+    pymupdf's select() is the only slicer measured to preserve them, so this
+    path warns instead of failing silently -- a document that quietly drops to
+    vision OCR costs hundreds of provider calls and re-reads text that was
+    already correct.
+    """
     try:
         from pypdf import PdfReader, PdfWriter
     except ImportError:
@@ -510,6 +538,14 @@ def _write_page_range_pdf_pypdf(pdf_path: Path, temp_path: Path, page_start: int
     if page_end > len(reader.pages):
         sys.exit(f"error: page range {page_start}-{page_end} exceeds {pdf_path} ({len(reader.pages)} pages)")
 
+    print(
+        "WARNING: slicing with pypdf because pymupdf is unavailable. pypdf can "
+        "drop the embedded text layer of pages using subset fonts with a "
+        "mislabelled encoding (common in Korean insurer PDFs), which silently "
+        "routes those pages to vision OCR. Install pymupdf for a lossless "
+        "slice.",
+        file=sys.stderr,
+    )
     writer = PdfWriter()
     for page_index in range(page_start - 1, page_end):
         writer.add_page(reader.pages[page_index])
