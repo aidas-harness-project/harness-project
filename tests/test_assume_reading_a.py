@@ -125,7 +125,12 @@ def test_every_page_claiming_a_text_path_is_a_page_that_gets_written(monkeypatch
         src)
     assert guard, "page-write loop not found -- update this test to match"
 
-    written = {p["page"] for p in data["pages"] if eval(guard.group(1), {}, {"p": p})}
+    # Evaluated against the module's own globals so the guard can reference
+    # module-level names -- it now tests membership in PAGE_TEXT_AGREEMENTS
+    # rather than an inline tuple, after that literal desynced a second time
+    # (single_reader: CASE_911 DOC_002 claimed 15 text_paths with 0 files).
+    written = {p["page"] for p in data["pages"]
+               if eval(guard.group(1), vars(run_checkpoint1), {"p": p})}
     result = run_checkpoint1._assemble_ocr_result(
         "CASE_911", "DOC_005", "RUN_20260811_010", data, source_total_pages=4)
     claimed = {p["page"] for p in result["pages"] if p["text_path"]}

@@ -354,6 +354,15 @@ ASSUME_READING_A_NOTE = (
 )
 
 
+# The single definition of "this page has text on disk". Two places consume it
+# and they MUST agree: the write loop in run_checkpoint1(), which creates
+# page_NNN.md, and _assemble_ocr_result()'s `has_text`, which stamps the
+# contract's text_path. When they drifted, the contract advertised files that
+# were never written -- a lie no downstream stage can detect, since it reads the
+# path and finds nothing rather than being told the page is missing.
+PAGE_TEXT_AGREEMENTS = frozenset({"agreed", "assume_reading_a", "single_reader"})
+
+
 def _apply_assume_reading_a(ocr_data: dict) -> list[int]:
     """Convert every P8 disagreement into a recorded reading_a selection.
 
@@ -404,7 +413,7 @@ def _assemble_ocr_result(
         # the auto_resolution block recording that a policy, not a person,
         # chose it.
         auto = p.get("auto_resolution")
-        has_text = p["agreement"] in ("agreed", "assume_reading_a", "single_reader")
+        has_text = p["agreement"] in PAGE_TEXT_AGREEMENTS
         cross_validation = {
             "vision_model_reading": p["reading_b"],
             "agreement": p["agreement"],
@@ -781,13 +790,16 @@ def run_checkpoint1(
     if on_disagreement == "assume-reading-a":
         _apply_assume_reading_a(ocr_data)
 
+    # MUST stay identical to _assemble_ocr_result's `has_text` set. The contract
+    # stamps a text_path for exactly these agreements, so any value present
+    # there and missing here produces a contract pointing at files that were
+    # never written -- twice now, both times caught only by a real run:
+    # assume_reading_a (CASE_911/DOC_005, 19 paths / 11 files) and then
+    # single_reader (CASE_911 again, DOC_002 15/0 and DOC_005 19/0, the case's
+    # only two OCR documents, while the three embedded_text ones were fine).
+    # Derived from one place so a third value cannot desync it a third time.
     for p in ocr_data["pages"]:
-        # assume_reading_a pages are written too, and must be: _assemble_ocr_result
-        # stamps them with a text_path, so skipping the write here produced a
-        # contract pointing at files that do not exist (CASE_911/DOC_005 claimed
-        # 19 page paths with only 11 on disk). Either both agree that the page
-        # has text or neither does.
-        if p["agreement"] in ("agreed", "assume_reading_a"):
+        if p["agreement"] in PAGE_TEXT_AGREEMENTS:
             _write_page_text(case_id, doc_id, p["page"], p["reading_a"], held_by, run_id)
 
     ocr_result = _assemble_ocr_result(

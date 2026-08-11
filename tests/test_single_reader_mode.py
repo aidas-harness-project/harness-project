@@ -195,6 +195,51 @@ def test_single_reader_document_is_not_blocked(page_image: Path, monkeypatch,
     )
 
 
+def test_page_write_set_matches_contract_text_path_set() -> None:
+    """The write loop and the contract must agree on which pages have text.
+
+    This desynced twice, both times caught only by a real run rather than by
+    the suite: assume_reading_a (CASE_911/DOC_005 advertised 19 text_paths with
+    11 files) and then single_reader (CASE_911's DOC_002 15/0 and DOC_005 19/0
+    — the case's only two OCR documents, while the three embedded_text ones
+    were unaffected, so the case looked 3/5 healthy).
+
+    Both sites now read PAGE_TEXT_AGREEMENTS. This pins the source-level fact
+    that neither reintroduces a literal tuple, which is what the drift was.
+    """
+    src = Path(rc.__file__).read_text(encoding="utf-8")
+    # The write loop and has_text must both go through the shared constant.
+    assert src.count("in PAGE_TEXT_AGREEMENTS") >= 2, (
+        "both the page-write loop and _assemble_ocr_result's has_text must "
+        "test membership in PAGE_TEXT_AGREEMENTS; a literal tuple in either "
+        "place is exactly the drift this constant exists to prevent"
+    )
+    assert rc.PAGE_TEXT_AGREEMENTS == {"agreed", "assume_reading_a", "single_reader"}
+
+
+def test_single_reader_writes_page_text(page_image: Path, tmp_path: Path,
+                                        monkeypatch) -> None:
+    """A single_reader page must actually reach _write_page_text.
+
+    The contract stamps it a text_path, so if the write loop skips it the
+    contract points at a file that does not exist -- and checkpoint 2 then has
+    no input at all. Drives the real predicate rather than asserting on the
+    constant, so removing the value from the loop fails here too.
+    """
+    out = _run(page_image, single_reader=True)
+    written = [p["page"] for p in out["pages"]
+               if p["agreement"] in rc.PAGE_TEXT_AGREEMENTS]
+    assert written == [1], "the single_reader page must be selected for writing"
+
+    result = rc._assemble_ocr_result(
+        "CASE_999", "DOC_001", "RUN_20260811_001", out, source_total_pages=1)
+    stamped = [p["page"] for p in result["pages"] if p["text_path"]]
+    assert stamped == written, (
+        f"contract stamps text_path for {stamped} but the write loop writes "
+        f"{written} -- every stamped page must have been written"
+    )
+
+
 def test_single_reader_cache_namespace_is_separate(page_image: Path) -> None:
     """A single-read verdict and a dual-read verdict must never be interchangeable.
 
