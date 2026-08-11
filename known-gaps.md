@@ -28,7 +28,7 @@ the same pass.
 | 37 | RISK ACCEPTED | P0-8 table-boundary verification on OCR-sourced policy docs |
 | 43 | OPEN | Policy reference-table reading order |
 | 44 | OPEN | Stage 4 validators defined but never called |
-| 45 | OPEN | P8 disagreements on billing tables: 200dpi vs scan quality unverified |
+| 45 | PARTIAL | P8 billing-table disagreements: dpi rejected by measurement; reader stability still open |
 | 46 | OPEN | P8 correlated error observed live: both readers invented the same caption |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
@@ -3229,7 +3229,7 @@ would risk breaking a stage on evidence I did not gather. What this item
 records is that the audit found them and what each one's status actually
 is, so the next Stage 4 pass starts from a list rather than a suspicion.
 
-## 45. P8 disagreements concentrate on billing tables, and 200dpi may be the cause -- OPEN 2026-08-10
+## 45. P8 disagreements concentrate on billing tables; the 200dpi hypothesis is rejected -- PARTIAL 2026-08-11
 
 Measured while running S-class cases for the runtime-optimization work
 (CASE_940/942/950/952, real OCR, no mocks). Every P8 disagreement observed
@@ -3256,19 +3256,83 @@ session). When the same disputed page was rendered at **400dpi** and read by a
 human, the character was unambiguous: CASE_942 p10's code is plainly `AA800`
 (reading_a correct, reading_b's `AA600` a misread), with no room for doubt.
 
-So the cheap experiment has not been run:
+### 2026-08-11: the experiment was run. The dpi hypothesis is REJECTED.
 
-1. Re-OCR CASE_952's six disagreeing pages (p10/12/14/16/17/18) at 300 and 400dpi
-2. Record whether the disagreements disappear, and which fields survive if not
-3. Measure the cost at the same time -- 200→400dpi is 4x the pixels, so provider
-   latency and spend rise. `provider.transcribe_image` spans already carry
-   `input_images` and `duration_s`, so this needs no new instrumentation
-4. If the gain is real, consider per-document-type dpi (raise it only for code
-   tables). A blanket raise hits the SLA directly, since provider time is
-   98%+ of Stage 2 wall-clock (measured, same runs)
+Run on CASE_953 (a fork of CASE_952 made for this and deleted afterwards, so
+the real case was never mutated), DOC_001 pages 10-18 at 200/300/400dpi. Real
+claude-cli calls throughout, `resume=False` so no verdict could come from
+cache. Scope deliberately included the three pages that AGREED at 200dpi
+(p11/13/15), not just the six that disagreed: a resolution that fixes six
+pages by breaking three has not helped.
 
-**Until that runs, do not describe these as "scan quality limits"** -- that
-claim has not been tested, and the 400dpi human read is evidence against it.
+| dpi | elapsed | disagreed | count |
+|---|---|---|---|
+| 200 | 177.0s | p10, p11, p13, p14, p16, p17, p18 | 7/9 |
+| 300 | 182.9s | p10, p12, p13, p16, p17, p18 | 6/9 |
+| 400 | 188.2s | p10, p11, p12, p14, p16, p17 | 6/9 |
+
+**Raising the resolution does not reduce disagreements** (7 -> 6 -> 6, i.e.
+within noise of each other), and the per-page pattern shows why:
+
+| page | 200 | 300 | 400 | original 200dpi run |
+|---|---|---|---|---|
+| p10 | X | X | X | X |
+| p11 | X | ok | X | ok |
+| p12 | ok | X | X | X |
+| p13 | X | X | ok | ok |
+| p14 | X | ok | X | X |
+| p15 | ok | ok | ok | ok |
+| p16 | X | X | X | X |
+| p17 | X | X | X | X |
+| p18 | X | X | ok | X |
+
+Verdicts flip with no relation to resolution.
+
+**The decisive control is the 200dpi column against the original 200dpi run:
+identical settings, identical document, no code change between them, and 3 of
+9 pages (33%) flipped** -- p11 and p13 agreed originally and disagreed on
+re-read; p12 did the reverse. **The dpi signal is smaller than the run-to-run
+noise**, so a single run per resolution cannot measure a dpi effect at all,
+and the two higher resolutions differing from 200 by one page means nothing.
+
+The 400dpi disagreements are also not shaped like resolution problems:
+`808,780 vs 908,780` (8 vs 9), `아세틸로페낙 vs 아세클로페낙`,
+`병원야간전담간호사1:1 vs 1:12`. These are dense-table reading errors, not
+illegible glyphs.
+
+**Cost: 400dpi costs 6% more wall-clock, not 4x** (177.0 -> 188.2s). The
+earlier assumption in point 3 below was wrong. Provider time is 98%+ of Stage
+2, but that time is dominated by model INFERENCE, not image transfer or
+handling; local rendering is milliseconds. The 400dpi PNGs were in fact
+SMALLER than the 300dpi ones (1169 vs 1783 KB) -- PNG compresses sparse scan
+content well. So cost is not the reason to leave dpi at 200; lack of benefit
+is.
+
+**Conclusion, and what to say about these disagreements from now on:**
+
+* **Not a resolution problem.** Rejected by measurement above.
+* **Not "scan quality limits" either.** A human read the same pages
+  unambiguously at 400dpi, and the model still disagreed with itself at
+  400dpi. The limitation is **reader stability on dense billing tables**, not
+  input fidelity. Do not attribute these to the scans.
+* **Adjudication fields remain untouched.** Across all 27 page-reads at three
+  resolutions, zero disagreements landed on 상병코드 / diagnosis / dates /
+  accident circumstances -- the same result as the original four-case
+  observation. What moves is procedure codes, drug names and amounts.
+
+`DEFAULT_RENDER_DPI` stays **200**; `--dpi` / `HARNESS_OCR_DPI` exist for
+future measurement, and nothing in the pipeline sets them.
+
+**Still open (a different question than this item asked):** reader stability
+itself. A P8 verdict that flips 33% of the time on identical input means the
+disagreement rate is not a usable quality signal for these documents, which is
+why the Go/No-Go criterion had to be revised (see below). Reducing that
+variance -- majority-of-N reads, a genuinely different reader technology
+(`open-decisions.md` #4), or excluding billing tables from P8 while the PoC
+scope excludes amount calculation -- is unaddressed.
+
+The original point 4 (per-document-type dpi) is moot: there is no gain to
+allocate.
 
 **2026-08-11 -- a blocker found while setting the experiment up, now fixed
 (commit `ae9c21b`).** Step 1 above could not have produced a valid result as
