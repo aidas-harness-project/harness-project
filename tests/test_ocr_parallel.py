@@ -10,6 +10,7 @@ Provider calls are faked throughout, keyed by image path rather than by call
 order, because a positional fake (FakeReader's readings.pop(0)) cannot express
 "page 3 got page 3's text" once calls are interleaved.
 """
+import json
 import threading
 import time
 from pathlib import Path
@@ -77,7 +78,7 @@ class CountingComparator:
 
 
 def _patch_split(monkeypatch, tmp_path, page_count):
-    def fake_split(doc_path, out_dir, max_pages=None):
+    def fake_split(doc_path, out_dir, max_pages=None, dpi=None):
         imgs = []
         for n in range(1, page_count + 1):
             p = out_dir / f"page_{n:03d}.png"
@@ -182,16 +183,28 @@ def test_resume_still_skips_cached_pages_and_reads_only_the_rest(scratch, monkey
     costs zero provider calls, exactly as before."""
     doc = _patch_split(monkeypatch, scratch, 5)
     cache = oe._resume_cache_dir("CASE_900", "DOC_001")
+
+    reader_a = PathKeyedReader("A")
+    reader_b = PathKeyedReader("B")
+    comparator = CountingComparator()
+
+    # Seed under the fingerprint this run will actually compute. Since
+    # 2026-08-11 an entry is only a hit for the exact dpi/provider/model/prompt
+    # that produced it, so seeding without one (as this test used to) is a
+    # miss -- correctly, but it would no longer be testing the cache-hit path.
+    # Every fake page shares the same bytes, so one fingerprint covers all.
+    seeded_image = scratch / "seed.png"
+    seeded_image.write_bytes(b"img")
+    fingerprint = oe._cache_fingerprint(seeded_image, reader_a, reader_b, comparator)
     for n in (1, 3):
         oe._save_cached_page(cache, n, {
             "page": n, "reading_a": f"CACHED{n}", "reading_b": f"CACHED{n}",
             "agreement": "agreed", "disagreement_details": [], "provider_metadata": {},
-        })
+        }, fingerprint)
 
-    reader_a = PathKeyedReader("A")
     result = oe.run_ocr("CASE_900", "DOC_001", doc,
-                        reader_a=reader_a, reader_b=PathKeyedReader("B"),
-                        comparator=CountingComparator())
+                        reader_a=reader_a, reader_b=reader_b,
+                        comparator=comparator)
 
     assert sorted(reader_a.calls) == [2, 4, 5]
     assert [p["page"] for p in result["pages"]] == [1, 2, 3, 4, 5]
@@ -263,3 +276,93 @@ def test_progress_is_reported_once_per_page(scratch, monkeypatch):
                comparator=CountingComparator(), progress=progress)
 
     assert len(messages) == 6
+
+
+# --------------------------------------------- cache fingerprint (2026-08-11) --
+
+def test_a_different_dpi_is_a_cache_miss_not_a_stale_p8_verdict(scratch, monkeypatch):
+    """The resume cache was keyed on case/doc/page ALONE until 2026-08-11.
+
+    That made a re-render at a different dpi a cache HIT on the old result, so
+    a 400-dpi run would have been served the 200-dpi verdict and reported the
+    same P8 agreement -- making a resolution experiment structurally incapable
+    of measuring anything. Worse than a wasted experiment: the cached value is
+    a P8 AGREEMENT decision, the gate every downstream stage trusts, so a
+    stale hit asserts a page pair agreed under settings it was never read at.
+    """
+    doc = _patch_split(monkeypatch, scratch, 3)
+    cache = oe._resume_cache_dir("CASE_900", "DOC_001")
+
+    reader_a = PathKeyedReader("A")
+    reader_b = PathKeyedReader("B")
+    comparator = CountingComparator()
+
+    seeded = scratch / "seed.png"
+    seeded.write_bytes(b"img")
+    fp_200 = oe._cache_fingerprint(seeded, reader_a, reader_b, comparator, 200)
+    for n in (1, 2, 3):
+        oe._save_cached_page(cache, n, {
+            "page": n, "reading_a": "STALE", "reading_b": "STALE",
+            "agreement": "agreed", "disagreement_details": [], "provider_metadata": {},
+        }, fp_200)
+
+    # Same document, same readers, different render resolution.
+    result = oe.run_ocr("CASE_900", "DOC_001", doc,
+                        reader_a=reader_a, reader_b=reader_b,
+                        comparator=comparator, dpi=400)
+
+    assert sorted(reader_a.calls) == [1, 2, 3], (
+        "a dpi change must re-read every page, not reuse the 200-dpi verdict")
+    assert all(p["reading_a"] != "STALE" for p in result["pages"]), (
+        "a stale cached transcription reached the result")
+
+
+def test_a_different_reader_model_is_a_cache_miss(scratch, monkeypatch):
+    """P8's premise is WHICH two readers agreed, so a verdict cached under one
+    model must not be served for another."""
+    doc = _patch_split(monkeypatch, scratch, 2)
+    cache = oe._resume_cache_dir("CASE_900", "DOC_001")
+
+    seeded = scratch / "seed.png"
+    seeded.write_bytes(b"img")
+
+    old_reader = PathKeyedReader("A")
+    old_reader.model_name = "old-model"
+    fp_old = oe._cache_fingerprint(seeded, old_reader, PathKeyedReader("B"),
+                                   CountingComparator())
+    for n in (1, 2):
+        oe._save_cached_page(cache, n, {
+            "page": n, "reading_a": "STALE", "reading_b": "STALE",
+            "agreement": "agreed", "disagreement_details": [], "provider_metadata": {},
+        }, fp_old)
+
+    new_reader = PathKeyedReader("A")
+    new_reader.model_name = "new-model"
+    result = oe.run_ocr("CASE_900", "DOC_001", doc,
+                        reader_a=new_reader, reader_b=PathKeyedReader("B"),
+                        comparator=CountingComparator())
+
+    assert sorted(new_reader.calls) == [1, 2]
+    assert all(p["reading_a"] != "STALE" for p in result["pages"])
+
+
+def test_a_pre_fingerprint_cache_entry_is_a_miss(scratch, monkeypatch):
+    """33 such entries existed on disk when fingerprinting was added. They
+    cannot be shown to match any current settings, so they must not be trusted
+    -- re-reading is the only safe handling."""
+    doc = _patch_split(monkeypatch, scratch, 2)
+    cache = oe._resume_cache_dir("CASE_900", "DOC_001")
+    cache.mkdir(parents=True, exist_ok=True)
+    for n in (1, 2):
+        (cache / f"page_{n:03d}.json").write_text(json.dumps({
+            "page": n, "reading_a": "LEGACY", "reading_b": "LEGACY",
+            "agreement": "agreed", "disagreement_details": [], "provider_metadata": {},
+        }), encoding="utf-8")
+
+    reader_a = PathKeyedReader("A")
+    result = oe.run_ocr("CASE_900", "DOC_001", doc,
+                        reader_a=reader_a, reader_b=PathKeyedReader("B"),
+                        comparator=CountingComparator())
+
+    assert sorted(reader_a.calls) == [1, 2]
+    assert all(p["reading_a"] != "LEGACY" for p in result["pages"])

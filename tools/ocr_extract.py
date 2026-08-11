@@ -30,6 +30,7 @@ Usage:
 """
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -254,7 +255,37 @@ def scratch_dir(case_id: str, doc_id: str):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def _split_to_page_images_fitz(doc_path: Path, out_dir: Path, max_pages: int | None = None) -> list[Path]:
+DEFAULT_RENDER_DPI = 200
+RENDER_DPI_ENV = "HARNESS_OCR_DPI"
+# Above this, a full page render starts costing more in provider-side image
+# handling than the extra detail is worth; a bad value should not silently
+# become an enormous one.
+MAX_RENDER_DPI = 600
+
+
+def _resolve_render_dpi(dpi: int | None = None) -> int:
+    """Explicit argument wins, then HARNESS_OCR_DPI, then the default.
+
+    Both render backends (pymupdf and pdftoppm) must agree: the dpi is a
+    property of the page image the READER sees, so letting it depend on which
+    backend happens to be installed would make P8 agreement depend on the host
+    rather than on the document. An unparseable, non-positive, or absurd env
+    value falls back to the default instead of raising -- rendering is not the
+    place to fail a run on a typo, and a silent 0-dpi render would be worse.
+    """
+    if dpi is None:
+        raw = os.environ.get(RENDER_DPI_ENV, "")
+        try:
+            dpi = int(raw) if raw.strip() else None
+        except ValueError:
+            dpi = None
+    if dpi is None or dpi <= 0 or dpi > MAX_RENDER_DPI:
+        return DEFAULT_RENDER_DPI
+    return dpi
+
+
+def _split_to_page_images_fitz(doc_path: Path, out_dir: Path, max_pages: int | None = None,
+                               dpi: int | None = None) -> list[Path]:
     import fitz  # pymupdf
 
     doc = fitz.open(doc_path)
@@ -263,7 +294,7 @@ def _split_to_page_images_fitz(doc_path: Path, out_dir: Path, max_pages: int | N
         paths = []
         for i in range(page_count):
             page = doc.load_page(i)
-            pix = page.get_pixmap(dpi=200)
+            pix = page.get_pixmap(dpi=_resolve_render_dpi(dpi))
             out_path = out_dir / f"page_{i + 1:03d}.png"
             pix.save(out_path)
             paths.append(out_path)
@@ -295,13 +326,14 @@ def _pdftoppm_page_number(path: Path) -> int:
     return int(match.group(1)) if match else 0
 
 
-def _split_to_page_images_pdftoppm(doc_path: Path, out_dir: Path, max_pages: int | None = None) -> list[Path]:
+def _split_to_page_images_pdftoppm(doc_path: Path, out_dir: Path, max_pages: int | None = None,
+                                   dpi: int | None = None) -> list[Path]:
     command = _find_pdftoppm()
     if command is None:
         sys.exit("error: pymupdf missing and pdftoppm not found for PDF rendering")
 
     prefix = out_dir / "page"
-    cmd = [command, "-png", "-r", "200"]
+    cmd = [command, "-png", "-r", str(_resolve_render_dpi(dpi))]
     if max_pages is not None:
         cmd.extend(["-f", "1", "-l", str(max_pages)])
     cmd.extend([str(doc_path), str(prefix)])
@@ -321,15 +353,18 @@ def _split_to_page_images_pdftoppm(doc_path: Path, out_dir: Path, max_pages: int
     return paths
 
 
-def split_to_page_images(doc_path: Path, out_dir: Path, max_pages: int | None = None) -> list[Path]:
+def split_to_page_images(doc_path: Path, out_dir: Path, max_pages: int | None = None,
+                         dpi: int | None = None) -> list[Path]:
     """max_pages caps how many pages get rendered (from the start) -- used by
     intake_case.py's content pre-check, which only needs the first few pages,
     not a full render. None (default) renders every page, unchanged from
-    this function's original behavior."""
+    this function's original behavior.
+
+    dpi=None keeps the 200-dpi default (see _resolve_render_dpi)."""
     try:
-        return _split_to_page_images_fitz(doc_path, out_dir, max_pages)
+        return _split_to_page_images_fitz(doc_path, out_dir, max_pages, dpi)
     except ImportError:
-        return _split_to_page_images_pdftoppm(doc_path, out_dir, max_pages)
+        return _split_to_page_images_pdftoppm(doc_path, out_dir, max_pages, dpi)
 
 
 def build_ocr_providers(
@@ -373,22 +408,84 @@ def _resume_cache_dir(case_id: str, doc_id: str) -> Path:
     return SCRATCH_ROOT / "_resume" / f"{case_id}_{doc_id}"
 
 
-def _load_cached_page(cache_dir: Path, page: int) -> dict | None:
+# Bumped when the CACHE ENTRY's own shape changes. An entry written before
+# fingerprinting existed carries no `fingerprint` key at all and is treated as
+# a miss, which is the intended handling: it cannot be shown to match.
+OCR_CACHE_FORMAT_VERSION = 1
+
+
+def _cache_fingerprint(img_path: Path, reader_a, reader_b, comparator,
+                       dpi: int | None = None) -> str:
+    """What the cached P8 verdict is only valid FOR.
+
+    Until 2026-08-11 this cache was keyed on case_id/doc_id/page alone, so a
+    re-run with a different render dpi, a different reader provider or model,
+    or a revised prompt was served the OLD verdict as a hit -- silently. That
+    is worse here than in the redaction cache: the cached value is a P8
+    AGREEMENT decision, so a stale hit can report `agreed` for a page pair
+    that was never actually read at the current settings, and P8 is the gate
+    everything downstream trusts.
+
+    Every input that can change the verdict is in here:
+
+    * sha256 of the exact page IMAGE bytes -- this is what the readers see, so
+      it covers render dpi, the render backend, and a re-rendered source
+      without needing to enumerate them.
+    * `OCR_PROMPT_VERSION` -- a revised transcription or comparison prompt
+      usually means the previous one misread something.
+    * both readers' and the comparator's provider+model -- a different model
+      is a different reader, and P8's premise is which two readers agreed.
+
+    A mismatch on any of them is a miss, and a miss re-runs the real calls.
+    """
+    try:
+        digest = hashlib.sha256(img_path.read_bytes()).hexdigest()
+    except OSError:
+        # Unreadable image -> a fingerprint nothing can match, so the page is
+        # re-read rather than served from cache on a guess.
+        digest = "unreadable"
+
+    def _label(provider) -> str:
+        return (f"{getattr(provider, 'provider_name', 'unknown')}"
+                f":{getattr(provider, 'model_name', None)}")
+
+    readers = f"{_label(reader_a)}|{_label(reader_b)}|{_label(comparator)}"
+    return (f"{OCR_CACHE_FORMAT_VERSION}:{OCR_PROMPT_VERSION}:"
+            f"{_resolve_render_dpi(dpi)}:{readers}:{digest}")
+
+
+def _load_cached_page(cache_dir: Path, page: int, fingerprint: str | None = None) -> dict | None:
+    """Return the cached page result, or None.
+
+    Fails closed in every ambiguous case -- unreadable file, malformed JSON,
+    missing fingerprint, fingerprint mismatch. A miss costs three provider
+    calls; a wrong hit reports a P8 verdict that was never measured under the
+    current settings.
+    """
     p = cache_dir / f"page_{page:03d}.json"
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        entry = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None  # corrupt/partial cache entry -> re-transcribe this page
+    if not isinstance(entry, dict):
+        return None
+    if fingerprint is not None and entry.get("fingerprint") != fingerprint:
+        return None  # different dpi/provider/model/prompt, or a pre-fingerprint entry
+    return entry
 
 
-def _save_cached_page(cache_dir: Path, page: int, page_result: dict) -> None:
+def _save_cached_page(cache_dir: Path, page: int, page_result: dict,
+                      fingerprint: str | None = None) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
+    entry = dict(page_result)
+    if fingerprint is not None:
+        entry["fingerprint"] = fingerprint
     # atomic write so an interrupt mid-write never leaves a half-page that
     # would be trusted on resume.
     tmp = cache_dir / f"page_{page:03d}.json.tmp"
-    tmp.write_text(json.dumps(page_result, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
     tmp.replace(cache_dir / f"page_{page:03d}.json")
 
 
@@ -430,6 +527,7 @@ def run_ocr(
     comparator=None,
     resume: bool = True,
     max_workers: int | None = None,
+    dpi: int | None = None,
 ) -> dict:
     """The actual dual-path OCR loop, extracted out of main() so callers
     (run_checkpoint1.py) can invoke it in-process instead of shelling out
@@ -490,7 +588,7 @@ def run_ocr(
 
     with scratch_dir(case_id, doc_id) as tmp_dir:
         if doc_path.suffix.lower() == ".pdf":
-            page_images = split_to_page_images(doc_path, tmp_dir)
+            page_images = split_to_page_images(doc_path, tmp_dir, dpi=dpi)
         else:
             page_images = [doc_path]  # already a single image
 
@@ -515,7 +613,10 @@ def run_ocr(
             page_no = index + 1
             with trace_mod.span("ocr.page", category="io", case_id=case_id,
                                 doc_id=doc_id, page=page_no) as sp, concurrency.enter():
-                cached = _load_cached_page(cache_dir, page_no) if resume else None
+                fingerprint = _cache_fingerprint(img_path, reader_a, reader_b,
+                                                 comparator, dpi)
+                cached = (_load_cached_page(cache_dir, page_no, fingerprint)
+                          if resume else None)
                 if cached is not None:
                     slots[index] = cached
                     sp.set_status("cache_hit")
@@ -545,7 +646,7 @@ def run_ocr(
                 # loses nothing (the page is re-read), whereas the reverse could
                 # report a page as done that was never persisted.
                 if resume:
-                    _save_cached_page(cache_dir, page_no, page_result)
+                    _save_cached_page(cache_dir, page_no, page_result, fingerprint)
                 slots[index] = page_result
                 report(f"page {page_no}/{total}: {result['agreement']}")
 
@@ -803,6 +904,11 @@ def main():
                     help="Pages transcribed concurrently (default %d, or HARNESS_OCR_WORKERS). "
                          "1 = the strictly sequential loop. Output is identical either way -- "
                          "pages are always returned in source order." % DEFAULT_OCR_WORKERS)
+    ap.add_argument("--dpi", type=int, default=None, metavar="N",
+                    help="Page render resolution (default %d, or HARNESS_OCR_DPI). "
+                         "Higher resolution costs proportionally more provider-side "
+                         "image handling, so raise it deliberately -- see known-gaps "
+                         "item 45." % DEFAULT_RENDER_DPI)
     args = ap.parse_args()
     trace_mod.configure_from_args(args)
 
@@ -823,6 +929,7 @@ def main():
             reader_b=providers["reader_b"],
             comparator=providers["comparator"],
             max_workers=args.workers,
+            dpi=args.dpi,
         )
     except ProviderConfigError as exc:
         sys.exit(f"error: {exc}")

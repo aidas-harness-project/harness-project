@@ -314,7 +314,7 @@ def test_build_ocr_providers_can_fall_back_to_common_llm_environment(monkeypatch
 
 def _patch_two_page_split(monkeypatch, tmp_path):
     """Make run_ocr see a deterministic 2-page document without a real PDF."""
-    def fake_split(doc_path, out_dir, max_pages=None):
+    def fake_split(doc_path, out_dir, max_pages=None, dpi=None):
         imgs = []
         for n in (1, 2):
             p = out_dir / f"page_{n:03d}.png"
