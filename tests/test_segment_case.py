@@ -990,19 +990,26 @@ def test_a_geometry_change_invalidates_the_cache(tmp_path):
         continuations=list(range(2, 13)), needs_full_page=[],
     )]
 
+    # CASE_TESTONLY_902, not CASE_902: the resume cache is keyed by case_id in a
+    # shared scratch dir, so once a real CASE_902 run existed on disk this test's
+    # first propose_boundaries hit ITS cache and made zero provider calls --
+    # the assertion below then failed on state no test created. Same defect as
+    # commit 6338a15 fixed for CASE_943/944; a test must never name a case_id a
+    # real run can claim.
+    case_id = "CASE_TESTONLY_902"
     geo_a = sc.compute_sheet_geometry(cols=3, rows=4, crop_ratio=0.33)
     p1 = _SequencedProvider(resp)
-    sc.propose_boundaries(pdf, case_id="CASE_902", doc_id="DOC_001",
+    sc.propose_boundaries(pdf, case_id=case_id, doc_id="DOC_001",
                           provider=p1, geometry=geo_a, sheet_paths=sheets, resume=True)
 
     geo_b = sc.compute_sheet_geometry(cols=3, rows=4, crop_ratio=0.4)
     p2 = _SequencedProvider(resp)
-    sc.propose_boundaries(pdf, case_id="CASE_902", doc_id="DOC_001",
+    sc.propose_boundaries(pdf, case_id=case_id, doc_id="DOC_001",
                           provider=p2, geometry=geo_b, sheet_paths=sheets, resume=True)
     assert p2.calls == 1  # different geometry -> cache miss -> real call
 
     import shutil
-    shutil.rmtree(sc._resume_dir("CASE_902", "DOC_001"), ignore_errors=True)
+    shutil.rmtree(sc._resume_dir(case_id, "DOC_001"), ignore_errors=True)
 
 
 def test_failed_cache_is_diagnostic_only_and_is_recalled_next_run(tmp_path):
