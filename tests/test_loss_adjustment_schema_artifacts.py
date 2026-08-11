@@ -11,6 +11,9 @@ RULEBOOK_PATH = Path(
 )
 CLAIM_ANALYSIS_PATH = Path(".claude/agents/claim-analysis.md")
 DRAFT_REPORT_PATH = Path(".claude/agents/draft-report.md")
+PIPELINE_PATH = Path("pipeline.md")
+TEMPLATE_PATH = Path("templates/draft-report.md")
+OPEN_DECISIONS_PATH = Path("open-decisions.md")
 
 
 def _schema() -> dict:
@@ -78,3 +81,15 @@ def test_draft_report_writes_then_deterministically_renders_structured_contract(
     assert "stage-input" in instructions
     assert "--structured-report-file" in instructions
     assert "support_status: unsupported" in instructions
+
+
+def test_live_documentation_has_no_unsupported_template_fallback():
+    pipeline = PIPELINE_PATH.read_text(encoding="utf-8")
+    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+    decisions = OPEN_DECISIONS_PATH.read_text(encoding="utf-8")
+
+    assert "--structured-report-file" in pipeline
+    assert "template_id: null" in pipeline
+    assert "다른 양식을 임시로 빌려" in template
+    assert "former 변형 A fallback has been removed" in decisions
+    assert "확보 전까지 변형 A를 임시 기반" not in template

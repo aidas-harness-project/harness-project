@@ -15,7 +15,7 @@ Corpus research derived from a protected local PDF corpus under `../sources/`. T
 - All boundaries passed both primary and independent OCR/text review; all 95 independent decisions matched, and five representative forms also passed visual boundary sampling
 - The validator checks live source-inventory closure, review-artifact hashes, OCR-cache/source binding, exact extracted text, and rendered equality of every selected source/output page
 
-Current candidate status: the corpus validator passes against the authorized local fixture. Metric freshness remains blocked until the protected `analysis/report-index.csv` is migrated to the current canonical headers and the metrics are regenerated.
+Current candidate status: the corpus validator and metric-staleness check pass against the authorized local fixture. Its protected report index has been migrated to the manifest-bound canonical headers, and the aggregate metrics have been regenerated. The ignored fixture remains outside the branch diff.
 
 ## Scope and assurance terms
 
@@ -42,7 +42,8 @@ Version-controlled artifacts:
 - `analysis/llm-authoring-rules.md`: operational LLM drafting rules
 - `analysis/loss-adjustment-report.schema.json`: structured authoring schema
 - `analysis/examples/example-disease-benefit.json`: schema-valid pseudonymous example
-- `../tools/generate_loss_adjustment_corpus_metrics.py`: deterministic metric definitions, generation, and staleness check
+- `analysis/examples/report-profile-conformance.json`: pseudonymous conformance matrix covering every pipeline family and claim mechanism
+- `../tools/generate_loss_adjustment_corpus_metrics.py`: deterministic metric definitions, legacy-index migration, generation, and staleness check
 
 Protected local artifacts ignored by Git:
 
@@ -84,7 +85,10 @@ python -m pytest -q \
   tests/test_extract_loss_adjustment_sections.py \
   tests/test_generate_loss_adjustment_corpus_metrics.py \
   tests/test_validate_loss_adjustment_report.py \
-  tests/test_loss_adjustment_schema_artifacts.py
+  tests/test_loss_adjustment_schema_artifacts.py \
+  tests/test_report_profile_integration.py \
+  tests/test_structured_report_pipeline_contract.py \
+  tests/test_document_assembly.py
 python tools/validate_loss_adjustment_report.py \
   loss-adjustment-format-study/analysis/examples/example-disease-benefit.json
 ```
@@ -110,6 +114,14 @@ The independent reviewer must separately classify all documents and record one s
 
 Metric generation also requires `STUDY_DIR/analysis/report-index.csv`, with exactly one family assignment for every manifest document. The generator validates every index row against manifest identity, classification, range, review status, and section-directory metadata, uses its reviewed `family` field as the sole family grouping source, and embeds the index SHA-256 in generated metrics. `scan` does not classify families or create this index; the completed index is the concrete shape and allowed-family reference. Review those assignments before generating metrics.
 
+If an existing reviewed index has the earlier header set without `source_sha256` and `source_size_bytes`, migrate it once before metric generation. The migration accepts only that exact legacy shape, verifies every legacy value against the manifest, preserves only the reviewed family assignment, and adds the two identity fields from the manifest. Unknown shapes and metadata mismatches fail without rewriting the file.
+
+```text
+python tools/generate_loss_adjustment_corpus_metrics.py STUDY_DIR --migrate-index
+python tools/generate_loss_adjustment_corpus_metrics.py STUDY_DIR
+python tools/generate_loss_adjustment_corpus_metrics.py STUDY_DIR --check
+```
+
 The required sequence is scan, human primary and independent review, apply-review, extract, validate, metrics generation, then metrics staleness check. Changes to sources, review decisions, OCR sidecars, extracted outputs, detector definitions, or indexed family assignments can invalidate downstream hashes or metrics and must be followed by validation and regeneration as appropriate.
 
 For an older study whose OCR sidecars predate provenance metadata, run `python tools/extract_loss_adjustment_sections.py refresh-cache loss-adjustment-format-study` before extraction. This re-extracts or OCRs every document from its hash-verified source; it does not merely bless legacy cache text.
@@ -120,7 +132,9 @@ When full re-OCR is intentionally not performed, `python tools/extract_loss_adju
 
 ## Authoring contract
 
-The corpus feeds `format-analysis.md`; those observed patterns are translated into operational drafting requirements in `llm-authoring-rules.md`, machine-enforced fields and cross-field invariants in `loss-adjustment-report.schema.json` plus the custom validator, and a pseudonymous conformance fixture in `analysis/examples/example-disease-benefit.json`. Corpus tendencies are not automatically mandatory unless the rules or validators make them so.
+The corpus feeds `format-analysis.md`; those observed patterns are translated into operational drafting requirements in `llm-authoring-rules.md`, machine-enforced fields and cross-field invariants in `loss-adjustment-report.schema.json` plus the custom validator, a complete pseudonymous disease-benefit example, and the all-family profile matrix in `analysis/examples/report-profile-conformance.json`. The matrix proves classification, registry, required-issue, calculation-category, and structured-contract compatibility without pretending that synthetic content is a reviewed practitioner example. Corpus tendencies are not automatically mandatory unless the rules or validators make them so.
+
+The live pipeline consumes this contract. Claim analysis emits `report_profile`; supported and provisional profiles must select a compatible entry in `templates/registry.json`; unsupported profiles have `template_id: null` and halt drafting. Draft report writes the structured JSON contract through the DAO, and `tools/document_assembly.py --structured-report-file` validates and deterministically renders the Korean narrative plus its evidence sidecar.
 
 The intended producer is an LLM-assisted drafting system and the intended output is a non-final structured report for professional review. Evidence, calculation, medical, and legal gate values are model-authored preflight states; `passed` is not authenticated proof that a human or professional review occurred. `draft` means the document remains non-final; `review_required` means one or more gates require human resolution. Neither status is approval. Human release approval belongs to a separate trusted workflow and is deliberately not represented by this authoring schema.
 

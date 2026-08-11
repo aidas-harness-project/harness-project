@@ -13,6 +13,20 @@ This ledger concerns document construction and authoring-contract coverage. It d
 - **Open**: the required control, evidence, or integration does not yet exist.
 - **Accepted limitation**: the limitation is explicitly bounded and does not block this local research study, but it would need a new decision before broader operational use.
 
+## Closure summary (2026-08-11)
+
+| Work item | Status now | What closes it |
+|---|---|---|
+| Canonical protected report index and current aggregate metrics | **Closed with current data** | Exact legacy-header migration completed; corpus validation and metric staleness check pass. |
+| Case category to report family/template selection | **Closed with current data** | Live `report_profile` plus registry compatibility validation. |
+| Structured report validation and narrative rendering | **Closed with current data** | DAO-governed contract write and deterministic document assembly are implemented and tested. |
+| Machine conformance for represented families/mechanisms | **Closed with current data** | Six pseudonymous scenarios cover all five represented families and all six mechanisms. |
+| Human-adjudicated subtype taxonomy | **Needs human review** | Confirm whether keyword candidates are primary assignments, secondary riders, exclusions, or incidental discussion. |
+| `실손` and other missing primary report types | **Needs more completed reports** | Acquire the representative material listed in “Types not evidenced or not confirmed.” |
+| Automobile self-injury and portal-style maturity | **Needs more completed reports** | Add enough examples to establish stable section/order rules; self-injury remains provisional meanwhile. |
+| Industry-wide generalizability | **Needs broader provenance** | Add reports from other producers before making an industry-wide claim. |
+| Full live-pipeline proof | **Needs an execution record, not new format data** | Run a new authorized pseudonymized case ground-truth-blind through Units 1–7 and record structured validation/rendering; Unit 11 remains unavailable locally. |
+
 ## Addressed gaps
 
 | Gap | Disposition | Evidence in the current branch |
@@ -26,6 +40,10 @@ This ledger concerns document construction and authoring-contract coverage. It d
 | Protected answer-key derivatives could enter the branch or pull-request diff. | Addressed | Raw sources, OCR caches, extracted sections, reviewed source-path metadata, and the report index are ignored. Only aggregate analysis, rules, schema, tools, tests, and a pseudonymous example are version-controlled. |
 | The completed-corpus claim could be confused with current-candidate validation. | Addressed | `validation-summary.json` separates historical aggregate facts, clean-checkout evidence, and the authorized external-fixture check. |
 | The local research tool accumulated production-grade concurrency complexity beyond its actual operating model. | Addressed as an accepted limitation | The current workflow is explicitly scoped to one cooperative local writer. The documentation no longer claims crash recovery, adversarial pathname resistance, or concurrent mutation safety. |
+| The protected report index used a prior header contract and could not pass the current staleness check. | Addressed | The exact-shape migration adds manifest-bound source hash and size fields, the authorized fixture was migrated, metrics were regenerated, and `--check` passes. |
+| Broad case types did not select the format-study family and mechanism. | Addressed | `case_type_result.report_profile` bridges coverage/loss axes to family, claim mechanism, mode, support status, and a compatible registry template. Unsupported profiles require `template_id: null`. |
+| The format study was isolated from live drafting. | Addressed | Claim analysis emits the profile, draft report writes the governed structured contract through the DAO, and document assembly validates and renders it deterministically. |
+| Family coverage existed only as prose and one disease example. | Addressed for machine conformance | `report-profile-conformance.json` covers every non-fallback family/mechanism pair, and tests validate profile selection, registry compatibility, required issues/calculations, and a complete structured-contract synthesis for every scenario. |
 
 ## Partially addressed gaps
 
@@ -35,16 +53,16 @@ This ledger concerns document construction and authoring-contract coverage. It d
 | Most OCR sidecars were inherited from the earlier study generation. | All sidecars are bound to source and sidecar hashes; selected output text and rendered PDF pages validate against the reviewed source range. | 83 of 95 sidecars were adopted as reviewed legacy text rather than freshly re-OCRed. Fresh OCR is needed to make a current-toolchain OCR-accuracy claim for every page. |
 | Family-specific rules exist, but evidence breadth is uneven. | Every defined family has rulebook and schema coverage. | A document family is not mature merely because it has schema coverage. The type inventory below must show the actual number and variety of supporting reports. |
 | Category metrics are reproducible. | Phrase and component counts come from versioned deterministic regex definitions. | The signals are lower bounds, not independently adjudicated semantic labels. They must not be described as exact component prevalence. |
-| The authoring contract covers every family structurally. | Tests synthesize family changes and reject incompatible requirements. | Only the disease-benefit family has a complete version-controlled example. Each supported family needs a representative pseudonymous conformance fixture. |
-| The format study is ready for downstream use as a contract. | Rules, schema, validator, and tests exist. | The live claim-analysis, draft-report, template registry, and document-assembly flow do not yet consume this contract. |
+| Every supported family has machine conformance coverage. | The conformance matrix exercises all family/mechanism pairs without copying protected content. | Only disease benefit has a hand-authored complete narrative example. Additional reviewed pseudonymous examples would improve authoring-quality review, but are not needed to prove contract compatibility. |
+| The live path consumes the format contract. | Profile selection, schema validation, DAO writes, and deterministic rendering are implemented and tested. | A complete ground-truth-blind Units 1–7 dry run on a newly authorized pseudonymized case pack has not yet been recorded on this branch. |
 
 ## Open gaps
 
-1. Migrate the protected `analysis/report-index.csv` to the current canonical headers, regenerate corpus metrics, and pass the staleness check.
-2. Obtain human confirmation for subtype candidates that appear only as aggregate keyword signals rather than reviewed primary-type labels.
-3. Add representative pseudonymous examples for every family intended for pipeline use.
+1. Obtain human confirmation for subtype candidates that appear only as aggregate keyword signals rather than reviewed primary-type labels.
+2. Acquire completed reports for the missing or unconfirmed primary types listed below; `실손` is the highest-priority blocker because the live case taxonomy accepts it while drafting correctly fails closed.
+3. Add more automobile self-injury and portal-style reports before promoting either thin layout to mature. The self-injury registry entry remains `provisional` and requires review.
 4. Decide whether the study's one-producer-heavy corpus is sufficient for the intended deployment population; add other producers before claiming industry-wide coverage.
-5. Integrate family selection and report validation into the live pipeline, or explicitly keep this package research-only.
+5. Record a complete ground-truth-blind Units 1–7 dry run that reaches structured-report validation and deterministic rendering, without local Unit 11 evaluation.
 
 ## Document-type re-audit
 
@@ -113,7 +131,7 @@ A single flat category is insufficient. The observed reports need at least four 
 3. **Claim mechanism/subtype**: for example third-party automobile compensation, automobile self-injury, mutual/cooperative liability, premises liability, or a carrier-specific disease rider.
 4. **Presentation mode**: `full`, `compact`, or the thinly evidenced portal-style presentation.
 
-The authoring schema already captures family, mechanism, and presentation mode. The live pipeline's two-axis case taxonomy captures coverage basis and broad loss type, but it does not yet preserve every subtype listed above.
+The authoring schema captures family, mechanism, and presentation mode, and the live pipeline now preserves that profile alongside its coverage basis and broad loss type. The observed thin subtypes listed above remain evidence annotations or review candidates; they are not promoted to machine taxonomy values until human confirmation establishes that they are primary assignments rather than incidental policy language.
 
 ### Types not evidenced or not confirmed in the current corpus
 

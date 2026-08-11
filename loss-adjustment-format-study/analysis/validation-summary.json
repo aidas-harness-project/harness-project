@@ -1,10 +1,11 @@
 {
-  "schema_version": "loss_adjustment_format_study_validation.v3",
+  "schema_version": "loss_adjustment_format_study_validation.v4",
   "candidate_evidence": {
-    "protected_fixture_present": false,
-    "protected_fixture_scope": "absent from the branch checkout; an authorized external local fixture was used read-only for corpus validation",
-    "corpus_validation": "passed_against_authorized_external_fixture",
-    "metrics_staleness_check": "failed_report_index_header_migration_required",
+    "protected_fixture_committed": false,
+    "protected_fixture_used_for_verification": true,
+    "protected_fixture_scope": "present only as ignored local files in the rebuild worktree; absent from commits and pull-request diffs",
+    "corpus_validation": "passed_against_authorized_local_fixture",
+    "metrics_staleness_check": "passed_after_report_index_migration",
     "external_fixture_result": {
       "source_documents": 95,
       "reports": 94,
@@ -12,26 +13,32 @@
       "errors": 0
     },
     "example_validation": "passed",
+    "report_profile_conformance": "passed_for_every_represented_family_and_claim_mechanism",
+    "live_structured_render_contract": "passed",
     "focused_tests": {
-      "passed": 82,
+      "passed": 144,
       "failed": 0,
       "files": [
         "tests/test_extract_loss_adjustment_sections.py",
         "tests/test_generate_loss_adjustment_corpus_metrics.py",
         "tests/test_validate_loss_adjustment_report.py",
-        "tests/test_loss_adjustment_schema_artifacts.py"
+        "tests/test_loss_adjustment_schema_artifacts.py",
+        "tests/test_report_profile_integration.py",
+        "tests/test_structured_report_pipeline_contract.py",
+        "tests/test_document_assembly.py",
+        "tests/test_validation.py"
       ]
     },
     "repository_tests": {
-      "status": "not_green_in_fresh_origin_main_worktree",
-      "passed": 1825,
+      "status": "not_green_in_isolated_rebuild_worktree",
+      "passed": 1849,
       "failed": 21,
       "errors": 14,
       "skipped": 29,
       "study_test_failures": 0,
-      "context": "Unrelated current-main tests require ignored outputs fixtures that are absent from a fresh worktree; one independent canonical-UID baseline test also fails."
+      "context": "The remaining failures are outside this change: schema/review-point tests require ignored outputs fixtures absent from the isolated worktree, and one independent canonical-UID baseline test fails. The 144-test format-study and live-integration slice is green."
     },
-    "note": "Protected artifacts remain absent from the branch and pull-request diff. The current candidate was checked read-only against an authorized external local fixture: corpus validation passed, while metric freshness failed closed because the protected report index still uses the prior header contract."
+    "note": "Protected artifacts remain ignored and absent from the branch diff. The authorized fixture was copied mechanically into the isolated rebuild worktree, its exact legacy report-index shape was migrated to manifest-bound headers, corpus validation passed, metrics were regenerated, and the staleness check passed."
   },
   "historical_completed_study_snapshot": {
     "source_documents": 95,
@@ -49,7 +56,7 @@
     "page_markers": 864,
     "rendered_source_output_pages_verified": 864,
     "exact_reviewed_text_slices_verified": 94,
-    "scope_note": "These aggregate facts come from the completed protected-fixture study. The current candidate validator confirmed the 95-document inventory and all extracted outputs against the authorized external fixture; metric regeneration remains pending."
+    "scope_note": "These aggregate facts come from the completed protected-fixture study. The current candidate validator confirmed the 95-document inventory and all extracted outputs against the authorized local fixture, and regenerated metrics pass the staleness check."
   },
   "historical_ocr_cache_provenance": {
     "source_bound_documents": 95,
@@ -89,7 +96,12 @@
     "negative_exact_results_rejected_before_rounding": true,
     "rounding_unit_enforced_for_none_mode": true,
     "open_professional_judgment_prevents_gate_self_clearance": true,
-    "family_event_and_component_invariants": true
+    "family_event_and_component_invariants": true,
+    "all_represented_family_mechanism_pairs_have_conformance_scenarios": true,
+    "case_type_profile_registry_cross_check": true,
+    "unsupported_profiles_fail_closed": true,
+    "live_dao_structured_report_contract": true,
+    "deterministic_structured_narrative_render": true
   },
   "metrics_contract": {
     "schema_version": "loss_adjustment_corpus_metrics.v0.2",
@@ -99,6 +111,7 @@
     "report_index_hash_embedded": true,
     "regex_definitions_embedded": true,
     "independently_adjudicated_semantic_labels": false,
-    "current_candidate_staleness_check": "failed_report_index_header_migration_required"
+    "legacy_index_migration_is_exact_shape_and_manifest_bound": true,
+    "current_candidate_staleness_check": "passed"
   }
 }

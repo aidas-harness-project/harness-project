@@ -39,6 +39,12 @@ REPORT_INDEX_FIELDS = (
     "section_directory",
 )
 
+LEGACY_REPORT_INDEX_FIELDS = tuple(
+    field
+    for field in REPORT_INDEX_FIELDS
+    if field not in {"source_sha256", "source_size_bytes"}
+)
+
 COMPONENT_PATTERNS = {
     "submission_letter": [
         r"(?:손해사정서|보험금\s*사정서).{0,100}(?:제출|송부)",
@@ -146,16 +152,119 @@ def _confined_text_path(study_root: Path, relative: Any, document_id: str) -> Pa
     return path
 
 
-def load_report_index(
-    manifest: dict[str, Any], study_root: Path
-) -> tuple[dict[str, str], Path, str]:
-    index_path = extractor._confined_path(
+def _report_index_path(study_root: Path) -> Path:
+    return extractor._confined_path(
         study_root,
         "analysis/report-index.csv",
         field_name="report index path",
         expected_relative="analysis/report-index.csv",
         require_exists=True,
     )
+
+
+def _expected_index_metadata(
+    document_id: str, record: dict[str, Any]
+) -> dict[str, Any]:
+    contains_report = record.get("contains_report") is True
+    page_start = record.get("page_start")
+    page_end = record.get("page_end")
+    if contains_report and (
+        not isinstance(page_start, int)
+        or isinstance(page_start, bool)
+        or not isinstance(page_end, int)
+        or isinstance(page_end, bool)
+    ):
+        raise ValueError(f"{document_id}: invalid reviewed report range")
+    if contains_report:
+        assert isinstance(page_start, int) and isinstance(page_end, int)
+        report_page_start = str(page_start)
+        report_page_end = str(page_end)
+        report_page_count = str(page_end - page_start + 1)
+    else:
+        report_page_start = ""
+        report_page_end = ""
+        report_page_count = "0"
+    return {
+        "document_id": document_id,
+        "source_relative_path": record.get("source_relative_path"),
+        "source_sha256": record.get("source_sha256"),
+        "source_size_bytes": str(record.get("source_size_bytes")),
+        "contains_report": str(contains_report),
+        "source_page_count": str(record.get("source_page_count")),
+        "report_page_start": report_page_start,
+        "report_page_end": report_page_end,
+        "report_page_count": report_page_count,
+        "review_status": record.get("review_status"),
+        "section_directory": f"sections/{document_id}" if contains_report else "",
+    }
+
+
+def _manifest_by_id(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    records = manifest.get("documents", [])
+    if not isinstance(records, list):
+        raise ValueError("manifest documents must be an array")
+    result: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("manifest documents must contain objects")
+        document_id = record.get("document_id")
+        if not isinstance(document_id, str) or document_id in result:
+            raise ValueError("manifest must contain unique string document IDs")
+        result[document_id] = record
+    return result
+
+
+def migrate_report_index(manifest: dict[str, Any], study_root: Path) -> bool:
+    """Add manifest-bound identity fields to an exact legacy report index.
+
+    Returns ``True`` when the file changed and ``False`` when it was already
+    canonical. Unknown shapes fail before the file is touched.
+    """
+
+    index_path = _report_index_path(study_root)
+    with index_path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        headers = tuple(reader.fieldnames or ())
+        rows = list(reader)
+    if headers == REPORT_INDEX_FIELDS:
+        return False
+    if headers != LEGACY_REPORT_INDEX_FIELDS:
+        raise ValueError("report index headers are neither legacy nor canonical")
+
+    manifest_by_id = _manifest_by_id(manifest)
+    row_by_id = {row.get("document_id"): row for row in rows}
+    if len(row_by_id) != len(rows) or set(row_by_id) != set(manifest_by_id):
+        raise ValueError("report index must exactly cover unique manifest documents")
+
+    migrated: list[dict[str, Any]] = []
+    for document_id, record in manifest_by_id.items():
+        row = row_by_id[document_id]
+        family = row.get("family")
+        if family not in FAMILY_ORDER:
+            raise ValueError(f"{document_id}: invalid reviewed family assignment")
+        expected = _expected_index_metadata(document_id, record)
+        legacy_expected = {
+            field: value
+            for field, value in expected.items()
+            if field in LEGACY_REPORT_INDEX_FIELDS and field != "family"
+        }
+        if any(row.get(field) != value for field, value in legacy_expected.items()):
+            raise ValueError(f"{document_id}: report index metadata mismatch")
+        migrated.append({**expected, "family": family})
+
+    temporary = index_path.with_suffix(index_path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=REPORT_INDEX_FIELDS)
+        writer.writeheader()
+        writer.writerows(migrated)
+    temporary.replace(index_path)
+    return True
+
+
+def load_report_index(
+    manifest: dict[str, Any], study_root: Path
+) -> tuple[dict[str, str], Path, str]:
+    index_path = _report_index_path(study_root)
     index_bytes = index_path.read_bytes()
     with io.StringIO(index_bytes.decode("utf-8"), newline="") as handle:
         reader = csv.DictReader(handle)
@@ -164,16 +273,7 @@ def load_report_index(
         rows = list(reader)
 
     records = manifest.get("documents", [])
-    if not isinstance(records, list):
-        raise ValueError("manifest documents must be an array")
-    manifest_by_id: dict[str, dict[str, Any]] = {}
-    for record in records:
-        if not isinstance(record, dict):
-            raise ValueError("manifest documents must contain objects")
-        document_id = record.get("document_id")
-        if not isinstance(document_id, str) or document_id in manifest_by_id:
-            raise ValueError("manifest must contain unique string document IDs")
-        manifest_by_id[document_id] = record
+    manifest_by_id = _manifest_by_id(manifest)
     row_by_id = {row.get("document_id"): row for row in rows}
     if (
         len(manifest_by_id) != len(records)
@@ -188,40 +288,7 @@ def load_report_index(
         family = row.get("family")
         if family not in FAMILY_ORDER:
             raise ValueError(f"{document_id}: invalid reviewed family assignment")
-        contains_report = record.get("contains_report") is True
-        page_start = record.get("page_start")
-        page_end = record.get("page_end")
-        if contains_report and (
-            not isinstance(page_start, int)
-            or isinstance(page_start, bool)
-            or not isinstance(page_end, int)
-            or isinstance(page_end, bool)
-        ):
-            raise ValueError(f"{document_id}: invalid reviewed report range")
-        if contains_report:
-            assert isinstance(page_start, int) and isinstance(page_end, int)
-            report_page_start = str(page_start)
-            report_page_end = str(page_end)
-            report_page_count = str(page_end - page_start + 1)
-        else:
-            report_page_start = ""
-            report_page_end = ""
-            report_page_count = "0"
-        expected = {
-            "document_id": document_id,
-            "source_relative_path": record.get("source_relative_path"),
-            "source_sha256": record.get("source_sha256"),
-            "source_size_bytes": str(record.get("source_size_bytes")),
-            "contains_report": str(contains_report),
-            "source_page_count": str(record.get("source_page_count")),
-            "report_page_start": report_page_start,
-            "report_page_end": report_page_end,
-            "report_page_count": report_page_count,
-            "review_status": record.get("review_status"),
-            "section_directory": (
-                f"sections/{document_id}" if contains_report else ""
-            ),
-        }
+        expected = _expected_index_metadata(document_id, record)
         if any(row.get(field) != value for field, value in expected.items()):
             raise ValueError(f"{document_id}: report index metadata mismatch")
         assignments[document_id] = family
@@ -338,12 +405,26 @@ def generate(study_root: Path) -> dict[str, Any]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("study_root", type=Path)
-    parser.add_argument("--check", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--migrate-index", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.migrate_index:
+        manifest_path, _, _, study_root = extractor._load_study_manifest(
+            args.study_root
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        changed = migrate_report_index(manifest, study_root)
+        print(
+            "migrated report index to canonical headers"
+            if changed
+            else "report index already uses canonical headers"
+        )
+        return 0
     output = args.study_root / "analysis/corpus-metrics.json"
     metrics = generate(args.study_root)
     rendered = json.dumps(metrics, ensure_ascii=False, indent=2) + "\n"

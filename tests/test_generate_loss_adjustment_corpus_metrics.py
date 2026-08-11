@@ -123,6 +123,69 @@ def test_load_report_index_requires_exact_manifest_metadata(tmp_path: Path):
         metrics.load_report_index(manifest, tmp_path)
 
 
+def test_migrate_report_index_adds_manifest_bound_identity_fields(tmp_path: Path):
+    analysis = tmp_path / "analysis"
+    analysis.mkdir()
+    manifest = {
+        "documents": [
+            {
+                "document_id": "DOC_001",
+                "source_relative_path": "arbitrary/source.pdf",
+                "source_sha256": "a" * 64,
+                "source_size_bytes": 1234,
+                "source_page_count": 3,
+                "contains_report": True,
+                "page_start": 1,
+                "page_end": 2,
+                "review_status": "verified",
+            }
+        ]
+    }
+    legacy_row = {
+        "document_id": "DOC_001",
+        "source_relative_path": "arbitrary/source.pdf",
+        "family": "liability_damages",
+        "contains_report": "True",
+        "source_page_count": "3",
+        "report_page_start": "1",
+        "report_page_end": "2",
+        "report_page_count": "2",
+        "review_status": "verified",
+        "section_directory": "sections/DOC_001",
+    }
+    index_path = analysis / "report-index.csv"
+    with index_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=metrics.LEGACY_REPORT_INDEX_FIELDS
+        )
+        writer.writeheader()
+        writer.writerow(legacy_row)
+
+    assert metrics.migrate_report_index(manifest, tmp_path) is True
+
+    with index_path.open(encoding="utf-8", newline="") as handle:
+        migrated = list(csv.DictReader(handle))
+    assert tuple(migrated[0]) == metrics.REPORT_INDEX_FIELDS
+    assert migrated[0]["source_sha256"] == "a" * 64
+    assert migrated[0]["source_size_bytes"] == "1234"
+    assignments, _, _ = metrics.load_report_index(manifest, tmp_path)
+    assert assignments == {"DOC_001": "liability_damages"}
+    assert metrics.migrate_report_index(manifest, tmp_path) is False
+
+
+def test_migrate_report_index_rejects_unknown_headers_without_rewriting(tmp_path: Path):
+    analysis = tmp_path / "analysis"
+    analysis.mkdir()
+    index_path = analysis / "report-index.csv"
+    original = b"document_id,family,unexpected\nDOC_001,disease_benefit,value\n"
+    index_path.write_bytes(original)
+
+    with pytest.raises(ValueError, match="neither legacy nor canonical"):
+        metrics.migrate_report_index({"documents": []}, tmp_path)
+
+    assert index_path.read_bytes() == original
+
+
 def test_generate_rejects_manifest_changed_during_counting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

@@ -9,14 +9,12 @@ list for that section; this tool replaces each placeholder with a
 sequentially-numbered [E#] tag and writes the sidecar from the same data,
 so a tag and its citation can never drift out of sync.
 
-Template enforcement (--template): pass a key from templates/registry.json
-(배상책임_후유장해형, 진단수술비형, screening_report) and the rendered
-sections are validated for presence AND order against that template's
-heading patterns before anything touches disk -- a mismatch is a hard
-exit, same fail/don't-persist contract as the sidecar validation below.
-Without --template the tool renders whatever it's given (correct for
-rebuttal_points.md, whose per-reason structure repeats dynamically and
-has no registry entry on purpose).
+Template enforcement (--template): pass a key from templates/registry.json.
+Sections are validated for presence and order against that template's heading
+patterns before anything touches disk. A mismatch is a hard exit, with the same
+fail/don't-persist contract as sidecar validation. Without --template the tool
+renders whatever it is given (correct for rebuttal_points.md, whose per-reason
+structure repeats dynamically and has no registry entry on purpose).
 
 This writes into outputs/ like any other DAO write path -- locked
 (held-by/run-id, same convention as dao.py write-contract, so dao.py
@@ -26,7 +24,7 @@ either file touches disk; a failure there is this tool's own bug (the
 agent's evidence_references were already well-formed going in), not a data
 problem to route around.
 
-Input (--sections-file), one JSON object:
+Legacy section input (--sections-file), one JSON object:
 {
   "output_path": "outputs/CASE_003/draft_report_v1.md",
   "sections": [
@@ -37,6 +35,16 @@ Input (--sections-file), one JSON object:
 
 Usage:
     python tools/document_assembly.py --sections-file /tmp/sections.json \\
+        --held-by draft-report --run-id RUN_20260710_001
+
+Structured draft input is a schema-valid loss_adjustment_report.v1 object.
+The registry supplies deterministic grouping and headings; evidence IDs resolve
+to exact document/page/quote citations:
+
+    python tools/document_assembly.py \\
+        --structured-report-file /tmp/loss_adjustment_report_v1.json \\
+        --template 개인보험_후유장해형 \\
+        --output-path outputs/CASE_003/draft_report_v1.md \\
         --held-by draft-report --run-id RUN_20260710_001
 """
 import argparse

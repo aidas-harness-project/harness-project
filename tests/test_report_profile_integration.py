@@ -6,17 +6,39 @@ support level that the draft stage will consume.  Historical results without
 this additive field remain readable.
 """
 
+import copy
 import json
 from pathlib import Path
 
 import pytest
 
 from _validation import load_registry, validate_instance
+from validate_loss_adjustment_report import validate_document
 
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_NAME = "case_type_result.schema.json"
 TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
+FORMAT_SCHEMA = (
+    ROOT
+    / "loss-adjustment-format-study"
+    / "analysis"
+    / "loss-adjustment-report.schema.json"
+)
+BASE_EXAMPLE = (
+    ROOT
+    / "loss-adjustment-format-study"
+    / "analysis"
+    / "examples"
+    / "example-disease-benefit.json"
+)
+CONFORMANCE_MATRIX = (
+    ROOT
+    / "loss-adjustment-format-study"
+    / "analysis"
+    / "examples"
+    / "report-profile-conformance.json"
+)
 
 
 def _validate(instance: dict) -> list[str]:
@@ -186,3 +208,101 @@ def test_every_draft_template_declares_its_report_profile_contract():
         assert len(template["structured_section_groups"]) == len(
             template["heading_patterns"]
         ), key
+
+
+def _conformance_scenarios() -> list[dict]:
+    return json.loads(CONFORMANCE_MATRIX.read_text(encoding="utf-8"))["scenarios"]
+
+
+def test_conformance_matrix_covers_every_pipeline_family_and_mechanism():
+    format_schema = json.loads(FORMAT_SCHEMA.read_text(encoding="utf-8"))
+    mapping = format_schema["$defs"]["documentProfile"]["properties"][
+        "claim_mechanism"
+    ]["x-family-mechanisms"]
+    expected = {
+        (family, mechanism)
+        for family, mechanisms in mapping.items()
+        if family != "other_review_required"
+        for mechanism in mechanisms
+    }
+    actual = {
+        (scenario["family"], scenario["claim_mechanism"])
+        for scenario in _conformance_scenarios()
+    }
+
+    assert actual == expected
+
+
+def test_each_conformance_scenario_selects_a_compatible_registry_template():
+    templates = json.loads(TEMPLATE_REGISTRY.read_text(encoding="utf-8"))["templates"]
+
+    for scenario in _conformance_scenarios():
+        template = templates[scenario["template_id"]]
+        assert scenario["family"] in template["report_families"]
+        assert scenario["claim_mechanism"] in template["claim_mechanisms"]
+        assert scenario["mode"] == template["mode"]
+        assert scenario["support_status"] == template["support_status"]
+
+        result = _result(
+            case_type=scenario["case_type"],
+            coverage_basis=scenario["coverage_basis"],
+            loss_type=scenario["loss_type"],
+            template_id=scenario["template_id"],
+            report_profile={
+                "format_contract_version": "loss_adjustment_report.v1",
+                "family": scenario["family"],
+                "claim_mechanism": scenario["claim_mechanism"],
+                "mode": scenario["mode"],
+                "support_status": scenario["support_status"],
+            },
+            review_required=scenario["support_status"] == "provisional",
+            reviewer_role=(
+                "손해사정사"
+                if scenario["support_status"] == "provisional"
+                else None
+            ),
+        )
+        if result["reviewer_role"] is None:
+            del result["reviewer_role"]
+        assert _validate(result) == [], scenario["scenario_id"]
+
+
+def test_each_conformance_scenario_can_form_a_valid_structured_report():
+    base = json.loads(BASE_EXAMPLE.read_text(encoding="utf-8"))
+
+    for scenario in _conformance_scenarios():
+        document = copy.deepcopy(base)
+        profile = document["document_profile"]
+        profile.update(
+            family=scenario["family"],
+            claim_mechanism=scenario["claim_mechanism"],
+            mode=scenario["mode"],
+        )
+        if scenario["mode"] == "compact":
+            profile["ordered_components"] = [
+                "summary",
+                "assignment_contract",
+                "facts",
+                "governing_basis",
+                "analysis",
+                "calculations",
+                "conclusion",
+                "evidence_index",
+            ]
+        document["case_reference"].update(
+            case_id=f"CASE_{scenario['scenario_id'].upper()}",
+            event_type=scenario["event_type"],
+            disability_benefit_claimed=False,
+        )
+        required_issues = scenario["required_issue_kinds"]
+        for index, issue in enumerate(document["reasoning_issues"]):
+            issue["issue_kind"] = (
+                required_issues[index] if index < len(required_issues) else "other"
+            )
+        document["calculations"][0]["category"] = scenario[
+            "required_calculation_categories"
+        ][0]
+
+        assert validate_document(document, FORMAT_SCHEMA) == [], scenario[
+            "scenario_id"
+        ]
