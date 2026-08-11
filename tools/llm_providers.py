@@ -190,7 +190,29 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 # own leaf calls waited for permits, it would deadlock against itself. The
 # permit is also released across a retry backoff sleep, so a retrying call
 # does not hold capacity it is not using.
-DEFAULT_LLM_MAX_INFLIGHT = 6
+#
+# Raised 6 -> 16 on 2026-08-11, on measurement rather than on headroom. 6 was
+# a guess made before anything nested; measured on CASE_953 (5 documents, 6
+# pages each, 8 page workers, 2 document workers) it was the binding
+# constraint and it was eating the gain it was meant to protect:
+#
+#   cap  wall     per-document time SUM   observed peak
+#    6   125.9s   214.4s  (+59.8s)        6/6   <- pinned
+#   16    98.1s   156.4s  (+1.8s)         12/16 <- slack
+#
+# With the cap at 6, running documents concurrently made each document
+# individually slower (DOC_003: 53.5s -> 87.9s) because 16 requests were
+# squeezed through 6 slots -- the parallel win was handed straight back as
+# queueing. At 16 that overhead is essentially gone (60s -> 1.8s).
+#
+# 16 rather than higher: the run peaked at 12 with zero rate-limit errors, so
+# 12 concurrent calls is measured-safe and 16 sits just above it without
+# binding. Anything larger is unmeasured on this backend, and being wrong
+# there costs rate-limit failures. Note the ceiling is not this constant
+# alone -- page workers x document workers is the demand, and 8 x 1 = 8 today,
+# so this value only becomes load-bearing once document-level parallelism
+# (T8) exists.
+DEFAULT_LLM_MAX_INFLIGHT = 16
 LLM_MAX_INFLIGHT_ENV = "HARNESS_LLM_MAX_INFLIGHT"
 
 _inflight_semaphore: threading.BoundedSemaphore | None = None

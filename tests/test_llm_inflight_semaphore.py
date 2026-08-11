@@ -146,6 +146,23 @@ def test_limit_resolution(monkeypatch, raw, expected):
     assert lp._resolve_max_inflight() == expected
 
 
+def test_default_cap_is_sixteen(monkeypatch):
+    """Raised 6 -> 16 on 2026-08-11 on measurement, not headroom.
+
+    At 6 the cap was the binding constraint and was eating the gain it was
+    meant to protect: running two documents concurrently made each document
+    individually slower (CASE_953 DOC_003: 53.5s -> 87.9s) because 16 requests
+    were squeezed through 6 slots. Per-document time SUM went 154.6s -> 214.4s
+    at cap 6, versus 156.4s at cap 16.
+
+    Pinned because the value is invisible at runtime -- a silent revert to 6
+    shows up only as a slower run that still passes everything else.
+    """
+    monkeypatch.delenv(lp.LLM_MAX_INFLIGHT_ENV, raising=False)
+    assert lp.DEFAULT_LLM_MAX_INFLIGHT == 16
+    assert lp._resolve_max_inflight() == 16
+
+
 def test_changing_the_env_rebuilds_the_semaphore(monkeypatch):
     monkeypatch.setenv(lp.LLM_MAX_INFLIGHT_ENV, "2")
     lp.reset_inflight_semaphore()
