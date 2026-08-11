@@ -211,7 +211,37 @@ def main(argv=None):
     for name in ("reader-a-model", "reader-b-model", "comparator-model",
                  "classifier-model"):
         ap.add_argument(f"--{name}")
+    # Both P8 policy flags exist on run_checkpoint1.py, and until now neither
+    # was reachable through this driver -- which is the tool document-pipeline
+    # is told to use. So a case-wide run could not defer a disagreement or run
+    # single-read at all, and the only way to reach either was the per-document
+    # loop this tool exists to replace.
+    ap.add_argument(
+        "--on-disagreement", choices=["block", "assume-reading-a"],
+        default="block",
+        help="What to do when the two P8 reads disagree, applied to every "
+             "document in the case. 'block' (default) halts that document "
+             "pending human resolution; siblings still finish and the step "
+             "still exits non-zero. 'assume-reading-a' takes reading_a and "
+             "continues, recording the deferral on every affected page. See "
+             "run_checkpoint1.py --help for the full contract.")
+    ap.add_argument(
+        "--single-reader", action="store_true",
+        help="DEVELOPMENT THROUGHPUT MODE -- runs the case with P8 OFF (one "
+             "read per page, no comparison), roughly halving provider calls "
+             "and wall time. Every page records agreement='single_reader', "
+             "never 'agreed'. Mutually exclusive with --on-disagreement. Not "
+             "admissible for PoC evaluation -- see run_checkpoint1.py --help.")
     args = ap.parse_args(argv)
+
+    # Same rejection as run_checkpoint1.py, enforced here too: this driver has
+    # its own parser, so a check that lived only in the single-document tool
+    # would not fire for a case-wide run.
+    if args.single_reader and args.on_disagreement != "block":
+        ap.error(
+            "--single-reader and --on-disagreement are mutually exclusive. "
+            "--single-reader performs no comparison, so no disagreement can "
+            "arise for --on-disagreement to resolve.")
 
     trace_mod.configure(args.case_id, args.run_id)
 
@@ -228,6 +258,8 @@ def main(argv=None):
         reader_b_model=args.reader_b_model,
         comparator_model=args.comparator_model,
         classifier_model=args.classifier_model,
+        on_disagreement=args.on_disagreement,
+        single_reader=args.single_reader,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     # Non-zero when any document did not complete, so a blocked P8 page still

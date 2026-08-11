@@ -63,6 +63,31 @@ does not change any gate or state transition. `aggregate-trace` reports
 incomplete stage coverage instead of reconstructing missing timings from
 run-state marker timestamps.
 
+**Reducing P8 for a throughput run is YOUR decision, never an agent's.**
+Stage 2's cost is dominated by dual-read OCR (the corpus is overwhelmingly
+scans), so two flags exist on `run_document_stage.py` to cut it. Pass one only
+when the run's purpose is timing or plumbing, name it explicitly in the
+briefing you dispatch, and never let a stage adopt one on its own to get past
+a document that blocked:
+
+- `--on-disagreement assume-reading-a` — dual reads still run and are still
+  compared; only the halt is deferred. Disagreed pages take reading_a and
+  record `agreement: assume_reading_a` plus an `auto_resolution` block. A
+  deferral of the judgement, not a finding: on CASE_911/DOC_005 both reads were
+  wrong on 8 of 19 pages (the source was scanned 90° rotated).
+- `--single-reader` — P8 off entirely. One read per page, no comparison,
+  roughly half the calls and wall time. Pages record `agreement: single_reader`
+  and the document reads `cross_validation_status:
+  single_reader_no_cross_validation`, `ocr_quality: low`.
+
+Mutually exclusive, rejected together at parse. Neither is gated by
+`finalize-stage` — a run using either completes normally and the resulting
+`review_required: true` is an honest grade on the text, not a work order. That
+is exactly why **a case processed with either flag must not be used as
+evaluation input**: nothing downstream will stop you, so the scoping decision
+is yours here. Record which flag was used in the run notes; a later reader must
+not have to infer from a passing stage that P8 was reduced or skipped.
+
 **Pass `--run-id` on read commands too**, and require the same of every
 dispatched agent. `read-contract`, `read-document-text`, `read-page-text`,
 `search-document-text`, `policy-snapshot`, `read-ledger`,

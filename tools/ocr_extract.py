@@ -721,7 +721,10 @@ def run_ocr(
                 if resume:
                     _save_cached_page(cache_dir, page_no, page_result, fingerprint)
                 slots[index] = page_result
-                report(f"page {page_no}/{total}: {result['agreement']}")
+                # Reads from page_result, not from `result`: the comparator
+                # verdict only exists on the dual-read branch, so referencing it
+                # here crashed every --single-reader page with an UnboundLocalError.
+                report(f"page {page_no}/{total}: {page_result['agreement']}")
 
         with trace_mod.span("pool.ocr_pages", category="compute",
                             case_id=case_id, doc_id=doc_id,
