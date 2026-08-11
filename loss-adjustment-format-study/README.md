@@ -38,6 +38,7 @@ Version-controlled artifacts:
 - `analysis/boundary-sample-qa.md`: visual first/last-page checks across five report forms
 - `analysis/validation-summary.json`: corpus, schema, focused-test, and repository-test status
 - `analysis/format-analysis.md`: source-grounded format, hierarchy, tone, and reasoning study
+- `analysis/quality-gaps-and-type-coverage.md`: explicit addressed/open quality ledger plus privacy-safe document-type re-audit
 - `analysis/llm-authoring-rules.md`: operational LLM drafting rules
 - `analysis/loss-adjustment-report.schema.json`: structured authoring schema
 - `analysis/examples/example-disease-benefit.json`: schema-valid pseudonymous example
