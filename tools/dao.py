@@ -4711,6 +4711,22 @@ def _set_human_input_status(case_id, stage, status, description, held_by, run_id
                 return 1
             entry["status"] = "received"
             entry["received_at"] = now_iso()
+            # Emit the wait as a human_wait span so active_s can deduct it.
+            #
+            # active_s is DEFINED as sla_wall_clock_s minus human_wait, and
+            # trace_aggregate has computed that deduction (as an interval
+            # union, so two gates open at once are not double-counted) since
+            # the timing layer was written -- but NOTHING ever emitted a
+            # human_wait span, so the deduction always subtracted zero. A
+            # 30-minute SLA measured that way silently includes however long a
+            # person took to answer, which is exactly the number the SLA is
+            # not about.
+            #
+            # Emitted on 'received' rather than at 'waiting' because only now
+            # is the interval closed; the span is back-dated to requested_at so
+            # it lands inside the SLA window where the wait actually happened.
+            _emit_human_wait_span(case_id, run_id, stage,
+                                  entry.get("requested_at"), entry["received_at"])
         # Validate before persisting, same fail-don't-persist contract as
         # _update_run_state (fleet F2: this writer was skipping the check, so
         # e.g. request-expert-review before run_id is set wrote an invalid
@@ -8494,6 +8510,39 @@ TIMING_SUMMARY_SCHEMA = "timing_summary.schema.json"
 # 2026-08-10). critic_v1 still RUNS -- evaluation depends on it -- it is simply
 # outside the measured window.
 SLA_END_STAGE = "draft_report_v1"
+
+
+def _emit_human_wait_span(case_id: str, run_id: str | None, stage: str,
+                          requested_at: str | None, received_at: str | None) -> bool:
+    """Record a closed human-input wait so active_s can deduct it.
+
+    P7 already stores requested_at/received_at in _run_state.json, so the
+    interval is known exactly -- this only carries it into the trace, where
+    compute_sla subtracts human_wait from the SLA wall clock. Without it the
+    subtraction is real but always zero, and a "30 minute" figure quietly
+    includes however long a person took to answer.
+
+    Never raises, for the same reason as _emit_sla_marker: a failure to record
+    a measurement must not fail the pipeline operation that triggered it.
+    """
+    if not (run_id and requested_at and received_at):
+        return False
+    try:
+        start = datetime.fromisoformat(requested_at)
+        end = datetime.fromisoformat(received_at)
+        waited = (end - start).total_seconds()
+        if waited < 0:
+            return False
+        trace_mod.configure(case_id, run_id)
+        if not trace_mod.enabled():
+            return False
+        trace_mod.closed_interval(
+            "human.gate", category="human_wait", t_start_wall=requested_at,
+            duration_s=waited, case_id=case_id,
+            gate_kind=stage, waited_s=round(waited, 3))
+        return True
+    except Exception:  # noqa: BLE001 -- diagnostics must never break a run
+        return False
 
 
 def _emit_sla_marker(case_id: str, run_id: str | None, op: str) -> bool:

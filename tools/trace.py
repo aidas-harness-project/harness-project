@@ -415,6 +415,33 @@ def event(op: str, *, category: str, case_id: str | None = None,
     return record["span_id"]
 
 
+def closed_interval(op: str, *, category: str, t_start_wall: str,
+                    duration_s: float, case_id: str | None = None,
+                    status: str = "ok", **attrs: Any) -> str | None:
+    """Record an interval that already happened, anchored to a past wall time.
+
+    `span()` measures work this process is doing now, and `event()` is a point
+    with no duration. Neither can express "a human gate was open from 09:00 to
+    09:40" -- that interval is only knowable once it closes, and it must land
+    where it occurred so an aggregator can subtract it from a window that
+    contains it.
+
+    The wall anchor is authoritative here, not perf_counter: the interval may
+    span processes (a gate opened by one command and closed by another), and
+    monotonic clocks are not comparable across them.
+    """
+    if not enabled():
+        return None
+    record = _build_record(
+        op, category, case_id=case_id, doc_id=None, page=None,
+        parent=_current_span_id.get(), duration_s=max(0.0, float(duration_s)),
+        status=status, attempt=None, t_start_wall=t_start_wall,
+        t_start_mono=time.perf_counter(), attrs=attrs,
+    )
+    _emit(record)
+    return record["span_id"]
+
+
 def run_in_context(fn):
     """Wrap `fn` so it runs under a COPY of the caller's current context.
 

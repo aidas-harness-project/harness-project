@@ -218,3 +218,65 @@ def test_cli_accepts_the_optional_run_id():
     args = parser.parse_args(["check-source-ledger-clear", "CASE_999",
                               "--run-id", RUN_ID])
     assert args.run_id == RUN_ID
+
+
+# ------------------------------------------------- human-wait deduction --
+
+def test_a_closed_human_gate_emits_a_human_wait_span(_case):
+    """active_s is DEFINED as the SLA wall clock minus human wait, and
+    trace_aggregate has computed that subtraction since the timing layer was
+    written -- but nothing ever EMITTED a human_wait span, so it always
+    subtracted zero. A "30 minute" figure measured that way silently includes
+    however long a person took to answer, which is the one thing an SLA on
+    machine time is not about.
+    """
+    (_case / "CASE_999").mkdir(parents=True, exist_ok=True)
+    dao._set_human_input_status("CASE_999", "document_processing", "waiting",
+                                "P8 판정 대기", "tester", RUN_ID)
+    dao._set_human_input_status("CASE_999", "document_processing", "received",
+                                None, "tester", RUN_ID)
+
+    waits = [s for s in _spans(_case) if s.get("category") == "human_wait"]
+    assert len(waits) == 1, "closing a human gate must record the wait"
+    assert waits[0]["op"] == "human.gate"
+    assert waits[0]["attrs"]["gate_kind"] == "document_processing"
+    assert waits[0]["t_start_wall"], "must be anchored to when the wait began"
+
+
+def test_opening_a_gate_alone_emits_nothing(_case):
+    """The interval is only knowable once it closes; a still-open gate has no
+    duration to record."""
+    (_case / "CASE_999").mkdir(parents=True, exist_ok=True)
+    dao._set_human_input_status("CASE_999", "screening_report", "waiting",
+                                "전문가 검토 대기", "tester", RUN_ID)
+
+    assert not [s for s in _spans(_case) if s.get("category") == "human_wait"]
+
+
+def test_the_wait_is_deducted_from_active_s():
+    """End to end on the aggregator: a gate inside the window comes off
+    active_s, and two overlapping gates are counted once rather than twice."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+
+    def rec(op, category, start, dur):
+        return {"op": op, "category": category, "duration_s": dur,
+                "t_start_wall": start.isoformat(), "pid": 1}
+
+    wall, human, active = trace_aggregate.compute_sla([
+        rec("sla.phase1.start", "marker", now, 0.0),
+        rec("human.gate", "human_wait", now + timedelta(minutes=10), 40 * 60),
+        rec("sla.phase1.end", "marker", now + timedelta(minutes=60), 0.0),
+    ])
+    assert round(wall) == 3600
+    assert round(human) == 2400
+    assert round(active) == 1200, "a 40-minute gate must come off a 60-minute window"
+
+    _, human2, _ = trace_aggregate.compute_sla([
+        rec("sla.phase1.start", "marker", now, 0.0),
+        rec("human.gate", "human_wait", now + timedelta(minutes=10), 30 * 60),
+        rec("human.gate", "human_wait", now + timedelta(minutes=20), 30 * 60),
+        rec("sla.phase1.end", "marker", now + timedelta(minutes=60), 0.0),
+    ])
+    assert round(human2) == 2400, "overlapping gates must be a union, not a sum"
