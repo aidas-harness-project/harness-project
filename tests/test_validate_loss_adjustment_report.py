@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 import validate_loss_adjustment_report as validator
 
 
@@ -38,6 +40,36 @@ def _schema() -> Path:
 
 def test_validate_example_accepts_review_gated_document():
     assert validator.validate_document(_load_example(), _schema()) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("document_profile", []),
+        ("case_reference", None),
+        ("final_assessment", []),
+        ("review_gates", []),
+    ],
+)
+def test_validate_document_returns_schema_errors_for_malformed_nested_shapes(
+    field: str, invalid_value: object
+):
+    document = _load_example()
+    document[field] = invalid_value
+
+    errors = validator.validate_document(document, _schema())
+
+    assert errors
+    assert any(field in error for error in errors)
+
+
+def test_validate_document_returns_schema_error_for_malformed_calculation_inputs():
+    document = _load_example()
+    document["calculations"][0]["inputs"] = None
+
+    errors = validator.validate_document(document, _schema())
+
+    assert any("$.calculations[0].inputs" in error for error in errors)
 
 
 def test_validate_document_rejects_unknown_evidence_reference():
@@ -176,6 +208,17 @@ def test_validate_document_treats_undetermined_issue_as_unresolved():
     errors = validator.validate_document(document, _schema())
 
     assert any("unresolved issue requires an unresolved final outcome" in error for error in errors)
+
+
+def test_validate_document_allows_unresolved_outcome_with_separate_resolved_denial():
+    document = _load_example()
+    denying_issue = document["reasoning_issues"][0]
+    denying_issue["disposition"] = "supported"
+    denying_issue["outcome_effect"] = "denies_payment"
+
+    errors = validator.validate_document(document, _schema())
+
+    assert errors == []
 
 
 def test_validate_document_requires_not_payable_for_resolved_denial():
@@ -387,6 +430,7 @@ def test_validate_document_allows_provisional_calculation_with_provisional_paren
     document = _load_example()
     parent = document["calculations"][0]
     parent["status"] = "provisional"
+    parent["result"] = None
     child = json.loads(json.dumps(parent))
     child.update(
         {
@@ -406,7 +450,7 @@ def test_validate_document_allows_provisional_calculation_with_provisional_paren
 
     errors = validator.validate_document(document, _schema())
 
-    assert not any("unknown or invalid calculation_ref" in error for error in errors)
+    assert not any("calculation reference must identify" in error for error in errors)
     assert not any(
         "complete calculation must reference only complete calculations" in error
         for error in errors

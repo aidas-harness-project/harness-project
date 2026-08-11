@@ -70,7 +70,6 @@ _segmentation_scratch/
 # material or source-path-bearing review metadata and must stay out of commits.
 loss-adjustment-format-study/_ocr_cache/
 loss-adjustment-format-study/_working/
-loss-adjustment-format-study/.publication-journal.json
 loss-adjustment-format-study/manifest.json
 /sources/
 loss-adjustment-format-study/boundary-review.json

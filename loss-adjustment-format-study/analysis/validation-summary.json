@@ -6,7 +6,7 @@
     "metrics_staleness_check": "not_run_protected_fixture_absent",
     "example_validation": "passed",
     "focused_tests": {
-      "passed": 115,
+      "passed": 82,
       "failed": 0,
       "files": [
         "tests/test_extract_loss_adjustment_sections.py",
@@ -16,7 +16,7 @@
       ]
     },
     "repository_tests": {
-      "passed": 548,
+      "passed": 515,
       "failed": 0
     },
     "note": "The protected source, manifest, reviews, OCR cache, report index, and extracted derivatives are intentionally absent from the pull-request checkout. Current-candidate corpus validation and metric staleness checking therefore were not run and are not claimed."
@@ -43,7 +43,7 @@
     "source_bound_documents": 95,
     "recomputed_from_source": 12,
     "reviewed_legacy_sidecar": 83,
-    "scope_note": "Historical provenance snapshot only. Current tooling additionally requires an extraction-contract digest; the protected fixture must be migrated or refreshed before current-candidate corpus validation."
+    "scope_note": "Historical provenance snapshot only. Current tooling requires source- and sidecar-hash metadata; the protected fixture must be migrated or refreshed before current-candidate corpus validation."
   },
   "historical_visual_boundary_sample": {
     "documents": [

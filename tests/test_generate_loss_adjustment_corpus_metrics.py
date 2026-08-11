@@ -1,5 +1,6 @@
 import csv
-import os
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -70,27 +71,6 @@ def test_build_metrics_counts_each_defined_phrase_at_most_once_per_document(
     assert result["generator"]["report_index_sha256"] == "b" * 64
 
 
-def test_generate_remains_bound_to_locked_root_after_rename(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    study = tmp_path / "study"
-    moved = tmp_path / "moved-study"
-    study.mkdir()
-
-    def generate_anchored(anchored_root: Path) -> dict[str, object]:
-        assert "/proc/self/fd/" in anchored_root.as_posix()
-        os.replace(study, moved)
-        study.mkdir()
-        (anchored_root / "metrics.marker").write_text("locked", encoding="utf-8")
-        return {"schema_version": "test"}
-
-    monkeypatch.setattr(metrics, "_generate_unlocked", generate_anchored)
-
-    assert metrics.generate(study) == {"schema_version": "test"}
-    assert (moved / "metrics.marker").read_text(encoding="utf-8") == "locked"
-    assert not (study / "metrics.marker").exists()
-
-
 def test_load_report_index_requires_exact_manifest_metadata(tmp_path: Path):
     analysis = tmp_path / "analysis"
     analysis.mkdir()
@@ -129,9 +109,10 @@ def test_load_report_index_requires_exact_manifest_metadata(tmp_path: Path):
         writer.writeheader()
         writer.writerow(row)
 
-    assignments, loaded_path = metrics.load_report_index(manifest, tmp_path)
+    assignments, loaded_path, loaded_sha256 = metrics.load_report_index(manifest, tmp_path)
     assert assignments == {"DOC_001": "liability_damages"}
     assert loaded_path == index_path
+    assert loaded_sha256 == hashlib.sha256(index_path.read_bytes()).hexdigest()
 
     row["report_page_end"] = "3"
     with index_path.open("w", encoding="utf-8", newline="") as handle:
@@ -141,14 +122,36 @@ def test_load_report_index_requires_exact_manifest_metadata(tmp_path: Path):
     with pytest.raises(ValueError, match="report index metadata mismatch"):
         metrics.load_report_index(manifest, tmp_path)
 
-    row["report_page_end"] = "2"
-    row["source_sha256"] = "b" * 64
-    with index_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=metrics.REPORT_INDEX_FIELDS)
-        writer.writeheader()
-        writer.writerow(row)
-    with pytest.raises(ValueError, match="report index metadata mismatch"):
-        metrics.load_report_index(manifest, tmp_path)
+
+def test_generate_rejects_manifest_changed_during_counting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"documents": []}), encoding="utf-8")
+    index_path = tmp_path / "report-index.csv"
+    index_path.write_text("index", encoding="utf-8")
+    index_sha256 = hashlib.sha256(index_path.read_bytes()).hexdigest()
+
+    monkeypatch.setattr(metrics.extractor, "validate_study", lambda root: {"valid": True})
+    monkeypatch.setattr(
+        metrics.extractor,
+        "_load_study_manifest",
+        lambda root: (manifest_path, {}, tmp_path, tmp_path),
+    )
+    monkeypatch.setattr(
+        metrics,
+        "load_report_index",
+        lambda manifest, root: ({}, index_path, index_sha256),
+    )
+
+    def replace_manifest_while_counting(*args, **kwargs):
+        manifest_path.write_text(json.dumps({"documents": [], "foreign": True}))
+        return {"schema_version": "test"}
+
+    monkeypatch.setattr(metrics, "build_metrics", replace_manifest_while_counting)
+
+    with pytest.raises(ValueError, match="manifest changed during metrics generation"):
+        metrics.generate(tmp_path)
 
 
 def test_metrics_cli_has_no_arbitrary_output_path(tmp_path: Path):

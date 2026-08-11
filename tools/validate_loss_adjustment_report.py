@@ -44,7 +44,7 @@ def _recompute_calculation(
     calculation: dict[str, Any],
     index: int,
     errors: list[str],
-    prior_results: dict[str, Decimal],
+    prior_results: dict[str, Decimal | None],
 ) -> Decimal | None:
     path = f"$.calculations[{index}]"
     operation = calculation.get("operation")
@@ -74,10 +74,20 @@ def _recompute_calculation(
                 calculation_ref = item.get("calculation_ref")
                 if calculation_ref not in prior_results:
                     errors.append(
-                        f"{path}.inputs: calculation reference must identify an earlier complete calculation"
+                        f"{path}.inputs: calculation reference must identify an earlier calculation"
                     )
                     return None
-                operands.append(Fraction(prior_results[calculation_ref]))
+                prior_result = prior_results[calculation_ref]
+                if prior_result is None:
+                    if (
+                        calculation.get("status") == "complete"
+                        or calculation.get("result") is not None
+                    ):
+                        errors.append(
+                            f"{path}.inputs: calculation reference must identify an earlier complete calculation"
+                        )
+                    return None
+                operands.append(Fraction(prior_result))
                 units.append("KRW")
                 continue
             if input_type != "literal":
@@ -204,7 +214,29 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
         )
     ]
 
-    evidence = document.get("evidence_registry", [])
+    evidence_value = document.get("evidence_registry")
+    evidence = evidence_value if isinstance(evidence_value, list) else []
+    reasoning_issues_value = document.get("reasoning_issues")
+    reasoning_issues = (
+        reasoning_issues_value if isinstance(reasoning_issues_value, list) else []
+    )
+    calculations_value = document.get("calculations")
+    calculations = calculations_value if isinstance(calculations_value, list) else []
+    document_profile_value = document.get("document_profile")
+    document_profile = (
+        document_profile_value if isinstance(document_profile_value, dict) else {}
+    )
+    case_reference_value = document.get("case_reference")
+    case_reference = (
+        case_reference_value if isinstance(case_reference_value, dict) else {}
+    )
+    final_assessment_value = document.get("final_assessment")
+    final_assessment = (
+        final_assessment_value if isinstance(final_assessment_value, dict) else {}
+    )
+    review_gates_value = document.get("review_gates")
+    gates = review_gates_value if isinstance(review_gates_value, dict) else {}
+
     evidence_ids = [item.get("evidence_id") for item in evidence if isinstance(item, dict)]
     evidence_ids = [item for item in evidence_ids if isinstance(item, str)]
     for duplicate in sorted(_duplicate_values(evidence_ids)):
@@ -235,7 +267,7 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
         ("reasoning_issues", "issue_id"),
         ("calculations", "calculation_id"),
     ):
-        collection = document.get(collection_name, [])
+        collection = reasoning_issues if collection_name == "reasoning_issues" else calculations
         identifiers: list[str] = []
         for item in collection:
             if not isinstance(item, dict):
@@ -247,16 +279,16 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
             errors.append(f"$.{collection_name}: duplicate {id_name} {duplicate}")
     known_issue_ids = {
         issue.get("issue_id")
-        for issue in document.get("reasoning_issues", [])
+        for issue in reasoning_issues
         if isinstance(issue, dict) and isinstance(issue.get("issue_id"), str)
     }
     known_issues = {
         issue["issue_id"]: issue
-        for issue in document.get("reasoning_issues", [])
+        for issue in reasoning_issues
         if isinstance(issue, dict) and isinstance(issue.get("issue_id"), str)
     }
 
-    components = document.get("document_profile", {}).get("ordered_components", [])
+    components = document_profile.get("ordered_components", [])
     if isinstance(components, list):
         component_schema = schema["$defs"]["documentProfile"]["properties"][
             "ordered_components"
@@ -269,15 +301,16 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
                 "$.document_profile.ordered_components: components are not in canonical order"
             )
         if (
-            document.get("document_profile", {}).get("mode") == "full"
+            document_profile.get("mode") == "full"
             and components != canonical_order
         ):
             errors.append(
                 "$.document_profile.ordered_components: full mode requires all 12 canonical components"
             )
 
-    family = document.get("document_profile", {}).get("family")
-    mechanism = document.get("document_profile", {}).get("claim_mechanism")
+    family_value = document_profile.get("family")
+    family = family_value if isinstance(family_value, str) else ""
+    mechanism = document_profile.get("claim_mechanism")
     mechanism_schema = schema["$defs"]["documentProfile"]["properties"][
         "claim_mechanism"
     ]
@@ -286,7 +319,7 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
         errors.append(
             "$.document_profile.claim_mechanism: mechanism does not match document family"
         )
-    event_type = document.get("case_reference", {}).get("event_type")
+    event_type = case_reference.get("event_type")
     family_event_types = {
         "automobile_compensation": {"accident", "mixed"},
         "automobile_self_injury": {"accident", "mixed"},
@@ -303,12 +336,11 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
     if family == "automobile_self_injury":
         issue_kinds = {
             issue.get("issue_kind")
-            for issue in document.get("reasoning_issues", [])
+            for issue in reasoning_issues
             if isinstance(issue, dict)
         }
         if (
-            document.get("case_reference", {}).get("disability_benefit_claimed")
-            is True
+            case_reference.get("disability_benefit_claimed") is True
             and "disability" not in issue_kinds
         ):
             errors.append(
@@ -317,20 +349,21 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
         if not any(
             isinstance(calculation, dict)
             and calculation.get("category") == "benefit_amount"
-            for calculation in document.get("calculations", [])
+            for calculation in calculations
         ):
             errors.append(
                 "$.calculations: automobile self-injury requires a benefit amount calculation"
             )
-    calculations = document.get("calculations", [])
-    recomputed_results: dict[str, Decimal] = {}
+    recomputed_results: dict[str, Decimal | None] = {}
     calculation_dependencies: dict[str, set[str]] = {}
     calculation_statuses: dict[str, str] = {}
     for index, calculation in enumerate(calculations):
         if not isinstance(calculation, dict):
             continue
+        inputs_value = calculation.get("inputs")
+        inputs = inputs_value if isinstance(inputs_value, list) else []
         if calculation.get("status") == "complete":
-            for input_index, item in enumerate(calculation.get("inputs", [])):
+            for input_index, item in enumerate(inputs):
                 if (
                     isinstance(item, dict)
                     and item.get("input_type") == "calculation_ref"
@@ -352,15 +385,13 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
                 calculation_statuses[calculation_id] = status
             calculation_dependencies[calculation_id] = {
                 item["calculation_ref"]
-                for item in calculation.get("inputs", [])
+                for item in inputs
                 if isinstance(item, dict)
                 and item.get("input_type") == "calculation_ref"
                 and isinstance(item.get("calculation_ref"), str)
             }
-            if recomputed is not None:
-                recomputed_results[calculation_id] = recomputed
+            recomputed_results[calculation_id] = recomputed
 
-    final_assessment = document.get("final_assessment", {})
     final_amount = final_assessment.get("amount")
     outcome = final_assessment.get("outcome")
     if outcome in {"payable", "partially_payable"} and not (
@@ -400,10 +431,14 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
             errors.append(
                 "$.final_assessment.net_calculation_ref: net calculation must reference a complete recomputed calculation"
             )
+        elif (net_result := recomputed_results[net_calculation_ref]) is None:
+            errors.append(
+                "$.final_assessment.net_calculation_ref: net calculation must reference a complete recomputed calculation"
+            )
         elif (
             isinstance(final_amount, dict)
             and isinstance(final_amount.get("value"), int)
-            and final_amount["value"] != int(recomputed_results[net_calculation_ref])
+            and final_amount["value"] != int(net_result)
         ):
             errors.append(
                 "$.final_assessment.amount.value: amount does not reconcile with net_calculation_ref"
@@ -467,7 +502,7 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
         in {"supported", "not_supported", "partially_supported"}
         and issue.get("outcome_effect") == "denies_payment"
     ]
-    if denying_issue_ids and outcome != "not_payable":
+    if denying_issue_ids and not unresolved_issue_ids and outcome != "not_payable":
         errors.append(
             "$.final_assessment.outcome: resolved denying issue requires a "
             f"not_payable outcome ({', '.join(denying_issue_ids)})"
@@ -500,7 +535,6 @@ def validate_document(document: dict[str, Any], schema_path: Path) -> list[str]:
                 "$.calculations: payable outcome requires every declared calculation to be complete and recomputable"
             )
 
-    gates = document.get("review_gates", {})
     if (
         gates.get("finalization") == "approved"
         or "human_approval_records" in gates

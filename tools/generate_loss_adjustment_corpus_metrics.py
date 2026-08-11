@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import re
 import statistics
@@ -147,7 +148,7 @@ def _confined_text_path(study_root: Path, relative: Any, document_id: str) -> Pa
 
 def load_report_index(
     manifest: dict[str, Any], study_root: Path
-) -> tuple[dict[str, str], Path]:
+) -> tuple[dict[str, str], Path, str]:
     index_path = extractor._confined_path(
         study_root,
         "analysis/report-index.csv",
@@ -155,7 +156,8 @@ def load_report_index(
         expected_relative="analysis/report-index.csv",
         require_exists=True,
     )
-    with index_path.open(encoding="utf-8", newline="") as handle:
+    index_bytes = index_path.read_bytes()
+    with io.StringIO(index_bytes.decode("utf-8"), newline="") as handle:
         reader = csv.DictReader(handle)
         if tuple(reader.fieldnames or ()) != REPORT_INDEX_FIELDS:
             raise ValueError("report index headers do not match the canonical schema")
@@ -223,7 +225,7 @@ def load_report_index(
         if any(row.get(field) != value for field, value in expected.items()):
             raise ValueError(f"{document_id}: report index metadata mismatch")
         assignments[document_id] = family
-    return assignments, index_path
+    return assignments, index_path, hashlib.sha256(index_bytes).hexdigest()
 
 
 def build_metrics(
@@ -305,28 +307,32 @@ def build_metrics(
     }
 
 
-def _generate_unlocked(study_root: Path) -> dict[str, Any]:
-    validation = extractor._validate_study_unlocked(study_root)
+def generate(study_root: Path) -> dict[str, Any]:
+    validation = extractor.validate_study(study_root)
     if not validation["valid"]:
         raise ValueError(
             "study validation failed before metrics generation: "
             + "; ".join(validation["errors"][:10])
         )
-    manifest_path, manifest, _, study_root = extractor._load_study_manifest(study_root)
-    family_assignments, report_index_path = load_report_index(manifest, study_root)
-    return build_metrics(
+    manifest_path, _, _, study_root = extractor._load_study_manifest(study_root)
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    family_assignments, report_index_path, report_index_sha256 = load_report_index(
+        manifest, study_root
+    )
+    result = build_metrics(
         manifest,
         study_root,
-        manifest_sha256=sha256_file(manifest_path),
-        report_index_sha256=sha256_file(report_index_path),
+        manifest_sha256=manifest_sha256,
+        report_index_sha256=report_index_sha256,
         family_assignments=family_assignments,
     )
-
-
-def generate(study_root: Path) -> dict[str, Any]:
-    study_root = extractor._validate_study_root(study_root)
-    with extractor._exclusive_study_lock(study_root) as anchored_root:
-        return _generate_unlocked(anchored_root)
+    if sha256_file(manifest_path) != manifest_sha256:
+        raise ValueError("manifest changed during metrics generation")
+    if sha256_file(report_index_path) != report_index_sha256:
+        raise ValueError("report index changed during metrics generation")
+    return result
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -338,29 +344,21 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    study_root = extractor._validate_study_root(args.study_root)
-    with extractor._exclusive_study_lock(study_root) as anchored_root:
-        output = extractor._confined_path(
-            anchored_root,
-            "analysis/corpus-metrics.json",
-            field_name="corpus metrics output",
-            expected_relative="analysis/corpus-metrics.json",
-        )
-        metrics = _generate_unlocked(anchored_root)
-        rendered = json.dumps(metrics, ensure_ascii=False, indent=2) + "\n"
-        if args.check:
-            if (
-                not output.is_file()
-                or extractor._read_regular_file_no_follow(output).decode("utf-8")
-                != rendered
-            ):
-                print(f"metrics are stale: {output}")
-                return 1
-            print(f"metrics are current: {output}")
-            return 0
-        extractor.atomic_write_json(output, metrics)
-        print(f"wrote {output}")
+    output = args.study_root / "analysis/corpus-metrics.json"
+    metrics = generate(args.study_root)
+    rendered = json.dumps(metrics, ensure_ascii=False, indent=2) + "\n"
+    if args.check:
+        if not output.is_file() or output.read_text(encoding="utf-8") != rendered:
+            print(f"metrics are stale: {output}")
+            return 1
+        print(f"metrics are current: {output}")
         return 0
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(rendered, encoding="utf-8")
+    temporary.replace(output)
+    print(f"wrote {output}")
+    return 0
 
 
 if __name__ == "__main__":
