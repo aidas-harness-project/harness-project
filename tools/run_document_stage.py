@@ -46,6 +46,7 @@ import dao as _dao
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
 from llm_providers import SUPPORTED_PROVIDERS
+import redact_document as redact_document_mod
 from run_checkpoint1 import run_checkpoint1
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -112,6 +113,134 @@ def select_documents(manifest: dict, only: list[str] | None = None) -> list[dict
             continue
         out.append(doc)
     return out
+
+
+def select_redaction_documents(manifest: dict,
+                               only: list[str] | None = None) -> list[dict]:
+    """Documents checkpoint 2 should redact, in manifest order.
+
+    Skips what redaction would refuse or has already done, so a skip is never
+    reported as a failure:
+
+    * the retained superseded bundle -- its children carry its pages;
+    * `expert_review_only` -- checkpoint 2 is not applicable, and feeding a raw
+      image to the text redactor is exactly what that disposition forbids;
+    * anything already carrying a `redacted_text_path`;
+    * anything whose OCR has not completed -- there is no page text to redact.
+
+    redact_document re-checks the cross-validation gate itself; this is a cheap
+    pre-filter, never the authority.
+    """
+    out = []
+    for doc in manifest.get("documents", []):
+        doc_id = doc.get("document_id")
+        if only and doc_id not in only:
+            continue
+        if doc.get("segmentation_status") == "superseded_bundle":
+            continue
+        if doc.get("downstream_disposition") == "expert_review_only":
+            continue
+        if doc.get("redacted_text_path"):
+            continue
+        if doc.get("ocr_status") not in {"completed", "pending"}:
+            continue
+        out.append(doc)
+    return out
+
+
+def run_redaction_stage(
+    case_id: str,
+    held_by: str,
+    run_id: str,
+    *,
+    doc_workers: int | None = None,
+    only: list[str] | None = None,
+    progress=None,
+    provider_name: str | None = None,
+    model: str | None = None,
+    page_workers: int | None = None,
+) -> dict:
+    """Run checkpoint 2 (redaction) over every eligible document in the case.
+
+    Same shape as run_document_stage: documents run concurrently, one document
+    failing does not take down the others, and the step exits non-zero if any
+    document did not complete.
+
+    Note the two levels of concurrency multiply. redact_document already runs
+    PAGES concurrently (4 by default, HARNESS_REDACT_WORKERS); this adds
+    documents on top, so total in-flight redaction calls are doc_workers x
+    page_workers. Both default low for that reason -- raise them together with
+    that product in mind, the same caution DEFAULT_OCR_WORKERS carries.
+    """
+    report = progress or (lambda msg: print(msg, file=sys.stderr, flush=True))
+
+    manifest = _dao.read_contract_data(case_id, "document_manifest.json")
+    if not manifest:
+        return {"status": "failed", "case_id": case_id,
+                "error": f"no document_manifest.json for {case_id}", "documents": []}
+
+    targets = select_redaction_documents(manifest, only)
+    if not targets:
+        return {"status": "success", "case_id": case_id, "documents": [],
+                "note": "no documents required checkpoint 2"}
+
+    workers = _resolve_doc_workers(doc_workers)
+    report(f"checkpoint 2: {len(targets)} document(s), {workers} document worker(s)")
+
+    slots: list[dict | None] = [None] * len(targets)
+    lock = threading.Lock()
+
+    def process(index: int, doc: dict) -> None:
+        doc_id = doc["document_id"]
+        with trace_mod.span("stage.redaction", category="compute",
+                            case_id=case_id, doc_id=doc_id):
+            try:
+                # Built per document rather than shared, and deliberately
+                # through redact_document's own selector: it is what routes a
+                # PII-free document class to the deterministic pass-through
+                # instead of paying for a model call, and duplicating that
+                # choice here would be a second copy of the rule.
+                redactor = redact_document_mod._redactor_for(
+                    case_id, doc_id,
+                    provider_name or redact_document_mod.DEFAULT_REDACTION_PROVIDER,
+                    model)
+                result = redact_document_mod.redact_document(
+                    case_id, doc_id, held_by, run_id, redactor,
+                    max_workers=page_workers)
+                result = {"status": "success", "doc_id": doc_id, **(result or {})}
+            except Exception as exc:
+                # Per-document isolation, as in checkpoint 1: a leak-blocked or
+                # gate-refused document reports itself and the siblings finish.
+                result = {"status": "error", "case_id": case_id, "doc_id": doc_id,
+                          "error": f"{type(exc).__name__}: {exc}"}
+        result.setdefault("doc_id", doc_id)
+        slots[index] = result
+        with lock:
+            report(f"  {doc_id}: {result.get('status')}")
+
+    if workers == 1:
+        for index, doc in enumerate(targets):
+            process(index, doc)
+    else:
+        with trace_mod.span("pool.redaction", category="compute",
+                            case_id=case_id, worker_count=workers):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(trace_mod.run_in_context(process), i, d)
+                           for i, d in enumerate(targets)]
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
+
+    results = [r for r in slots if r is not None]
+    blocked = [r for r in results if r.get("status") not in _OK_STATUSES]
+    return {
+        "status": "success" if not blocked else "partial",
+        "case_id": case_id,
+        "run_id": run_id,
+        "document_workers": workers,
+        "documents": results,
+        "blocked": [{"doc_id": r.get("doc_id"), "status": r.get("status")}
+                    for r in blocked],
+    }
 
 
 def run_document_stage(
@@ -195,6 +324,24 @@ def main(argv=None):
     ap.add_argument("case_id")
     ap.add_argument("--held-by", required=True)
     ap.add_argument("--run-id", required=True)
+    ap.add_argument(
+        "--checkpoint", choices=["1", "2"], default="1",
+        help="Which checkpoint to drive across the case's documents. 1 "
+             "(default) = OCR + classification. 2 = redaction, which was "
+             "previously one redact_document.py call per document -- the same "
+             "sequential pattern this driver exists to remove. Note redaction "
+             "already runs PAGES concurrently, so total in-flight calls are "
+             "--doc-workers x --page-workers.")
+    ap.add_argument(
+        "--page-workers", type=int, default=None, metavar="N",
+        help="Checkpoint 2 only: pages redacted concurrently WITHIN each "
+             "document (default 4, or HARNESS_REDACT_WORKERS).")
+    ap.add_argument(
+        "--provider", choices=SUPPORTED_PROVIDERS, default=None,
+        help="Checkpoint 2 only: redaction provider (default claude-cli).")
+    ap.add_argument(
+        "--model", default=None,
+        help="Checkpoint 2 only: redaction model.")
     ap.add_argument("--doc-workers", type=int, default=None, metavar="N",
                     help=f"Documents processed concurrently (default "
                          f"{DEFAULT_DOC_WORKERS}, or {DOC_WORKERS_ENV}). "
@@ -250,6 +397,18 @@ def main(argv=None):
             "arise for --on-disagreement to resolve.")
 
     trace_mod.configure(args.case_id, args.run_id)
+
+    if args.checkpoint == "2":
+        result = run_redaction_stage(
+            args.case_id, args.held_by, args.run_id,
+            doc_workers=args.doc_workers,
+            only=args.only,
+            provider_name=args.provider,
+            model=args.model,
+            page_workers=args.page_workers,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["status"] == "success" else 1
 
     result = run_document_stage(
         args.case_id, args.held_by, args.run_id,
