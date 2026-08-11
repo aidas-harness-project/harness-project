@@ -119,6 +119,19 @@ Pages are OCR'd **concurrently (8 workers by default)**, and each completed page
 
 Concurrency is bounded twice, and the two are different things: `--workers` is per-document page concurrency, while **`HARNESS_LLM_MAX_INFLIGHT` (default 16) caps concurrent provider calls across the whole process**, which is what keeps nested pools (documents × pages) from overwhelming a shared rate limit. Set it to `0` to disable the cap.
 
+**Running checkpoint 1 over a whole case — use the case-level driver, not a loop.** For a case with more than one document to process, run it **once**:
+
+```
+python tools/run_document_stage.py CASE_ID --held-by document-pipeline --run-id RUN_ID \
+    --reader-a claude-cli --reader-b claude-cli --comparator claude-cli --classifier-provider claude-cli
+```
+
+It reads `document_manifest.json`, selects the documents that still need checkpoint 1 (skipping the retained superseded bundle and anything already `ocr_status: completed`), and processes **3 documents concurrently** (`--doc-workers N` / `HARNESS_DOC_WORKERS`; `1` restores the sequential loop). Measured on a real 5-document case: **2.50x** faster than invoking `run_checkpoint1.py` once per document, which is what this replaces. Do not write your own loop over documents — that is exactly the sequential pattern this exists to remove, and it also gives up the per-document failure isolation below.
+
+**A blocked document does not stop the others, and does not make the step pass.** If one document hits a P8 disagreement, that document alone is blocked (`blocked_disagreement`, no page text written, per P8 unchanged) while its siblings finish; the driver reports every result, lists the blocked documents, and **exits non-zero**. Resolve each blocked document through `run_checkpoint1.py resolve-disagreement` as usual, then re-run the driver — completed documents are skipped, so nothing is re-paid for. Note this is deliberately the opposite of checkpoint 2's leak-halt: a possible PII leak is a privacy event that must stop everything, while a P8 disagreement is a per-document extraction failure.
+
+`run_checkpoint1.py` stays the tool for a **single** document and for every special mode — `--bundle-ocr`, `classify-only`, `resolve-disagreement`, `resolve-non-text`.
+
 For each page that reads `agreed`, checkpoint 1 writes the page text via the DAO. For any page that reads `disagreed`, do not write it manually, do not pick one reading over the other, and do not override the tool's blocked result — that page's document is extraction-failed, per P8, immediately, no tolerance threshold.
 
 If a genuine human verifies that the **entire blocked document** is photographs/visual evidence with no faithful text transcription, use `python tools/run_checkpoint1.py resolve-non-text CASE_ID DOC_ID --verified-by NAME --reviewer-role {손해사정사|의사|법률전문가} --note TEXT --held-by document-pipeline --run-id RUN_ID`. This is not OCR success and does not select either reader. It preserves the disagreement, writes no page text, records `extraction_method: non_text_image`, `ocr_status: not_applicable`, `cross_validation_status: non_text_verified`, and routes the document `expert_review_only`. Never invoke this from agent judgment alone, and never use it for a mixed document with any validated text page.

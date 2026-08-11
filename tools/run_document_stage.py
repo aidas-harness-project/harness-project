@@ -1,0 +1,239 @@
+"""Checkpoint 1 across every document in a case, with document-level parallelism (T8).
+
+Why this exists as a separate tool rather than a loop inside run_checkpoint1.py:
+run_checkpoint1 processes exactly ONE document per invocation, and nothing in
+this repository ever looped over documents -- the agent did, by reading
+document-pipeline.md and invoking the tool once per document. The
+serialization was therefore in a SPEC, not in code, and no amount of editing
+run_checkpoint1 would have removed it. This tool is the missing driver.
+
+Measured on CASE_953 (fork of CASE_907; 5 documents, 6 pages each, 8 page
+workers), real claude-cli calls, against a sequential baseline of 154.7s:
+
+    doc workers   in-flight cap   wall     speedup   observed peak
+        2               6         125.9s    1.23x     6/6  (pinned)
+        2              16          98.1s    1.58x    12/16
+        3              16          61.9s    2.50x    16/16
+
+The theoretical floor is the slowest single document (53.5s -> 2.89x), so 3
+workers reach 86% of what document parallelism can win on that case. The cap
+matters as much as the worker count: at 6 the per-document time SUM inflated
+154.6s -> 214.4s, i.e. concurrency was handed straight back as queueing.
+
+FAILURE SEMANTICS -- deliberately the OPPOSITE of redaction's (T4c).
+A P8 disagreement blocks its own document and the others keep going. Redaction
+hard-fails the whole document on a possible leak because a leak is a privacy
+event whose blast radius is the document; a P8 disagreement is a per-document
+extraction failure whose blast radius is that document alone. P8's "no
+tolerance threshold, report immediately" is about never accepting a disagreed
+page as text -- which still holds exactly: the blocked document writes no page
+text, is reported in the summary, and this tool exits non-zero. Letting
+document B finish does not make document A's disagreement any less blocking.
+"""
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import json
+import os
+import sys
+import threading
+from pathlib import Path
+
+sys.stdout.reconfigure(encoding="utf-8")
+
+import dao as _dao
+# tools/trace.py, not the stdlib `trace` module.
+import trace as trace_mod
+from llm_providers import SUPPORTED_PROVIDERS
+from run_checkpoint1 import run_checkpoint1
+
+ROOT = Path(__file__).resolve().parent.parent
+
+DEFAULT_DOC_WORKERS = 3
+DOC_WORKERS_ENV = "HARNESS_DOC_WORKERS"
+
+# Statuses that do NOT represent a failure of this step. Kept as an explicit
+# allowlist rather than "not blocked_*" so a status added upstream shows up as
+# an unknown value to look at instead of being silently counted as a pass.
+#
+# `already_extracted` belongs here even though no work was done: it is
+# run_checkpoint1 REFUSING to re-OCR a document that already has extracted
+# text, which is the guard against paying twice, not an extraction failure.
+# Found by running the driver for real -- treating it as blocked made a
+# perfectly healthy re-run exit non-zero. `blocked_segmentation` is likewise a
+# refusal (the retained superseded bundle, whose children own its pages), and
+# select_documents already filters those, so reaching one here means the
+# manifest disagrees with the filter and it is left OUT of this set on
+# purpose: that is worth surfacing.
+_OK_STATUSES = {"success", "passed", "bundle_ocr_complete", "already_extracted"}
+
+
+def _resolve_doc_workers(explicit: int | None) -> int:
+    """Explicit argument wins, then HARNESS_DOC_WORKERS, then the default.
+    A value <= 1 restores the strictly sequential loop."""
+    if explicit is None:
+        raw = os.environ.get(DOC_WORKERS_ENV, "")
+        try:
+            explicit = int(raw) if raw.strip() else None
+        except ValueError:
+            explicit = None
+    if explicit is None:
+        return DEFAULT_DOC_WORKERS
+    return max(1, explicit)
+
+
+def _pdf_path_for(case_id: str, doc: dict) -> Path:
+    """The raw PDF for a manifest entry, via the manifest's own file_path when
+    present so this tool does not re-derive a layout convention that already
+    lives in the manifest."""
+    file_path = doc.get("file_path")
+    if file_path:
+        return ROOT / file_path
+    return ROOT / "data" / "raw" / case_id / (doc.get("file_name") or f"{doc['document_id']}.pdf")
+
+
+def select_documents(manifest: dict, only: list[str] | None = None) -> list[dict]:
+    """Documents this stage should process, in manifest order.
+
+    Skips what checkpoint 1 would refuse anyway, so a refusal is not reported
+    as a failure: the retained superseded bundle (its children own its pages)
+    and anything already carrying completed OCR. run_checkpoint1 re-checks both
+    itself -- this is a cheap pre-filter, never the authority.
+    """
+    out = []
+    for doc in manifest.get("documents", []):
+        doc_id = doc.get("document_id")
+        if only and doc_id not in only:
+            continue
+        if doc.get("segmentation_status") == "superseded_bundle":
+            continue
+        if doc.get("ocr_status") == "completed":
+            continue
+        out.append(doc)
+    return out
+
+
+def run_document_stage(
+    case_id: str,
+    held_by: str,
+    run_id: str,
+    *,
+    doc_workers: int | None = None,
+    only: list[str] | None = None,
+    progress=None,
+    **checkpoint_kwargs,
+) -> dict:
+    """Run checkpoint 1 over every eligible document in the case."""
+    report = progress or (lambda msg: print(msg, file=sys.stderr, flush=True))
+
+    manifest = _dao.read_contract_data(case_id, "document_manifest.json")
+    if not manifest:
+        return {"status": "failed", "case_id": case_id,
+                "error": f"no document_manifest.json for {case_id}", "documents": []}
+
+    targets = select_documents(manifest, only)
+    if not targets:
+        return {"status": "success", "case_id": case_id, "documents": [],
+                "note": "no documents required checkpoint 1"}
+
+    workers = _resolve_doc_workers(doc_workers)
+    report(f"checkpoint 1: {len(targets)} document(s), {workers} document worker(s)")
+
+    slots: list[dict | None] = [None] * len(targets)
+    lock = threading.Lock()
+
+    def process(index: int, doc: dict) -> None:
+        doc_id = doc["document_id"]
+        pdf = _pdf_path_for(case_id, doc)
+        with trace_mod.span("stage.document", category="compute",
+                            case_id=case_id, doc_id=doc_id):
+            try:
+                result = run_checkpoint1(
+                    case_id, doc_id, str(pdf), held_by, run_id,
+                    progress=None, **checkpoint_kwargs)
+            except Exception as exc:
+                # One document raising must not take the others down with it --
+                # that is the whole point of per-document isolation here.
+                result = {"status": "error", "case_id": case_id, "doc_id": doc_id,
+                          "error": f"{type(exc).__name__}: {exc}"}
+        result.setdefault("doc_id", doc_id)
+        slots[index] = result
+        with lock:
+            report(f"  {doc_id}: {result.get('status')}")
+
+    if workers == 1:
+        for index, doc in enumerate(targets):
+            process(index, doc)
+    else:
+        with trace_mod.span("pool.documents", category="compute",
+                            case_id=case_id, worker_count=workers):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(trace_mod.run_in_context(process), i, d)
+                           for i, d in enumerate(targets)]
+                # Drain every future before reporting: a document that raised
+                # must not discard the documents that finished.
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
+
+    results = [r for r in slots if r is not None]
+    blocked = [r for r in results if r.get("status") not in _OK_STATUSES]
+    return {
+        "status": "success" if not blocked else "partial",
+        "case_id": case_id,
+        "run_id": run_id,
+        "document_workers": workers,
+        "documents": results,
+        "blocked": [{"doc_id": r.get("doc_id"), "status": r.get("status")}
+                    for r in blocked],
+    }
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("case_id")
+    ap.add_argument("--held-by", required=True)
+    ap.add_argument("--run-id", required=True)
+    ap.add_argument("--doc-workers", type=int, default=None, metavar="N",
+                    help=f"Documents processed concurrently (default "
+                         f"{DEFAULT_DOC_WORKERS}, or {DOC_WORKERS_ENV}). "
+                         "1 = the sequential loop.")
+    ap.add_argument("--only", nargs="+", metavar="DOC_ID",
+                    help="Restrict to these document ids.")
+    ap.add_argument("--workers", type=int, default=None, metavar="N",
+                    help="Pages OCR'd concurrently WITHIN each document "
+                         "(default 8, or HARNESS_OCR_WORKERS). Total demand is "
+                         "doc-workers x workers, bounded by "
+                         "HARNESS_LLM_MAX_INFLIGHT.")
+    for name in ("reader-a", "reader-b", "comparator", "classifier-provider"):
+        ap.add_argument(f"--{name}", choices=SUPPORTED_PROVIDERS)
+    for name in ("reader-a-model", "reader-b-model", "comparator-model",
+                 "classifier-model"):
+        ap.add_argument(f"--{name}")
+    args = ap.parse_args(argv)
+
+    trace_mod.configure(args.case_id, args.run_id)
+
+    result = run_document_stage(
+        args.case_id, args.held_by, args.run_id,
+        doc_workers=args.doc_workers,
+        only=args.only,
+        max_workers=args.workers,
+        reader_a_name=args.reader_a,
+        reader_b_name=args.reader_b,
+        comparator_name=args.comparator,
+        classifier_provider_name=args.classifier_provider,
+        reader_a_model=args.reader_a_model,
+        reader_b_model=args.reader_b_model,
+        comparator_model=args.comparator_model,
+        classifier_model=args.classifier_model,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    # Non-zero when any document did not complete, so a blocked P8 page still
+    # fails the step even though its siblings finished.
+    return 0 if result["status"] == "success" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
