@@ -9,6 +9,8 @@ SCHEMA_PATH = Path(
 RULEBOOK_PATH = Path(
     "loss-adjustment-format-study/analysis/llm-authoring-rules.md"
 )
+CLAIM_ANALYSIS_PATH = Path(".claude/agents/claim-analysis.md")
+DRAFT_REPORT_PATH = Path(".claude/agents/draft-report.md")
 
 
 def _schema() -> dict:
@@ -57,3 +59,22 @@ def test_protected_study_source_root_is_git_ignored():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_claim_analysis_requires_the_report_profile_and_fail_closed_path():
+    instructions = CLAIM_ANALYSIS_PATH.read_text(encoding="utf-8")
+
+    assert "report_profile" in instructions
+    assert "support_status" in instructions
+    assert "template_id: null" in instructions
+    assert "use the closest variant" not in instructions.lower()
+
+
+def test_draft_report_writes_then_deterministically_renders_structured_contract():
+    instructions = DRAFT_REPORT_PATH.read_text(encoding="utf-8")
+
+    assert "loss_adjustment_report_v1.json" in instructions
+    assert "loss_adjustment_report.schema.json" in instructions
+    assert "stage-input" in instructions
+    assert "--structured-report-file" in instructions
+    assert "support_status: unsupported" in instructions

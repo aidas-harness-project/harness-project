@@ -153,6 +153,72 @@ def validate_template(headings: list[str], template_key: str) -> list[str]:
     return errors
 
 
+def sections_from_structured_report(
+    document: dict, template_key: str, output_path: str
+) -> dict:
+    """Convert a validated authoring contract into the existing render spec.
+
+    The template registry owns the heading and grouping map.  Evidence IDs in
+    structured statements resolve to exact document/page/quote records here,
+    so the existing renderer can keep owning citation tags and source checks.
+    """
+    templates = json.loads(TEMPLATE_REGISTRY.read_text(encoding="utf-8"))["templates"]
+    template = templates.get(template_key)
+    if template is None:
+        raise ValueError(f"unknown template {template_key!r}")
+    profile = document.get("document_profile", {})
+    family = profile.get("family")
+    if family not in template.get("report_families", []):
+        raise ValueError(f"template {template_key!r} does not accept family {family!r}")
+    if profile.get("claim_mechanism") not in template.get("claim_mechanisms", []):
+        raise ValueError(f"template {template_key!r} does not accept claim mechanism")
+    if profile.get("mode") != template.get("mode"):
+        raise ValueError(f"template {template_key!r} does not accept report mode")
+
+    evidence = {
+        item["evidence_id"]: item for item in document.get("evidence_registry", [])
+    }
+    sections = []
+    headings = template.get("render_headings", [])
+    groups = template.get("structured_section_groups", [])
+    if len(headings) != len(groups):
+        raise ValueError(f"template {template_key!r} has an invalid structured render map")
+    for heading, group in zip(headings, groups):
+        content_parts = []
+        references = []
+        if not group:
+            content_parts.append(profile.get("title", ""))
+        for section_name in group:
+            section = document["sections"][section_name]
+            if len(group) > 1:
+                content_parts.append(f"### {section['heading']}")
+            if section["status"] != "included":
+                content_parts.append(section["rationale"])
+                continue
+            for statement in section["statements"]:
+                evidence_ids = statement["evidence_refs"]
+                content_parts.append(
+                    statement["text"] + " " + " ".join("{{E}}" for _ in evidence_ids)
+                )
+                for evidence_id in evidence_ids:
+                    source = evidence[evidence_id]
+                    reference = {
+                        "document_id": source["document_id"],
+                        "quote": source["quote"],
+                    }
+                    if source.get("page") is not None:
+                        reference["page"] = source["page"]
+                    references.append(reference)
+        sections.append(
+            {
+                "heading": heading,
+                "content": "\n\n".join(content_parts),
+                "evidence_references": references,
+            }
+        )
+    return {"output_path": output_path, "sections": sections}
+
+
 def render(spec: dict) -> tuple[str, dict]:
     output_path = spec["output_path"]
     lines = []
@@ -198,7 +264,16 @@ def render(spec: dict) -> tuple[str, dict]:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sections-file", required=True, help="Path to the section-spec JSON described above")
+    source = ap.add_mutually_exclusive_group(required=True)
+    source.add_argument("--sections-file", help="Path to the section-spec JSON described above")
+    source.add_argument(
+        "--structured-report-file",
+        help="Path to a validated loss_adjustment_report_vN.json contract",
+    )
+    ap.add_argument(
+        "--output-path",
+        help="Required with --structured-report-file; relative narrative path under outputs/",
+    )
     ap.add_argument("--held-by", required=True, help="Calling agent name, e.g. draft-report")
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--template", help="Key in templates/registry.json to enforce section "
@@ -206,7 +281,41 @@ def main():
                     "documents with no registry entry (rebuttal_points).")
     args = ap.parse_args()
 
-    spec = json.loads(Path(args.sections_file).read_text(encoding="utf-8"))
+    if args.structured_report_file:
+        if not args.template:
+            sys.exit("error: --structured-report-file requires --template")
+        if not args.output_path:
+            sys.exit("error: --structured-report-file requires --output-path")
+        document = json.loads(
+            Path(args.structured_report_file).read_text(encoding="utf-8")
+        )
+        schemas, registry = load_registry()
+        report_errors = validate_instance(
+            document, "loss_adjustment_report.schema.json", schemas, registry
+        )
+        if report_errors:
+            sys.exit(
+                "error: structured report failed loss_adjustment_report.schema.json "
+                "-- nothing written:\n"
+                + "\n".join(f"  - {error}" for error in report_errors)
+            )
+        output_case = _CASE_ID_RE.search(args.output_path)
+        report_case = document.get("case_reference", {}).get("case_id")
+        if output_case and output_case.group(1) != report_case:
+            sys.exit(
+                "error: structured report case_reference.case_id does not match "
+                "the output_path case -- nothing written"
+            )
+        try:
+            spec = sections_from_structured_report(
+                document, args.template, args.output_path
+            )
+        except ValueError as exc:
+            sys.exit(f"error: {exc} -- nothing written")
+    else:
+        if args.output_path:
+            sys.exit("error: --output-path is only valid with --structured-report-file")
+        spec = json.loads(Path(args.sections_file).read_text(encoding="utf-8"))
 
     if args.template:
         headings = [s["heading"] for s in spec["sections"]]

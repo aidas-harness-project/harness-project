@@ -686,6 +686,8 @@
         "source_kind",
         "title",
         "locator",
+        "document_id",
+        "quote",
         "available"
       ],
       "properties": {
@@ -713,6 +715,18 @@
           "minLength": 1
         },
         "locator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "document_id": {
+          "type": "string",
+          "pattern": "^DOC_[0-9]{3,}$"
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "quote": {
           "type": "string",
           "minLength": 1
         },

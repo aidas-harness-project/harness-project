@@ -35,6 +35,9 @@
       "source_kind": "policy",
       "title": "적용 특별약관",
       "locator": "약관 조항 및 별표 위치",
+      "document_id": "DOC_101",
+      "page": 7,
+      "quote": "특별약관에 질병 정의와 진단확정 요건이 기재되어 있음.",
       "available": true
     },
     {
@@ -42,6 +45,9 @@
       "source_kind": "contract_schedule",
       "title": "보험계약 가입내역",
       "locator": "해당 담보 및 가입금액",
+      "document_id": "DOC_102",
+      "page": 2,
+      "quote": "해당 질병 진단비 담보와 가입금액이 기재되어 있음.",
       "available": true
     },
     {
@@ -49,6 +55,9 @@
       "source_kind": "medical_record",
       "title": "진단서 및 의무기록",
       "locator": "진단명, 진단일, 검사결과",
+      "document_id": "DOC_103",
+      "page": 1,
+      "quote": "진단서와 의무기록에 진단명, 진단일 및 검사결과가 기재되어 있음.",
       "available": true
     }
   ],

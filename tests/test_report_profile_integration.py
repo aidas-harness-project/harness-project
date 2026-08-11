@@ -182,3 +182,7 @@ def test_every_draft_template_declares_its_report_profile_contract():
         assert template["claim_mechanisms"], key
         assert template["mode"] in {"full", "compact"}, key
         assert template["support_status"] in {"supported", "provisional"}, key
+        assert len(template["render_headings"]) == len(template["heading_patterns"]), key
+        assert len(template["structured_section_groups"]) == len(
+            template["heading_patterns"]
+        ), key
