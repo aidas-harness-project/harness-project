@@ -205,11 +205,22 @@ def run_stage2(
     doc_workers: int | None = None,
     page_workers: int | None = None,
     single_reader: bool | None = None,
+    skip_redaction: bool | None = None,
     auto_approve_segmentation: bool = False,
     segmentation_reviewer: str | None = None,
     progress=None,
 ) -> dict:
     report = progress or (lambda msg: print(msg, file=sys.stderr, flush=True))
+
+    def redaction_flags(argv: list[str]) -> list[str]:
+        """Both redaction phases take the same switch, so it is applied in one
+        place -- passing it to the top-level documents but not to the split
+        children would redact half the case under a different policy."""
+        if skip_redaction is True:
+            argv += ["--skip-redaction"]
+        elif skip_redaction is False:
+            argv += ["--redact"]
+        return argv
     steps: list[dict] = []
 
     def common(extra: list[str]) -> list[str]:
@@ -257,6 +268,7 @@ def run_stage2(
             argv += ["--provider", provider]
         if doc_workers is not None:
             argv += ["--doc-workers", str(doc_workers)]
+        argv = redaction_flags(argv)
         step = _run(argv, phase="redaction", progress=report)
         steps.append(step)
         if not _phase_ok(step):
@@ -350,6 +362,7 @@ def run_stage2(
                 argv += ["--provider", provider]
             if doc_workers is not None:
                 argv += ["--doc-workers", str(doc_workers)]
+            argv = redaction_flags(argv)
             step = _run(argv, phase="redaction.children", progress=report)
             steps.append(step)
             if not _phase_ok(step):
@@ -437,6 +450,17 @@ def main(argv=None):
                        help="Turn P8 off (orchestrator-owned; timing runs only)")
     group.add_argument("--dual-read", dest="single_reader", action="store_false",
                        help="Force full dual-read P8 even under HARNESS_SINGLE_READER")
+    skip_group = ap.add_mutually_exclusive_group()
+    skip_group.add_argument(
+        "--skip-redaction", dest="skip_redaction", action="store_true", default=None,
+        help="Skip the redaction MODEL for every document (dev switch, or "
+             "HARNESS_SKIP_REDACTION=1). Orchestrator-owned like --single-reader. "
+             "The deterministic residual-PII scan still runs and still blocks a "
+             "page carrying structured PII; unstructured PII goes unchecked, so "
+             "a run using it is not privacy-preserving.")
+    skip_group.add_argument(
+        "--redact", dest="skip_redaction", action="store_false",
+        help="Force the redaction model on even under HARNESS_SKIP_REDACTION.")
     ap.add_argument(
         "--auto-approve-segmentation", action="store_true",
         help="Skip the human boundary-approval gate. For timing and plumbing "
@@ -453,6 +477,7 @@ def main(argv=None):
         doc_workers=args.doc_workers,
         page_workers=args.page_workers,
         single_reader=args.single_reader,
+        skip_redaction=args.skip_redaction,
         auto_approve_segmentation=args.auto_approve_segmentation,
         segmentation_reviewer=args.segmentation_reviewer,
     )

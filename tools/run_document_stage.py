@@ -303,6 +303,7 @@ def run_redaction_stage(
     provider_name: str | None = None,
     model: str | None = None,
     page_workers: int | None = None,
+    skip_redaction: bool | None = None,
 ) -> dict:
     """Run checkpoint 2 (redaction) over every eligible document in the case.
 
@@ -347,7 +348,7 @@ def run_redaction_stage(
                 redactor = redact_document_mod._redactor_for(
                     case_id, doc_id,
                     provider_name or redact_document_mod.DEFAULT_REDACTION_PROVIDER,
-                    model)
+                    model, skip_redaction=skip_redaction)
                 result = redact_document_mod.redact_document(
                     case_id, doc_id, held_by, run_id, redactor,
                     max_workers=page_workers)
@@ -468,6 +469,16 @@ def main(argv=None):
     ap.add_argument("case_id")
     ap.add_argument("--held-by", required=True)
     ap.add_argument("--run-id", required=True)
+    skip_group = ap.add_mutually_exclusive_group()
+    skip_group.add_argument(
+        "--skip-redaction", dest="skip_redaction", action="store_true", default=None,
+        help="Checkpoint 2 only: skip the redaction MODEL for every document "
+             "(dev switch, or HARNESS_SKIP_REDACTION=1). The deterministic "
+             "residual-PII scan still runs and still blocks a page carrying "
+             "structured PII.")
+    skip_group.add_argument(
+        "--redact", dest="skip_redaction", action="store_false",
+        help="Force the redaction model on even under HARNESS_SKIP_REDACTION.")
     ap.add_argument(
         "--checkpoint", choices=["1", "2", "classify"], default="1",
         help="Which checkpoint to drive across the case's documents. 1 "
@@ -567,6 +578,7 @@ def main(argv=None):
             provider_name=args.provider,
             model=args.model,
             page_workers=args.page_workers,
+            skip_redaction=args.skip_redaction,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] == "success" else 1

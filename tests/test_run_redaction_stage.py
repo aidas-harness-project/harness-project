@@ -218,9 +218,13 @@ def test_a_missing_manifest_fails_rather_than_reporting_success(monkeypatch):
 def test_the_redactor_comes_from_redact_documents_own_selector(four_docs, monkeypatch):
     """The PII-free-class routing rule must have exactly one implementation."""
     built = []
+    # **kw, not a fixed parameter list: the driver also forwards
+    # skip_redaction, and a stub that pins today's exact signature turns any
+    # future keyword into a silent no-call (the failure looks like "the
+    # selector was never used", which is the opposite of what happened).
     monkeypatch.setattr(
         rds.redact_document_mod, "_redactor_for",
-        lambda case_id, doc_id, provider, model: built.append(
+        lambda case_id, doc_id, provider, model, **kw: built.append(
             (doc_id, provider, model)) or object())
     _install(monkeypatch,
              lambda *a, **kw: {"status": "success"})
@@ -231,11 +235,30 @@ def test_the_redactor_comes_from_redact_documents_own_selector(four_docs, monkey
     assert sorted(built) == [(f"DOC_00{i}", "openai-api", "gpt-x") for i in range(1, 5)]
 
 
+def test_skip_redaction_reaches_the_selector(four_docs, monkeypatch):
+    """The dev switch must arrive at the one place that picks the redactor.
+
+    Checkpoint 2 runs twice per case (top-level documents, then the split
+    children), so a switch that reached only one of them would redact half the
+    case under a different policy.
+    """
+    seen = []
+    monkeypatch.setattr(
+        rds.redact_document_mod, "_redactor_for",
+        lambda case_id, doc_id, provider, model, *, skip_redaction=None:
+            seen.append(skip_redaction) or object())
+    _install(monkeypatch, lambda *a, **kw: {"status": "success"})
+
+    rds.run_redaction_stage("CASE_911", "tester", "RUN_1", doc_workers=1,
+                            skip_redaction=True)
+    assert seen == [True] * 4, "every document must get the same policy"
+
+
 def test_provider_defaults_to_redact_documents_own_default(four_docs, monkeypatch):
     built = []
     monkeypatch.setattr(
         rds.redact_document_mod, "_redactor_for",
-        lambda case_id, doc_id, provider, model: built.append(provider) or object())
+        lambda case_id, doc_id, provider, model, **kw: built.append(provider) or object())
     _install(monkeypatch, lambda *a, **kw: {"status": "success"})
 
     rds.run_redaction_stage("CASE_911", "tester", "RUN_1", doc_workers=1)

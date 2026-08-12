@@ -598,6 +598,60 @@ class NoPiiClassRedactor:
         )
 
 
+class DevNoLlmRedactor:
+    """Development switch: skip the redaction MODEL for every document class.
+
+    Why this is a legitimate switch and not a hole:
+
+      * The PoC corpus is already de-identified at source -- the material
+        supplied for this project had PII removed before it arrived, so the
+        model is being paid to re-derive "nothing here" on every page.
+      * The production target is a local de-identification model
+        (`open-decisions.md` #1), so the LLM span-redaction path is scaffolding
+        for a component that will be replaced, not the eventual design.
+      * It measurably dominates Stage 2 once it runs on everything. On
+        CASE_964, 367 of 367 pages took the model path (5644s of accumulated
+        provider time, 245s of wall) because classification had moved AFTER
+        redaction and `NoPiiClassRedactor`'s `document_type` test could not
+        see a type yet.
+
+    What it does NOT relax: `scan_residual_pii` still runs on every page and
+    still raises `RedactionLeakError`, exactly as on the LLM path and exactly
+    as `NoPiiClassRedactor` does. A structured RRN, account number, phone,
+    address or plate surviving in the text still BLOCKS the document. So this
+    is "do not pay a model to look for unstructured PII", not "stop checking".
+
+    What is genuinely given up is the same thing `NoPiiClassRedactor` gives up
+    -- unstructured PII such as a bare personal name, which no regex can see --
+    but here for every document class rather than for published boilerplate.
+    That is why it is a DEV switch, recorded per document, and why the label
+    says so: a run that used it is not admissible as a privacy-preserving run.
+    """
+
+    method = "dev_no_llm_redaction"
+    label = "dev_no_llm_redaction:deterministic"
+
+    def redact_page(self, text: str) -> RedactionOutcome:
+        residual = scan_residual_pii(text)
+        if residual:
+            raise RedactionLeakError(
+                "redaction model disabled (HARNESS_SKIP_REDACTION) but structured "
+                "PII is present, so the page cannot pass through unmodified: "
+                + ", ".join(f"{h['kind']}={h['sample']!r}" for h in residual)
+            )
+        return RedactionOutcome(
+            redacted_text=text,
+            items_redacted=0,
+            categories=[],
+            provider_metadata=None,
+            review_warnings=[
+                "redaction model skipped (HARNESS_SKIP_REDACTION): structured-PII "
+                "scan passed, but unstructured PII (e.g. a bare personal name) "
+                "was not checked by any model on this page"
+            ],
+        )
+
+
 class LlmRedactor:
     """Redactor backed by an llm_providers provider. The provider IDENTIFIES PII
     spans; substitution and all safety checks are deterministic and local."""

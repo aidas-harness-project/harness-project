@@ -44,8 +44,9 @@ from llm_providers import (
     SUPPORTED_PROVIDERS,
     build_provider,
 )
-from redaction import (PROMPT_VERSION, LlmRedactor, NoPiiClassRedactor,
-                       RedactionLeakError, RedactionOutcome, RedactionParseError)
+from redaction import (PROMPT_VERSION, DevNoLlmRedactor, LlmRedactor,
+                       NoPiiClassRedactor, RedactionLeakError, RedactionOutcome,
+                       RedactionParseError)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -501,9 +502,36 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
 NO_PII_DOCUMENT_TYPES = frozenset({"insurance_policy"})
 
 
-def _redactor_for(case_id: str, doc_id: str, provider_name: str, model: str | None):
-    """Pick the redactor for this document: deterministic pass-through for a
-    PII-free document class, otherwise the real LLM span redactor."""
+SKIP_REDACTION_ENV = "HARNESS_SKIP_REDACTION"
+
+
+def resolve_skip_redaction(skip: bool | None = None) -> bool:
+    """Whether to skip the redaction MODEL. Explicit argument wins, then the env.
+
+    Same precedence as every other knob here (and as
+    ocr_extract.resolve_single_reader): `None` means "not specified", so an
+    evaluation run can force real redaction back on inside a shell that exports
+    the dev default.
+    """
+    if skip is not None:
+        return bool(skip)
+    raw = str(os.environ.get(SKIP_REDACTION_ENV, "")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _redactor_for(case_id: str, doc_id: str, provider_name: str, model: str | None,
+                  *, skip_redaction: bool | None = None):
+    """Pick the redactor for this document: the dev no-model switch, then the
+    deterministic pass-through for a PII-free document class, otherwise the
+    real LLM span redactor."""
+    if resolve_skip_redaction(skip_redaction):
+        # Checked before the manifest read: this switch does not depend on a
+        # document_type, which is exactly what makes it survive the
+        # classification-after-redaction order that broke the class exemption.
+        print(f"{doc_id}: {SKIP_REDACTION_ENV} set -- redaction model skipped, "
+              "deterministic residual-PII scan still enforced per page",
+              file=sys.stderr)
+        return DevNoLlmRedactor()
     manifest = dao.read_contract_data(case_id, "document_manifest.json")
     if manifest is None:
         raise RuntimeError(f"no document_manifest.json for {case_id}")
@@ -538,6 +566,17 @@ def main() -> None:
                              "The cache is keyed on prompt version, redactor identity "
                              "and page-text hash, so a stale entry is already a miss; "
                              "this is for forcing a cold measurement.")
+    skip_group = parser.add_mutually_exclusive_group()
+    skip_group.add_argument(
+        "--skip-redaction", dest="skip_redaction", action="store_true", default=None,
+        help="Skip the redaction MODEL for every document (dev switch, or "
+             "HARNESS_SKIP_REDACTION=1). The deterministic residual-PII scan "
+             "still runs and still blocks a page carrying structured PII; what "
+             "is given up is unstructured PII, which only a model can see. Text "
+             "produced this way is not admissible as a privacy-preserving run.")
+    skip_group.add_argument(
+        "--redact", dest="skip_redaction", action="store_false",
+        help="Force the redaction model on even under HARNESS_SKIP_REDACTION.")
     args = parser.parse_args()
 
     # Without this every span below is a no-op: trace.enabled() stays False
@@ -549,7 +588,8 @@ def main() -> None:
     trace_mod.configure(args.case_id, args.run_id)
 
     try:
-        redactor = _redactor_for(args.case_id, args.doc_id, args.provider, args.model)
+        redactor = _redactor_for(args.case_id, args.doc_id, args.provider, args.model,
+                                 skip_redaction=args.skip_redaction)
         result = redact_document(args.case_id, args.doc_id, args.held_by,
                                  args.run_id, redactor, resume=not args.no_resume,
                                  max_workers=args.workers)
