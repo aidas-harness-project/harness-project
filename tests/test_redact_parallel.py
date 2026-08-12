@@ -222,22 +222,37 @@ def test_worker_count_resolution_falls_back_safely(monkeypatch, raw, expected):
     assert rd._resolve_workers(None) == want
 
 
-def test_default_redact_workers_match_ocr():
-    """Redaction and OCR must stay pinned to the same measured knee.
+def test_redact_workers_sit_at_the_short_call_knee():
+    """Redaction runs at the SHORT-call width, which is not OCR's width.
 
-    These drifted apart once already and it went unnoticed because nothing
-    asserted the relationship: this constant's comment claimed "Matches
-    ocr_extract's default" while sitting at 4 and OCR had moved to 16. The
-    cost was measurable on CASE_911 -- the same 34 scanned pages cleared OCR
-    at 15-16 workers in 35-42s per document, then took 25.0s (DOC_002, 15p)
-    and 32.7s (DOC_005, 19p) in redaction at 4.
+    An earlier version of this test asserted equality with
+    DEFAULT_OCR_WORKERS, written when both had just been set to 12. That was
+    wrong as a permanent rule: the two ops have different measured optima
+    because they are different workloads. A redact_text call is ~4.1-6.4s of
+    which ~4.34s is process spawn, so it saturates early (trivial-call curve
+    peaks at 12); a real OCR call waits ~23s on the model with the CPU idle
+    and does not contend until ~24 (34-page curve: 12 -> 75.2s, 24 -> 54.6s
+    with latency flat, 34 -> 53.0s with latency +5.2s).
 
-    A prose claim of equality is exactly what drifts; this makes it fail.
+    What must NOT come back is the original defect: this constant sat at 4
+    with a comment claiming "Matches ocr_extract's default" while OCR was at
+    16 -- a prose claim of equality that had silently stopped being true.
+    Measured cost on CASE_911: the same 34 scanned pages cleared OCR in
+    35-42s per document, then took 25.0s (DOC_002, 15p) and 32.7s (DOC_005,
+    19p) in redaction at 4.
+
+    So this pins the VALUE to its own measurement, and pins the invariant
+    that actually matters -- redaction must never silently fall back to a
+    small default while the rest of the pipeline scales up.
     """
-    import ocr_extract as oe
-    assert rd.DEFAULT_REDACT_WORKERS == oe.DEFAULT_OCR_WORKERS, (
-        "redaction and OCR page workers must stay in sync -- see the measured "
-        "concurrency curve in llm_providers.DEFAULT_LLM_MAX_INFLIGHT"
+    import llm_providers as lp
+    assert rd.DEFAULT_REDACT_WORKERS == 12, (
+        "redaction page workers must sit at the short-call knee (12); see the "
+        "trivial-call curve in llm_providers.DEFAULT_LLM_MAX_INFLIGHT"
+    )
+    assert rd.DEFAULT_REDACT_WORKERS <= lp.DEFAULT_LLM_MAX_INFLIGHT, (
+        "a per-op width above the process-wide cap would queue every call and "
+        "make the op's own measured width unreachable"
     )
 
 

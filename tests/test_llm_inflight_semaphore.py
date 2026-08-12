@@ -157,23 +157,32 @@ def test_default_cap_is_the_measured_knee(monkeypatch):
     The flaw was that this watched exactly one failure mode. "The backend is
     not rate-limiting us" is correct and does not imply "no ceiling is
     needed": a CLI provider is also bounded LOCALLY, since every call spawns
-    a full node child. Measured 2026-08-12 over 24 trivial calls, throughput
-    peaks at 12 workers and degrades above it (12 -> 19.9s, 16 -> 23.6s,
-    24 -> 32.1s, which is slower than 4 workers' 28.7s), with zero
-    rate-limit errors at every width -- so the original evidence could not
-    have detected this.
+    a full node child, and that shows up as slowness rather than as errors --
+    so the original evidence could not have detected it.
 
-    The cap is load-bearing now that document parallelism exists: page
-    workers x document workers is the demand (12 x 3 = 36), well past the
-    knee. Without it a multi-document case runs in the degraded region.
+    Set to 24, the HIGHER of the two workloads measured 2026-08-12:
 
-    Pinned in both directions: the value must stay at the measured knee, and
-    0 must still disable it (the documented rollback).
+      * trivial calls (spawn cost only) peak at 12 -- 12 -> 19.9s,
+        16 -> 23.6s, 24 -> 32.1s, slower than 4 workers' 28.7s
+      * 34 real OCR pages peak at 24 -- 12 -> 75.2s, 24 -> 54.6s with
+        latency flat, 34 -> 53.0s with latency +5.2s
+
+    This is a CEILING, not a target. Each op runs at its own measured width
+    (OCR 24, redaction 12); the cap exists to stop the pools MULTIPLYING,
+    since page workers x document workers is the demand (24 x 3 = 72 for
+    OCR) and that would put a multi-document case deep into saturation.
+
+    It must not be lowered to 12: that would clamp OCR back to the width
+    measured 27% slower, which is why the OCR test asserts its width is
+    <= this value.
+
+    Pinned in both directions: the value must stay at the measured OCR knee,
+    and 0 must still disable it (the documented rollback).
     """
     monkeypatch.delenv(lp.LLM_MAX_INFLIGHT_ENV, raising=False)
     lp.reset_inflight_semaphore()
-    assert lp.DEFAULT_LLM_MAX_INFLIGHT == 12
-    assert lp._resolve_max_inflight() == 12
+    assert lp.DEFAULT_LLM_MAX_INFLIGHT == 24
+    assert lp._resolve_max_inflight() == 24
     assert lp._get_inflight_semaphore() is not None, "the cap must be armed"
 
     monkeypatch.setenv(lp.LLM_MAX_INFLIGHT_ENV, "0")

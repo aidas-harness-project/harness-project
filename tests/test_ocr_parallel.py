@@ -378,27 +378,43 @@ def test_default_worker_count_is_the_measured_knee(monkeypatch):
     recorded at the time as a deliberate bet, justified by CASE_953 making 99
     provider calls with zero rate-limit errors.
 
-    That bet lost, on the axis it was not watching. Measured 2026-08-12 with
-    24 trivial `claude -p` calls (model work ~0, so this is the spawn curve):
+    That bet lost, but so did the first correction. Measured 2026-08-12 with
+    24 trivial `claude -p` calls (model work ~0, so this is the SPAWN curve):
 
         workers    4      8     12     16     24
         wall     28.7s  23.0s  19.9s  23.6s  32.1s
 
-    Throughput peaks at 12 and degrades above it -- 24 workers is slower than
-    4 -- with ZERO rate-limit errors at every width. Each CLI call is a full
-    node child process, so the binding constraint is local spawn cost, whose
-    symptom is slowness. The zero-rate-limit-errors evidence behind the 16
-    bet was structurally blind to it.
+    That peaks at 12, and OCR was briefly set there -- applying a short-call
+    result to a long-call workload. Measured again on 34 REAL scanned pages
+    (batch larger than every width, so each is genuinely distinct):
 
-    Unlike every previous value here, 12 IS a measured optimum.
+        workers   12     24     34
+        wall     75.2s  54.6s  53.0s
+        latency  23.5s  23.4s  28.6s
+
+    24 is 27% faster than 12 with per-call latency FLAT (no contention yet);
+    34 buys 1.6s more while latency jumps +5.2s (saturation). A real OCR call
+    waits ~23s on the model with the CPU idle, so spawn cost is a small share
+    of it and this workload tolerates ~2x the trivial-call width.
+
+    24 is therefore OCR's own measured optimum, deliberately different from
+    the short-call ops' 12. A 15-page run that appeared to show "16 is
+    fastest" was discarded as unreadable: with 15 items, W=16 and W=24 both
+    dispatch the whole batch at once and are the same configuration.
 
     Pinned because the value is load-bearing and invisible -- nothing else in
     the pipeline states it, and a silent revert would show up only as a slower
     run that still passes every other test.
     """
     monkeypatch.delenv("HARNESS_OCR_WORKERS", raising=False)
-    assert oe.DEFAULT_OCR_WORKERS == 12
-    assert oe._resolve_workers(None) == 12
+    assert oe.DEFAULT_OCR_WORKERS == 24
+    assert oe._resolve_workers(None) == 24
+
+    # The per-op width must be reachable: a process-wide cap below it would
+    # queue every call and silently restore the 12-wide behaviour measured
+    # 27% slower.
+    import llm_providers as lp
+    assert oe.DEFAULT_OCR_WORKERS <= lp.DEFAULT_LLM_MAX_INFLIGHT
 
 
 def test_env_still_overrides_the_default(monkeypatch):

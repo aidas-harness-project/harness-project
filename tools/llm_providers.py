@@ -220,9 +220,10 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 # added parallelism returns. That shows up as slowness, never as an error, so
 # the "zero rate-limit failures" evidence is blind to it by construction.
 #
-# Measured 2026-08-12, 24 trivial `claude -p` calls (no image, no reasoning),
-# varying only pool width -- so this is the spawn/scheduling curve itself,
-# with model work held near zero:
+# Measured 2026-08-12 on TWO workloads, which do not have the same optimum.
+#
+# (a) 24 trivial `claude -p` calls (no image, no reasoning) -- the spawn
+# curve, model work held near zero:
 #
 #   workers   wall     throughput   mean latency
 #      4      28.7s     0.84/s         4.5s
@@ -231,18 +232,34 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 #     16      23.6s     1.02/s        11.6s
 #     24      32.1s     0.75/s        16.9s   <- slower than 4 workers
 #
-# Throughput peaks at 12 and DEGRADES above it; 24 workers is worse than 4.
-# Zero rate-limit errors at every width, which is precisely why the previous
+# Throughput peaks at 12 and DEGRADES above it, with zero rate-limit errors
+# at every width -- precisely why the earlier "no errors, so no cap needed"
 # evidence could not see this. A single trivial call costs 4.34s of pure
-# process overhead, so the short-call ops (redact/classify/segment-judge, all
-# ~4.1-6.4s each) are mostly spawn cost, not inference.
+# process overhead, so the short-call ops (redact_text, classify_document,
+# segment.judge -- all ~4.1-6.4s each, minima at ~4.1s) are mostly spawn
+# cost rather than inference, and 12 is right for them.
 #
-# 12 is therefore a MEASURED ceiling, unlike every previous value here. It is
-# load-bearing now that document-level parallelism exists: page workers x
-# document workers is the demand (12 x 3 = 36 at the defaults), well past the
-# knee, so without this cap a multi-document case runs in the degraded region.
-# HARNESS_LLM_MAX_INFLIGHT overrides it; 0 restores the uncapped behaviour.
-DEFAULT_LLM_MAX_INFLIGHT = 12  # measured knee; see the curve above
+# (b) 34 REAL scanned OCR pages -- the long-call workload:
+#
+#   workers   wall     per page   mean latency
+#     12      75.2s     2.21s       23.5s
+#     24      54.6s     1.61s       23.4s   <- knee
+#     34      53.0s     1.56s       28.6s
+#
+# 27% faster at 24 than at 12 with per-call latency FLAT, so contention has
+# not started; at 34 latency jumps +5.2s for a 1.6s wall gain, which is
+# saturation. A real OCR call waits ~23s on the model with the local CPU
+# idle, so spawn cost is a small share of it -- the same machine tolerates
+# roughly twice the width when calls are long.
+#
+# This cap is set to 24, the HIGHER of the two, on purpose. It is a ceiling,
+# not a target: each op still runs at its own measured width (OCR 24,
+# redaction 12), and this exists to stop the pools from MULTIPLYING -- page
+# workers x document workers is the demand (24 x 3 = 72 for OCR), which
+# would otherwise put a multi-document case deep into saturation. Setting it
+# to 12 would silently clamp OCR back to the width just measured 27% slower.
+# HARNESS_LLM_MAX_INFLIGHT overrides it; 0 restores uncapped behaviour.
+DEFAULT_LLM_MAX_INFLIGHT = 24  # measured OCR knee; see both curves above
 LLM_MAX_INFLIGHT_ENV = "HARNESS_LLM_MAX_INFLIGHT"
 
 _inflight_semaphore: threading.BoundedSemaphore | None = None

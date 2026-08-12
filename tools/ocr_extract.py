@@ -508,23 +508,47 @@ def _save_cached_page(cache_dir: Path, page: int, page_result: dict,
 # against anything. The bet's stated safety net was that being wrong would
 # cost rate-limit failures rather than slowness.
 #
-# 2026-08-12: measured, and the bet lost on exactly the axis it was not
-# watching. 24 trivial `claude -p` calls at varying pool width (spawn cost
-# isolated, model work ~0) peak at 12 workers and DEGRADE above it: 12 ->
-# 19.9s, 16 -> 23.6s, 24 -> 32.1s (slower than 4 workers' 28.7s), with zero
-# rate-limit errors at every width. The binding constraint on a CLI provider
-# is local: each call is a full node child process. So the failure mode is
-# slowness, invisible to the rate-limit-error evidence the raise relied on.
-# Full curve in llm_providers.DEFAULT_LLM_MAX_INFLIGHT.
+# 2026-08-12: measured twice, and the two measurements disagree -- which is
+# the whole point, because they measure different workloads.
 #
-# Lowered 16 -> 12, the measured knee.
+# First, 24 TRIVIAL `claude -p` calls (no image, no reasoning) at varying
+# width peaked at 12 and degraded above it: 12 -> 19.9s, 16 -> 23.6s,
+# 24 -> 32.1s. That curve is real but it is the SPAWN curve: with model work
+# held at ~0, a call is nothing but local process cost, so contention
+# dominates immediately. Setting OCR to 12 from that number was applying a
+# short-call result to a long-call workload.
 #
-# This is a per-DOCUMENT knob, so the demand is this value x
-# HARNESS_DOC_WORKERS (12 x 3 = 36), still past the knee. What bounds it is
-# the process-wide in-flight cap (T6), re-armed at 12 on the same
-# measurement after a day uncapped. Raising this alone can no longer push
-# real concurrency past 12; raising the cap too is what would.
-DEFAULT_OCR_WORKERS = 12
+# Second, the actual thing: 34 REAL scanned pages (every OCR page in
+# CASE_911 -- DOC_002's 15 plus the 11 medical children's 19), batch larger
+# than every width tested so each is genuinely distinct:
+#
+#   workers   wall     per page   mean latency
+#     12      75.2s     2.21s       23.5s
+#     24      54.6s     1.61s       23.4s   <- chosen
+#     34      53.0s     1.56s       28.6s
+#
+# 12 -> 24 is a 20.6s (27%) win with per-call latency FLAT (23.5 -> 23.4),
+# i.e. no contention had begun at 24. 24 -> 34 buys only 1.6s more while
+# latency jumps +5.2s -- work is being queued inside the calls, the onset of
+# saturation, for essentially no wall-clock return.
+#
+# Why this workload tolerates ~2x the trivial-call width: a real OCR call
+# spends ~23s awaiting the model with the local CPU idle, so the 4.34s of
+# spawn cost is a small share of each call rather than all of it. An earlier
+# 15-page run appeared to show "16 is fastest" and was discarded as
+# unreadable -- with only 15 items, W=16 and W=24 both dispatch the whole
+# batch at once and are the same configuration.
+#
+# Raised 12 -> 24 on that measurement. This deliberately DIFFERS from the
+# short-call ops (redaction/classify/segment-judge), which stay at 12 where
+# their own measurement put them; one global width would have to be wrong
+# for one of the two.
+#
+# This is a per-DOCUMENT knob, so demand is this value x HARNESS_DOC_WORKERS
+# (24 x 3 = 72). The process-wide in-flight cap (T6) is what actually bounds
+# that; it is set to this same 24 so a single document can reach full width
+# while several documents cannot multiply past it.
+DEFAULT_OCR_WORKERS = 24
 
 # Turns P8 off for every OCR call in the process, so a development session does
 # not have to remember --single-reader on each invocation. Set
