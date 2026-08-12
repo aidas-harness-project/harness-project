@@ -704,6 +704,7 @@ def text_anchor_boundaries(pdf_path, page_count: int) -> dict[int, str | None] |
 
 def boundaries_from_page_texts(
     page_texts: list[str], *, medical: bool = False, judge=None,
+    undecided: list[int] | None = None,
 ) -> dict[int, str | None] | None:
     """The same boundary rule over page text a caller already has.
 
@@ -749,20 +750,80 @@ def boundaries_from_page_texts(
     # 5-line header window into policy text, where the strict first-line rule is
     # what measured precision 1.0000 across 173 boundaries.
     policy = _boundaries_from_page_lines(lines, page_texts=page_texts)
+    # Only the medical pass consults the judge, so only it can leave a page
+    # undecided; `undecided` is threaded here rather than collected by a second
+    # call so the flags describe the very pass that produced these boundaries.
     medical_result = _boundaries_from_page_lines(
-        lines, medical=True, judge=judge, page_texts=page_texts)
+        lines, medical=True, judge=judge, page_texts=page_texts,
+        undecided=undecided)
     if policy is None or medical_result is None:
         # None is "no verdict, fall through to vision" and is not comparable to
         # a boundary count; if either reader declined, so does this.
-        return policy if medical_result is None else medical_result
-    return medical_result if len(medical_result) > len(policy) else policy
+        chosen = policy if medical_result is None else medical_result
+        if chosen is policy and undecided is not None:
+            undecided.clear()
+        return chosen
+    if len(medical_result) > len(policy):
+        return medical_result
+    # The POLICY result won, and it never consulted the judge -- so any pages
+    # the medical pass could not settle describe boundaries that were then
+    # discarded. Reporting them would flag pages for review that the returned
+    # boundary set did not actually leave undecided.
+    if undecided is not None:
+        undecided.clear()
+    return policy
+
+
+def processed_boundaries_with_undecided(
+    case_id: str, doc_id: str, page_count: int, judge=None
+) -> tuple[dict[int, str | None] | None, list[int]]:
+    """Boundaries AND the pages the judge could not settle, from ONE pass.
+
+    These must come from the same pass. They used to be two independent calls
+    (`processed_text_boundaries` then `processed_undecided_pages`), each
+    re-asking the LLM tier about the same page pairs with no memo between them,
+    which was wrong twice over:
+
+      * it paid for every judged page TWICE, and
+      * the two passes could disagree. A page judged in the first pass and
+        failed in the second (or vice versa) produced boundaries from one set
+        of verdicts and flags from the other, so `undecided_pages` did not
+        describe the boundaries actually used.
+
+    That is not hypothetical. On CASE_961 (cold Stage 2 run, 2026-08-12) nine
+    consecutive judge calls failed inside ~0.05s each. The bundle split into 13
+    segments instead of 11 -- p4/p5 and p18/p19 each over-split -- and the
+    proposal recorded `undecided_pages: []`, so a boundary set produced by
+    failed calls looked fully decided at the human approval gate. Over-splitting
+    is the deliberately safe direction, but only because the gate can see it;
+    silently, it just propagates a wrong document_type downstream.
+    """
+    if judge is None:
+        return processed_text_boundaries(case_id, doc_id, page_count), []
+    texts = _processed_page_texts(case_id, doc_id, page_count)
+    if texts is None:
+        return None, []
+    collected: list[int] = []
+    # Same entry point processed_text_boundaries uses, so this stays one
+    # implementation of the boundary rules rather than a second copy that can
+    # drift; `undecided` is threaded through to collect the flags from the very
+    # pass that produced these boundaries.
+    boundaries = boundaries_from_page_texts(
+        texts, medical="auto", judge=judge, undecided=collected)
+    return boundaries, sorted(set(collected))
 
 
 def processed_undecided_pages(
     case_id: str, doc_id: str, page_count: int, judge=None
 ) -> list[int]:
     """Pages the LLM tier could not settle, for the same text the boundaries came
-    from. Empty when no judge ran or no processed text exists."""
+    from. Empty when no judge ran or no processed text exists.
+
+    Kept for callers that want only the flags. Anything that also needs the
+    boundaries must use `processed_boundaries_with_undecided` instead -- asking
+    for both through two calls re-judges every page and lets the two answers
+    disagree.
+    """
     if judge is None:
         return []
     texts = _processed_page_texts(case_id, doc_id, page_count)
@@ -1013,6 +1074,35 @@ Reply with ONLY a JSON object, no other text, in exactly this shape:
 """
 
 
+_JUDGE_FAILURE_ATTR = "_harness_judge_failures"
+
+
+def _record_judge_failure(judge, exc: BaseException) -> None:
+    """Attach a provider failure to the judge object itself.
+
+    On the judge rather than in a module global because the failures belong to
+    ONE proposal run: a module-level list would accumulate across runs in a
+    long-lived process and would need clearing at exactly the right moment,
+    which is a second thing to get wrong. Best-effort -- a judge that rejects
+    attribute assignment must not turn a swallowed provider error into a
+    crash, since the caller's fail-toward-splitting behaviour is still correct
+    without the diagnostic.
+    """
+    try:
+        failures = getattr(judge, _JUDGE_FAILURE_ATTR, None)
+        if failures is None:
+            failures = []
+            setattr(judge, _JUDGE_FAILURE_ATTR, failures)
+        failures.append(f"{type(exc).__name__}: {str(exc)[:200]}")
+    except Exception:
+        pass
+
+
+def judge_failures(judge) -> list[str]:
+    """Provider failures recorded against this judge, newest last."""
+    return list(getattr(judge, _JUDGE_FAILURE_ATTR, ()) or ())
+
+
 def _judge_boundary(previous_text: str, current_text: str, judge) -> dict | None:
     """Ask the model whether `current_text` starts a document. None if unusable.
 
@@ -1034,7 +1124,15 @@ def _judge_boundary(previous_text: str, current_text: str, judge) -> dict | None
     try:
         with trace_mod.span("segment.judge", category="compute"):
             result = judge.classify_document(prompt, BOUNDARY_JUDGE_PROMPT_VERSION)
-    except Exception:
+    except Exception as exc:
+        # A provider failure is NOT the same as "the model considered it and
+        # could not say". Both split and both get flagged -- the caller treats
+        # them identically, which is correct -- but a run where the CLI failed
+        # 9 times in a row inside 0.05s each is a broken run, not an ambiguous
+        # bundle, and nothing said so: CASE_961 recorded 13 segments instead of
+        # 11 with no visible sign the calls had failed at all. Recording it on
+        # the judge lets `propose` report the difference.
+        _record_judge_failure(judge, exc)
         return None
     raw = (getattr(result, "text", "") or "").strip()
     if raw.startswith("```"):
@@ -1937,11 +2035,8 @@ def propose_boundaries(
         # The provider doubles as the LLM tier's judge: it decides the pages
         # the title rules cannot settle (a generic heading like REPORT, or no
         # title at all), reading the page text rather than a contact sheet.
-        anchored = processed_text_boundaries(
+        anchored, anchored_undecided = processed_boundaries_with_undecided(
             case_id, doc_id, page_count, judge=provider)
-        anchored_undecided = (
-            processed_undecided_pages(case_id, doc_id, page_count, judge=provider)
-            if anchored is not None and provider is not None else [])
         if anchored is not None and progress:
             progress(
                 f"processed text covers all {page_count} page(s): deriving "
@@ -3487,17 +3582,40 @@ def _cmd_propose(args):
         # one -- so a bundle the title rules fully answer still constructs no
         # provider and renders no sheet.
         cli_judge = _LazyJudge(lambda: build_provider(parse_provider_config(args)))
-        anchored = processed_text_boundaries(
+        anchored, anchored_undecided = processed_boundaries_with_undecided(
             args.case_id, args.doc_id, page_count, judge=cli_judge)
-        anchored_undecided = (
-            processed_undecided_pages(args.case_id, args.doc_id, page_count,
-                                       judge=cli_judge)
-            if anchored is not None else [])
         source = "processed text"
         if anchored is None:
             anchored = text_anchor_boundaries(pdf_path, page_count)
             anchored_undecided = []
             source = "text layer"
+
+        # A boundary set built on FAILED judge calls is not a proposal. Every
+        # failure splits, so the result looks like a decisive answer and reads
+        # as one at the approval gate; on CASE_961 nine consecutive failures
+        # turned an 11-segment bundle into 13 with `undecided_pages: []`.
+        # Refuse rather than write it: the pages are still flagged, but a
+        # reviewer would be approving boundaries no model ever judged.
+        failures = judge_failures(cli_judge)
+        if failures:
+            _stderr(f"error: {len(failures)} boundary-judge call(s) failed")
+            print(json.dumps({
+                "status": "judge_failed",
+                "case_id": args.case_id,
+                "document_id": args.doc_id,
+                "judge_failure_count": len(failures),
+                "judge_failures": failures[:10],
+                "undecided_pages": anchored_undecided,
+                "note": (
+                    "Boundaries were NOT written. Every failed judge call splits, "
+                    "so the proposal would look decided while resting on calls "
+                    "that never returned a verdict. Re-run `propose`; the "
+                    "deterministic title rules are unaffected and only the "
+                    "genuinely ambiguous pages are re-judged."
+                ),
+            }, ensure_ascii=False, indent=2))
+            return 1
+
         if anchored is not None:
             _stderr(
                 f"{source} covers all {page_count} page(s): deriving "
