@@ -503,21 +503,28 @@ def _save_cached_page(cache_dir: Path, page: int, page_result: dict,
 # 141.32s -> 86.06s, a 1.64x speedup from this constant alone. The new corpus
 # is entirely scans, so this applies to every case rather than a subset.
 #
-# 2026-08-11: raised 8 -> 16 (user decision). Neither 8 nor 16 is a measured
-# ceiling -- 4 and 8 were compared on a real document, 16 was not, so this is a
-# deliberate bet, not a measurement. What justifies taking it: the full CASE_953
-# end-to-end run made 99 provider calls with ZERO rate-limit errors and zero
-# queueing, so the backend showed no sign of being near a limit at the previous
-# setting. If that changes, the symptom is rate-limit failures rather than
-# slowness, and HARNESS_OCR_WORKERS lowers it with no code change.
+# 2026-08-11: raised 8 -> 16 (user decision), explicitly recorded at the time
+# as "a deliberate bet, not a measurement" -- 16 had never been compared
+# against anything. The bet's stated safety net was that being wrong would
+# cost rate-limit failures rather than slowness.
 #
-# NOTE: this is a per-DOCUMENT knob and it is no longer bounded by anything
-# global. The provider in-flight cap (T6) that used to backstop it was
-# uncapped by default on 2026-08-11 after it was measured never to engage, so
-# the real process-wide ceiling is now this value x HARNESS_DOC_WORKERS
-# (16 x 3 = 48 concurrent calls at the defaults). Raise both at once only with
-# that product in mind.
-DEFAULT_OCR_WORKERS = 16
+# 2026-08-12: measured, and the bet lost on exactly the axis it was not
+# watching. 24 trivial `claude -p` calls at varying pool width (spawn cost
+# isolated, model work ~0) peak at 12 workers and DEGRADE above it: 12 ->
+# 19.9s, 16 -> 23.6s, 24 -> 32.1s (slower than 4 workers' 28.7s), with zero
+# rate-limit errors at every width. The binding constraint on a CLI provider
+# is local: each call is a full node child process. So the failure mode is
+# slowness, invisible to the rate-limit-error evidence the raise relied on.
+# Full curve in llm_providers.DEFAULT_LLM_MAX_INFLIGHT.
+#
+# Lowered 16 -> 12, the measured knee.
+#
+# This is a per-DOCUMENT knob, so the demand is this value x
+# HARNESS_DOC_WORKERS (12 x 3 = 36), still past the knee. What bounds it is
+# the process-wide in-flight cap (T6), re-armed at 12 on the same
+# measurement after a day uncapped. Raising this alone can no longer push
+# real concurrency past 12; raising the cap too is what would.
+DEFAULT_OCR_WORKERS = 12
 
 # Turns P8 off for every OCR call in the process, so a development session does
 # not have to remember --single-reader on each invocation. Set

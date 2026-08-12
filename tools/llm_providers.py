@@ -205,29 +205,44 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 # squeezed through 6 slots -- the parallel win was handed straight back as
 # queueing. At 16 that overhead is essentially gone (60s -> 1.8s).
 #
-# UNCAPPED by default since 2026-08-11 (user decision), after the full
-# CASE_953 end-to-end run measured the cap out of the picture entirely: 99
-# provider calls, ZERO `provider.queue` spans -- not one call ever waited on a
-# permit -- and zero rate-limit errors. A limiter that never engages is not
-# protecting anything; it is only a second place a future throughput change
-# has to be remembered.
+# UNCAPPED between 2026-08-11 and 2026-08-12, then RE-ARMED at 12 on
+# measurement. The uncapping was reasoned from the full CASE_953 run: 99
+# provider calls, ZERO `provider.queue` spans, zero rate-limit errors, so "a
+# limiter that never engages is not protecting anything". Both observations
+# were true and still are -- CASE_911 reproduced them exactly (97 calls, 0
+# queue spans, 0 errors).
 #
-# What actually governs concurrency is the pool sizes: page workers x document
-# workers is the demand, so raising throughput means raising those, not this.
-# The semaphore remains in the code and re-arms the moment this is set to a
-# positive value (HARNESS_LLM_MAX_INFLIGHT=16 restores the previous default),
-# which is the knob to reach for if a backend ever starts rate-limiting.
+# What that reasoning missed is that it only ever watched for ONE failure
+# mode. It concluded the backend was not rate-limiting -- correct -- and from
+# there that no ceiling was needed, which does not follow. Concurrency on a
+# CLI provider is also bounded LOCALLY: every call is a full node child
+# process, and past a point the machine spends more on spawning them than the
+# added parallelism returns. That shows up as slowness, never as an error, so
+# the "zero rate-limit failures" evidence is blind to it by construction.
 #
-# The earlier reasoning for a finite value, kept because it explains what the
-# limiter is FOR: at 6 it was the binding constraint and was eating the gain
-# it was meant to protect. Anything larger than 16 was unmeasured on this
-# backend, and being wrong costs rate-limit failures rather than slowness --
-# which is why this is now a deliberate uncapping rather than a bigger guess.
-# Note the ceiling is not this constant
-# alone -- page workers x document workers is the demand, and 8 x 1 = 8 today,
-# so this value only becomes load-bearing once document-level parallelism
-# (T8) exists.
-DEFAULT_LLM_MAX_INFLIGHT = 0  # 0 == no cap; see the note above
+# Measured 2026-08-12, 24 trivial `claude -p` calls (no image, no reasoning),
+# varying only pool width -- so this is the spawn/scheduling curve itself,
+# with model work held near zero:
+#
+#   workers   wall     throughput   mean latency
+#      4      28.7s     0.84/s         4.5s
+#      8      23.0s     1.04/s         6.9s
+#     12      19.9s     1.21/s         9.5s   <- knee
+#     16      23.6s     1.02/s        11.6s
+#     24      32.1s     0.75/s        16.9s   <- slower than 4 workers
+#
+# Throughput peaks at 12 and DEGRADES above it; 24 workers is worse than 4.
+# Zero rate-limit errors at every width, which is precisely why the previous
+# evidence could not see this. A single trivial call costs 4.34s of pure
+# process overhead, so the short-call ops (redact/classify/segment-judge, all
+# ~4.1-6.4s each) are mostly spawn cost, not inference.
+#
+# 12 is therefore a MEASURED ceiling, unlike every previous value here. It is
+# load-bearing now that document-level parallelism exists: page workers x
+# document workers is the demand (12 x 3 = 36 at the defaults), well past the
+# knee, so without this cap a multi-document case runs in the degraded region.
+# HARNESS_LLM_MAX_INFLIGHT overrides it; 0 restores the uncapped behaviour.
+DEFAULT_LLM_MAX_INFLIGHT = 12  # measured knee; see the curve above
 LLM_MAX_INFLIGHT_ENV = "HARNESS_LLM_MAX_INFLIGHT"
 
 _inflight_semaphore: threading.BoundedSemaphore | None = None

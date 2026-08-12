@@ -370,22 +370,35 @@ def test_a_pre_fingerprint_cache_entry_is_a_miss(scratch, monkeypatch):
 
 # ---------------------------------------------- default worker count (T12) --
 
-def test_default_worker_count_is_sixteen(monkeypatch):
-    """4 -> 8 -> 16 over 2026-08-11.
+def test_default_worker_count_is_the_measured_knee(monkeypatch):
+    """4 -> 8 -> 16 over 2026-08-11, then 16 -> 12 on measurement 2026-08-12.
 
     The 4 -> 8 step was measured: 141.32s -> 86.06s on a real 12-page scan, a
-    1.64x speedup from this constant alone. The 8 -> 16 step was NOT -- it is a
-    deliberate bet taken because the CASE_953 end-to-end run made 99 provider
-    calls with zero rate-limit errors, i.e. the backend never showed strain at
-    8. Do not cite 16 as a measured optimum.
+    1.64x speedup from this constant alone. The 8 -> 16 step was NOT -- it was
+    recorded at the time as a deliberate bet, justified by CASE_953 making 99
+    provider calls with zero rate-limit errors.
+
+    That bet lost, on the axis it was not watching. Measured 2026-08-12 with
+    24 trivial `claude -p` calls (model work ~0, so this is the spawn curve):
+
+        workers    4      8     12     16     24
+        wall     28.7s  23.0s  19.9s  23.6s  32.1s
+
+    Throughput peaks at 12 and degrades above it -- 24 workers is slower than
+    4 -- with ZERO rate-limit errors at every width. Each CLI call is a full
+    node child process, so the binding constraint is local spawn cost, whose
+    symptom is slowness. The zero-rate-limit-errors evidence behind the 16
+    bet was structurally blind to it.
+
+    Unlike every previous value here, 12 IS a measured optimum.
 
     Pinned because the value is load-bearing and invisible -- nothing else in
     the pipeline states it, and a silent revert would show up only as a slower
     run that still passes every other test.
     """
     monkeypatch.delenv("HARNESS_OCR_WORKERS", raising=False)
-    assert oe.DEFAULT_OCR_WORKERS == 16
-    assert oe._resolve_workers(None) == 16
+    assert oe.DEFAULT_OCR_WORKERS == 12
+    assert oe._resolve_workers(None) == 12
 
 
 def test_env_still_overrides_the_default(monkeypatch):

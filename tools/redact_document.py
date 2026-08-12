@@ -64,10 +64,23 @@ DEFAULT_REDACTION_PROVIDER = "claude-cli"
 # is treated as a miss rather than migrated.
 CACHE_FORMAT_VERSION = 1
 
-# Matches ocr_extract's default. The work is provider round-trips, not local
-# computation, so the ceiling is the backend's rate limit and (for CLI
-# providers) one child process per concurrent call -- not CPU count.
-DEFAULT_REDACT_WORKERS = 4
+# The work is provider round-trips, not local computation, so the ceiling is
+# the backend's rate limit and (for CLI providers) one child process per
+# concurrent call -- not CPU count.
+#
+# This said "Matches ocr_extract's default" while sitting at 4 and
+# DEFAULT_OCR_WORKERS sat at 16 -- the claim silently stopped being true when
+# OCR was raised (8 -> 16 on 2026-08-11) and this was not. Measured on
+# CASE_911, that desync is what made redaction the slower half of the same
+# 34 scanned pages: OCR cleared them at 15-16 workers in 35-42s per document
+# while redaction took 25.0s (DOC_002, 15p) and 32.7s (DOC_005, 19p) at 4.
+#
+# Now pinned to the same measured knee as OCR (12; see
+# llm_providers.DEFAULT_LLM_MAX_INFLIGHT for the curve) rather than restating
+# the other module's value in prose, which is the drift that caused this.
+# The process-wide in-flight cap is the real ceiling regardless of what this
+# is set to, so raising it cannot push total concurrency past the knee.
+DEFAULT_REDACT_WORKERS = 12
 REDACT_WORKERS_ENV = "HARNESS_REDACT_WORKERS"
 
 

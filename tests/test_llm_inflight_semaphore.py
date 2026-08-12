@@ -146,29 +146,40 @@ def test_limit_resolution(monkeypatch, raw, expected):
     assert lp._resolve_max_inflight() == expected
 
 
-def test_default_is_uncapped(monkeypatch):
-    """Uncapped by default since 2026-08-11 (user decision).
+def test_default_cap_is_the_measured_knee(monkeypatch):
+    """Uncapped 2026-08-11, RE-ARMED at 12 on measurement 2026-08-12.
 
-    The full CASE_953 end-to-end run measured the cap out of the picture: 99
-    provider calls, ZERO provider.queue spans -- not one call ever waited on a
-    permit -- and zero rate-limit errors. A limiter that never engages is not
-    protecting anything. Concurrency is governed by the pool sizes (page
-    workers x document workers), which is what to change for throughput.
+    The uncapping was reasoned from CASE_953: 99 provider calls, ZERO
+    provider.queue spans, zero rate-limit errors -- "a limiter that never
+    engages is not protecting anything". Both observations were true and
+    CASE_911 reproduced them (97 calls, 0 queue spans, 0 errors).
 
-    Pinned because the semaphore must stay REACHABLE: setting the env to a
-    positive value has to re-arm it, so the knob still exists if a backend
-    ever starts rate-limiting.
+    The flaw was that this watched exactly one failure mode. "The backend is
+    not rate-limiting us" is correct and does not imply "no ceiling is
+    needed": a CLI provider is also bounded LOCALLY, since every call spawns
+    a full node child. Measured 2026-08-12 over 24 trivial calls, throughput
+    peaks at 12 workers and degrades above it (12 -> 19.9s, 16 -> 23.6s,
+    24 -> 32.1s, which is slower than 4 workers' 28.7s), with zero
+    rate-limit errors at every width -- so the original evidence could not
+    have detected this.
+
+    The cap is load-bearing now that document parallelism exists: page
+    workers x document workers is the demand (12 x 3 = 36), well past the
+    knee. Without it a multi-document case runs in the degraded region.
+
+    Pinned in both directions: the value must stay at the measured knee, and
+    0 must still disable it (the documented rollback).
     """
     monkeypatch.delenv(lp.LLM_MAX_INFLIGHT_ENV, raising=False)
     lp.reset_inflight_semaphore()
-    assert lp.DEFAULT_LLM_MAX_INFLIGHT == 0
-    assert lp._resolve_max_inflight() == 0
-    assert lp._get_inflight_semaphore() is None, "no cap means no semaphore"
+    assert lp.DEFAULT_LLM_MAX_INFLIGHT == 12
+    assert lp._resolve_max_inflight() == 12
+    assert lp._get_inflight_semaphore() is not None, "the cap must be armed"
 
-    monkeypatch.setenv(lp.LLM_MAX_INFLIGHT_ENV, "16")
+    monkeypatch.setenv(lp.LLM_MAX_INFLIGHT_ENV, "0")
     lp.reset_inflight_semaphore()
-    assert lp._get_inflight_semaphore() is not None, (
-        "the limiter must re-arm when a positive value is set")
+    assert lp._get_inflight_semaphore() is None, (
+        "0 must still disable the cap -- the documented rollback")
 
 
 def test_changing_the_env_rebuilds_the_semaphore(monkeypatch):

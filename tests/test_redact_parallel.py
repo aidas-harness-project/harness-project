@@ -207,11 +207,38 @@ def test_workers_one_is_the_sequential_path(monkeypatch, tmp_path):
 
 # ------------------------------------------------------------ worker config --
 
-@pytest.mark.parametrize("raw,expected",
-                         [("", 4), ("2", 2), ("0", 4), ("-3", 4), ("abc", 4)])
+# A malformed or non-positive env value must fall back to the default rather
+# than raise or resolve to zero workers. Written against the CONSTANT, not a
+# literal: the point is the fallback behaviour, and a hardcoded number here
+# breaks every time the measured default is retuned (it did, 4 -> 12 on
+# 2026-08-12) while testing nothing extra. The default's own value is pinned
+# deliberately, and separately, in test_default_redact_workers_match_ocr.
+@pytest.mark.parametrize("raw,expected", [
+    ("", None), ("2", 2), ("0", None), ("-3", None), ("abc", None),
+])
 def test_worker_count_resolution_falls_back_safely(monkeypatch, raw, expected):
     monkeypatch.setenv(rd.REDACT_WORKERS_ENV, raw)
-    assert rd._resolve_workers(None) == expected
+    want = rd.DEFAULT_REDACT_WORKERS if expected is None else expected
+    assert rd._resolve_workers(None) == want
+
+
+def test_default_redact_workers_match_ocr():
+    """Redaction and OCR must stay pinned to the same measured knee.
+
+    These drifted apart once already and it went unnoticed because nothing
+    asserted the relationship: this constant's comment claimed "Matches
+    ocr_extract's default" while sitting at 4 and OCR had moved to 16. The
+    cost was measurable on CASE_911 -- the same 34 scanned pages cleared OCR
+    at 15-16 workers in 35-42s per document, then took 25.0s (DOC_002, 15p)
+    and 32.7s (DOC_005, 19p) in redaction at 4.
+
+    A prose claim of equality is exactly what drifts; this makes it fail.
+    """
+    import ocr_extract as oe
+    assert rd.DEFAULT_REDACT_WORKERS == oe.DEFAULT_OCR_WORKERS, (
+        "redaction and OCR page workers must stay in sync -- see the measured "
+        "concurrency curve in llm_providers.DEFAULT_LLM_MAX_INFLIGHT"
+    )
 
 
 def test_explicit_worker_argument_wins_over_env(monkeypatch):
