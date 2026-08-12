@@ -651,6 +651,7 @@ def _is_toc_page(lines: list[str]) -> bool:
     return titles == len(lines)
 
 
+@trace_mod.traced("segment.text_anchor", category="compute")
 def text_anchor_boundaries(pdf_path, page_count: int) -> dict[int, str | None] | None:
     """Document-start pages derived from the PDF's own text layer. No model call.
 
@@ -770,6 +771,7 @@ def processed_undecided_pages(
     return undecided_pages(texts, medical="auto", judge=judge)
 
 
+@trace_mod.traced("segment.read_processed_text", category="io")
 def _processed_page_texts(case_id: str, doc_id: str, page_count: int) -> list[str] | None:
     """A document's processed page text, redacted layer preferred. None if the
     text does not cover the whole document."""
@@ -3058,6 +3060,7 @@ def _case_id_from_text_path(text_path: str | None) -> str:
     return parts[2] if len(parts) > 2 else "UNKNOWN_CASE"
 
 
+@trace_mod.traced("segment.redistribute_redaction", category="io")
 def _redistribute_parent_redaction(
     *, case_id: str, bundle_id: str, segments: list[dict],
     document_ids: list[str], progress=None,
@@ -3117,6 +3120,7 @@ def _redistribute_parent_redaction(
     return True
 
 
+@trace_mod.traced("segment.redistribute_ocr", category="io")
 def _redistribute_parent_ocr(
     *, case_id: str, bundle_id: str, segments: list[dict],
     document_ids: list[str], progress=None,
@@ -3175,6 +3179,7 @@ def _redistribute_parent_ocr(
     return True
 
 
+@trace_mod.traced("segment.split_bundle", category="io")
 def split_bundle(
     proposal: dict,
     *,
