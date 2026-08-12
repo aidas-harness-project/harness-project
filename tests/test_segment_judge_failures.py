@@ -137,7 +137,7 @@ class TestFailuresAreVisible:
         assert sc._judge_boundary("a", "b", Slotted()) is None
         assert sc.judge_failures(Slotted()) == []
 
-    def test_undecided_is_empty_when_the_policy_rule_wins(self) -> None:
+    def test_undecided_is_empty_when_the_policy_rule_wins(self, monkeypatch) -> None:
         """Flags must describe the boundaries actually RETURNED.
 
         Both rules run over the same pages and the one finding MORE boundaries
@@ -164,16 +164,25 @@ class TestFailuresAreVisible:
                 return {1: "med"}                 # fewer -> loses
             return {1: "pol", 2: "pol", 3: "pol"}  # more -> wins
 
-        original = sc._boundaries_from_page_lines
-        sc._boundaries_from_page_lines = fake_rule
-        try:
-            collected: list[int] = []
-            boundaries = sc.boundaries_from_page_texts(
-                ["a", "b", "c"], medical="auto", judge=_Judge(),
-                undecided=collected)
-        finally:
-            sc._boundaries_from_page_lines = original
+        # monkeypatch rather than assign-and-restore: it undoes the patch even
+        # if the call below raises, so a failure here can never leave the module
+        # global stubbed for whichever test the randomizer runs next.
+        monkeypatch.setattr(sc, "_boundaries_from_page_lines", fake_rule)
 
+        collected: list[int] = []
+        boundaries = sc.boundaries_from_page_texts(
+            ["a", "b", "c"], medical="auto", judge=_Judge(),
+            undecided=collected)
+
+        # Both rules must actually have gone through the stub. Asserted because
+        # the interesting assertions below are all about which rule WON, and a
+        # real rule reaching them instead would fail them for a reason that has
+        # nothing to do with the behaviour under test.
+        assert calls["n"] == 2, (
+            f"expected both rules to run through the stub, saw {calls['n']} "
+            "call(s) -- boundaries_from_page_texts is not calling "
+            "_boundaries_from_page_lines the way this test assumes"
+        )
         assert boundaries == {1: "pol", 2: "pol", 3: "pol"}
         assert collected == [], (
             "the policy rule won and never asked the judge, so nothing it "
