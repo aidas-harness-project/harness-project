@@ -28,6 +28,10 @@ Every step this driver performs is mechanical -- the agent spec
 judgement:
 
   * which documents need checkpoint 1  -> selected from the manifest
+  * when a document is classified      -> after redaction, so the classifier
+                                          reads the redacted layer; a bundle
+                                          awaiting split is excluded because
+                                          one label cannot describe it
   * whether a PDF is a bundle          -> "Do not decide in advance which PDFs
                                           are bundles"; `propose` reports it
   * classify children with classify-only, never `run` -> always; `run` refuses
@@ -221,7 +225,7 @@ def run_stage2(
 
     with trace_mod.span("stage2.driver", category="compute", case_id=case_id):
         # ---- phase 1: checkpoint 1 over everything that needs it ------------
-        report("phase: checkpoint 1 (OCR + classification)")
+        report("phase: checkpoint 1 (OCR)")
         argv = common([str(TOOLS / "run_document_stage.py"), case_id])
         if provider:
             for flag in ("--reader-a", "--reader-b", "--comparator",
@@ -259,6 +263,28 @@ def run_stage2(
             return stop("redaction",
                         "redaction did not complete; a possible PII leak halts "
                         "the document and is never worked around", gate=True)
+
+        # ---- phase 2b: classify, now that redacted text exists ---------------
+        # Deliberately AFTER redaction. Classification used to be checkpoint 1's
+        # tail, which meant every top-level document was labelled from the raw
+        # page -- `classification_text_source: raw_page_text`, `review_required`
+        # -- because no redacted layer existed yet. That made the
+        # `classification_review` gate fire on the normal path of every run
+        # (4-5 documents on CASE_909/911/961/962) rather than on an exception,
+        # and a gate taken every time is a gate that gets rubber-stamped. A
+        # bundle awaiting its split is excluded by the selector, not by a flag
+        # here: its children classify individually after the split.
+        report("phase: classification (post-redaction)")
+        argv = common([str(TOOLS / "run_document_stage.py"), case_id,
+                       "--checkpoint", "classify"])
+        if provider:
+            argv += ["--classifier-provider", provider]
+        if doc_workers is not None:
+            argv += ["--doc-workers", str(doc_workers)]
+        step = _run(argv, phase="classification", progress=report)
+        steps.append(step)
+        if not _phase_ok(step):
+            return stop("classification", "classification did not complete")
 
         # ---- phase 3: segmentation, per bundle ------------------------------
         manifest = _manifest(case_id)

@@ -840,17 +840,51 @@ def run_checkpoint1(
                 "raw_ocr_path": str(raw_ocr_path)}
 
     if not classify:
-        # Bundle OCR for the inverted order: the text exists and segmentation
-        # reads it to place boundaries, but this document is about to stop
-        # existing as a processing target -- split_bundle supersedes it and
-        # redistributes these pages to its children, which classify
-        # individually. Writing a document_type here would be asserting one
-        # label for a bundle, the very thing the gate above protects against.
+        # Extraction without a label. Two callers reach this: a bundle awaiting
+        # its split (`--bundle-ocr`), and every document under the case-wide
+        # driver, which classifies as a separate pass after redaction so the
+        # classifier reads the redacted layer. Either way, writing a
+        # `document_type` here would be wrong -- for a bundle because one label
+        # cannot describe it, for the rest because the text to classify from
+        # does not exist yet.
+        #
+        # What must still be written is everything OCR itself established.
+        # Leaving the manifest untouched was harmless while a bundle was the
+        # only caller (it becomes `superseded_bundle` and those fields stop
+        # meaning anything), but it silently broke the driver path: DOC_001-004
+        # of CASE_963 finished OCR, redaction and chunking while the manifest
+        # still read `ocr_status: pending`, so the classification pass -- which
+        # selects on `ocr_status: completed` -- skipped all four and the stage
+        # reported success with four unclassified documents.
+        fields = {
+            "pages": len(ocr_data["pages"]),
+            "source_total_pages": ocr_result.get("source_total_pages"),
+            "ocr_status": "completed",
+            "ocr_quality": ocr_result["ocr_quality"],
+            "uncertain_region_count": 0,
+            "cross_validation_status": ocr_result["cross_validation_status"],
+            "extraction_method": ocr_result.get("extraction_method", "ocr"),
+            "non_text_verification": None,
+        }
+        # Reported, not fatal. The OCR itself succeeded and its output is on
+        # disk; killing the process here would discard a completed read over a
+        # bookkeeping write, and under the case-wide driver it would take the
+        # sibling documents down with it. The one way this fails in practice is
+        # a manifest entry the schema rejects for reasons unrelated to OCR --
+        # e.g. `segmentation_status: required` with no `segmentation_reviewed_by`,
+        # a state a real intake never produces (0 of 38 such entries on this
+        # corpus) -- so surfacing it beats both crashing and ignoring it.
+        ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)
+
         _dao._update_run_state(case_id, run_id, "document_processing", "in_progress", held_by)
-        return {"status": "bundle_ocr_complete", "case_id": case_id, "doc_id": doc_id,
-                "pages": len(ocr_data["pages"]),
-                "cross_validation_status": ocr_result["cross_validation_status"],
-                "next_action": "derive boundaries from this text, then split; children classify individually"}
+        result = {"status": "bundle_ocr_complete", "case_id": case_id, "doc_id": doc_id,
+                  "pages": len(ocr_data["pages"]),
+                  "cross_validation_status": ocr_result["cross_validation_status"],
+                  "next_action": "derive boundaries from this text, then split; children classify individually"}
+        if not ok:
+            result["manifest_update"] = "failed"
+            result["manifest_error"] = message
+        return result
 
     return _finish_checkpoint1(case_id, doc_id, run_id, held_by, ocr_data["pages"][0]["reading_a"], classifier=classifier)
 

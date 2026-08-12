@@ -47,7 +47,11 @@ import dao as _dao
 import trace as trace_mod
 from llm_providers import SUPPORTED_PROVIDERS
 import redact_document as redact_document_mod
-from run_checkpoint1 import run_checkpoint1
+from run_checkpoint1 import (
+    build_classifier_provider,
+    classify_existing,
+    run_checkpoint1,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -160,6 +164,132 @@ def select_redaction_documents(manifest: dict,
             continue
         out.append(doc)
     return out
+
+
+def select_classification_documents(manifest: dict,
+                                     only: list[str] | None = None) -> list[dict]:
+    """Documents that still owe a `document_type`, in manifest order.
+
+    Classification runs AFTER redaction, not as checkpoint 1's tail, so that
+    the classifier reads `redacted_text.md` rather than the raw page. The
+    fallback in `_classification_input_text` still exists for a document that
+    genuinely has no redacted layer, but ordering the work this way means it is
+    reached by exception rather than by every top-level document on every run
+    (CASE_909/911/961/962 each recorded 4-5 `raw_page_text` classifications,
+    one per top-level document, every single time).
+
+    Excluded, each because a type here would be wrong rather than merely
+    redundant:
+
+    * the retained superseded bundle -- its children carry its pages;
+    * a bundle still awaiting its split (`segmentation_status: required`) --
+      `document_type` is a per-document value and one label cannot be right
+      for a bundle mixing a 진단서, a 검사보고서 and a 진료비 명세서;
+    * `expert_review_only` -- `resolve_as_non_text` already assigned its type
+      without a classifier, and there is no text to classify;
+    * anything already carrying a `document_type`;
+    * anything whose OCR has not completed -- there is no page 1 text yet.
+    """
+    out = []
+    for doc in manifest.get("documents", []):
+        doc_id = doc.get("document_id")
+        if only and doc_id not in only:
+            continue
+        if doc.get("downstream_disposition") == "superseded_bundle":
+            continue
+        if doc.get("downstream_disposition") == "expert_review_only":
+            continue
+        if doc.get("segmentation_status") == "required":
+            continue
+        if doc.get("document_type"):
+            continue
+        if doc.get("ocr_status") != "completed":
+            continue
+        out.append(doc)
+    return out
+
+
+def run_classification_stage(
+    case_id: str,
+    held_by: str,
+    run_id: str,
+    *,
+    doc_workers: int | None = None,
+    only: list[str] | None = None,
+    progress=None,
+    classifier=None,
+) -> dict:
+    """Classify every document that owes a `document_type`, after redaction.
+
+    Same per-document isolation as the other two stages: one document failing
+    reports itself and the siblings finish. Uses `classify_existing`, the same
+    entry point a split child takes -- a document whose pages are already on
+    disk must never be re-OCR'd to obtain a label.
+    """
+    report = progress or (lambda msg: print(msg, file=sys.stderr, flush=True))
+
+    manifest = _dao.read_contract_data(case_id, "document_manifest.json")
+    if not manifest:
+        return {"status": "failed", "case_id": case_id,
+                "error": f"no document_manifest.json for {case_id}", "documents": []}
+
+    targets = select_classification_documents(manifest, only)
+    if not targets:
+        return {"status": "success", "case_id": case_id, "documents": [],
+                "note": "no documents required classification"}
+
+    workers = _resolve_doc_workers(doc_workers)
+    report(f"classification: {len(targets)} document(s), {workers} document worker(s)")
+
+    slots: list[dict | None] = [None] * len(targets)
+    lock = threading.Lock()
+
+    def process(index: int, doc: dict) -> None:
+        doc_id = doc["document_id"]
+        with trace_mod.span("stage.classification", category="compute",
+                            case_id=case_id, doc_id=doc_id):
+            try:
+                result = classify_existing(case_id, doc_id, held_by=held_by,
+                                            run_id=run_id, classifier=classifier)
+            except SystemExit as exc:
+                # classify_existing exits on a document with no extracted text.
+                # The selector already excludes those, so reaching one means the
+                # manifest disagrees with the filter -- report it, do not abort
+                # the siblings.
+                result = {"status": "error", "case_id": case_id, "doc_id": doc_id,
+                          "error": str(exc)}
+            except Exception as exc:
+                result = {"status": "error", "case_id": case_id, "doc_id": doc_id,
+                          "error": f"{type(exc).__name__}: {exc}"}
+        result.setdefault("doc_id", doc_id)
+        slots[index] = result
+        with lock:
+            report(f"  {doc_id}: {result.get('status')} "
+                   f"({result.get('classification_text_source')})")
+
+    if workers == 1:
+        for index, doc in enumerate(targets):
+            process(index, doc)
+    else:
+        with trace_mod.span("pool.classification", category="compute",
+                            case_id=case_id, worker_count=workers):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(trace_mod.run_in_context(process), i, d)
+                           for i, d in enumerate(targets)]
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
+
+    results = [r for r in slots if r is not None]
+    blocked = [r for r in results if r.get("status") not in _OK_STATUSES]
+    return {
+        "status": "success" if not blocked else "partial",
+        "case_id": case_id,
+        "run_id": run_id,
+        "document_workers": workers,
+        "documents": results,
+        "blocked": [{"doc_id": r.get("doc_id"), "status": r.get("status")}
+                    for r in blocked],
+    }
 
 
 def run_redaction_stage(
@@ -339,13 +469,15 @@ def main(argv=None):
     ap.add_argument("--held-by", required=True)
     ap.add_argument("--run-id", required=True)
     ap.add_argument(
-        "--checkpoint", choices=["1", "2"], default="1",
+        "--checkpoint", choices=["1", "2", "classify"], default="1",
         help="Which checkpoint to drive across the case's documents. 1 "
-             "(default) = OCR + classification. 2 = redaction, which was "
+             "(default) = OCR only. 2 = redaction, which was "
              "previously one redact_document.py call per document -- the same "
              "sequential pattern this driver exists to remove. Note redaction "
              "already runs PAGES concurrently, so total in-flight calls are "
-             "--doc-workers x --page-workers.")
+             "--doc-workers x --page-workers. `classify` assigns each "
+             "document_type and runs AFTER 2, so the classifier reads the "
+             "redacted layer instead of the raw page.")
     ap.add_argument(
         "--page-workers", type=int, default=None, metavar="N",
         help="Checkpoint 2 only: pages redacted concurrently WITHIN each "
@@ -412,6 +544,21 @@ def main(argv=None):
 
     trace_mod.configure(args.case_id, args.run_id)
 
+    if args.checkpoint == "classify":
+        classifier = None
+        if args.classifier_provider:
+            classifier = build_classifier_provider(
+                classifier_provider_name=args.classifier_provider,
+                classifier_model=args.classifier_model)
+        result = run_classification_stage(
+            args.case_id, args.held_by, args.run_id,
+            doc_workers=args.doc_workers,
+            only=args.only,
+            classifier=classifier,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["status"] == "success" else 1
+
     if args.checkpoint == "2":
         result = run_redaction_stage(
             args.case_id, args.held_by, args.run_id,
@@ -439,6 +586,15 @@ def main(argv=None):
         classifier_model=args.classifier_model,
         on_disagreement=args.on_disagreement,
         single_reader=args.single_reader,
+        # Checkpoint 1 extracts; it does not label. Classification moved to its
+        # own `--checkpoint classify` pass that runs after redaction, so the
+        # classifier reads redacted_text.md rather than the raw page. Leaving it
+        # here meant every top-level document was classified from unredacted
+        # text on every run and then had to be cleared by hand at the
+        # `classification_review` gate -- an exception path taken by the normal
+        # case. The `classify=True` default on run_checkpoint1 itself is
+        # unchanged, so a single-document call still behaves as before.
+        classify=False,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     # Non-zero when any document did not complete, so a blocked P8 page still
