@@ -3,6 +3,7 @@
 No I/O and no provider calls -- rendering, compositing, and the split path arrive
 in later build steps with their own tests.
 """
+import hashlib
 import json
 from pathlib import Path
 
@@ -2447,6 +2448,181 @@ def test_split_hands_each_child_its_own_page_text_when_the_parent_was_ocrd(tmp_p
     assert [p["page"] for p in child["pages"]] == [1, 2, 3]
 
 
+def test_split_registers_a_source_revision_for_each_child(tmp_path):
+    """A child's inherited redacted text must be REGISTERED, not just written.
+
+    `_revision_index.json` is populated only as a side effect of
+    `dao.write-redacted-text`, and a split child never takes that path -- its
+    text is inherited and written directly. Nothing else registers it: no
+    pipeline tool calls `record-source-digest`.
+
+    The cost is real and was measured. `policy_clause_processing` gates on
+    canonical_v1 UID verification, which cannot be enabled for a document whose
+    source bytes were never registered, so CASE_133 halted with 174
+    unregistered-revision blockers, one per policy child, with no in-pipeline
+    way to clear them. Keeping the 약관 bundles whole cut that to 2 rather than
+    0 -- proof the two defects are independent, since a collapsed bundle is
+    still split into a 1:1 child (CASE_135: DOC_003 145p -> DOC_010 145p) that
+    inherits its text exactly the same way.
+    """
+    pdf = _bundle_pdf(tmp_path, 4)
+    _write_parent_ocr(tmp_path, "CASE_900", "DOC_001", 4)
+    parent_dir = tmp_path / "data" / "processed" / "CASE_900" / "DOC_001"
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    (parent_dir / "redacted_text.md").write_text(
+        "".join(f"<<<PAGE page={n}>>>\nredacted page {n}\n" for n in range(1, 5)),
+        encoding="utf-8")
+
+    registered = []
+
+    def fake_register(case_id, doc_id, text, revision_sha, held_by, run_id,
+                      supersedes=None, lock_already_held=False):
+        registered.append((doc_id, revision_sha, text, run_id))
+
+    import dao as real_dao
+    original = real_dao._register_revision
+    real_dao._register_revision = fake_register
+    prop = _proposal([_seg(0, 1, 1, status="approved"),
+                      _seg(1, 2, 4, status="approved")],
+                     review_status="approved")
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        out = sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_1",
+            dao=_FakeDao(),
+        )
+    finally:
+        sc.ROOT = orig_root
+        real_dao._register_revision = original
+
+    assert out["status"] == "split"
+    assert [d for d, _, _, _ in registered] == ["DOC_002", "DOC_003"]
+    # The hash must be over the child's OWN bytes, not the parent's.
+    for doc_id, sha, text, _ in registered:
+        assert sha == hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert "redacted page 1" in registered[0][2]
+    assert "redacted page 2" in registered[1][2]
+    assert "redacted page 1" not in registered[1][2]
+    # The split's REAL run id must reach the index. The first version of this
+    # passed None, which the schema types `string` -- so every child wrote an
+    # explicit null and the whole index failed validation. This test could not
+    # see it, because the fake above never validates; the fix is asserted here
+    # AND exercised against the real writer in the test below.
+    assert [r for _, _, _, r in registered] == ["RUN_1", "RUN_1"]
+
+
+def test_split_survives_a_failed_child_revision_registration(tmp_path):
+    """Registration is diagnostic, never fatal to a completed split.
+
+    Registration is what makes a later policy stage possible; it is not what
+    makes the split correct. A registration failure must not destroy pages that
+    were cut correctly.
+    """
+    pdf = _bundle_pdf(tmp_path, 4)
+    _write_parent_ocr(tmp_path, "CASE_900", "DOC_001", 4)
+    parent_dir = tmp_path / "data" / "processed" / "CASE_900" / "DOC_001"
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    (parent_dir / "redacted_text.md").write_text(
+        "".join(f"<<<PAGE page={n}>>>\nredacted page {n}\n" for n in range(1, 5)),
+        encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("revision index unavailable")
+
+    import dao as real_dao
+    original = real_dao._register_revision
+    real_dao._register_revision = boom
+    prop = _proposal([_seg(0, 1, 1, status="approved"),
+                      _seg(1, 2, 4, status="approved")],
+                     review_status="approved")
+    orig_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        out = sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_1",
+            dao=_FakeDao(),
+        )
+    finally:
+        sc.ROOT = orig_root
+        real_dao._register_revision = original
+
+    assert out["status"] == "split"
+    proc = tmp_path / "data" / "processed" / "CASE_900"
+    assert (proc / "DOC_003" / "redacted_text.md").exists()
+
+
+def test_child_revisions_survive_the_real_schema_validated_writer(tmp_path):
+    """Register through the REAL `_register_revision`, schema check included.
+
+    The two tests above replace `_register_revision` with a fake, which is the
+    right isolation for asserting WHICH children get registered and over which
+    bytes -- but a fake validates nothing, so both passed while the real write
+    path was broken for every child. `run_id=None` produced an explicit null in
+    a field the schema types `string`, and because the index is validated as a
+    WHOLE document, one bad revision invalidated the entire file: on CASE_135
+    all 18 children failed at once, and the failure was invisible until the
+    function was run against real data.
+
+    So this test deliberately does not mock the writer. It is slower and needs a
+    real manifest, and that is the point -- it is the only one here that would
+    have failed before the fix.
+    """
+    import dao as real_dao
+    from _validation import load_registry, validate_instance
+
+    pdf = _bundle_pdf(tmp_path, 4)
+    _write_parent_ocr(tmp_path, "CASE_900", "DOC_001", 4)
+    parent_dir = tmp_path / "data" / "processed" / "CASE_900" / "DOC_001"
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    (parent_dir / "redacted_text.md").write_text(
+        "".join(f"<<<PAGE page={n}>>>\nredacted page {n}\n" for n in range(1, 5)),
+        encoding="utf-8")
+
+    outputs = tmp_path / "outputs" / "CASE_900"
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / "document_manifest.json").write_text(
+        json.dumps(_manifest_with_bundle()), encoding="utf-8")
+
+    prop = _proposal([_seg(0, 1, 1, status="approved"),
+                      _seg(1, 2, 4, status="approved")],
+                     review_status="approved")
+    # `dao.OUTPUTS` is derived from `dao.ROOT` at IMPORT time, so redirecting
+    # ROOT alone leaves every path helper pointing at the real outputs tree --
+    # the write lands outside tmp_path and the assertion below finds nothing.
+    orig_root, orig_dao_root = sc.ROOT, real_dao.ROOT
+    orig_outputs = real_dao.OUTPUTS
+    sc.ROOT = real_dao.ROOT = tmp_path
+    real_dao.OUTPUTS = tmp_path / "outputs"
+    try:
+        out = sc.split_bundle(
+            prop, case_id="CASE_900", bundle_id="DOC_001", bundle_pdf_path=pdf,
+            proposal_path="outputs/CASE_900/segmentation_proposal_DOC_001.json",
+            manifest=_manifest_with_bundle(), held_by="R", run_id="RUN_20260812_1",
+            dao=_FakeDao(),
+        )
+    finally:
+        sc.ROOT, real_dao.ROOT = orig_root, orig_dao_root
+        real_dao.OUTPUTS = orig_outputs
+
+    assert out["status"] == "split"
+    index = json.loads((outputs / "_revision_index.json").read_text(encoding="utf-8"))
+    by_id = {d["document_id"]: d for d in index["documents"]}
+    assert {"DOC_002", "DOC_003"} <= set(by_id)
+    for doc_id in ("DOC_002", "DOC_003"):
+        revision = by_id[doc_id]["revisions"][0]
+        # The null that broke CASE_135: present as a key, wrong as a value.
+        assert revision["run_id"] == "RUN_20260812_1"
+        assert revision["registered_by"] == "segment_case.split"
+    schemas, registry = load_registry()
+    assert not validate_instance(
+        index, "revision_index.schema.json", schemas, registry)
+
+
 def test_split_keeps_the_parent_ocr_record_after_redistributing(tmp_path):
     """The parent's OCR output is the original P8 record and is retained.
 
@@ -2616,10 +2792,14 @@ def test_propose_uses_redacted_processed_text_when_it_exists(tmp_path):
     deterministic rule applies to a scan too.
     """
     pdf = _bundle_pdf(tmp_path, 3)  # no text layer -- a "scan"
+    # A MEDICAL bundle, not a policy one: this test is about which PATH runs
+    # (deterministic text_anchor vs vision), and a policy bundle now collapses
+    # to a single segment by design, which would hide the boundary result the
+    # assertion below is actually checking.
     _processed_bundle(tmp_path, "CASE_900", "DOC_001", [
-        "영업배상책임보험\n보통약관",
+        "진 단 서\n환자 성명",
         "제1조(목적)\n이 계약은 다음과 같이 보상합니다",
-        "구내치료비 추가특별약관",
+        "입퇴원확인서",
     ])
     orig_root = sc.ROOT
     sc.ROOT = tmp_path
@@ -2659,14 +2839,17 @@ def test_propose_prefers_redacted_text_over_raw_page_text(tmp_path):
     reads it. Measured on CASE_112's 217 split children, every document title
     survived redaction, so preferring the redacted text costs no accuracy.
     """
-    pdf = _bundle_pdf(tmp_path, 3)
     # p2's title differs between the two layers, so which one was read is
     # visible in the recorded label. Page 1 is a boundary by position and
-    # carries no title, which is why the assertion targets p2.
+    # carries no title, which is why the assertion targets p2. A MEDICAL form
+    # name is used rather than a 약관 title: a policy bundle now collapses to a
+    # single segment by design, which would erase the very label this test
+    # reads to tell the two layers apart.
     _processed_bundle(tmp_path, "CASE_900", "DOC_001",
-                      ["표지", "구내치료비 추가특별약관", "계속되는 본문"], redacted=True)
+                      ["표지", "입퇴원확인서", "계속되는 본문"], redacted=True)
     _processed_bundle(tmp_path, "CASE_900", "DOC_001",
-                      ["표지", "환자명 홍길동 특별약관", "계속되는 본문"], redacted=False)
+                      ["표지", "환자명 홍길동 진단서", "계속되는 본문"], redacted=False)
+    pdf = _bundle_pdf(tmp_path, 3)
     orig_root = sc.ROOT
     sc.ROOT = tmp_path
     try:
@@ -2678,7 +2861,7 @@ def test_propose_prefers_redacted_text_over_raw_page_text(tmp_path):
         sc.ROOT = orig_root
     assert result["method"]["mode"] == "text_anchor"
     titles = [s.get("provisional_type_label") for s in result["segments"]]
-    assert "구내치료비 추가특별약관" in titles
+    assert "입퇴원확인서" in titles
 
 
 # --- medical form titles ------------------------------------------------------
@@ -2992,11 +3175,124 @@ def test_a_medical_bundle_is_read_by_the_medical_rule():
 
 
 def test_a_policy_bundle_is_read_by_the_policy_rule():
+    """The policy rule finds the 약관 titles -- and the bundle then STAYS WHOLE.
+
+    The rule itself is unchanged and still cuts on `구내치료비 추가특별약관`
+    (asserted directly below via `_boundaries_from_page_lines`). What changed is
+    the DOCUMENT decision built on top of it: a 약관 bundle is deliberately not
+    split, so `boundaries_from_page_texts` collapses it to one segment.
+    """
     pages = [
         "영업배상책임보험\n보통약관",
         "제1조(목적)\n이 계약은 다음과 같이 보상합니다",
         "구내치료비 추가특별약관\n제1조",
     ]
+    lines = [
+        sc._page_content_lines([ln.strip() for ln in t.splitlines() if ln.strip()])
+        for t in pages
+    ]
+    # The rule still sees both 약관 boundaries...
+    assert set(sc._boundaries_from_page_lines(lines, page_texts=pages)) == {1, 3}
+    # ...and the bundle is nonetheless kept whole.
+    assert set(sc.boundaries_from_page_texts(pages, medical="auto")) == {1}
+
+
+def test_a_policy_bundle_collapses_to_one_segment():
+    """A 약관 bundle is never split -- the rule that had no code behind it.
+
+    Korean policy clauses print their owning 약관 in the clause body, so
+    downstream identification runs off clause text, not the PDF a clause sits
+    in; and `chunk_text` re-splits to page granularity either way. Splitting is
+    therefore pure cost. Measured on CASE_133 (RUN_20260812_133): two bundles
+    split into 174 children (median 1 page), costing 381 classification calls
+    and 344 judge calls, while `page_chunks.json` still held exactly the
+    pre-split page count.
+
+    Enforced here rather than at the human approval gate because
+    `--auto-approve-segmentation` skips that gate on every automated run.
+    """
+    pages = [
+        "영업배상책임보험\n보통약관",
+        "제1조(목적)",
+        "구내치료비 추가특별약관",
+        "제1조(목적)",
+        "물적손해 확장 추가특별약관",
+    ]
+    assert set(sc.boundaries_from_page_texts(pages, medical="auto")) == {1}
+
+
+def test_a_policy_bundle_collapses_even_when_a_judge_is_supplied():
+    """The regression that a judge=None check could not see.
+
+    The medical pass consults the judge, and a judge that declines a page splits
+    it (the deliberate fail-safe direction), so on a policy bundle the medical
+    pass returns roughly ONE BOUNDARY PER PAGE. Measured on CASE_134/DOC_003:
+    policy 84, medical-with-judge 145. `len(medical) > len(policy)` is then true
+    and the medical result is returned -- so a collapse placed after that
+    comparison never runs. The first version of this fix passed a judge=None
+    check and still split that bundle 85 ways in the real run.
+
+    Also pins the saving: a recognised policy bundle must cost ZERO judge calls,
+    since the medical pass is skipped rather than run-and-discarded.
+    """
+    pages = [
+        "영업배상책임보험\n보통약관",
+        "제1조(목적)",
+        "구내치료비 추가특별약관",
+        "제1조(목적)",
+        "물적손해 확장 추가특별약관",
+    ]
+
+    class DecliningJudge:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, *args, **kwargs):
+            self.calls += 1
+            return None
+
+    judge = DecliningJudge()
+    assert set(sc.boundaries_from_page_texts(
+        pages, medical="auto", judge=judge)) == {1}
+    assert judge.calls == 0
+
+
+def test_a_single_policy_document_is_not_treated_as_a_bundle():
+    """One 약관 title on page 1 is a document, not a bundle.
+
+    Collapsing it would change nothing, but the predicate must not claim a
+    bundle it did not see -- page 1 carries a null title on the policy path, so
+    a naive count of title strings would misread this shape.
+    """
+    pages = ["영업배상책임보험\n보통약관", "제1조(목적)", "제2조(보상하지 않는 손해)"]
+    assert set(sc.boundaries_from_page_texts(pages, medical="auto")) == {1}
+    lines = [
+        sc._page_content_lines([ln.strip() for ln in t.splitlines() if ln.strip()])
+        for t in pages
+    ]
+    assert sc._is_policy_bundle(sc._boundaries_from_page_lines(
+        lines, page_texts=pages)) is False
+
+
+def test_a_policy_boundary_from_the_contents_branch_still_counts_as_a_bundle():
+    """Not every policy boundary is a 약관 title, and unanimity is too strict.
+
+    The policy path also opens a document on the first real page after a
+    contents block, whose line 1 is a cover title. On CASE_133/DOC_004 that is
+    p7 `영업배상책임보험` -- 1 of 89 boundaries. Requiring every boundary to be a
+    약관 title scored that real bundle False and left it split.
+    """
+    boundaries = {1: None, 7: "영업배상책임보험", 9: "시설소유(관리)자 특별약관"}
+    assert sc._is_policy_bundle(boundaries) is True
+
+
+def test_a_medical_bundle_still_splits():
+    """The collapse is policy-only -- a medical bundle genuinely needs splitting.
+
+    `document_type` is per-document and one label cannot describe a 진단서 plus
+    a 입퇴원확인서, which is the whole reason medical bundles are split.
+    """
+    pages = ["진 단 서\n환자 성명", "계속되는 본문", "입퇴원확인서"]
     assert set(sc.boundaries_from_page_texts(pages, medical="auto")) == {1, 3}
 
 
@@ -3013,7 +3309,15 @@ def test_auto_does_not_let_the_wrong_rule_weaken_the_right_one():
         "제3조(서류)\n회사는 진단서를 요구할 수 있습니다\n진 단 서",
         "구내치료비 추가특별약관",
     ]
-    assert set(sc.boundaries_from_page_texts(pages, medical="auto")) == {1, 3}
+    lines = [
+        sc._page_content_lines([ln.strip() for ln in t.splitlines() if ln.strip()])
+        for t in pages
+    ]
+    # The policy rule wins and cuts on the 약관 title only -- p2's stray
+    # `진 단 서` contributes nothing. Asserted on the rule itself, since the
+    # bundle is then collapsed to one segment as a policy bundle.
+    assert set(sc._boundaries_from_page_lines(lines, page_texts=pages)) == {1, 3}
+    assert set(sc.boundaries_from_page_texts(pages, medical="auto")) == {1}
 
 
 def test_auto_falls_back_to_the_policy_result_when_neither_fires():
@@ -3229,12 +3533,20 @@ def test_redistributed_redaction_writes_each_childs_contract(tmp_path):
     finally:
         sc.ROOT = orig_root
 
+    from _validation import load_registry as _load_registry, validate_instance as _validate
+
     child = json.loads(
         (out / "redaction_result_DOC_002.json").read_text(encoding="utf-8"))
     assert child["document_id"] == "DOC_002"
     assert child["redacted_text_path"] == "data/processed/CASE_900/DOC_002/redacted_text.md"
-    # The parent's item count describes the parent, not this child.
-    assert child["items_redacted"] is None or isinstance(child["items_redacted"], int)
+    # The parent's item count describes the parent, not this child -- but the
+    # schema REQUIRES a non-negative integer here, so `None` is not an option
+    # either. This assertion used to accept None, which is why 18 of 18 split
+    # children on CASE_135 shipped schema-invalid contracts with the suite green.
+    assert child["items_redacted"] == 0, "child count must be its OWN, and an int"
+    assert child["items_redacted"] != 4, "must not inherit the parent's count"
+    schemas, registry = _load_registry()
+    assert not _validate(child, "redaction_result.schema.json", schemas, registry)
     # And the manifest entry points at it, so chunking can find it.
     written = {d["document_id"]: d for d in dao.calls[0]["new_documents"]}
     assert written["DOC_002"]["redacted_text_path"] == \
