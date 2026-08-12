@@ -46,13 +46,35 @@ class TestSelectRedactionDocuments:
 
     def test_skips_superseded_bundle(self) -> None:
         """Its children carry its pages; redacting it would process every page
-        twice and produce a document nothing downstream should read."""
+        twice and produce a document nothing downstream should read.
+
+        The bundle is identified by `downstream_disposition`. This test used to
+        set `segmentation_status="superseded_bundle"` -- not a permitted value
+        of that field -- and still passed, because a real bundle is also
+        excluded by the later ocr_status/redacted_text_path filters. The dead
+        line therefore looked like it worked here while the identical mistake
+        in select_documents was actively breaking checkpoint 1.
+        """
         manifest = {"documents": [
-            _doc("DOC_005", segmentation_status="superseded_bundle"),
+            _doc("DOC_005", downstream_disposition="superseded_bundle"),
             _doc("DOC_006"),
         ]}
         assert [d["document_id"] for d in
                 rds.select_redaction_documents(manifest)] == ["DOC_006"]
+
+    def test_bundle_skip_does_not_depend_on_the_later_filters(self) -> None:
+        """The disposition alone must exclude it.
+
+        Constructed so every other filter would ADMIT the document: OCR
+        completed, no redacted_text_path yet. Only the disposition can
+        exclude it, so this fails if the bundle test is dropped or points at
+        the wrong field again.
+        """
+        manifest = {"documents": [
+            _doc("DOC_005", downstream_disposition="superseded_bundle",
+                 ocr_status="completed", redacted_text_path=None),
+        ]}
+        assert rds.select_redaction_documents(manifest) == []
 
     def test_skips_expert_review_only(self) -> None:
         """checkpoint 2 is not applicable to non-text visual evidence, and

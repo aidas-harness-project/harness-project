@@ -101,13 +101,21 @@ def select_documents(manifest: dict, only: list[str] | None = None) -> list[dict
     as a failure: the retained superseded bundle (its children own its pages)
     and anything already carrying completed OCR. run_checkpoint1 re-checks both
     itself -- this is a cheap pre-filter, never the authority.
+
+    The bundle test reads `downstream_disposition`, NOT `segmentation_status`.
+    It was written against the latter, where `superseded_bundle` is not even a
+    permitted value (the enum is pending_review/required/not_required/
+    completed/not_applicable) -- so the line could never match and the filter
+    was dead. The bundle then reached run_checkpoint1, which correctly refused
+    it with `blocked_segmentation`, and that correct refusal was reported as a
+    blocking failure of the whole stage.
     """
     out = []
     for doc in manifest.get("documents", []):
         doc_id = doc.get("document_id")
         if only and doc_id not in only:
             continue
-        if doc.get("segmentation_status") == "superseded_bundle":
+        if doc.get("downstream_disposition") == "superseded_bundle":
             continue
         if doc.get("ocr_status") == "completed":
             continue
@@ -130,13 +138,19 @@ def select_redaction_documents(manifest: dict,
 
     redact_document re-checks the cross-validation gate itself; this is a cheap
     pre-filter, never the authority.
+
+    The bundle test reads `downstream_disposition`, not `segmentation_status` --
+    see select_documents for why the latter can never match. Here the mistake
+    was masked: a superseded bundle also has `ocr_status: not_applicable` and
+    a null `redacted_text_path`, so the later filters excluded it anyway and
+    the dead line looked like it was working.
     """
     out = []
     for doc in manifest.get("documents", []):
         doc_id = doc.get("document_id")
         if only and doc_id not in only:
             continue
-        if doc.get("segmentation_status") == "superseded_bundle":
+        if doc.get("downstream_disposition") == "superseded_bundle":
             continue
         if doc.get("downstream_disposition") == "expert_review_only":
             continue

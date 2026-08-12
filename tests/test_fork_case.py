@@ -4,6 +4,7 @@ snapshot-backup only versions outputs/ (never data/) and case_id is the
 primary key almost everywhere in the DAO (no run_id-scoped branching).
 """
 import json
+import re
 
 import pytest
 
@@ -67,6 +68,41 @@ def test_next_free_case_id_scans_all_four_roots(tmp_path):
     (tmp_path / "outputs" / "CASE_001").mkdir(parents=True)
     (tmp_path / "data" / "raw" / "CASE_002").mkdir(parents=True)
     (tmp_path / "data" / "processed" / "CASE_009").mkdir(parents=True)
+    assert fc.next_free_case_id() == "CASE_010"
+
+
+def test_next_free_case_id_never_exceeds_three_digits(tmp_path):
+    """CASE_999 on disk must not produce CASE_1000.
+
+    human_review_ledger.schema.json pins case_id to ^CASE_[0-9]{3}$ --
+    exactly three digits, unlike the ^CASE_[0-9]+$ every other schema uses.
+    Plain max+1 returned CASE_1000, and fork_case discovered this only AFTER
+    copying every file and rewriting the case_id into each one: the fork
+    "succeeded" and left behind a case that could never accept a
+    human-review write.
+
+    Above the ceiling the id must fall back to a free lower number instead.
+    """
+    (tmp_path / "outputs" / "CASE_999").mkdir(parents=True)
+    (tmp_path / "outputs" / "CASE_001").mkdir(parents=True)
+    got = fc.next_free_case_id()
+    assert re.fullmatch(r"CASE_\d{3}", got), (
+        f"{got} is not a 3-digit case id and would fail the human-review "
+        "ledger schema the moment that ledger is written"
+    )
+    assert got == "CASE_002", "should take the lowest free id once at the ceiling"
+
+
+def test_next_free_case_id_prefers_max_plus_one_below_the_ceiling(tmp_path):
+    """Gap-filling is the CEILING FALLBACK, not the normal rule.
+
+    Reusing a gap loses chronological ordering and can resurrect an id that
+    has history attached -- CASE_002 is free in the real tree only because
+    its files were rejected in the D1 incident. So below 999 a fork still
+    takes a fresh id above everything on disk.
+    """
+    (tmp_path / "outputs" / "CASE_001").mkdir(parents=True)
+    (tmp_path / "outputs" / "CASE_009").mkdir(parents=True)
     assert fc.next_free_case_id() == "CASE_010"
 
 

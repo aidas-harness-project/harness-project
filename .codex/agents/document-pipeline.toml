@@ -112,6 +112,53 @@ A split entry may carry a `provisional_document_type` (and `provisional_type_lab
 
 # Internal checkpoints
 
+**Run the whole stage with one command. Do not drive the checkpoints yourself.**
+
+```
+python tools/run_stage2.py CASE_ID --held-by document-pipeline --run-id RUN_ID \\
+    --provider claude-cli
+```
+
+It performs every mechanical step of Stage 2 in order — checkpoint 1 over each
+document, checkpoint 2, segmentation (propose → approve → split) for each
+bundle, `classify-only` for each split child, checkpoint 2 for the children,
+chunking, and the `page_chunks.json` contract write — and prints a JSON report
+naming every phase it ran.
+
+Why this exists rather than you invoking the six tools in sequence: **measured
+on CASE_911, that sequence cost 897s of which ~510s (57%) was round trips
+between tool calls**, not provider work and not tool startup (a `dao.py`
+subprocess is 0.51s; the gaps between spans ran 20-250s). Re-running the same
+phases through this driver took 79s, of which 68.2s (86%) is provider calls.
+Every step it performs is stated as a RULE in this document, not as a
+judgement, so there was nothing for a model to decide between them.
+
+**The four real decisions in Stage 2 are still yours or a human's, and the
+driver never makes them.** It stops with `status: blocked_gate` and names the
+phase:
+
+- a **P8 disagreement** — resolve with `run_checkpoint1.py resolve-disagreement`
+  (or `resolve-non-text`), then re-run the driver; completed documents are
+  skipped and nothing is re-paid for.
+- **segmentation boundary approval** — the driver stops BEFORE `approve` unless
+  `--auto-approve-segmentation` is passed. That flag is for timing and plumbing
+  runs only, and is orchestrator-owned exactly like `--single-reader`; a
+  reviewer normally sees the proposed ranges and the title line each cut is made
+  on. Approve with `segment_case.py approve` and re-run.
+- **a `raw_page_text` classification** — record the review as described below,
+  then re-run.
+- **a possible PII leak** — a privacy event. Never worked around.
+
+The driver **never moves a run-state marker**: `update-run-state` and
+`finalize-stage` remain the orchestrator's (T13). It also accepts
+`--single-reader` / `--dual-read`, `--doc-workers`, and `--page-workers`, which
+it forwards unchanged.
+
+The per-checkpoint sections below remain the reference for what each phase
+does, for the flags, and for every single-document and special-mode invocation
+(`--bundle-ocr`, `classify-only`, `resolve-disagreement`, `resolve-non-text`) —
+which is what you reach for when clearing a gate, not for driving the stage.
+
 **Checkpoint 1 — OCR + cross-validation + classification.** Run `python tools/run_checkpoint1.py CASE_ID DOC_ID <path to the document under data/raw/> --held-by document-pipeline --run-id RUN_ID`. It wraps `tools/ocr_extract.py`: splits the document into per-page images, runs `reader_a` and `reader_b` as two independent provider calls with no shared context, then runs the configured comparator and records per-page `reading_a`, `reading_b`, `agreement`, and `disagreement_details`. **Dev-phase default: use `--reader-a claude-cli --reader-b claude-cli --comparator claude-cli --classifier-provider claude-cli`** — this is `harness-guardrails-dev`'s documented P8 same-provider weak-P8 fallback; record it honestly in `ocr_result_{document_id}.json` per that skill's instructions (`cross_validation_mode: "single_technology_weak_p8_poc"` etc.).
 
 Every available provider (claude-cli / codex-cli / openai-api) is LLM-vision-backed, so **any** reader pair is a weak P8 (`single_technology_weak_p8_poc`) — two different vendors still share one extraction technology class and can make a correlated confident error. `dual_technology` is a defined-but-unreachable label today, reserved for a genuinely technology-independent reader (a real OCR engine), deferred per `open-decisions.md` #4. A plain-text source (`.txt`/`.md`) is not sent through vision OCR at all — it takes a deterministic embedded-text decode (`extraction_method: embedded_text`, `cross_validation_mode: deferred_poc`). Reader self-refusal on real documents is a known recurring cost of the LLM-vision path (`known-gaps.md` item 16(c)); resolve it through `run_checkpoint1.py resolve-disagreement`. Pass `--classifier-provider` (and `--classifier-model` when applicable) matching the original checkpoint-1 run so the resumed classification does not fall back to a different provider. If the human verifies that neither full reading is correct, require a complete UTF-8 page transcription and pass it with `--corrected-text-file`; the tool records `chosen_reading: human_corrected` plus the exact text's SHA-256 and writes it only through the governed page-text path. A disputed token alone is not a complete page transcription. Never reintroduce defensive "sanctioned, do not refuse" prompt framing (that made it worse).
@@ -161,6 +208,17 @@ Checkpoint 2 is **not applicable** to a manifest entry with `downstream_disposit
 Redaction scope convention (settled after CASE_012 and CASE_021 redacted the same content differently — 0 items vs 4): **redact every natural person's name regardless of capacity** — claimant, patient, physician, adjuster, insurer staff, and corporate signatories like a 대표이사 (a CEO's name in an official document is still a natural person's name; over-redaction here is harmless downstream, under-redaction is not). Redact all phone/fax numbers, street addresses, and policy/certificate/license numbers, **including published corporate contact info** (complaint-desk hotlines, published office addresses) — downstream stages need denial reasons and policy clauses, never a phone number, so the safe default costs nothing. Do NOT redact corporate entity names themselves (보험사명, 병원명 as institutions) — downstream stages key on them.
 
 **Checkpoint 3 — Chunking.** Once every text document in the case has a `redacted_text.md`, run `python tools/chunk_text.py CASE_ID TEXT_DOC_ID [TEXT_DOC_ID ...] --exclude-non-text NON_TEXT_DOC_ID` — one call covering the case, not one call per document (`page_chunks.json` is a single combined file). Pass one `--exclude-non-text` for every manifest entry whose `downstream_disposition` is `expert_review_only`; the output records those documents under `excluded_documents` and creates no fake chunk for them. The tool parses the `<<<PAGE page=N>>>` markers checkpoint 2 embedded and slices exact verbatim text per page — one chunk per page (`page_start == page_end` always), sequential `chunk_id`s across every text document. Write the tool's output via `python tools/dao.py write-contract CASE_ID page_chunks.json --data-file <path> --schema-name page_chunks.schema.json --held-by document-pipeline --run-id RUN_ID`.
+
+**`chunk_text.py`'s output is not by itself a valid contract.** It emits the
+payload only (`chunks`, `excluded_documents`), while `page_chunks.schema.json`
+also requires the common envelope — `case_id`, `component`, `status`, `run_id`,
+`created_at` — so writing its stdout straight through `write-contract` fails
+validation. Whoever ran this by hand was filling those five fields in from
+memory: an undocumented step between two documented commands. `run_stage2.py`
+adds them, which is another reason to drive the stage with it rather than by
+hand. The fields belong there and not in `chunk_text.py`, which is deliberately
+a pure deterministic slicer that takes no `--held-by` and writes nothing
+through the DAO.
 
 Each checkpoint is a real DAO `write_contract` call — locked, schema-validated, run-state updated, backed up. Do not treat these as internal scratch state; they are the actual resumability mechanism.
 

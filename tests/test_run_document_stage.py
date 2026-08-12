@@ -173,12 +173,37 @@ def test_an_unknown_status_counts_as_blocked_not_passed(five_docs, monkeypatch):
 # ------------------------------------------------------------ doc selection --
 
 def test_superseded_bundle_and_completed_documents_are_skipped(monkeypatch):
+    """The bundle is identified by `downstream_disposition`.
+
+    This test previously built the bundle with
+    `segmentation_status="superseded_bundle"` and passed -- but that is not a
+    permitted value of that field (the enum is pending_review / required /
+    not_required / completed / not_applicable), and the production filter read
+    the same wrong field. Test and code shared one misunderstanding, so the
+    filter was dead code and nothing noticed: on CASE_961 the bundle reached
+    run_checkpoint1, was correctly refused with `blocked_segmentation`, and
+    that correct refusal was reported as a blocking stage failure.
+    """
     manifest = _manifest(
         _doc("DOC_001"),
-        _doc("DOC_002", segmentation_status="superseded_bundle"),
+        _doc("DOC_002", downstream_disposition="superseded_bundle"),
         _doc("DOC_003", ocr_status="completed"),
     )
     assert [d["document_id"] for d in rds.select_documents(manifest)] == ["DOC_001"]
+
+
+def test_bundle_is_not_identified_by_segmentation_status(monkeypatch):
+    """A guard against the exact confusion above coming back.
+
+    `segmentation_status: completed` is what a real split bundle carries, and
+    it must NOT by itself cause a skip -- every split CHILD is completed too.
+    """
+    manifest = _manifest(
+        _doc("DOC_001", segmentation_status="completed"),
+    )
+    assert [d["document_id"] for d in rds.select_documents(manifest)] == ["DOC_001"], (
+        "segmentation_status must not be used to identify the superseded bundle"
+    )
 
 
 def test_only_restricts_the_document_set(five_docs, monkeypatch):

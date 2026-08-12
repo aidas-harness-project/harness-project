@@ -82,16 +82,45 @@ def next_free_case_id() -> str:
     the next free CASE_NNN, zero-padded to 3 digits (matching the existing
     CASE_001/CASE_002/CASE_009 convention). Non-numeric dirs (CASE_DEMO,
     CASE_SMOKE) are ignored -- they predate or fall outside the
-    ^CASE_[0-9]+$ schema pattern and aren't part of this numbering."""
-    max_n = 0
+    ^CASE_[0-9]+$ schema pattern and aren't part of this numbering.
+
+    Normally max+1, so a fork gets a fresh id above everything on disk and
+    numbering stays chronological.
+
+    The 3-digit ceiling is real and load-bearing:
+    `human_review_ledger.schema.json` pins case_id to ^CASE_[0-9]{3}$ --
+    exactly three digits, unlike the ^CASE_[0-9]+$ every other schema uses.
+    With CASE_999 present, plain max+1 returned CASE_1000; the fork then
+    copied every file, rewrote the case_id into each, and only afterwards
+    reported that the id it had just chosen was invalid -- leaving a case
+    that could never accept a human-review write.
+
+    So above the ceiling it falls back to the lowest free id rather than
+    emitting an unusable one. That is a deliberate second choice: reusing a
+    gap loses chronological ordering and can resurrect an id with history
+    attached (CASE_002 is free only because its files were rejected in the
+    D1 incident), which is why it is the fallback and not the rule.
+    """
+    used: set[int] = set()
     for root in (OUTPUTS, DATA / "raw", DATA / "processed", DATA / "ground_truth"):
         if not root.exists():
             continue
         for d in root.iterdir():
             m = CASE_ID_DIR_RE.match(d.name)
             if m:
-                max_n = max(max_n, int(m.group(1)))
-    return f"CASE_{max_n + 1:03d}"
+                used.add(int(m.group(1)))
+    candidate = (max(used) + 1) if used else 1
+    if candidate <= 999:
+        return f"CASE_{candidate:03d}"
+    for n in range(1, 1000):
+        if n not in used:
+            return f"CASE_{n:03d}"
+    raise RuntimeError(
+        "no free CASE_NNN id remains: CASE_001..CASE_999 are all in use. The "
+        "3-digit ceiling is a schema constraint (human_review_ledger.schema"
+        ".json pins ^CASE_[0-9]{3}$), so going wider needs a schema change, "
+        "not a change here."
+    )
 
 
 def resolve_source_root(source_case_id: str, from_step: int | None) -> Path:
@@ -176,6 +205,14 @@ def main():
                      help="Copies real answer-key material into the new case_id -- use deliberately, not by default")
     ap.add_argument("--held-by", required=True)
     ap.add_argument("--run-id", required=True)
+    ap.add_argument(
+        "--new-case-id", default=None, metavar="CASE_NNN",
+        help="Target case id instead of the auto-assigned one. Needed once "
+             "the tree reaches the CASE_999 ceiling, where auto-assignment "
+             "falls back to the lowest free number and can hand back an id "
+             "with history attached (CASE_002 is free only because the D1 "
+             "incident rejected its files).",
+    )
     args = ap.parse_args()
     # Switch tracing on before any instrumented path runs. This tool does not
     # raise spans itself, but the dao/provider calls below do -- and without
@@ -188,7 +225,18 @@ def main():
     source_root = resolve_source_root(args.source_case_id, args.from_step)
     check_no_active_locks(source_root)
 
-    new_case_id = next_free_case_id()
+    if args.new_case_id is not None:
+        # Held to the STRICTER of the two patterns in the schema set: every
+        # schema accepts ^CASE_[0-9]+$, but human_review_ledger.schema.json
+        # pins exactly three digits, and an id that satisfies only the looser
+        # one produces a case that copies fine and then cannot take a
+        # human-review write.
+        if not re.fullmatch(r"CASE_\d{3}", args.new_case_id):
+            sys.exit(f"error: --new-case-id must match CASE_NNN (exactly 3 "
+                     f"digits) -- got {args.new_case_id!r}")
+        new_case_id = args.new_case_id
+    else:
+        new_case_id = next_free_case_id()
     dest = case_dir(new_case_id)
     if any(dest.iterdir()):
         sys.exit(f"error: {dest} already exists and isn't empty -- refusing to fork into it. "

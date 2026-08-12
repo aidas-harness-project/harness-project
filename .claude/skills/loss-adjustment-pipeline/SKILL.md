@@ -111,9 +111,22 @@ does not change any gate or state transition. `aggregate-trace` reports
 incomplete stage coverage instead of reconstructing missing timings from
 run-state marker timestamps.
 
+**Stage 2 runs as one command, not as a sequence you supervise.** Dispatch
+`document-pipeline` to run `python tools/run_stage2.py CASE_ID --held-by
+document-pipeline --run-id RUN_ID --provider claude-cli`, which performs every
+mechanical step (checkpoint 1 → checkpoint 2 → segmentation → child
+classification → child redaction → chunking → contract write) and stops at the
+four real gates. Measured on CASE_911, driving those steps by dispatching the
+agent per step cost 897s of which ~510s (57%) was model round trips between
+tool calls; the same phases through the driver took 79s, 86% of it provider
+calls. Do not ask an agent to invoke the individual checkpoint tools in
+sequence — that is the serialization this removes. The driver never moves a
+run-state marker: `update-run-state` and `finalize-stage` stay yours (T13).
+
 **Reducing P8 for a throughput run is YOUR decision, never an agent's.**
 Stage 2's cost is dominated by dual-read OCR (the corpus is overwhelmingly
-scans), so two flags exist on `run_document_stage.py` to cut it. Pass one only
+scans), so two flags exist on `run_document_stage.py` (and pass through
+`run_stage2.py`) to cut it. Pass one only
 when the run's purpose is timing or plumbing, name it explicitly in the
 briefing you dispatch, and never let a stage adopt one on its own to get past
 a document that blocked:
