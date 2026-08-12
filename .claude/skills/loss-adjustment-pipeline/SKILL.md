@@ -54,7 +54,7 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
 | 2 | Document Processing | `document-pipeline` | (a) bundle OCR (`--bundle-ocr`, no classification) → (b) bundle redaction → (c) **segmentation**: propose/approve/split, children inherit the bundle's pages → (d) per-child classification → (e) per-child redaction → (f) case-wide chunking. All under `document_processing`; segmentation sits *inside* because processing runs on both sides of it |
 | 3 | Indexing (adapter, optional) | (tool, no agent) | pass-through by default; no-op unless enabled |
 | 4 | Policy Clause Processing | `policy-pipeline` | (a) exact boundary inventory, (b) semantic extraction, (c) reference tables, (d) version-bound audit; finalize only when every audit is current and has no open finding |
-| 5 | Claim Analysis | `claim-analysis` | (a) field extraction + canonical medical-variable publication, (b) coverage ID, (c) case-type classification, (d) requirement matching, then medical clearance before pass/snapshot |
+| 5 | Claim Analysis | `claim-analysis` | (a) field extraction + medical-variable content derivation, (b) coverage ID, (c) case-type classification + canonical medical-variable publication, (d) requirement matching, then medical clearance before pass/snapshot |
 | 6 | Consistency Check | `consistency-check` | conflict-ledger-gated — any disagreement halts via `_conflict_ledger.json`, not an inline ad-hoc halt |
 | 7 | Screening Report | `screening-report` | consumes `denial-response`'s output as a dependency if an insurer-response document exists — not phase-gated |
 | 8 | Draft Report v1 | `draft-report` | same agent reused for v2 in Phase 2 |

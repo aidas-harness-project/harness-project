@@ -202,6 +202,16 @@ def test_local_harness_is_fail_closed_and_ground_truth_blind():
     assert "write-medical-variables" in claim_agent
     assert "check-medical-reviews-clear" in claim_agent
     assert "snapshot-backup" in claim_agent
+    derive_position = claim_agent.find(
+        "After checkpoint 1, derive the evidence-grounded medical-variable content"
+    )
+    case_type_position = claim_agent.find(
+        "**Checkpoint 3 — Case Type Classification.**"
+    )
+    publish_position = claim_agent.find(
+        "After checkpoint 3 has produced canonical `case_type_result.json`, publish"
+    )
+    assert 0 <= derive_position < case_type_position < publish_position
     assert "`.lock` present" not in pipeline_skill
     assert "check-lock" in pipeline_skill
     assert "No local Evaluation stage or read-ground-truth command is authorized" in settings

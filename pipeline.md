@@ -62,7 +62,9 @@ outcome read as a total one (CASE_907: 배상책임 denied, 구내치료비
 ## Medical-review checkpoint and downstream boundary
 
 Medical structuring and review are checkpoints and a human gate inside
-`claim_analysis`, not a new top-level autonomous stage. Once a run publishes a
+`claim_analysis`, not a new top-level autonomous stage. Claim analysis derives
+medical-variable content after field extraction, then publishes it only after
+canonical case-type classification exists. Once a run publishes a
 canonical medical-variable revision, the claim-analysis agent and orchestrator must run
 `python tools/dao.py check-medical-reviews-clear CASE_ID` before claim analysis can pass
 and immediately before every downstream agent dispatch. Missing, malformed, stale, uncovered, or unresolved
