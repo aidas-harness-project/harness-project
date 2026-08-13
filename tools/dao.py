@@ -152,6 +152,7 @@ import hashlib
 import json
 import os
 import hashlib
+import platform
 import re
 import secrets
 import shutil
@@ -282,6 +283,86 @@ def lock_path(target: Path) -> Path:
     return target.with_name(target.name + ".lock")
 
 
+# A lock's owner, recorded so a waiter can tell a live holder from a dead one.
+# `held_by` is a human label ("Claude", "Dev") and several processes legitimately
+# share one, so it can never answer "is that holder still running?".
+#
+# The boot id is what makes the pid trustworthy. Pids are recycled, so a bare
+# pid from a previous boot can match an unrelated live process and make a stale
+# lock look held forever. Reclaim therefore requires the SAME machine and the
+# SAME boot; anything else is left alone and waits out P5's cap as before.
+_MACHINE_ID = f"{platform.node()}"
+
+
+def _boot_id() -> str:
+    """Identifies this boot of this machine. Falls back to the empty string
+    when psutil is unavailable, which disables reclaim rather than guessing:
+    a wrong reclaim breaks the mutual exclusion the lock exists to provide."""
+    try:
+        import psutil
+    except ImportError:
+        return ""
+    try:
+        return str(int(psutil.boot_time()))
+    except Exception:
+        return ""
+
+
+def _lock_owner() -> dict:
+    return {"machine": _MACHINE_ID, "pid": os.getpid(), "boot_id": _boot_id()}
+
+
+def _owner_is_dead(owner) -> bool:
+    """True only when the recorded owner is PROVABLY gone.
+
+    Every uncertain case returns False (treat as held): a missing owner record
+    (a lock written by an older version), a different machine or boot, no
+    psutil, or any error interrogating the process. Waiting on an already-dead
+    holder costs time; reclaiming a live holder's lock corrupts shared state.
+    """
+    if not isinstance(owner, dict):
+        return False
+    pid = owner.get("pid")
+    if not isinstance(pid, int):
+        return False
+    if owner.get("machine") != _MACHINE_ID:
+        return False
+    boot = owner.get("boot_id")
+    if not boot or boot != _boot_id():
+        return False
+    try:
+        import psutil
+    except ImportError:
+        return False
+    try:
+        return not psutil.pid_exists(pid)
+    except Exception:
+        return False
+
+
+def _reclaim_if_dead(target: Path, existing) -> bool:
+    """Remove a lock whose owner is provably dead. Returns True if reclaimed.
+
+    The unlink is guarded by the lock's own bytes: if the file changed between
+    the staleness decision and the removal, somebody else acted on it first and
+    this caller must not remove whatever is there now.
+    """
+    if not _owner_is_dead((existing or {}).get("owner")):
+        return False
+    lp = lock_path(target)
+    try:
+        current = lp.read_bytes()
+    except FileNotFoundError:
+        return True
+    if json.loads(current.decode("utf-8")) != existing:
+        return False
+    try:
+        lp.unlink()
+    except FileNotFoundError:
+        pass
+    return True
+
+
 def read_lock(target: Path):
     lp = lock_path(target)
     if not lp.exists():
@@ -315,8 +396,16 @@ def acquire_lock(target: Path, held_by: str, run_id: str, purpose: str):
                                      "purpose": "already held"}
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump({"held_by": held_by, "run_id": run_id,
-                   "started_at": now_iso(), "purpose": purpose}, f, ensure_ascii=False, indent=2)
+                   "started_at": now_iso(), "purpose": purpose,
+                   "owner": _lock_owner()}, f, ensure_ascii=False, indent=2)
     return None
+
+
+# Windows holds a brief unlink-blocking handle whenever a waiter reads the
+# lock file. Short and bounded on purpose: this runs on the success path of
+# every write, so it must not become a stall of its own.
+_RELEASE_RETRY_ATTEMPTS = 5
+_RELEASE_RETRY_DELAY_SECONDS = 0.05
 
 
 def release_lock(target: Path) -> None:
@@ -328,11 +417,32 @@ def release_lock(target: Path) -> None:
     had already committed its write, so the work looks failed when it
     succeeded. Ask forgiveness, not permission: the post-condition wanted here
     is "no lock file remains", and another process having already removed it
-    satisfies that."""
-    try:
-        lock_path(target).unlink()
-    except FileNotFoundError:
-        pass
+    satisfies that.
+
+    Windows adds a second way to lose that race. `read_lock` opens this file on
+    every poll, and while any handle is open `unlink` raises PermissionError
+    (WinError 32) instead of succeeding. Letting that escape is strictly worse
+    than the FileNotFoundError above: the releaser dies AFTER committing its
+    write and LEAVES THE LOCK BEHIND, so every other worker on a shared
+    case-level file blocks on an owner that no longer exists. That is exactly
+    how CASE_140 deadlocked -- one DOC_002 writer hit this and stalled the
+    DOC_001/DOC_003 workers, whose own work was entirely independent.
+
+    A brief retry covers the poll-read window, which is short by construction.
+    If the file still cannot be removed, the lock is left for the dead-owner
+    reclaim to collect rather than killing a caller whose write already
+    succeeded -- releasing is cleanup, and failing it must not fail the work."""
+    lp = lock_path(target)
+    for attempt in range(_RELEASE_RETRY_ATTEMPTS):
+        try:
+            lp.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if attempt == _RELEASE_RETRY_ATTEMPTS - 1:
+                break
+            time.sleep(_RELEASE_RETRY_DELAY_SECONDS)
 
 
 # P5's mid-run poll-and-wait cadence -- module-level, not bound into a
@@ -390,11 +500,22 @@ def acquire_lock_blocking(target: Path, held_by: str, run_id: str, purpose: str)
                         lock_kind=target.name) as sp:
         waited = 0.0
         polls = 0
+        reclaimed = 0
         while True:
             existing = acquire_lock(target, held_by, run_id, purpose)
             if existing is None:
-                sp.set(wait_s=waited, poll_count=polls, acquired=True)
+                sp.set(wait_s=waited, poll_count=polls, acquired=True,
+                       reclaimed_dead_locks=reclaimed)
                 return None
+            # A holder that died without releasing would otherwise hold this
+            # target for the full cap and, through a shared case-level file,
+            # stall every other worker behind it. Reclaim only when the owner
+            # is provably gone, then retry the atomic create immediately --
+            # winning that create is still what grants the lock, so two
+            # waiters reclaiming at once cannot both proceed.
+            if _reclaim_if_dead(target, existing):
+                reclaimed += 1
+                continue
             if waited >= LOCK_MAX_WAIT_SECONDS:
                 sp.set(wait_s=waited, poll_count=polls, acquired=False)
                 sp.set_status("error")
