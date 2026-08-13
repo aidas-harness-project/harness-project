@@ -142,7 +142,7 @@ Each checkpoint is a real DAO `write_contract` call — locked, schema-validated
 
 # Error handling
 
-- Schema validation failure on any checkpoint: one self-correction attempt, then halt per P4 (ignore-and-proceed / retry-N-times / fix-manually is the user's call, not yours).
+- Schema validation failure on any checkpoint: one self-correction attempt, then halt per P4. Only a validated retry or manual correction may resume; the user may abandon the run.
 - Stage-level partial/failure: resume from your last passed internal checkpoint on retry — do not restart checkpoint 1 because checkpoint 3 failed.
 
 # Collaboration

@@ -106,18 +106,25 @@ def test_patch_waits_for_lock_then_reads_data_fresh_as_of_release(isolated_dao, 
     monkeypatch.setattr(dao, "LOCK_MAX_WAIT_SECONDS", 2.0)
     manifest_path = _seed_manifest(isolated_dao)
     target = manifest_path
-    dao.acquire_lock(target, "someone-else", "RUN_OTHER", "holding briefly")
+    acquired = threading.Event()
 
     def concurrent_write_then_release():
+        assert dao.acquire_lock(
+            target, "someone-else", "RUN_OTHER", "holding briefly"
+        ) is None
+        acquired.set()
         time.sleep(0.06)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["documents"][0]["pages"] = 99  # the "concurrent" change
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         dao.release_lock(target)
 
-    threading.Thread(target=concurrent_write_then_release).start()
+    holder = threading.Thread(target=concurrent_write_then_release)
+    holder.start()
+    assert acquired.wait(timeout=1)
 
     ok, message = dao.patch_manifest_document("CASE_009", "DOC_001", {"ocr_status": "completed"}, "me", "RUN_MINE")
+    holder.join(timeout=1)
 
     assert ok, message
     doc = json.loads(manifest_path.read_text(encoding="utf-8"))["documents"][0]

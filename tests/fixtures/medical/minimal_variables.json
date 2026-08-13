@@ -1,0 +1,95 @@
+{
+  "case_id": "CASE_9001",
+  "case_type": "기타",
+  "run_id": "RUN_20260723_001",
+  "component": "claim-analysis",
+  "status": "success",
+  "schema_version": "medical_variables.v0.1",
+  "config_version": "medical_structuring.v0.1",
+  "source_coverage": [
+    {
+      "document_id": "DOC_001",
+      "document_role": "medical_record",
+      "coverage_status": "consumed",
+      "reason": "Synthetic validated medical-record fixture.",
+      "processing_contract_versions": {
+        "document_manifest": "document_manifest.v0.1",
+        "page_chunks": "page_chunks.v0.1"
+      }
+    }
+  ],
+  "domains": [
+    {
+      "domain_id": "MD_diagnosis",
+      "domain_code": "diagnosis",
+      "label": "Diagnosis",
+      "config_version": "medical_structuring.v0.1"
+    }
+  ],
+  "medical_issues": [
+    {
+      "issue_id": "MCI_0001",
+      "issue_category": "diagnosis",
+      "question": "How should the synthetic finding be interpreted?",
+      "evidence_links": [
+        {
+          "issue_evidence_link_id": "MIEL_0001",
+          "observation_id": "MO_0001",
+          "relation": "supports",
+          "materiality": "core",
+          "reason": "The synthetic observation establishes the test issue.",
+          "classification_version": "medical_structuring.v0.1"
+        }
+      ],
+      "config_version": "medical_structuring.v0.1"
+    }
+  ],
+  "variables": [
+    {
+      "variable_id": "MV_0001",
+      "domain_id": "MD_diagnosis",
+      "variable_kind": "diagnosis_code",
+      "label": "Documented diagnosis",
+      "related_variable_ids": [],
+      "observations": [
+        {
+          "observation_id": "MO_0001",
+          "value_state": "asserted",
+          "value_type": "coded",
+          "coded_value": {
+            "system": "synthetic",
+            "code": "SYN-001",
+            "display": "Synthetic finding"
+          },
+          "observed_at": {
+            "kind": "unknown",
+            "reason": "No occurrence date."
+          },
+          "evidence": [
+            {
+              "locator_id": "MEV_0001",
+              "document_id": "DOC_001",
+              "page": 1,
+              "quote": "Synthetic finding documented.",
+              "chunk_id": "CHUNK_001"
+            }
+          ],
+          "extraction_method": "model_extracted"
+        }
+      ]
+    }
+  ],
+  "contradiction_groups": [],
+  "importance_assignments": [
+    {
+      "importance_id": "MIA_0001",
+      "issue_id": "MCI_0001",
+      "observation_id": "MO_0001",
+      "tier": "A",
+      "reason": "Synthetic context-only importance for contract testing.",
+      "config_version": "medical_structuring.v0.1"
+    }
+  ],
+  "quantity_summaries": [],
+  "timeline_observation_ids": ["MO_0001"]
+}

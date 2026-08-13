@@ -42,11 +42,15 @@ def isolated_main(tmp_path, monkeypatch):
 def _seed_case(base, case_id="CASE_009", files=("doc.pdf",), source_dir=None):
     out_dir = base / "outputs" / case_id
     out_dir.mkdir(parents=True, exist_ok=True)
+    entries = [{"file_name": f, "classification": "raw", "review_status": "pending",
+                "reviewed_by": None, "reviewed_at": None, "rejection_reason": None} for f in files]
     dao.atomic_write_json(out_dir / "_source_ledger.json", {
+        "ledger_version": "source_ledger.v0.4",
         "case_id": case_id, "source_dir": source_dir or "source-cases/x", "created_at": dao.now_iso(),
         "updated_at": dao.now_iso(),
-        "files": [{"file_name": f, "classification": "raw", "review_status": "pending",
-                   "reviewed_by": None, "reviewed_at": None, "rejection_reason": None} for f in files],
+        "files": entries,
+        "history_boundary": dao.make_history_boundary(entries, mode="native"),
+        "operations": [],
     })
     return out_dir
 

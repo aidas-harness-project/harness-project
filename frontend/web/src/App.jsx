@@ -1,34 +1,59 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import Sidebar from "./components/Sidebar";
 import StageDetail from "./components/StageDetail";
 import RunBanner from "./components/RunBanner";
 import { PHASE_1, PHASE_2, TRIGGERED, ALL_STAGES } from "./pipelineDefinition";
 import { api } from "./api";
+import { caseSnapshotFor } from "./medicalReviewUiLogic";
 
 function useCaseData(caseId) {
-  const [runState, setRunState] = useState(null);
-  const [ledgers, setLedgers] = useState(null);
-  const [ocrReview, setOcrReview] = useState(null);
-  const [error, setError] = useState(null);
+  const [snapshot, setSnapshot] = useState(null);
+  const generationRef = useRef(0);
 
   const reload = useCallback(() => {
-    if (!caseId) return;
-    setError(null);
+    const generation = ++generationRef.current;
+    if (!caseId) {
+      setSnapshot(null);
+      return;
+    }
+    setSnapshot((current) => current?.caseId === caseId
+      ? { ...current, error: null }
+      : current);
     Promise.all([
       api.runState(caseId),
       api.ledgers(caseId),
       api.ocrReview(caseId).catch(() => null), // never let the P8 queue take the whole view down
     ])
       .then(([rs, lg, ocr]) => {
-        setRunState(rs);
-        setLedgers(lg);
-        setOcrReview(ocr);
+        if (generation !== generationRef.current) return;
+        setSnapshot({ caseId, runState: rs, ledgers: lg, ocrReview: ocr, error: null });
       })
-      .catch((e) => setError(e.message));
+      .catch((e) => {
+        if (generation !== generationRef.current) return;
+        setSnapshot((current) => ({
+          caseId,
+          runState: current?.caseId === caseId ? current.runState : null,
+          ledgers: current?.caseId === caseId ? current.ledgers : null,
+          ocrReview: current?.caseId === caseId ? current.ocrReview : null,
+          error: e.message,
+        }));
+      });
   }, [caseId]);
 
-  useEffect(reload, [reload]);
-  return { runState, ledgers, ocrReview, error, reload };
+  useEffect(() => {
+    reload();
+    return () => {
+      generationRef.current += 1;
+    };
+  }, [reload]);
+  const currentSnapshot = caseSnapshotFor(snapshot, caseId);
+  return {
+    runState: currentSnapshot?.runState || null,
+    ledgers: currentSnapshot?.ledgers || null,
+    ocrReview: currentSnapshot?.ocrReview || null,
+    error: currentSnapshot?.error || null,
+    reload,
+  };
 }
 
 export default function App() {
@@ -75,6 +100,7 @@ export default function App() {
         ocrReview={ocrReview}
         onRefresh={reload}
         onCaseListChanged={refreshCaseList}
+        mutationsAvailable={api.mutationsAvailable}
       />
 
       <main className="app-main">
@@ -83,6 +109,7 @@ export default function App() {
         {current && <RunBanner caseId={current} onActivity={reload} />}
         {current && runState && stageDef && (
           <StageDetail
+            key={`${current}:${stageDef.key}`}
             stageDef={stageDef}
             index={indexWithinPhase}
             phaseLabel={phaseLabel}
@@ -91,6 +118,7 @@ export default function App() {
             ocrReview={ocrReview}
             caseId={current}
             onLedgersChanged={reload}
+            readOnly={!api.mutationsAvailable}
           />
         )}
       </main>

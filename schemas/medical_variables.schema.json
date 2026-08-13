@@ -1,0 +1,268 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "medical_variables.schema.json",
+  "title": "medical_variables.json -- canonical medical-variable contract v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
+    "case_type": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "pattern": "^RUN_[0-9]{8}_[0-9]+$" },
+    "component": { "const": "claim-analysis" },
+    "status": { "enum": ["success", "partial", "failed"] },
+    "schema_version": { "const": "medical_variables.v0.1" },
+    "config_version": { "$ref": "medical_common.schema.json#/$defs/config_version" },
+    "source_coverage": { "type": "array", "items": { "$ref": "#/$defs/source_coverage" } },
+    "domains": { "type": "array", "items": { "$ref": "#/$defs/domain" } },
+    "medical_issues": { "type": "array", "items": { "$ref": "#/$defs/medical_issue" } },
+    "variables": { "type": "array", "items": { "$ref": "#/$defs/variable" } },
+    "contradiction_groups": { "type": "array", "items": { "$ref": "#/$defs/contradiction_group" } },
+    "importance_assignments": { "type": "array", "items": { "$ref": "#/$defs/importance_assignment" } },
+    "quantity_summaries": { "type": "array", "items": { "$ref": "#/$defs/quantity_summary" } },
+    "timeline_observation_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/observation_id" } }
+  },
+  "required": ["case_id", "case_type", "run_id", "component", "status", "schema_version", "config_version", "source_coverage", "domains", "medical_issues", "variables", "contradiction_groups", "importance_assignments", "quantity_summaries", "timeline_observation_ids"],
+  "$defs": {
+    "source_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+        "document_role": { "type": "string", "minLength": 1 },
+        "coverage_status": { "$ref": "medical_common.schema.json#/$defs/source_coverage_status" },
+        "reason": { "type": "string", "minLength": 1 },
+        "processing_contract_versions": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        }
+      },
+      "required": ["document_id", "document_role", "coverage_status", "reason", "processing_contract_versions"]
+    },
+    "domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "domain_id": { "type": "string", "pattern": "^MD_[a-z][a-z0-9_]*$" },
+        "domain_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "label": { "type": "string", "minLength": 1 },
+        "config_version": { "$ref": "medical_common.schema.json#/$defs/config_version" }
+      },
+      "required": ["domain_id", "domain_code", "label", "config_version"]
+    },
+    "coded_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "system": { "type": "string", "minLength": 1 },
+        "code": { "type": "string", "minLength": 1 },
+        "display": { "type": "string", "minLength": 1 }
+      },
+      "required": ["system", "code", "display"]
+    },
+    "normalized_measure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "number": { "type": "number" },
+        "unit_status": { "const": "normalized" },
+        "unit_code": { "type": "string", "minLength": 1 },
+        "raw_unit": { "type": "string", "minLength": 1 }
+      },
+      "required": ["number", "unit_status", "unit_code"]
+    },
+    "unmapped_measure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "number": { "type": "number" },
+        "unit_status": { "const": "unmapped" },
+        "raw_unit": { "type": "string", "minLength": 1 }
+      },
+      "required": ["number", "unit_status", "raw_unit"]
+    },
+    "unitless_measure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "number": { "type": "number" },
+        "unit_status": { "const": "not_applicable" }
+      },
+      "required": ["number", "unit_status"]
+    },
+    "numeric_value": {
+      "oneOf": [
+        { "$ref": "#/$defs/normalized_measure" },
+        { "$ref": "#/$defs/unmapped_measure" },
+        { "$ref": "#/$defs/unitless_measure" }
+      ]
+    },
+    "quantity_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "count": { "type": "number", "minimum": 0 },
+        "unit_status": { "enum": ["normalized", "unmapped", "not_applicable"] },
+        "unit_code": { "type": "string", "minLength": 1 },
+        "raw_unit": { "type": "string", "minLength": 1 },
+        "period_start": { "$ref": "medical_common.schema.json#/$defs/temporal_endpoint" },
+        "period_end": { "$ref": "medical_common.schema.json#/$defs/temporal_endpoint" },
+        "counting_basis": { "type": "string", "minLength": 1 }
+      },
+      "required": ["count", "unit_status", "period_start", "period_end", "counting_basis"],
+      "allOf": [
+        {
+          "if": { "properties": { "unit_status": { "const": "normalized" } }, "required": ["unit_status"] },
+          "then": { "required": ["unit_code"] }
+        },
+        {
+          "if": { "properties": { "unit_status": { "const": "unmapped" } }, "required": ["unit_status"] },
+          "then": { "required": ["raw_unit"], "not": { "required": ["unit_code"] } }
+        },
+        {
+          "if": { "properties": { "unit_status": { "const": "not_applicable" } }, "required": ["unit_status"] },
+          "then": { "not": { "anyOf": [{ "required": ["unit_code"] }, { "required": ["raw_unit"] }] } }
+        }
+      ]
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "observation_id": { "$ref": "medical_common.schema.json#/$defs/observation_id" },
+        "value_state": { "enum": ["asserted", "unknown", "absent", "not_applicable"] },
+        "value_type": { "enum": ["coded", "text", "temporal", "numeric", "quantity"] },
+        "coded_value": { "$ref": "#/$defs/coded_value" },
+        "text_value": { "type": "string", "minLength": 1 },
+        "temporal_value": { "$ref": "medical_common.schema.json#/$defs/temporal_value" },
+        "numeric_value": { "$ref": "#/$defs/numeric_value" },
+        "quantity_value": { "$ref": "#/$defs/quantity_value" },
+        "state_reason": { "type": "string", "minLength": 1 },
+        "observed_at": { "$ref": "medical_common.schema.json#/$defs/observed_at" },
+        "evidence": { "type": "array", "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/evidence_locator" } },
+        "extraction_method": { "enum": ["model_extracted", "deterministic", "human_entered"] }
+      },
+      "required": ["observation_id", "value_state", "observed_at", "evidence", "extraction_method"],
+      "oneOf": [
+        {
+          "properties": { "value_state": { "const": "asserted" }, "value_type": { "const": "coded" }, "evidence": { "minItems": 1 } },
+          "required": ["value_type", "coded_value"],
+          "not": { "anyOf": [{ "required": ["text_value"] }, { "required": ["temporal_value"] }, { "required": ["numeric_value"] }, { "required": ["quantity_value"] }, { "required": ["state_reason"] }] }
+        },
+        {
+          "properties": { "value_state": { "const": "asserted" }, "value_type": { "const": "text" }, "evidence": { "minItems": 1 } },
+          "required": ["value_type", "text_value"],
+          "not": { "anyOf": [{ "required": ["coded_value"] }, { "required": ["temporal_value"] }, { "required": ["numeric_value"] }, { "required": ["quantity_value"] }, { "required": ["state_reason"] }] }
+        },
+        {
+          "properties": { "value_state": { "const": "asserted" }, "value_type": { "const": "temporal" }, "evidence": { "minItems": 1 } },
+          "required": ["value_type", "temporal_value"],
+          "not": { "anyOf": [{ "required": ["coded_value"] }, { "required": ["text_value"] }, { "required": ["numeric_value"] }, { "required": ["quantity_value"] }, { "required": ["state_reason"] }] }
+        },
+        {
+          "properties": { "value_state": { "const": "asserted" }, "value_type": { "const": "numeric" }, "evidence": { "minItems": 1 } },
+          "required": ["value_type", "numeric_value"],
+          "not": { "anyOf": [{ "required": ["coded_value"] }, { "required": ["text_value"] }, { "required": ["temporal_value"] }, { "required": ["quantity_value"] }, { "required": ["state_reason"] }] }
+        },
+        {
+          "properties": { "value_state": { "const": "asserted" }, "value_type": { "const": "quantity" }, "evidence": { "minItems": 1 } },
+          "required": ["value_type", "quantity_value"],
+          "not": { "anyOf": [{ "required": ["coded_value"] }, { "required": ["text_value"] }, { "required": ["temporal_value"] }, { "required": ["numeric_value"] }, { "required": ["state_reason"] }] }
+        },
+        {
+          "properties": { "value_state": { "enum": ["unknown", "absent", "not_applicable"] } },
+          "required": ["state_reason"],
+          "not": { "anyOf": [{ "required": ["value_type"] }, { "required": ["coded_value"] }, { "required": ["text_value"] }, { "required": ["temporal_value"] }, { "required": ["numeric_value"] }, { "required": ["quantity_value"] }] }
+        }
+      ]
+    },
+    "variable": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "variable_id": { "$ref": "medical_common.schema.json#/$defs/variable_id" },
+        "domain_id": { "type": "string", "pattern": "^MD_[a-z][a-z0-9_]*$" },
+        "variable_kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "label": { "type": "string", "minLength": 1 },
+        "related_variable_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/variable_id" } },
+        "observations": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/observation" } }
+      },
+      "required": ["variable_id", "domain_id", "variable_kind", "label", "related_variable_ids", "observations"]
+    },
+    "issue_evidence_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "issue_evidence_link_id": { "$ref": "medical_common.schema.json#/$defs/issue_evidence_link_id" },
+        "observation_id": { "$ref": "medical_common.schema.json#/$defs/observation_id" },
+        "relation": { "enum": ["supports", "weakens", "conflicts", "contextual", "missing_expected"] },
+        "materiality": { "enum": ["core", "supporting", "context"] },
+        "reason": { "type": "string", "minLength": 1 },
+        "classification_version": { "$ref": "medical_common.schema.json#/$defs/config_version" }
+      },
+      "required": ["issue_evidence_link_id", "observation_id", "relation", "materiality", "reason", "classification_version"]
+    },
+    "medical_issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "issue_id": { "$ref": "medical_common.schema.json#/$defs/issue_id" },
+        "issue_category": { "$ref": "medical_common.schema.json#/$defs/issue_category" },
+        "question": { "type": "string", "minLength": 1 },
+        "evidence_links": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/issue_evidence_link" } },
+        "config_version": { "$ref": "medical_common.schema.json#/$defs/config_version" }
+      },
+      "required": ["issue_id", "issue_category", "question", "evidence_links", "config_version"]
+    },
+    "contradiction_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contradiction_group_id": { "$ref": "medical_common.schema.json#/$defs/contradiction_group_id" },
+        "observation_ids": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/observation_id" } },
+        "conflict_id": { "type": "string", "pattern": "^CONFLICT_[0-9]+$" }
+      },
+      "required": ["contradiction_group_id", "observation_ids", "conflict_id"]
+    },
+    "importance_assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "importance_id": { "$ref": "medical_common.schema.json#/$defs/importance_id" },
+        "issue_id": { "$ref": "medical_common.schema.json#/$defs/issue_id" },
+        "variable_id": { "$ref": "medical_common.schema.json#/$defs/variable_id" },
+        "observation_id": { "$ref": "medical_common.schema.json#/$defs/observation_id" },
+        "tier": { "enum": ["A", "B", "C"] },
+        "reason": { "type": "string", "minLength": 1 },
+        "config_version": { "$ref": "medical_common.schema.json#/$defs/config_version" }
+      },
+      "required": ["importance_id", "issue_id", "tier", "reason", "config_version"],
+      "oneOf": [
+        { "required": ["variable_id"], "not": { "required": ["observation_id"] } },
+        { "required": ["observation_id"], "not": { "required": ["variable_id"] } }
+      ]
+    },
+    "quantity_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "quantity_id": { "$ref": "medical_common.schema.json#/$defs/quantity_id" },
+        "variable_id": { "$ref": "medical_common.schema.json#/$defs/variable_id" },
+        "source_observation_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/observation_id" } },
+        "period": { "$ref": "medical_common.schema.json#/$defs/temporal_value" },
+        "count": { "type": "number", "minimum": 0 },
+        "unit_status": { "enum": ["normalized", "unmapped", "not_applicable"] },
+        "unit_code": { "type": "string", "minLength": 1 },
+        "raw_unit": { "type": "string", "minLength": 1 },
+        "counting_basis": { "type": "string", "minLength": 1 },
+        "coverage_status": { "enum": ["complete", "partial", "unknown"] }
+      },
+      "required": ["quantity_id", "variable_id", "source_observation_ids", "period", "count", "unit_status", "counting_basis", "coverage_status"],
+      "allOf": [
+        { "if": { "properties": { "unit_status": { "const": "normalized" } }, "required": ["unit_status"] }, "then": { "required": ["unit_code"] } },
+        { "if": { "properties": { "unit_status": { "const": "unmapped" } }, "required": ["unit_status"] }, "then": { "required": ["raw_unit"], "not": { "required": ["unit_code"] } } },
+        { "if": { "properties": { "unit_status": { "const": "not_applicable" } }, "required": ["unit_status"] }, "then": { "not": { "anyOf": [{ "required": ["unit_code"] }, { "required": ["raw_unit"] }] } } }
+      ]
+    }
+  }
+}

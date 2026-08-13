@@ -1,8 +1,7 @@
-"""dao.py's P7 human-input tracking (set-human-input-status,
-request-expert-review) and D1's evaluation gate (mark-human-review-complete,
-read-ground-truth's per-version flag check). Closes the gap found in the
-end-to-end pipeline review: neither mechanism had any write path before this
--- evaluation could never be legitimately unblocked for any case.
+"""P7 human-input tracking and the deferred Unit 11 handoff boundary.
+
+Human-review completion records a versioned future handoff prerequisite; it
+never unlocks ground-truth access in the local Units 1-7 harness.
 """
 import json
 
@@ -18,7 +17,7 @@ def fast_lock_wait(monkeypatch):
 
 
 VALID_EXPERT_REVIEW = {
-    "case_id": "CASE_009", "component": "evaluation", "status": "success",
+    "case_id": "CASE_009", "component": "human-review", "status": "success",
     "reviewer_id": "Dev", "reviewer_role": "손해사정사",
     "reviewed_document": "outputs/CASE_009/draft_report_v1_reviewed.md",
     "overall_approved": True,
@@ -37,12 +36,12 @@ def _write_expert_review(isolated_dao, version="v1", data=None):
 # ------------------------------------------------------- human_input_status --
 
 def test_waiting_requires_description(isolated_dao, make_args):
-    rc = dao.cmd_set_human_input_status(make_args(stage="evaluation", status="waiting", description=None))
+    rc = dao.cmd_set_human_input_status(make_args(stage="human_review_v1", status="waiting", description=None))
     assert rc == 1
 
 
 def test_waiting_then_received_round_trip(isolated_dao, make_args):
-    rc1 = dao.cmd_set_human_input_status(make_args(stage="evaluation", status="waiting", description="expert review of v1"))
+    rc1 = dao.cmd_set_human_input_status(make_args(stage="human_review_v1", status="waiting", description="expert review of v1"))
     assert rc1 == 0
     state = dao.load_run_state("CASE_009")
     entry = state["human_input_status"][0]
@@ -50,7 +49,7 @@ def test_waiting_then_received_round_trip(isolated_dao, make_args):
     assert entry["description"] == "expert review of v1"
     assert entry["received_at"] is None
 
-    rc2 = dao.cmd_set_human_input_status(make_args(stage="evaluation", status="received"))
+    rc2 = dao.cmd_set_human_input_status(make_args(stage="human_review_v1", status="received"))
     assert rc2 == 0
     state = dao.load_run_state("CASE_009")
     entry = state["human_input_status"][0]
@@ -60,15 +59,15 @@ def test_waiting_then_received_round_trip(isolated_dao, make_args):
 
 
 def test_received_with_no_waiting_entry_fails(isolated_dao, make_args):
-    rc = dao.cmd_set_human_input_status(make_args(stage="evaluation", status="received"))
+    rc = dao.cmd_set_human_input_status(make_args(stage="human_review_v1", status="received"))
     assert rc == 1
 
 
 def test_entries_are_never_deleted_only_appended_or_updated(isolated_dao, make_args):
     """P7: the full history of what was waited on stays visible."""
-    dao.cmd_set_human_input_status(make_args(stage="evaluation", status="waiting", description="v1 review"))
-    dao.cmd_set_human_input_status(make_args(stage="evaluation", status="received"))
-    dao.cmd_set_human_input_status(make_args(stage="evaluation", status="waiting", description="v2 review"))
+    dao.cmd_set_human_input_status(make_args(stage="human_review_v1", status="waiting", description="v1 review"))
+    dao.cmd_set_human_input_status(make_args(stage="human_review_v1", status="received"))
+    dao.cmd_set_human_input_status(make_args(stage="human_review_v2", status="waiting", description="v2 review"))
 
     state = dao.load_run_state("CASE_009")
     assert len(state["human_input_status"]) == 2
@@ -82,10 +81,10 @@ def test_received_flips_the_most_recent_waiting_entry_for_that_stage(isolated_da
     """If two 'waiting' episodes for the same stage somehow coexist (a
     prior receive was skipped), 'received' resolves the most recent one,
     not an arbitrary one."""
-    dao.cmd_set_human_input_status(make_args(stage="evaluation", status="waiting", description="old, forgotten"))
-    dao.cmd_set_human_input_status(make_args(stage="evaluation", status="waiting", description="current"))
+    dao.cmd_set_human_input_status(make_args(stage="human_review_v1", status="waiting", description="old, forgotten"))
+    dao.cmd_set_human_input_status(make_args(stage="human_review_v1", status="waiting", description="current"))
 
-    dao.cmd_set_human_input_status(make_args(stage="evaluation", status="received"))
+    dao.cmd_set_human_input_status(make_args(stage="human_review_v1", status="received"))
 
     state = dao.load_run_state("CASE_009")
     assert state["human_input_status"][0]["status"] == "waiting", "the older one is untouched"
@@ -98,7 +97,7 @@ def test_request_expert_review_wraps_with_fixed_description(isolated_dao, make_a
     assert rc == 0
     state = dao.load_run_state("CASE_009")
     entry = state["human_input_status"][0]
-    assert entry["stage_name"] == "evaluation"
+    assert entry["stage_name"] == "human_review_v1"
     assert entry["status"] == "waiting"
     assert "draft_report_v1_reviewed.md" in entry["description"]
 
@@ -177,12 +176,12 @@ def test_read_ground_truth_denied_for_wrong_caller_stage(isolated_dao, make_args
     assert rc == 1
 
 
-def test_read_ground_truth_allowed_after_flag_set(isolated_dao, make_args):
+def test_read_ground_truth_remains_denied_after_flag_set(isolated_dao, make_args):
     _write_expert_review(isolated_dao, "v1")
     dao.cmd_mark_human_review_complete(make_args(version="v1", reviewer="Dev"))
 
     rc = dao.cmd_read_ground_truth(make_args(caller_stage="evaluation", version="v1"))
-    assert rc == 0
+    assert rc == 1
 
 
 def test_read_ground_truth_v1_flag_does_not_unlock_v2(isolated_dao, make_args):
@@ -194,9 +193,7 @@ def test_read_ground_truth_v1_flag_does_not_unlock_v2(isolated_dao, make_args):
 
 
 def test_full_handoff_sequence(isolated_dao, make_args):
-    """The whole chain in order: critic finishes -> request review ->
-    human reviews, expert_review.json gets written -> mark complete ->
-    evaluation can read ground truth."""
+    """Human review completes the local slice without unlocking ground truth."""
     assert dao.cmd_request_expert_review(make_args(version="v1")) == 0
     assert dao.cmd_read_ground_truth(make_args(caller_stage="evaluation", version="v1")) == 1, \
         "still blocked -- review not actually done yet"
@@ -204,7 +201,7 @@ def test_full_handoff_sequence(isolated_dao, make_args):
     _write_expert_review(isolated_dao, "v1")
     assert dao.cmd_mark_human_review_complete(make_args(version="v1", reviewer="Dev")) == 0
 
-    assert dao.cmd_read_ground_truth(make_args(caller_stage="evaluation", version="v1")) == 0
+    assert dao.cmd_read_ground_truth(make_args(caller_stage="evaluation", version="v1")) == 1
     state = dao.load_run_state("CASE_009")
     assert state["human_input_status"][0]["status"] == "received"
 

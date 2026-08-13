@@ -8,6 +8,14 @@
     {
       "type": "object",
       "properties": {
+        "projection_mode": {
+          "enum": ["legacy_pre_medical", "canonical_medical_projection"],
+          "description": "Explicitly distinguishes pre-medical legacy output from a canonical medical compatibility projection."
+        },
+        "medical_revision_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
         "fields": {
           "type": "object",
           "properties": {
@@ -38,6 +46,13 @@
         }
       },
       "required": ["fields"]
+    },
+    {
+      "if": {
+        "properties": { "projection_mode": { "const": "canonical_medical_projection" } },
+        "required": ["projection_mode"]
+      },
+      "then": { "required": ["medical_revision_sha"] }
     }
   ],
   "$defs": {

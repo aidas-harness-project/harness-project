@@ -10,12 +10,11 @@ function Step({ done, children }) {
   );
 }
 
-// The critic -> human review -> evaluation gate (P7/D1), driven from the UI.
-// Shows exactly what the pipeline is waiting on for this draft version and
-// lets the human open the D1 gate once the recorded review content exists.
+// The critic -> human review -> external handoff prerequisite, driven from the UI.
+// Shows exactly what the local pipeline is waiting on for this draft version.
 // dao.py enforces the hard precondition (expert_review_v{N}.json must exist
 // and validate) -- the button can't self-certify past it.
-export default function HumanReviewPanel({ caseId, version, onChanged }) {
+export default function HumanReviewPanel({ caseId, version, onChanged, readOnly = false }) {
   const [reviewer, setReviewer] = useReviewerName();
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -61,7 +60,7 @@ export default function HumanReviewPanel({ caseId, version, onChanged }) {
           <span className="mono">expert_review_{version}.json</span> exists (the recorded human review content)
         </Step>
         <Step done={state.review_complete}>
-          D1 gate open — evaluation may read ground truth for {version}
+          Future isolated Unit 11 handoff prerequisite recorded for {version}; local Evaluation remains unavailable
           {state.review_complete && (
             <span className="muted"> (marked by {state.completed_by} at {state.completed_at})</span>
           )}
@@ -70,7 +69,7 @@ export default function HumanReviewPanel({ caseId, version, onChanged }) {
 
       {error && <p className="audit-error">{error}</p>}
 
-      {!state.review_complete && (
+      {!readOnly && !state.review_complete && (
         <div className="gate-action">
           {state.expert_review_exists ? (
             <>
@@ -82,8 +81,8 @@ export default function HumanReviewPanel({ caseId, version, onChanged }) {
                 {busy ? "marking…" : `mark human review complete (${version})`}
               </button>
               <p className="muted small">
-                This is a real human action — it creates the versioned D1 flag that lets evaluation read the
-                answer key. Only do this after actually reviewing the draft.
+                This is a real human action. It records that this local review prerequisite is complete; it
+                does not enable local Evaluation or ground-truth access.
               </p>
             </>
           ) : (

@@ -30,7 +30,7 @@ Workflow:
        cross-validation over the whole document.
     3. A human reviews the plan (and any content_warning) and sets each
        file's status via
-       `python tools/dao.py set-ledger-status CASE_XXX <file> approved --reviewer <name>`
+       `python tools/dao.py set-ledger-status CASE_XXX <file> approved --reviewer <name> --operation-id <id> --held-by <name> --run-id RUN_ID`
        (or rejected --reason "...").
     4. --execute: copies files to data/raw/CASE_XXX/ and
        data/ground_truth/CASE_XXX/, but only if every ledger entry is
@@ -68,6 +68,7 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+import dao
 from dao import (
     case_dir, atomic_write_json, now_iso, source_ledger_path, load_json,
     acquire_lock_blocking, release_lock,
@@ -363,8 +364,11 @@ def build_ledger(case_id, case_dir_path, plan, splits, content_warnings=None):
             files.append({"file_name": out_name, "classification": dest, "review_status": "pending",
                           "reviewed_by": None, "reviewed_at": None, "rejection_reason": None})
     return {
+        "ledger_version": "source_ledger.v0.4",
         "case_id": case_id, "source_dir": str(case_dir_path),
         "created_at": now_iso(), "updated_at": now_iso(), "files": files,
+        "history_boundary": dao.make_history_boundary(files, mode="native"),
+        "operations": [],
     }
 
 
@@ -490,7 +494,7 @@ def main():
         atomic_write_json(ledger_path, ledger)
         print(f"\nWrote {ledger_path} -- every file is 'pending'. "
               f"A human must review and set each to approved/rejected via "
-              f"`python tools/dao.py set-ledger-status {args.case_id} <file> approved --reviewer <name>` "
+              f"`python tools/dao.py set-ledger-status {args.case_id} <file> approved --reviewer <name> --operation-id <id> --held-by <name> --run-id RUN_ID` "
               f"before --execute will run.")
         return
 
@@ -498,9 +502,10 @@ def main():
         print("\n(dry run) pass --init-ledger to create the review ledger, or --execute to copy once it's approved.")
         return
 
-    ledger = load_json(source_ledger_path(args.case_id))
-    if ledger is None:
-        sys.exit("error: no _source_ledger.json found -- run with --init-ledger first.")
+    try:
+        ledger = dao.validated_source_ledger(args.case_id)
+    except ValueError as exc:
+        sys.exit(f"error: source ledger is not executable: {exc}")
     pending = [e["file_name"] for e in ledger["files"] if e["review_status"] == "pending"]
     rejected = [e["file_name"] for e in ledger["files"] if e["review_status"] == "rejected"]
     if pending or rejected:

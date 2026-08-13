@@ -26,7 +26,7 @@ adjacency and dependency are different graphs; conflating them is the bug this
 replaces.
 
 Part 11I completed the graph. It previously stopped at `screening_report`, and
-every later stage (draft/critic/denial_validation/evaluation) fell through to a
+every later stage (draft/critic/denial_validation/human review) fell through to a
 permissive default -- so `draft_report_v2` could be recorded `passed` in a run
 where nothing had ever been drafted, and `evaluation` (the sole D1 exception,
 the one stage allowed to read ground truth) had no prerequisite at all. Two
@@ -41,11 +41,8 @@ things changed:
     every gate in this module. Refusing a name we were never told about costs
     one line in this file; accepting it costs the whole graph.
 
-`evaluation` additionally carries a non-graph gate: D1's human-review flag.
-That lives on disk (`_human_review_complete_{version}.flag`), not in run-state,
-so the DAO supplies it as the `human_review_complete` argument. It defaults to
-None and None BLOCKS -- "the caller did not tell us" is not "the review
-happened".
+Local Evaluation is deliberately absent. The terminal local stages record
+human-owned review and the future external Unit 11 handoff boundary.
 """
 
 # --- optional stages -------------------------------------------------------
@@ -86,6 +83,7 @@ _REQUIRES = {
     "screening_report": ("claim_analysis", "consistency_check"),
     "draft_report_v1": ("screening_report",),
     "critic_v1": ("draft_report_v1",),
+    "human_review_v1": ("critic_v1",),
     # --- Phase 2 ---------------------------------------------------------
     # Validates the insurer's stated denial reasons against the case's
     # evidence, so it needs both: the reasons (denial_response) and the
@@ -95,11 +93,7 @@ _REQUIRES = {
     # v2 is an UPDATE of v1 that incorporates the rebuttal points, so both.
     "draft_report_v2": ("draft_report_v1", "denial_validation"),
     "critic_v2": ("draft_report_v2",),
-    # The sole D1 exception. One canonical stage name covers both the v1 and
-    # v2 comparison, so the graph requires the v1 critic pass (the earliest
-    # point any reviewed draft exists) and the human-review gate is checked
-    # separately, per version, by the DAO.
-    "evaluation": ("critic_v1",),
+    "human_review_v2": ("critic_v2",),
 }
 
 # For each dependent stage, the subset of its prerequisites for which an
@@ -117,7 +111,7 @@ _ACCEPTS_SKIPPED_FROM = {
 # Stages that need a gate this module cannot see in run-state. `evaluation` is
 # the only one: D1's human-review completion is a flag file on disk, owned by
 # the DAO. Listed here so the rule lives with the rest of the graph.
-HUMAN_REVIEW_GATED_STAGES = frozenset({"evaluation"})
+HUMAN_REVIEW_GATED_STAGES = frozenset()
 
 KNOWN_STAGES = frozenset(_REQUIRES)
 

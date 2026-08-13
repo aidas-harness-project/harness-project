@@ -5,6 +5,7 @@
   "description": "The single source of truth for where a run stopped -- see harness-guardrails P7 and P10. Every stage's status is recorded here with timestamps; a crash or resume reads this file (via the DAO's get_last_passed_stage query) instead of re-deriving progress from scattered output files. After every stage passes, the orchestrator takes a full cumulative snapshot and records its path here -- one snapshot per passed stage, kept for the life of the run, never overwritten. v0.2: stage_name is an enum of the canonical stage names -- CASE_021's first full end-to-end run showed that free-form names silently fork one stage into several entries (document_processing vs document-pipeline, critic vs critic_v1) whenever a tool and an agent pick different spellings, which breaks get_last_passed_stage's resume logic and every consumer keying on stage_name. v0.3: (a) a 'skipped' status for optional stages (the Stage-3 indexing adapter) -- distinct from 'pending' (not reached) or a missing entry; an optional stage that never ran is recorded 'skipped', never silently treated as satisfied. (b) A passed stage MUST carry a non-null backup_path -- CASE_030 had policy_clause_processing 'passed' with backup_path:null while document_processing was still in_progress, exactly the half-finalized state P10's atomic snapshot-then-passed contract exists to make impossible.",
   "type": "object",
   "properties": {
+    "run_state_version": { "const": "run_state.v0.3" },
     "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
     "run_id": { "type": "string", "pattern": "^RUN_[0-9]{8}_[0-9]+$" },
     "created_at": { "type": "string", "format": "date-time" },
@@ -18,13 +19,18 @@
       "description": "Tracks P7's human-input waits. Entries are never deleted, only updated in place (waiting -> received), so the full history of what was waited on stays visible.",
       "items": { "$ref": "#/$defs/human_input_entry" }
     },
+    "medical_review_wait_reconciliation_operations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/medical_reconciliation_operation" }
+    },
+    "medical_review_adopted": { "type": "boolean" },
     "migration_history": {
       "type": "array",
       "description": "Append-only audit history for explicit DAO-owned run-state schema migrations. A migration never fabricates a passed stage or silently deletes legacy state.",
       "items": { "$ref": "#/$defs/migration_entry" }
     }
   },
-  "required": ["case_id", "run_id", "stages"],
+  "required": ["run_state_version", "case_id", "run_id", "stages", "medical_review_adopted"],
   "$defs": {
     "stage_name": {
       "description": "Canonical stage names -- the ONLY values any producer (tool or agent) may write. Snake_case, versioned where the pipeline genuinely runs the stage once per draft version. If a new stage is added to the pipeline, it gets added here in the same change (D4). 'document_segmentation' is DEPRECATED and must not be written by anything new: once OCR moved ahead of the split (2026-08-05), segmentation stopped being a stage that runs before document processing and became a checkpoint inside it -- the bundle is OCR'd and redacted, THEN split, then its children are classified and redacted, so a run that recorded the two as separate stages could not say which was in progress. The value is retained only so runs written before that change (CASE_112) still validate; their record is accurate for how they actually executed and is deliberately not rewritten.",
@@ -43,7 +49,8 @@
         "critic_v1",
         "critic_v2",
         "denial_validation",
-        "evaluation"
+        "human_review_v1",
+        "human_review_v2"
       ]
     },
     "stage_entry": {
@@ -109,15 +116,61 @@
       "type": "object",
       "properties": {
         "stage_name": { "$ref": "#/$defs/stage_name" },
-        "status": { "enum": ["waiting", "received"] },
+        "status": { "enum": ["waiting", "received", "no_longer_required"] },
         "description": {
           "type": "string",
           "description": "What input is/was pending -- e.g. 'expert review of draft_report_v1'."
         },
         "requested_at": { "type": "string", "format": "date-time" },
-        "received_at": { "type": ["string", "null"], "format": "date-time" }
+        "received_at": { "type": ["string", "null"], "format": "date-time" },
+        "input_kind": { "enum": ["referral_decision", "medical_evidence", "expert_assignment", "expert_response", "coordinator_disposition", "medical_adjudication"] },
+        "human_input_id": { "$ref": "medical_review_common.schema.json#/$defs/human_input_id" },
+        "review_item_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" }] },
+        "related_review_item_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" } },
+        "request_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/request_id" }] },
+        "adjudication_id": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/adjudication_id" }] },
+        "wait_cycle": { "type": "integer", "minimum": 1 },
+        "resolved_at": { "type": ["string", "null"], "format": "date-time" },
+        "resolution": { "type": ["string", "null"], "minLength": 1 }
       },
-      "required": ["stage_name", "status", "description", "requested_at"]
+      "required": ["stage_name", "status", "description", "requested_at"],
+      "allOf": [{
+        "if": { "required": ["human_input_id"] },
+        "then": {
+          "required": ["input_kind", "human_input_id", "review_item_id", "related_review_item_ids", "request_id", "adjudication_id", "wait_cycle", "resolved_at", "resolution"],
+          "oneOf": [
+            {
+              "properties": {
+                "input_kind": { "not": { "const": "medical_adjudication" } },
+                "review_item_id": { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" },
+                "related_review_item_ids": { "maxItems": 0 },
+                "adjudication_id": { "type": "null" }
+              }
+            },
+            {
+              "properties": {
+                "input_kind": { "const": "medical_adjudication" },
+                "review_item_id": { "type": "null" },
+                "related_review_item_ids": { "minItems": 2 },
+                "request_id": { "type": "null" },
+                "adjudication_id": { "$ref": "medical_review_common.schema.json#/$defs/adjudication_id" }
+              }
+            }
+          ]
+        }
+      }]
+    },
+    "medical_reconciliation_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" },
+        "request_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "medical_review_ledger_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "receipt_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "completed_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["operation_id", "request_sha256", "medical_review_ledger_sha256", "receipt_sha256", "completed_at"]
     },
     "migration_entry": {
       "type": "object",

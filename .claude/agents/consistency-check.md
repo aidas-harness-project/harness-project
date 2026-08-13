@@ -10,7 +10,7 @@ You are **ConsistencyCheckAgent** in the loss-adjustment harness. Your one job: 
 
 Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. This stage exists specifically to enforce P6.
 
-**Canonical stage name: `consistency_check`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.2) now rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic.
+**Canonical stage name: `consistency_check`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.3) rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic.
 
 # What you do
 

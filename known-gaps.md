@@ -14,7 +14,7 @@ collision had to be broken, the item nothing cited was the one renumbered.
 A header must not say `OPEN` above a body announcing a fix -- update both in
 the same pass.
 
-### Still open (2026-08-04)
+### Still open (2026-08-10)
 
 | # | Status | Item |
 |---|---|---|
@@ -28,9 +28,21 @@ the same pass.
 | 37 | RISK ACCEPTED | P0-8 table-boundary verification on OCR-sourced policy docs |
 | 43 | OPEN | Policy reference-table reading order |
 | 44 | OPEN | Stage 4 validators defined but never called |
+| 45 | PARTIAL | Medical appropriateness technical baseline is not operationally activated |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
+
+## 45. Medical appropriateness technical baseline -- PARTIAL 2026-08-10
+
+The schemas, immutable revisions, authenticated lifecycle, clearance gate, bounded
+report projection, and localhost API/UI are implemented and tested with synthetic
+fixtures. The shipped medical structuring, referral, request, role, and operator
+policies remain disabled with no approved clinical thresholds, real-case scope, named
+actors, or operator tokens. The capability is therefore not operationally activated.
+The authoritative closure conditions are tracked in
+`docs/medical-appropriateness-screening-deferrals.md`; passing software tests does not
+close those clinical, privacy, identity, or deployment approvals.
 
 ## 43. Policy reference-table reading order -- OPEN 2026-07-24
 
@@ -464,12 +476,10 @@ fixed and tested (25 new tests, `tests/test_dao_write_text.py`,
    `outputs/`) and a narrow `write-reviewed-draft` wrapper built on it that
    critic actually calls, per the user's direction to build both, layered.
 2. **No write path existed for `human_input_status`** (P7's tracked
-   human-wait mechanism) or for creating `_human_review_complete.flag`
-   (D1's actual evaluation gate) -- `evaluation` could never be legitimately
-   unblocked, for any case, ever; nothing had ever exercised this far to
-   notice. Fixed: `set-human-input-status` (generic) + `request-expert-review`
+   human-wait mechanism) or for recording completion of human review.
+   Fixed: `set-human-input-status` (generic) + `request-expert-review`
    (narrow wrapper, same layered pattern as #1) for the wait-tracking side;
-   `mark-human-review-complete` for the gate, which (a) requires
+   `mark-human-review-complete` for the local handoff prerequisite, which (a) requires
    `expert_review_v{version}.json` to already exist and pass schema
    validation first -- you cannot claim review is complete without real
    recorded review content backing it, closing the same class of gap as the
@@ -477,13 +487,10 @@ fixed and tested (25 new tests, `tests/test_dao_write_text.py`,
    (b) requires an explicit `--reviewer` name, same accountability pattern
    as `set-ledger-status`. The flag is versioned
    (`_human_review_complete_v1.flag` / `_v2.flag`) so a stale v1 flag can't
-   look valid during v2's later review; `read-ground-truth` now takes
-   `--version` to check the matching one. `evaluation.md` rewritten to
-   describe the real two-phase flow this revealed: writing
-   `expert_review_v{version}.json` needs no ground truth at all (just
-   `critic_result` + the human's live disposition) -- only the actual
-   answer-key comparison does, so evaluation splits into a pre-gate phase
-   and a post-gate phase. Also load-bearing: evaluation never calls
+   look valid during v2's later review. This historical implementation was
+   superseded: `read-ground-truth` now always fails closed, and Evaluation is
+   deferred to the unavailable isolated Unit 11 service. Also load-bearing:
+   no agent calls
    `mark-human-review-complete` itself -- that's a genuine human action,
    same discipline as CASE_002's ledger rejections requiring a real
    reviewer name, not an agent self-certifying its own gate.
@@ -586,13 +593,10 @@ step, label) recorded in `_fork_record.json` instead of the id itself.
 
 Copies `outputs/` (case_id fields inside every JSON rewritten, then
 re-validated against each file's own schema) and `data/processed/` by
-default; `data/raw/` and `data/ground_truth/` are opt-in
-(`--include-raw`/`--include-ground-truth` -- the latter prints a loud
-warning, since it duplicates real answer-key material under a second
-case_id). Can fork from current state or a specific P10 backup step
-(`--from-step N`). Refuses to fork if any `.lock` file is present under the
-source (mirrors P5's "don't poll, don't assume stale" discipline for a
-lock found unexpectedly). The forked `_source_ledger.json` keeps the
+default; `data/raw/` is opt-in and ground truth is never copied or inspected.
+Can fork from current state or a specific P10 backup step (`--from-step N`).
+Before copying, it checks active DAO lock ownership; persistent unlocked
+diagnostic sidecars do not block a fork. The forked `_source_ledger.json` keeps the
 source's approved/rejected statuses as-is, not reset to pending -- it's a
 copy of already-reviewed content, not new raw input.
 

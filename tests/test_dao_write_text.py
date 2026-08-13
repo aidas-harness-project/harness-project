@@ -29,7 +29,61 @@ def test_write_text_writes_arbitrary_filename_and_releases_lock(isolated_dao, ma
     target = isolated_dao / "outputs" / "CASE_009" / "some_freeform_note.md"
     assert rc == 0
     assert target.read_text(encoding="utf-8").startswith("## Annotated draft")
-    assert not target.with_name(target.name + ".lock").exists()
+    assert dao.read_lock(target) is None
+
+
+def test_write_text_rejects_ancestor_swap_into_medical_revision_namespace(
+    isolated_dao,
+    make_args,
+    monkeypatch,
+    tmp_path,
+):
+    case_dir = dao.case_dir("CASE_009")
+    revision_directory = case_dir / "_medical_variable_revisions"
+    revision_directory.mkdir()
+    digest = "a" * 64
+    protected = revision_directory / f"{digest}.json"
+    escaped_lock = protected.with_name(protected.name + ".lock")
+    protected.write_bytes(b"immutable revision")
+    safe_alias = case_dir / "safe-alias"
+    safe_alias.mkdir()
+    replacement = _text_file(tmp_path, "malicious replacement")
+    repository = dao.sys.modules["medical_repository"]
+    real_guard = repository.require_generic_target_allowed
+    real_read_text = dao.Path.read_text
+    observed_escaped_lock = []
+
+    def swap_after_generic_guard(dao_module, case_id, filename):
+        real_guard(dao_module, case_id, filename)
+        safe_alias.rmdir()
+        safe_alias.symlink_to(
+            revision_directory.name,
+            target_is_directory=True,
+        )
+
+    def observe_lock_before_input_read(path, *args, **kwargs):
+        if path == dao.Path(replacement):
+            observed_escaped_lock.append(escaped_lock.exists())
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        repository,
+        "require_generic_target_allowed",
+        swap_after_generic_guard,
+    )
+    monkeypatch.setattr(dao.Path, "read_text", observe_lock_before_input_read)
+    result = dao.cmd_write_text(make_args(
+        case_id="CASE_009",
+        filename=f"safe-alias/{digest}.json",
+        text_file=replacement,
+        held_by="synthetic-test",
+        run_id="RUN_001",
+        purpose=None,
+    ))
+
+    assert result == 1
+    assert protected.read_bytes() == b"immutable revision"
+    assert not any(observed_escaped_lock)
 
 
 def test_write_text_rejects_when_locked(isolated_dao, make_args, tmp_path):

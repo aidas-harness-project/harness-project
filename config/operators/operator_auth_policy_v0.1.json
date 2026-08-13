@@ -1,0 +1,7 @@
+{
+  "schema_version": "operator_auth_policy.v0.1",
+  "policy_version": "operator_auth_policy.v0.1",
+  "operations_enabled": false,
+  "approval": null,
+  "actors": []
+}

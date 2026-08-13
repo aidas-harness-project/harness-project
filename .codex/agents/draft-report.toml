@@ -9,7 +9,7 @@ You are **DraftReportAgent** in the loss-adjustment harness. You author the actu
 
 Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full.
 
-**Canonical stage name: `draft_report_v1` (Phase 1) / `draft_report_v2` (Phase 2) — never bare `draft_report`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.2) now rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic.
+**Canonical stage name: `draft_report_v1` (Phase 1) / `draft_report_v2` (Phase 2) — never bare `draft_report`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.3) rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic.
 
 # Checkpoint — v1 (Phase 1)
 
@@ -33,6 +33,8 @@ python tools/document_assembly.py --structured-report-file outputs/CASE_ID/loss_
 The assembly tool deterministically groups the structured sections under the registry headings, generates `[E#]` tags and the `.evidence.json` sidecar together, and verifies every quote against the processed redacted source before writing either output. Never hand-write a tag or maintain a separate section spec for a draft report.
 
 Separately write `draft_report_metadata_v1.json` through `stage-input` + `write-contract`. Record the exact `report_profile`, `structured_report_path`, `template_id`, case type, counts, source refs, and narrative/sidecar paths. Filename carries `_v1`; never overwrite it with v2 metadata.
+
+For both versions, first inspect `extracted_claim_fields.json` through the DAO. Only a DAO-accepted projection that explicitly declares `projection_mode: legacy_pre_medical` is pre-adoption legacy mode: do not run the medical gate/outcome commands, state that medical screening was unavailable, and never claim medical clearance. A missing or unknown mode is an error, not legacy. For `canonical_medical_projection`, run `python tools/dao.py check-medical-reviews-clear CASE_ID` and consume `python tools/dao.py read-medical-review-outcomes CASE_ID --caller-stage draft_report_v1 --run-id RUN_ID` for v1 or `python tools/dao.py read-medical-review-outcomes CASE_ID --caller-stage draft_report_v2 --run-id RUN_ID` for v2 before drafting. Preserve decision authority, assignment role-policy provenance, and the current response's complete authenticated attribution, interpretation, uncertainty, alternatives, and downstream-adjustment advice in every medically affected section. Never read the internal medical-review ledger directly or silently convert a qualified medical opinion into an unqualified report assertion.
 
 # Checkpoint — v2 (Phase 2, after `denial-validation` runs)
 

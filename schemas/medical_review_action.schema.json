@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "medical_review_action.schema.json",
+  "title": "Closed medical-review transition payload v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "enum": [
+        "provide_information",
+        "assign",
+        "request_information",
+        "supplement_package",
+        "reassign",
+        "submit_response",
+        "amend_response",
+        "withdraw_response",
+        "flag_conflict",
+        "adjudicate",
+        "cancel",
+        "close",
+        "reopen"
+      ]
+    },
+    "data": { "type": ["object", "null"] }
+  },
+  "required": ["action", "data"],
+  "$defs": {
+    "assignment_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": { "$ref": "medical_review_common.schema.json#/$defs/request_id" },
+        "request_version": { "type": "integer", "minimum": 1 },
+        "reviewer_actor_id": { "type": "string", "minLength": 1 },
+        "package_review_attestation": { "$ref": "medical_review_common.schema.json#/$defs/package_review_attestation" }
+      },
+      "required": ["request_id", "request_version", "reviewer_actor_id", "package_review_attestation"]
+    },
+    "response_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "response": { "$ref": "medical_review_response_submission.schema.json" },
+        "reason": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" }
+      },
+      "required": ["response"]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "action": { "const": "provide_information" } }, "required": ["action"] },
+      "then": {
+        "properties": { "data": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "information": { "type": "string", "minLength": 1 } },
+          "required": ["information"]
+        } }
+      }
+    },
+    {
+      "if": { "properties": { "action": { "enum": ["assign", "reassign"] } }, "required": ["action"] },
+      "then": { "properties": { "data": { "$ref": "#/$defs/assignment_payload" } } }
+    },
+    {
+      "if": { "properties": { "action": { "const": "request_information" } }, "required": ["action"] },
+      "then": {
+        "properties": { "data": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "request_id": { "$ref": "medical_review_common.schema.json#/$defs/request_id" },
+            "request_version": { "type": "integer", "minimum": 1 },
+            "information_required": { "type": "string", "minLength": 1 }
+          },
+          "required": ["request_id", "request_version", "information_required"]
+        } }
+      }
+    },
+    {
+      "if": { "properties": { "action": { "const": "supplement_package" } }, "required": ["action"] },
+      "then": {
+        "properties": { "data": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "request_id": { "$ref": "medical_review_common.schema.json#/$defs/request_id" },
+            "request": { "$ref": "medical_referral_submission.schema.json#/$defs/request_submission" },
+            "source_reinspection": { "$ref": "medical_referral_submission.schema.json#/properties/source_reinspection" }
+          },
+          "required": ["request_id", "request", "source_reinspection"]
+        } }
+      }
+    },
+    {
+      "if": { "properties": { "action": { "enum": ["submit_response", "amend_response"] } }, "required": ["action"] },
+      "then": { "properties": { "data": { "$ref": "#/$defs/response_payload" } } }
+    },
+    {
+      "if": { "properties": { "action": { "const": "amend_response" } }, "required": ["action"] },
+      "then": { "properties": { "data": { "required": ["response", "reason"] } } }
+    },
+    {
+      "if": { "properties": { "action": { "const": "withdraw_response" } }, "required": ["action"] },
+      "then": {
+        "properties": { "data": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "response_id": { "$ref": "medical_review_common.schema.json#/$defs/response_id" } },
+          "required": ["response_id"]
+        } }
+      }
+    },
+    {
+      "if": { "properties": { "action": { "const": "flag_conflict" } }, "required": ["action"] },
+      "then": {
+        "properties": { "data": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "items": {
+              "type": "array", "minItems": 2, "uniqueItems": true,
+              "items": {
+                "type": "object", "additionalProperties": false,
+                "properties": {
+                  "review_item_id": { "$ref": "medical_review_common.schema.json#/$defs/review_item_id" },
+                  "response_id": { "$ref": "medical_review_common.schema.json#/$defs/response_id" }
+                },
+                "required": ["review_item_id", "response_id"]
+              }
+            }
+          },
+          "required": ["items"]
+        } }
+      }
+    },
+    {
+      "if": { "properties": { "action": { "const": "adjudicate" } }, "required": ["action"] },
+      "then": {
+        "properties": { "data": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "adjudication_id": { "$ref": "medical_review_common.schema.json#/$defs/adjudication_id" },
+            "record": { "type": "string", "minLength": 1 }
+          },
+          "required": ["adjudication_id", "record"]
+        } }
+      }
+    },
+    {
+      "if": { "properties": { "action": { "const": "cancel" } }, "required": ["action"] },
+      "then": {
+        "properties": { "data": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "adjudication_id": { "$ref": "medical_review_common.schema.json#/$defs/adjudication_id" } }
+        } }
+      }
+    },
+    {
+      "if": { "properties": { "action": { "const": "close" } }, "required": ["action"] },
+      "then": { "properties": { "data": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "action": { "const": "reopen" } }, "required": ["action"] },
+      "then": {
+        "properties": { "data": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "decision_owner": { "enum": ["policy", "human"] },
+            "reason": { "type": "string", "minLength": 1 }
+          },
+          "required": ["decision_owner", "reason"]
+        } }
+      }
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "schema_version": "medical_review_request_config.v0.1",
+  "config_version": "medical_review_request.v0.1",
+  "requests_enabled": false,
+  "approval": null,
+  "interpretations": []
+}

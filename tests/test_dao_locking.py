@@ -6,6 +6,8 @@ already-documented 30s/15min cadence, now owned by the DAO itself -- with the
 poll interval overridable for parallel batches of short commits).
 """
 import json
+import os
+from pathlib import Path
 import threading
 import time
 
@@ -50,7 +52,148 @@ def test_write_contract_success_writes_file_and_releases_lock(isolated_dao, make
     assert rc == 0
     assert target.exists()
     assert json.loads(target.read_text(encoding="utf-8"))["coverages"][0]["coverage_name"] == "a"
-    assert not target.with_name(target.name + ".lock").exists(), "lock must be released after a successful write"
+    assert dao.read_lock(target) is None, "lock must be released after a successful write"
+
+
+def test_write_contract_rejects_ancestor_swap_into_medical_revision_namespace(
+    isolated_dao,
+    make_args,
+    monkeypatch,
+    tmp_path,
+):
+    case_dir = dao.case_dir("CASE_009")
+    revision_directory = case_dir / "_medical_variable_revisions"
+    revision_directory.mkdir()
+    digest = "b" * 64
+    protected = revision_directory / f"{digest}.json"
+    escaped_lock = protected.with_name(protected.name + ".lock")
+    protected.write_bytes(b"immutable revision")
+    safe_alias = case_dir / "safe-alias"
+    safe_alias.mkdir()
+    repository = dao.sys.modules["medical_repository"]
+    real_guard = repository.require_generic_target_allowed
+    real_read_text = dao.Path.read_text
+    observed_escaped_lock = []
+
+    def swap_after_generic_guard(dao_module, case_id, filename):
+        real_guard(dao_module, case_id, filename)
+        safe_alias.rmdir()
+        safe_alias.symlink_to(
+            revision_directory.name,
+            target_is_directory=True,
+        )
+
+    def observe_lock_before_input_read(path, *args, **kwargs):
+        if path == Path(data_file):
+            observed_escaped_lock.append(escaped_lock.exists())
+        return real_read_text(path, *args, **kwargs)
+
+    data_file = _write_data_file(tmp_path, VALID_COVERAGE_RESULT)
+
+    monkeypatch.setattr(
+        repository,
+        "require_generic_target_allowed",
+        swap_after_generic_guard,
+    )
+    monkeypatch.setattr(dao.Path, "read_text", observe_lock_before_input_read)
+    result = dao.cmd_write_contract(make_args(
+        case_id="CASE_009",
+        filename=f"safe-alias/{digest}.json",
+        data_file=data_file,
+        schema_name="coverage_result.schema.json",
+    ))
+
+    assert result == 1
+    assert protected.read_bytes() == b"immutable revision"
+    assert not any(observed_escaped_lock)
+
+
+def test_write_contract_rejects_parent_replacement_after_lock(
+    isolated_dao,
+    make_args,
+    monkeypatch,
+    tmp_path,
+):
+    case_dir = dao.case_dir("CASE_009")
+    parent = case_dir / "safe-parent"
+    displaced = case_dir / "displaced-parent"
+    parent.mkdir()
+    data_file = _write_data_file(tmp_path, VALID_COVERAGE_RESULT)
+    real_read_text = dao.Path.read_text
+    swapped = False
+
+    def replace_parent_during_input_read(path, *args, **kwargs):
+        nonlocal swapped
+        if path == Path(data_file) and not swapped:
+            parent.rename(displaced)
+            parent.mkdir()
+            swapped = True
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(dao.Path, "read_text", replace_parent_during_input_read)
+    result = dao.cmd_write_contract(make_args(
+        case_id="CASE_009",
+        filename="safe-parent/coverage_result.json",
+        data_file=data_file,
+        schema_name="coverage_result.schema.json",
+    ))
+
+    assert swapped
+    assert result == 1
+    assert not (parent / "coverage_result.json").exists()
+    assert not (displaced / "coverage_result.json").exists()
+    assert dao.read_lock(displaced / "coverage_result.json") is None
+
+
+def test_anchored_lock_release_preserves_replacement_inode(isolated_dao):
+    case_dir = dao.case_dir("CASE_009")
+    target = case_dir / "nested" / "thing.json"
+    owned_lock, existing = dao.acquire_lock_beneath(
+        case_dir,
+        "nested/thing.json",
+        "original-holder",
+        "RUN_001",
+        "test replacement ownership",
+    )
+    assert existing is None
+    assert owned_lock is not None
+    lock_file = target.with_name(target.name + ".lock")
+    lock_file.unlink()
+    lock_file.write_text("foreign replacement", encoding="utf-8")
+
+    dao.release_lock_beneath(owned_lock)
+
+    assert lock_file.read_text(encoding="utf-8") == "foreign replacement"
+
+
+def test_anchored_lock_fifo_collision_returns_without_blocking(
+    isolated_dao,
+    monkeypatch,
+):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO is unavailable on this platform")
+    case_dir = dao.case_dir("CASE_009")
+    parent = case_dir / "nested"
+    parent.mkdir()
+    os.mkfifo(parent / "thing.json.lock")
+    monkeypatch.setattr(dao, "LOCK_MAX_WAIT_SECONDS", 0)
+
+    started = time.monotonic()
+    owned_lock, existing = dao.acquire_lock_beneath_blocking(
+        case_dir,
+        "nested/thing.json",
+        "new-holder",
+        "RUN_002",
+        "test FIFO collision",
+    )
+
+    assert time.monotonic() - started < 1
+    assert owned_lock is None
+    assert existing == {
+        "held_by": "unknown",
+        "run_id": "unknown",
+        "purpose": "unsafe lock path",
+    }
 
 
 def test_write_contract_rejects_when_already_locked(isolated_dao, make_args, tmp_path):
@@ -76,7 +219,7 @@ def test_write_contract_unknown_schema_name_fails_cleanly(isolated_dao, make_arg
     target = isolated_dao / "outputs" / "CASE_009" / "coverage_result.json"
     assert rc == 1
     assert not target.exists()
-    assert not target.with_name(target.name + ".lock").exists(), "lock must be released even when the schema name is bad"
+    assert dao.read_lock(target) is None, "lock must be released even when the schema name is bad"
 
 
 def test_write_contract_schema_validation_failure_writes_nothing_and_releases_lock(isolated_dao, make_args, tmp_path):
@@ -90,7 +233,7 @@ def test_write_contract_schema_validation_failure_writes_nothing_and_releases_lo
     target = isolated_dao / "outputs" / "CASE_009" / "coverage_result.json"
     assert rc == 1
     assert not target.exists(), "atomic-write-then-validate-fail: nothing should land on disk"
-    assert not target.with_name(target.name + ".lock").exists(), "lock must not be left behind on validation failure"
+    assert dao.read_lock(target) is None, "lock must not remain held on validation failure"
 
 
 def test_write_contract_second_write_after_first_release_succeeds(isolated_dao, make_args, tmp_path):
@@ -109,18 +252,198 @@ def test_acquire_lock_blocking_waits_then_succeeds_once_released(isolated_dao, m
     monkeypatch.setattr(dao, "LOCK_POLL_INTERVAL_SECONDS", 0.02)
     monkeypatch.setattr(dao, "LOCK_MAX_WAIT_SECONDS", 2.0)
     target = isolated_dao / "outputs" / "CASE_009" / "thing.json"
-    dao.acquire_lock(target, "someone-else", "RUN_OTHER", "holding briefly")
+    acquired = threading.Event()
 
-    def release_soon():
+    def hold_briefly():
+        assert dao.acquire_lock(
+            target, "someone-else", "RUN_OTHER", "holding briefly"
+        ) is None
+        acquired.set()
         time.sleep(0.06)
         dao.release_lock(target)
-    threading.Thread(target=release_soon).start()
+
+    holder = threading.Thread(target=hold_briefly)
+    holder.start()
+    assert acquired.wait(timeout=1)
 
     result = dao.acquire_lock_blocking(target, "me", "RUN_MINE", "waiting my turn")
+    holder.join(timeout=1)
 
     assert result is None, "must eventually succeed once the other holder releases"
     lock = dao.read_lock(target)
     assert lock["held_by"] == "me", "the lock now held is mine, acquired fresh after the wait"
+
+
+def test_lock_path_replacement_cannot_create_second_generic_owner(isolated_dao):
+    target = isolated_dao / "outputs" / "CASE_009" / "thing.json"
+    assert dao.acquire_lock(target, "first", "RUN_001", "original owner") is None
+    dao.lock_path(target).unlink()
+
+    existing = dao.acquire_lock(target, "second", "RUN_002", "replacement owner")
+
+    assert existing is not None
+    dao.release_lock(target)
+    assert dao.acquire_lock(target, "second", "RUN_002", "after release") is None
+    dao.release_lock(target)
+
+
+def test_lock_path_replacement_cannot_create_second_owned_owner(isolated_dao):
+    target = isolated_dao / "outputs" / "CASE_009" / "thing.json"
+    first, existing = dao.acquire_owned_lock(target, "first", "RUN_001", "original owner")
+    assert first is not None and existing is None
+    dao.lock_path(target).unlink()
+
+    second, existing = dao.acquire_owned_lock(target, "second", "RUN_002", "replacement owner")
+
+    assert second is None and existing is not None
+    dao.release_owned_lock(first)
+    second, existing = dao.acquire_owned_lock(target, "second", "RUN_002", "after release")
+    assert second is not None and existing is None
+    dao.release_owned_lock(second)
+
+
+def test_lock_path_replacement_cannot_create_second_anchored_owner(isolated_dao):
+    case_dir = dao.case_dir("CASE_009")
+    first, existing = dao.acquire_lock_beneath(
+        case_dir, "nested/thing.json", "first", "RUN_001", "original owner"
+    )
+    assert first is not None and existing is None
+    target = case_dir / "nested" / "thing.json"
+    dao.lock_path(target).unlink()
+
+    second, existing = dao.acquire_lock_beneath(
+        case_dir, "nested/thing.json", "second", "RUN_002", "replacement owner"
+    )
+
+    assert second is None and existing is not None
+    dao.release_lock_beneath(first)
+    second, existing = dao.acquire_lock_beneath(
+        case_dir, "nested/thing.json", "second", "RUN_002", "after release"
+    )
+    assert second is not None and existing is None
+    dao.release_lock_beneath(second)
+
+
+def test_unrelated_thread_cannot_release_generic_lock(isolated_dao):
+    target = isolated_dao / "outputs" / "CASE_009" / "thing.json"
+    assert dao.acquire_lock(target, "first", "RUN_001", "thread owner") is None
+
+    releaser = threading.Thread(target=dao.release_lock, args=(target,))
+    releaser.start()
+    releaser.join(timeout=1)
+
+    assert dao.acquire_lock(target, "second", "RUN_002", "must remain blocked") is not None
+    dao.release_lock(target)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable")
+def test_fork_child_cannot_release_parent_generic_lock(isolated_dao):
+    target = isolated_dao / "outputs" / "CASE_009" / "thing.json"
+    assert dao.acquire_lock(target, "parent", "RUN_001", "parent owner") is None
+
+    child = os.fork()
+    if child == 0:
+        dao.release_lock(target)
+        os._exit(0)
+    _, status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+
+    assert dao.acquire_lock(target, "second", "RUN_002", "must remain blocked") is not None
+    dao.release_lock(target)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable")
+@pytest.mark.parametrize("family", ["generic", "owned", "anchored"])
+def test_fork_during_kernel_token_handoff_does_not_leak_ownership(
+    tmp_path: Path,
+    monkeypatch,
+    family: str,
+):
+    target = tmp_path / f"{family}.json"
+    child_ready_read, child_ready_write = os.pipe()
+    child_exit_read, child_exit_write = os.pipe()
+    child_pid: int | None = None
+    original_try_kernel_lock = dao._try_kernel_lock
+
+    def fork_after_kernel_bind(key: str):
+        nonlocal child_pid
+        token = original_try_kernel_lock(key)
+        if token is None:
+            return None
+        child_pid = os.fork()
+        if child_pid == 0:
+            os.close(child_ready_read)
+            os.close(child_exit_write)
+            os.write(child_ready_write, b"1")
+            os.read(child_exit_read, 1)
+            os._exit(0)
+        os.close(child_ready_write)
+        os.close(child_exit_read)
+        assert os.read(child_ready_read, 1) == b"1"
+        return token
+
+    def acquire():
+        if family == "generic":
+            existing = dao.acquire_lock(
+                target, "holder", "RUN_HANDOFF", "fork handoff"
+            )
+            return target if existing is None else None
+        if family == "owned":
+            owner, _ = dao.acquire_owned_lock(
+                target, "holder", "RUN_HANDOFF", "fork handoff"
+            )
+            return owner
+        owner, _ = dao.acquire_lock_beneath(
+            tmp_path,
+            target.name,
+            "holder",
+            "RUN_HANDOFF",
+            "fork handoff",
+        )
+        return owner
+
+    def release(owner) -> None:
+        if family == "generic":
+            dao.release_lock(owner)
+        elif family == "owned":
+            dao.release_owned_lock(owner)
+        else:
+            dao.release_lock_beneath(owner)
+
+    monkeypatch.setattr(dao, "_try_kernel_lock", fork_after_kernel_bind)
+    first_owner = acquire()
+    assert first_owner is not None
+    monkeypatch.setattr(dao, "_try_kernel_lock", original_try_kernel_lock)
+    release(first_owner)
+
+    second_owner = None
+    try:
+        second_owner = acquire()
+        assert second_owner is not None
+    finally:
+        if second_owner is not None:
+            release(second_owner)
+        os.write(child_exit_write, b"1")
+        if child_pid is not None:
+            os.waitpid(child_pid, 0)
+        os.close(child_ready_read)
+        os.close(child_exit_write)
+
+
+def test_generic_lock_release_never_unlinks_the_lock_path(
+    isolated_dao, monkeypatch
+):
+    target = isolated_dao / "outputs" / "CASE_009" / "thing.json"
+    assert dao.acquire_lock(target, "owner", "RUN_001", "synthetic") is None
+    monkeypatch.setattr(
+        Path,
+        "unlink",
+        lambda *_args, **_kwargs: pytest.fail(
+            "generic lock release must never unlink a pathname"
+        ),
+    )
+
+    dao.release_lock(target)
 
 
 def test_release_lock_tolerates_a_concurrent_release(isolated_dao):
@@ -200,10 +523,14 @@ def test_add_conflict_entry_requires_held_by_and_run_id_and_locks(isolated_dao, 
 
 
 def test_set_ledger_status_locks_across_the_whole_operation(isolated_dao, make_args):
+    entries = [{"file_name": "a.pdf", "classification": "raw", "review_status": "pending",
+                "reviewed_by": None, "reviewed_at": None, "rejection_reason": None}]
     dao.atomic_write_json(dao.source_ledger_path("CASE_009"), {
+        "ledger_version": "source_ledger.v0.4",
         "case_id": "CASE_009", "source_dir": "x", "created_at": dao.now_iso(), "updated_at": dao.now_iso(),
-        "files": [{"file_name": "a.pdf", "classification": "raw", "review_status": "pending",
-                   "reviewed_by": None, "reviewed_at": None, "rejection_reason": None}],
+        "files": entries,
+        "history_boundary": dao.make_history_boundary(entries, mode="native"),
+        "operations": [],
     })
     dao.acquire_lock(dao.source_ledger_path("CASE_009"), "someone-else", "RUN_OTHER", "holding")
 

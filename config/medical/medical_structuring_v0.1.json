@@ -1,0 +1,26 @@
+{
+  "schema_version": "medical_structuring_config.v0.1",
+  "config_version": "medical_structuring.v0.1",
+  "behavior_enabled": false,
+  "approval": null,
+  "enabled_case_types": [],
+  "enabled_document_roles": [],
+  "domains": [
+    { "code": "diagnosis", "label": "Diagnosis" },
+    { "code": "objective_evidence", "label": "Objective evidence" },
+    { "code": "treatment", "label": "Treatment" },
+    { "code": "clinical_course", "label": "Clinical course" },
+    { "code": "history_and_prognosis", "label": "History and prognosis" },
+    { "code": "function_and_disability_evidence", "label": "Function and disability evidence" },
+    { "code": "missing_evidence", "label": "Missing evidence" },
+    { "code": "context", "label": "Context" }
+  ],
+  "variable_kinds": [],
+  "importance_tiers": [
+    { "tier": "A", "description": "Core evidence for one explicitly identified medical issue." },
+    { "tier": "B", "description": "Supporting evidence whose importance depends on convergence for one issue." },
+    { "tier": "C", "description": "Context that cannot independently determine an issue or referral." }
+  ],
+  "units": [],
+  "quantity_rules": []
+}

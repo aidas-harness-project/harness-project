@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "medical_source_reinspection.schema.json",
+  "title": "Medical source reinspection record v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "source_reinspection_id": { "$ref": "medical_review_common.schema.json#/$defs/source_reinspection_id" },
+    "medical_variables_revision": { "$ref": "medical_review_common.schema.json#/$defs/medical_variables_revision" },
+    "performed": { "type": "boolean" },
+    "actor_or_process": { "type": "string", "minLength": 1 },
+    "performed_at": { "type": "string", "format": "date-time" },
+    "observation_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/observation_id" } },
+    "evidence_locator_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/evidence_locator_id" } },
+    "result": { "enum": ["resolved", "unresolved", "insufficient_source", "blocked_upstream"] },
+    "unresolved_reason": { "type": ["string", "null"], "minLength": 1 }
+  },
+  "required": ["source_reinspection_id", "medical_variables_revision", "performed", "actor_or_process", "performed_at", "observation_ids", "evidence_locator_ids", "result", "unresolved_reason"],
+  "allOf": [{
+    "if": { "properties": { "result": { "enum": ["unresolved", "insufficient_source", "blocked_upstream"] } }, "required": ["result"] },
+    "then": { "properties": { "unresolved_reason": { "type": "string", "minLength": 1 } } }
+  }]
+}

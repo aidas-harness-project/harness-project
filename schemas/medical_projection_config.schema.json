@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "medical_projection_config.schema.json",
+  "title": "Medical legacy projection configuration v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "medical_projection_config.v0.1" },
+    "config_version": { "type": "string", "pattern": "^medical_projection\\.v[0-9]+\\.[0-9]+$" },
+    "projection_enabled": { "type": "boolean" },
+    "approval": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "approved_by": { "type": "string", "minLength": 1 },
+            "authority_role": { "type": "string", "minLength": 1 },
+            "decision_record": { "type": "string", "minLength": 1 },
+            "approved_at": { "type": "string", "format": "date-time" },
+            "scope": { "type": "string", "minLength": 1 }
+          },
+          "required": ["approved_by", "authority_role", "decision_record", "approved_at", "scope"]
+        }
+      ]
+    },
+    "field_rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "rule_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "field_name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "variable_kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "value_type": { "enum": ["coded", "text", "temporal", "numeric", "quantity"] },
+          "value_path": { "type": "string", "pattern": "^[a-z_]+(\\.[a-z_]+)*$" },
+          "selection_strategy": { "const": "single_distinct_or_fail" },
+          "compatibility_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "review_required": { "type": "boolean" },
+          "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+        },
+        "required": ["rule_id", "field_name", "variable_kind", "value_type", "value_path", "selection_strategy", "compatibility_confidence", "review_required"],
+        "allOf": [
+          {
+            "if": { "properties": { "review_required": { "const": true } }, "required": ["review_required"] },
+            "then": { "required": ["reviewer_role"] }
+          }
+        ]
+      }
+    },
+    "primary_diagnosis_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rule_id": { "const": "legacy_document_character_priority" },
+        "enabled": { "type": "boolean" },
+        "reason_disabled": { "type": "string", "minLength": 1 }
+      },
+      "required": ["rule_id", "enabled"],
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": false } }, "required": ["enabled"] },
+          "then": { "required": ["reason_disabled"] }
+        }
+      ]
+    }
+  },
+  "required": ["schema_version", "config_version", "projection_enabled", "approval", "field_rules", "primary_diagnosis_rule"],
+  "allOf": [
+    {
+      "if": { "properties": { "projection_enabled": { "const": true } }, "required": ["projection_enabled"] },
+      "then": { "properties": { "approval": { "type": "object" }, "field_rules": { "minItems": 1 } } }
+    }
+  ]
+}

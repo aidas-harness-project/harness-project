@@ -75,7 +75,7 @@ export const STATIC_CASES = {
           "backup_path": null
         },
         {
-          "stage_name": "evaluation-v1",
+          "stage_name": "human_review_v1",
           "status": "pending",
           "started_at": null,
           "completed_at": null,
@@ -85,9 +85,9 @@ export const STATIC_CASES = {
       ],
       "human_input_status": [
         {
-          "stage_name": "evaluation-v1",
+          "stage_name": "human_review_v1",
           "status": "waiting",
-          "description": "awaiting expert review before evaluation may access ground truth (D1)",
+          "description": "awaiting human review before the future isolated Unit 11 handoff",
           "requested_at": "2026-07-10T15:05:00+09:00",
           "received_at": null
         }
@@ -95,6 +95,7 @@ export const STATIC_CASES = {
     },
     "ledgers": {
       "source_ledger": {
+        "ledger_version": "source_ledger.v0.4",
         "case_id": "CASE_001",
         "source_dir": "source-cases/후유장해 케이스",
         "created_at": "2026-07-10T15:00:00+09:00",
@@ -116,13 +117,45 @@ export const STATIC_CASES = {
             "reviewed_at": "2026-07-10T15:00:30+09:00",
             "rejection_reason": null
           }
-        ]
+        ],
+        "history_boundary": {
+          "mode": "legacy_snapshot",
+          "established_at": "2026-07-10T15:00:30+09:00",
+          "baseline_sha256": "35df778bed663d681587be5238d10d066a4df86989a9bc345530bc07d69c83eb",
+          "baseline_state": [
+            {
+              "file_name": "배상-상완골 근위부 골절OP (김태윤) - 고객정보 삭제.pdf",
+              "classification": "raw",
+              "review_status": "approved",
+              "reviewed_by": "김태윤",
+              "reviewed_at": "2026-07-10T15:00:30+09:00",
+              "rejection_reason": null
+            },
+            {
+              "file_name": "배상 한화손보 손해사정서 - 고객정보 삭제.pdf",
+              "classification": "ground_truth",
+              "review_status": "approved",
+              "reviewed_by": "김태윤",
+              "reviewed_at": "2026-07-10T15:00:30+09:00",
+              "rejection_reason": null
+            }
+          ]
+        },
+        "operations": []
       },
       "conflict_ledger": {
+        "ledger_version": "conflict_ledger.v0.3",
         "case_id": "CASE_001",
         "created_at": "2026-07-10T15:00:00+09:00",
         "updated_at": "2026-07-10T15:00:00+09:00",
-        "conflicts": []
+        "conflicts": [],
+        "history_boundary": {
+          "mode": "native",
+          "established_at": "2026-07-10T15:00:00+09:00",
+          "baseline_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "baseline_state": []
+        },
+        "operations": []
       }
     },
     "contracts": {
@@ -320,15 +353,6 @@ export const STATIC_CASES = {
           "단정적 법률/의료 표현 없음."
         ]
       },
-      "evaluation_result.json": {
-        "case_id": "CASE_001",
-        "component": "evaluation",
-        "status": "partial",
-        "confidence": null,
-        "review_required": true,
-        "reviewer_role": "손해사정사",
-        "note": "전문가 검수 대기 중 -- expert_review.json 미제출로 평가 보류 (P7)."
-      }
     },
     "reports": {
       "draft_report_v1.md": {
