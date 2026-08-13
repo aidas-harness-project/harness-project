@@ -84,7 +84,7 @@ _ALLOWED_ATTRS: dict[str, frozenset[str]] = {
     "provider": frozenset({
         "provider_name", "model_name", "prompt_version", "input_chars",
         "input_images", "output_chars", "timeout_s", "attempts",
-        "retry_reason_code", "structured", "queue_wait_s",
+        "retry_reason_code", "structured", "queue_wait_s", "unit_hash",
     }),
     "lock": frozenset({
         "lock_kind", "wait_s", "poll_count", "acquired", "held_s",
@@ -97,11 +97,11 @@ _ALLOWED_ATTRS: dict[str, frozenset[str]] = {
     }),
     "io": frozenset({
         "bytes_in", "bytes_out", "page_count", "exit_code", "startup_s",
-        "hit_count", "documents_searched",
+        "hit_count", "documents_searched", "unit_hash",
     }),
     "compute": frozenset({
         "worker_count", "observed_max_concurrency", "items",
-        "cache_hits", "cache_misses",
+        "cache_hits", "cache_misses", "unit_hash",
     }),
     "human_wait": frozenset({
         "gate_kind", "waited_s",
@@ -126,6 +126,7 @@ _ENUM_ATTRS = frozenset({
     "provider_name", "model_name", "prompt_version", "retry_reason_code",
     "lock_kind", "schema_name", "argv0", "subcommand", "gate_kind",
     "marker_kind", "stage_name", "attempt_outcome",
+    "unit_hash",
 })
 _ENUM_MAX_LEN = 64
 _ENUM_EXTRA_CHARS = frozenset("._-:/")

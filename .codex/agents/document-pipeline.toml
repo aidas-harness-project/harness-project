@@ -140,13 +140,24 @@ and a gate taken every time is a gate that gets rubber-stamped rather than
 read. The raw fallback still exists for a document that genuinely has no
 redacted layer; it is now reached by exception.
 
-Why this exists rather than you invoking the six tools in sequence: **measured
-on CASE_911, that sequence cost 897s of which ~510s (57%) was round trips
-between tool calls**, not provider work and not tool startup (a `dao.py`
-subprocess is 0.51s; the gaps between spans ran 20-250s). Re-running the same
-phases through this driver took 79s, of which 68.2s (86%) is provider calls.
-Every step it performs is stated as a RULE in this document, not as a
-judgement, so there was nothing for a model to decide between them.
+Why this exists rather than you invoking the six tools in sequence: every step
+it performs is stated as a RULE in this document, not as a judgement, so there
+is nothing for a model to decide between them, and the four real decisions stay
+explicit human gates (below). That is the standing reason Stage 2 is driven from
+code — deterministic checkpoint control, with its genuine gates preserved.
+
+**Do not cite an exact Stage 2 speedup ratio.** Earlier revisions of this
+document quoted a `547s`/`897s` agent-led figure against a `79s` driver figure,
+a `6.9x` ratio, and `~510s` of "round trips between tool calls". Those are a
+**historical observation, not reproducible from retained timing records**:
+CASE_911 does record a real closed agent-led `document_processing` attempt of
+897.4s (`_run_state.json` and its `_timing_summary.json` agree), but no
+surviving trace holds a closed, cold, input-equivalent driver arm to compare it
+against, and per-decision-round timing is not recoverable because no
+dispatch-boundary instrumentation exists. Treat the 897.4s attempt as the only
+retained figure, and do not present any agent-versus-driver ratio as a measured
+result. A future performance claim requires a controlled cold A/B plus
+dispatch-boundary instrumentation.
 
 **The four real decisions in Stage 2 are still yours or a human's, and the
 driver never makes them.** It stops with `status: blocked_gate` and names the

@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "value"],
+  "properties": {
+    "ok": {"type": "boolean"},
+    "value": {"type": "string", "const": "provider-smoke"}
+  }
+}

@@ -124,6 +124,23 @@ def test_overlapping_stage_attempts_fail_closed_for_tool_attribution():
         assert attempt["observed_tool_overlap_s"] is None
         assert attempt["unattributed_active_s"] is None
 
+    metrics = summary["closed_attempt_metrics"]
+    assert metrics["closed_attempt_active_wall_sum_s"] == pytest.approx(80.0)
+    assert metrics["closed_attempt_raw_wall_union_s"] == pytest.approx(50.0)
+    # No run-state record was supplied, so both markers being paired is enough.
+    assert metrics["closed_attempt_union_partial"] is False
+
+
+def test_dropped_trace_line_marks_closed_attempt_union_partial():
+    summary = trace_aggregate.summarize(
+        [_start("claim_analysis", 1, 0), _end("claim_analysis", 1, 10)],
+        case_id="CASE_999", run_id="RUN_20260810_001",
+        generated_at=BASE.isoformat(), dropped_span_lines=1, shard_count=1,
+    )
+
+    assert summary["stage_coverage"]["coverage_complete"] is True
+    assert summary["closed_attempt_metrics"]["closed_attempt_union_partial"] is True
+
 
 @pytest.mark.parametrize(
     ("spans", "expected"),
@@ -143,6 +160,7 @@ def test_non_unique_or_invalid_marker_pairs_never_invent_duration(spans, expecte
     assert attempt["raw_wall_s"] is None
     assert attempt["active_wall_s"] is None
     assert attempt["unattributed_active_s"] is None
+    assert _summary(spans)["closed_attempt_metrics"]["closed_attempt_union_partial"] is True
 
 
 def test_run_state_reconciliation_reports_missing_attempt_but_not_skipped_stage():

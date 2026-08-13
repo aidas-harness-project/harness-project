@@ -116,12 +116,27 @@ run-state marker timestamps.
 document-pipeline --run-id RUN_ID --provider claude-cli`, which performs every
 mechanical step (checkpoint 1 → checkpoint 2 → segmentation → child
 classification → child redaction → chunking → contract write) and stops at the
-four real gates. Measured on CASE_911, driving those steps by dispatching the
-agent per step cost 897s of which ~510s (57%) was model round trips between
-tool calls; the same phases through the driver took 79s, 86% of it provider
-calls. Do not ask an agent to invoke the individual checkpoint tools in
-sequence — that is the serialization this removes. The driver never moves a
-run-state marker: `update-run-state` and `finalize-stage` stay yours (T13).
+four real gates. Stage 2 is driven from code because its checkpoint control is
+deterministic and its real human gates stay explicit. Do not ask an agent to
+invoke the individual checkpoint tools in sequence — that is the serialization
+this removes. The driver never moves a run-state marker: `update-run-state` and
+`finalize-stage` stay yours (T13).
+
+**Do not cite an exact Stage 2 speedup ratio.** Earlier revisions of this skill
+quoted `897s` agent-led against `79s` driven, with `~510s` of model round trips.
+That is a **historical observation, not reproducible from retained timing
+records**: CASE_911's closed agent-led `document_processing` attempt of 897.4s is
+real and DAO-verifiable, but no retained trace provides a closed, cold,
+input-equivalent driver arm, and no dispatch-boundary instrumentation exists to
+recover per-decision-round timing. A future performance claim requires a
+controlled cold A/B and that instrumentation.
+
+**Policy UID preflight runs before its attempt, not inside it.** Before opening
+`policy_clause_processing`, dispatch `python tools/run_policy_preflight.py
+CASE_ID --held-by orchestrator --run-id RUN_ID`. It performs only the existing
+digest/UID-enable DAO sequence for in-scope noncanonical policy documents and
+may invalidate stale artifacts while no policy attempt is open. A nonzero
+result is a blocked precondition: do not open or dispatch the policy stage.
 
 **Reducing P8 for a throughput run is YOUR decision, never an agent's.**
 Stage 2's cost is dominated by dual-read OCR (the corpus is overwhelmingly
@@ -222,6 +237,16 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
 
 `denial-response` is **not** a numbered Phase 1 stage — it's dependency-triggered. It runs whenever a flagged insurer-response document's processed text (from stage 2) is ready, whether that happens to be during Phase 1 (closed-case packs that bundle the insurer notice from the start) or later. Same agent, same mechanism, no phase-based scheduling exception needed.
 
+**Readiness lanes:** Phase labels do not serialize graph-independent work. After
+document processing, policy preflight → `policy_clause_processing` and an
+eligible `denial_response` may be dispatched concurrently, after separate
+preflights and T13 attempt opens. `denial_validation` starts as soon as both
+`denial_response` and `consistency_check` pass; it may overlap the independent
+v1 draft/critic lane. Do not open publishable `screening_report` while an
+insurer-response input exists but `denial_reason_result.json` is absent. Each
+concurrent member retains its own locks, attempt boundary, result handling, and
+downstream gate; a phase label is never a reason to delay a ready stage.
+
 **Claim-analysis medical gate**: after the agent publishes its evidence-derived candidate with `write-medical-variables`, do not mark `claim_analysis` passed or call `snapshot-backup` until `python tools/dao.py check-medical-reviews-clear CASE_ID` succeeds. The DAO also rejects both transitions without clearance. The orchestrator does not open review items, choose referral policy, or stand in for a human decision.
 
 **Between stage 9 and the external handoff**: once `critic` passes, call `dao.py request-expert-review CASE_ID {v1|v2}` to mark `human_input_status: waiting` (P7) and hand the reviewed draft + `critic_result_v{version}.json` to a genuine human reviewer. Once validated human-owned review content exists, the human-only `dao.py mark-human-review-complete CASE_ID {v1|v2} --reviewer NAME` records the future Unit 11 handoff prerequisite. It does not enable local Evaluation or ground-truth access.
@@ -229,6 +254,10 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
 ## Phase 2 — insurer denial/reduction response
 
 Only two genuinely new stages — everything else is Phase 1's agents reused on new input.
+
+`draft_report_v2` is a strict join: `draft_report_v1`, `critic_v1`, and
+`denial_validation` must all be passed. The critic dependency is correctness,
+not a reason to delay the earlier denial-validation dispatch.
 
 | # | Stage | Agent | Internal checkpoints |
 |---|---|---|---|
@@ -243,7 +272,7 @@ Only two genuinely new stages — everything else is Phase 1's agents reused on 
 
 | Situation | Response |
 |---|---|
-| Schema validation fails twice (P4) | Halt, present ignore-and-proceed / retry-N-times / fix-manually to the user |
+| Schema validation fails twice (P4) | Halt, present retry-N-times / fix-manually / abandon-run to the user |
 | Stage returns `partial` or fails (P9) | Close the current attempt with `--attempt-outcome partial` or `failed`, then retry from its last internal checkpoint up to 3 explicit dispatch attempts; after 3, halt for user audit |
 | Conflict-ledger has any `pending` entry (P6) | Halt before dispatching the next stage, list all pending entries |
 | Extraction cross-validation disagrees (P8) | Halt immediately, no tolerance threshold, even for one field on one document |

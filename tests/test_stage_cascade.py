@@ -74,6 +74,13 @@ def test_draft_v2_cannot_start_without_denial_validation():
     assert any("'denial_validation' is absent" in b for b in blockers), blockers
 
 
+def test_draft_v2_cannot_start_without_critic_v1():
+    blockers = sd.check_dependencies(
+        "draft_report_v2", "in_progress",
+        _state(_stage("draft_report_v1"), _stage("denial_validation")))
+    assert any("'critic_v1' is absent" in b for b in blockers), blockers
+
+
 def test_evaluation_cannot_start_without_the_critic_pass():
     blockers = sd.check_dependencies(
         "evaluation", "in_progress", _state(_stage("draft_report_v1")),

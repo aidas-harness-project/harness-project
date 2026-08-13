@@ -96,6 +96,17 @@
       "additionalProperties": { "$ref": "#/$defs/stage_rollup" }
     },
     "stage_coverage": { "$ref": "#/$defs/stage_coverage" },
+    "closed_attempt_metrics": {
+      "type": "object",
+      "description": "Explicitly separates the sum of closed stage-attempt active walls from their raw-wall interval union. Neither is whole-run elapsed when coverage is partial.",
+      "properties": {
+        "closed_attempt_active_wall_sum_s": { "type": "number", "minimum": 0 },
+        "closed_attempt_raw_wall_union_s": { "type": "number", "minimum": 0 },
+        "closed_attempt_union_partial": { "type": "boolean" }
+      },
+      "required": ["closed_attempt_active_wall_sum_s", "closed_attempt_raw_wall_union_s", "closed_attempt_union_partial"],
+      "additionalProperties": false
+    },
     "worker_config": {
       "type": "object",
       "description": "Configured worker counts observed in pool spans, keyed by pool name.",

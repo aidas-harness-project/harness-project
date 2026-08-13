@@ -171,6 +171,43 @@ def compare_text_timeout(env: Mapping[str, str] | None = None) -> int:
     except ValueError:
         return _COMPARE_TEXT_DEFAULT_TIMEOUT_SECONDS
     return value if value > 0 else _COMPARE_TEXT_DEFAULT_TIMEOUT_SECONDS
+
+
+# analyze_text_structured is NOT compare_text, and sharing compare's 60s budget
+# was a real defect: V4a's claim-analysis checkpoint-1 driver timed out on 3 of
+# 17 documents because extracting facts from a full document is a longer job
+# than deciding whether two OCR transcriptions agree. 180s matches the budget
+# the image-analysis paths already use for comparable per-document work.
+# Deliberately a SEPARATE resolver and env var: raising the OCR comparison
+# timeout to fix fact extraction would slow every P8 disagreement path too.
+_STRUCTURED_TEXT_DEFAULT_TIMEOUT_SECONDS = 180
+_STRUCTURED_TEXT_TIMEOUT_ENV = "HARNESS_STRUCTURED_TEXT_TIMEOUT"
+# An upper bound on the accepted override. Without it a fat-fingered value
+# (a millisecond figure pasted into a seconds field) becomes a child that
+# effectively never times out, which is indistinguishable from a hang.
+_STRUCTURED_TEXT_MAX_TIMEOUT_SECONDS = 3600
+
+
+def structured_text_timeout(env: Mapping[str, str] | None = None) -> int:
+    """Resolve analyze_text_structured's subprocess timeout.
+
+    Same fail-safe contract as compare_text_timeout -- malformed, zero, and
+    negative values fall back to the default rather than raising, so a bad
+    config value cannot turn every structured analysis into a hard failure.
+    Values above _STRUCTURED_TEXT_MAX_TIMEOUT_SECONDS also fall back, since an
+    implausibly large timeout hides a hang instead of surfacing it.
+    """
+    source = os.environ if env is None else env
+    raw = str(source.get(_STRUCTURED_TEXT_TIMEOUT_ENV, "")).strip()
+    if not raw:
+        return _STRUCTURED_TEXT_DEFAULT_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _STRUCTURED_TEXT_DEFAULT_TIMEOUT_SECONDS
+    if value <= 0 or value > _STRUCTURED_TEXT_MAX_TIMEOUT_SECONDS:
+        return _STRUCTURED_TEXT_DEFAULT_TIMEOUT_SECONDS
+    return value
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 # ---------------------------------------------------------------- T6: in-flight cap --
@@ -353,6 +390,56 @@ def _require_scan_images(image_paths) -> None:
             "scan_intake_content requires page images -- the D2 content check is a "
             "vision scan and cannot run blind (got no image_paths)"
         )
+
+
+# Keywords claude-cli's --json-schema validator (ajv, strict mode) refuses.
+# Verified against CLI 2.1.231: each one aborts argv construction with
+# `--json-schema is not a valid JSON Schema`, before any provider call.
+#   $schema          -- `no schema with key or ref ".../draft/2020-12/schema"`
+#   dependentRequired -- `strict mode: unknown keyword`
+# These are valid 2020-12 and MUST stay in the on-disk schema files, which are
+# what validate_instance() enforces. This set is only about what that one CLI
+# flag will parse.
+_CLI_SCHEMA_UNSUPPORTED_KEYWORDS = frozenset({"$schema", "dependentRequired"})
+
+# Claude CLI accepts its JSON Schema only as an inline argv value. Keep a
+# deliberately conservative cap well below Windows CreateProcess's 32,767
+# character command-line limit: the command path, flags, quoting, and future
+# flags also consume that budget. Drivers with richer public contracts must
+# send a compact transport schema and retain their full local validation gate.
+CLAUDE_CLI_SCHEMA_MAX_CHARS = 8_000
+
+
+def _cli_json_schema(output_schema: Mapping[str, Any]) -> dict[str, Any]:
+    """The schema as claude-cli's --json-schema validator will accept it.
+
+    Strips, recursively, the keywords in _CLI_SCHEMA_UNSUPPORTED_KEYWORDS. Two
+    different losses, worth keeping distinct:
+
+    `$schema` is a meta-schema declaration -- removing it changes nothing about
+    what instances are valid.
+
+    `dependentRequired` is a REAL constraint, and dropping it genuinely weakens
+    the provider-side pre-check: the CLI will no longer reject a response that
+    violates it. That is deliberate and bounded -- the authoritative gate is our
+    own validate_instance() against the UNMODIFIED on-disk schema, which every
+    candidate still passes through before any contract write. So a violating
+    response is still caught, just by us rather than by the CLI (later, not
+    never). Nothing reaches a governed file on the strength of this relaxation.
+
+    Prefer expressing a constraint in an ajv-strict-compatible form over adding
+    to the strip set: anything added here stops being enforced at the provider
+    boundary for every caller.
+    """
+    def prune(node: Any) -> Any:
+        if isinstance(node, Mapping):
+            return {k: prune(v) for k, v in node.items()
+                    if k not in _CLI_SCHEMA_UNSUPPORTED_KEYWORDS}
+        if isinstance(node, list):
+            return [prune(v) for v in node]
+        return node
+
+    return prune(dict(output_schema))
 
 
 def _child_safe_env(*, keep_prefixes: Sequence[str]) -> dict[str, str]:
@@ -545,6 +632,22 @@ class BaseProvider:
     ) -> ProviderResult:
         raise NotImplementedError
 
+    def analyze_text_structured(
+        self,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        """Return one native schema-constrained text-analysis result.
+
+        This is distinct from ``compare_text``: drivers use it for candidate
+        extraction, while comparison keeps its domain-specific prompts and
+        timeout history. Implementations return the parsed mapping in
+        ``structured_output`` and a stable JSON representation in ``text``.
+        Domain correction remains the driver's one P4 correction attempt.
+        """
+        raise NotImplementedError
+
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         raise NotImplementedError
 
@@ -585,16 +688,33 @@ class ClaudeCliProvider(BaseProvider):
         # fabricated text in the trusted processed layer. This applies to every
         # claude-cli call through this provider (transcribe/compare/classify/scan),
         # not just OCR -- the same context-inheritance risk exists for all of them.
-        cmd = [self.command, "-p", prompt, "--safe-mode"]
+        # The prompt goes over STDIN, never argv. Windows CreateProcess caps a
+        # command line at 32,767 chars, and V4a's consolidation call built a
+        # 94,063-char argv (61,911 prompt + 32,152 schema) -- CreateProcess
+        # failed with ERROR_FILE_NOT_FOUND, which Python raises as
+        # FileNotFoundError, which this provider reported as "claude-cli
+        # command not found" for a binary that plainly existed. Bare `-p` with
+        # the prompt on stdin is the CLI's own documented form, so this costs
+        # nothing and removes the prompt from the size budget entirely.
+        cmd = [self.command, "-p", "--safe-mode"]
         if output_schema is not None:
             # --output-format json alone only wraps arbitrary assistant prose in
             # a JSON envelope. --json-schema is the part that requires a
             # validated value in the envelope's structured_output field.
+            cli_schema = json.dumps(
+                _cli_json_schema(output_schema), ensure_ascii=False, separators=(",", ":"),
+            )
+            if len(cli_schema) > CLAUDE_CLI_SCHEMA_MAX_CHARS:
+                raise ProviderExecutionError(
+                    "claude-cli structured-output schema is too large for inline argv "
+                    f"({len(cli_schema)} chars; limit {CLAUDE_CLI_SCHEMA_MAX_CHARS}). "
+                    "Use a compact transport schema and keep the full schema for local validation."
+                )
             cmd.extend([
                 "--output-format",
                 "json",
                 "--json-schema",
-                json.dumps(output_schema, ensure_ascii=False, separators=(",", ":")),
+                cli_schema,
             ])
         # Pass the configured model through. Without this the model recorded in
         # provenance metadata is a lie (the CLI silently uses its own default),
@@ -637,12 +757,13 @@ class ClaudeCliProvider(BaseProvider):
         max_attempts = 1 if output_schema is not None else _CLAUDE_CLI_MAX_ATTEMPTS
         for attempt in range(max_attempts):
             try:
-                # stdin=DEVNULL: without it the child inherits the parent's
-                # stdin and blocks ~3s waiting for input it will never get
-                # ("Warning: no stdin data received in 3s..."), which both
-                # slows every call and, on a live pipe (PowerShell background),
-                # intermittently returns non-zero. Closing stdin is exactly
-                # what the CLI's own warning recommends ("< /dev/null").
+                # input=prompt: the prompt is DELIVERED here, not in argv (see
+                # the cmd construction above for the CreateProcess limit that
+                # forces this). This also supersedes the former stdin=DEVNULL:
+                # that existed to stop the child blocking ~3s on stdin it would
+                # never get, and a child that receives its prompt on stdin --
+                # then sees EOF as subprocess closes the pipe -- never waits at
+                # all. The two are mutually exclusive; passing both raises.
                 #
                 # encoding/errors are set explicitly: the child CLI emits
                 # UTF-8, but on a cp949-locale host bare text=True decodes with
@@ -654,13 +775,13 @@ class ClaudeCliProvider(BaseProvider):
                 with provider_slot("claude-cli"):
                     result = subprocess.run(
                         cmd,
+                        input=prompt,
                         capture_output=True,
                         text=True,
                         encoding="utf-8",
                         errors="replace",
                         timeout=timeout,
                         cwd=cwd,
-                        stdin=subprocess.DEVNULL,
                         env=run_env,
                     )
             except FileNotFoundError as exc:
@@ -777,6 +898,20 @@ class ClaudeCliProvider(BaseProvider):
                          timeout=compare_text_timeout(),
                          output_schema=output_schema)
 
+    def analyze_text_structured(
+        self,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        return self._run(
+            prompt,
+            prompt_version=prompt_version,
+            allowed_read=False,
+            timeout=structured_text_timeout(),
+            output_schema=output_schema,
+        )
+
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, allowed_read=False, timeout=120)
 
@@ -825,10 +960,12 @@ class CodexCliProvider(BaseProvider):
         prompt_version: str,
         timeout: int,
         image_paths: Sequence[Path] | None = None,
+        output_schema: Mapping[str, Any] | None = None,
     ) -> ProviderResult:
         scratch_dir = self.root / "_ocr_scratch"
         scratch_dir.mkdir(parents=True, exist_ok=True)
         output_path: Path | None = None
+        schema_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
                 prefix="codex-last-message-",
@@ -838,11 +975,30 @@ class CodexCliProvider(BaseProvider):
             ) as output_file:
                 output_path = Path(output_file.name)
 
+            if output_schema is not None:
+                # Codex takes a schema FILE, unlike Claude's inline
+                # --json-schema value. Closing this file before child launch
+                # is required on Windows. The tool-owned scratch directory is
+                # outside governed case data and neither path is persisted.
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    prefix="codex-output-schema-",
+                    suffix=".json",
+                    dir=scratch_dir,
+                    delete=False,
+                ) as schema_file:
+                    json.dump(output_schema, schema_file, ensure_ascii=False,
+                              separators=(",", ":"))
+                    schema_path = Path(schema_file.name)
+
             cmd = [self.command, "exec", prompt, "--skip-git-repo-check", "--sandbox", "read-only"]
             if self.model_name != "codex-cli":
                 cmd.extend(["--model", self.model_name])
             for image_path in image_paths or ():
                 cmd.extend(["--image", str(image_path)])
+            if schema_path is not None:
+                cmd.extend(["--output-schema", str(schema_path)])
             cmd.extend(["--output-last-message", str(output_path)])
 
             # Start from a secret-scrubbed environment, then re-add only Codex's
@@ -868,7 +1024,11 @@ class CodexCliProvider(BaseProvider):
             # redaction.py's own checks, so no tolerance is introduced.
             last_exc: ProviderExecutionError | None = None
             last_detail = ""
-            for attempt in range(_CLAUDE_CLI_MAX_ATTEMPTS):
+            # A native schema call is either transport-valid or the driver's
+            # one correction case. Retrying a malformed semantic response here
+            # would silently exceed P4's correction boundary.
+            max_attempts = 1 if output_schema is not None else _CLAUDE_CLI_MAX_ATTEMPTS
+            for attempt in range(max_attempts):
                 try:
                     with provider_slot("codex-cli"):
                         result = subprocess.run(
@@ -907,7 +1067,25 @@ class CodexCliProvider(BaseProvider):
                         # immediately, since an empty last-message file is the
                         # shape a truncated/aborted run takes.
                         if text:
-                            return self._result(text, prompt_version, raw_metadata)
+                            if output_schema is None:
+                                return self._result(text, prompt_version, raw_metadata)
+                            try:
+                                structured = json.loads(text)
+                            except json.JSONDecodeError as exc:
+                                raise ProviderExecutionError(
+                                    "codex-cli structured-output mode returned non-JSON output"
+                                ) from exc
+                            if not isinstance(structured, dict):
+                                raise ProviderExecutionError(
+                                    "codex-cli structured-output mode returned a non-object value"
+                                )
+                            raw_metadata["structured_output_native"] = True
+                            return self._result(
+                                json.dumps(structured, ensure_ascii=False),
+                                prompt_version,
+                                raw_metadata,
+                                structured_output=structured,
+                            )
                         last_exc = ProviderExecutionError("codex-cli returned empty output")
                         last_detail = ""
                     else:
@@ -916,7 +1094,7 @@ class CodexCliProvider(BaseProvider):
                         last_exc = ProviderExecutionError(f"codex-cli call failed: {detail}")
                         last_detail = detail
 
-                if attempt < _CLAUDE_CLI_MAX_ATTEMPTS - 1:
+                if attempt < max_attempts - 1:
                     # Same full-jitter exponential curve as claude-cli, and for
                     # the same reason: page-level concurrency means several
                     # calls fail against a shared limit at nearly the same
@@ -928,6 +1106,8 @@ class CodexCliProvider(BaseProvider):
         finally:
             if output_path is not None:
                 output_path.unlink(missing_ok=True)
+            if schema_path is not None:
+                schema_path.unlink(missing_ok=True)
 
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(
@@ -941,14 +1121,21 @@ class CodexCliProvider(BaseProvider):
         self, prompt: str, prompt_version: str,
         output_schema: Mapping[str, Any] | None = None,
     ) -> ProviderResult:
-        # codex-cli has no native structured-output flag (unlike claude-cli's
-        # --json-schema) -- output_schema is accepted for interface parity
-        # with the other providers but cannot be enforced here. A caller
-        # relying on strict-JSON parsing over this provider still needs its
-        # own parse-with-one-correction handling; this is not silently
-        # equivalent to a provider that actually enforces the schema.
         return self._run(prompt, prompt_version=prompt_version,
-                         timeout=compare_text_timeout())
+                         timeout=compare_text_timeout(), output_schema=output_schema)
+
+    def analyze_text_structured(
+        self,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        return self._run(
+            prompt,
+            prompt_version=prompt_version,
+            timeout=compare_text_timeout(),
+            output_schema=output_schema,
+        )
 
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, timeout=120)
@@ -1176,6 +1363,32 @@ class FixtureProvider(BaseProvider):
         output_schema: Mapping[str, Any] | None = None,
     ) -> ProviderResult:
         return self._response("compare_text", prompt_version)
+
+    def analyze_text_structured(
+        self,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        """Return fixture JSON through the same structured-result seam.
+
+        Fixture is used by driver tests and must exercise the native-output
+        consumer path rather than silently falling back to BaseProvider's
+        NotImplementedError.  The fixture deliberately does not validate the
+        schema: production providers enforce that boundary, while tests can
+        supply malformed JSON to cover driver refusal behaviour.
+        """
+        result = self._response("analyze_text_structured", prompt_version)
+        try:
+            parsed = json.loads(result.text)
+        except json.JSONDecodeError as exc:
+            raise ProviderExecutionError("fixture structured response is not JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ProviderExecutionError("fixture structured response must be a JSON object")
+        return self._result(
+            json.dumps(parsed, ensure_ascii=False), prompt_version,
+            result.raw_metadata, structured_output=parsed,
+        )
 
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._response("classify_document", prompt_version)

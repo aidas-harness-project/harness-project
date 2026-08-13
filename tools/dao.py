@@ -823,6 +823,307 @@ def cmd_read_document_text(args):
     return 1
 
 
+def _redacted_bundle_document(case_id: str, manifest_entry: dict) -> dict:
+    """Return one driver-safe redacted document payload.
+
+    This helper is deliberately DAO-local: downstream drivers receive content
+    and revision binding, never a processed-layer pathname they could reopen.
+    """
+    doc_id = manifest_entry["document_id"]
+    disposition = manifest_entry.get("downstream_disposition")
+    if disposition == "expert_review_only":
+        raise ValueError(
+            f"NON_TEXT_EXPERT_REVIEW_ONLY: {doc_id} has no automated text input")
+    if disposition == "superseded_bundle":
+        raise ValueError(
+            f"SUPERSEDED_BUNDLE: {doc_id} is provenance-only; read its active children")
+    redacted = processed_dir(case_id, doc_id) / "redacted_text.md"
+    if not redacted.exists():
+        raise ValueError(f"NOT_EXTRACTED: {doc_id} has no redacted text")
+    try:
+        source = redacted.read_text(encoding="utf-8")
+        pages = _cross_contract.split_pages(source)
+    except Exception as exc:
+        raise ValueError(f"UNREADABLE: {doc_id}: {exc}") from exc
+    revision = revision_entry_for(case_id, doc_id) or {}
+    return {
+        "document_id": doc_id,
+        # These are provenance fields, not paths. Denial-response uses them to
+        # join split siblings before deciding which bundle to send to a worker.
+        "source_file_name": manifest_entry.get("source_file_name") or manifest_entry.get("file_name"),
+        "source_page_start": manifest_entry.get("source_page_start"),
+        "source_page_end": manifest_entry.get("source_page_end"),
+        "document_type": manifest_entry.get("document_type"),
+        "source_text_revision_sha256": revision.get("current_revision_sha256"),
+        "redacted_text_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        "pages": [
+            {"page": page, "text": pages[page]}
+            for page in sorted(pages)
+        ],
+    }
+
+
+def read_redacted_text_bundle_data(case_id: str, doc_ids: list[str]) -> dict:
+    """DAO-owned content bundle for drivers; never returns processed paths."""
+    if not doc_ids:
+        raise ValueError("at least one --doc-id is required")
+    if len(set(doc_ids)) != len(doc_ids):
+        raise ValueError("duplicate --doc-id is not permitted")
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        raise ValueError(f"NOT_FOUND: {case_id} has no document_manifest.json")
+    by_id = {entry.get("document_id"): entry for entry in manifest.get("documents", [])}
+    documents = []
+    for doc_id in doc_ids:
+        entry = by_id.get(doc_id)
+        if not isinstance(entry, dict):
+            raise ValueError(f"UNKNOWN_DOCUMENT: {doc_id} is not in document_manifest.json")
+        documents.append(_redacted_bundle_document(case_id, entry))
+    return {"case_id": case_id, "documents": documents}
+
+
+@traced_read("dao.read_redacted_text_bundle")
+def cmd_read_redacted_text_bundle(args):
+    try:
+        print(json.dumps(
+            read_redacted_text_bundle_data(args.case_id, args.doc_id),
+            ensure_ascii=False,
+        ))
+        return 0
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+
+
+def _verify_driver_reference(case_id: str, reference: dict,
+                             bundle_by_id: dict[str, dict]) -> dict:
+    if not isinstance(reference, dict):
+        raise ValueError("reference must be an object")
+    doc_id = reference.get("document_id")
+    page = reference.get("page")
+    quote = reference.get("quote")
+    if not isinstance(doc_id, str) or not doc_id:
+        raise ValueError("reference.document_id must be a non-empty string")
+    if not isinstance(page, int) or page < 1:
+        raise ValueError(f"{doc_id}: reference.page must be a positive integer")
+    if not isinstance(quote, str) or not quote.strip():
+        raise ValueError(f"{doc_id}: reference.quote must be non-empty")
+    document = bundle_by_id.get(doc_id)
+    if document is None:
+        raise ValueError(f"{doc_id}: reference document was not included in this bundle")
+    expected_revision = reference.get("source_text_revision_sha256")
+    actual_revision = document["source_text_revision_sha256"]
+    if expected_revision is not None and expected_revision != actual_revision:
+        raise ValueError(f"{doc_id}: source_text_revision_sha256 is stale")
+    expected_digest = reference.get("redacted_text_sha256")
+    if expected_digest is not None and expected_digest != document["redacted_text_sha256"]:
+        raise ValueError(f"{doc_id}: redacted_text_sha256 is stale")
+    page_text = next((item["text"] for item in document["pages"]
+                      if item["page"] == page), None)
+    if page_text is None:
+        raise ValueError(f"{doc_id}: page {page} is not present in processed text")
+    start = reference.get("start_char")
+    end = reference.get("end_char")
+    if (start is None) != (end is None):
+        raise ValueError(f"{doc_id}: start_char and end_char must be supplied together")
+    if start is not None:
+        if not isinstance(start, int) or not isinstance(end, int) or start < 0 or start >= end:
+            raise ValueError(f"{doc_id}: invalid start_char/end_char range")
+        if end > len(page_text) or page_text[start:end] != quote:
+            raise ValueError(f"{doc_id}: quote does not exactly match the claimed page range")
+    elif _cross_contract._normalize_ws(quote) not in _cross_contract._normalize_ws(page_text):
+        raise ValueError(f"{doc_id}: quote is not present on page {page}")
+    verified = {
+        "document_id": doc_id,
+        "page": page,
+        "quote": quote,
+        "source_text_revision_sha256": actual_revision,
+        "redacted_text_sha256": document["redacted_text_sha256"],
+    }
+    if start is not None:
+        verified.update({"start_char": start, "end_char": end})
+    return verified
+
+
+@traced_read("dao.verify_evidence_references")
+def cmd_verify_evidence_references(args):
+    try:
+        payload = json.loads(Path(args.references_file).read_text(encoding="utf-8"))
+        references = payload.get("references") if isinstance(payload, dict) else None
+        if not isinstance(references, list) or not references:
+            raise ValueError("references file must be an object with a non-empty references list")
+        doc_ids = []
+        for reference in references:
+            doc_id = reference.get("document_id") if isinstance(reference, dict) else None
+            if not isinstance(doc_id, str) or not doc_id:
+                raise ValueError("every reference must name document_id")
+            if doc_id not in doc_ids:
+                doc_ids.append(doc_id)
+        bundle = read_redacted_text_bundle_data(args.case_id, doc_ids)
+        documents = {document["document_id"]: document for document in bundle["documents"]}
+        # Preserve list order: callers can pair their candidate records with
+        # responses deterministically without using a synthetic identifier.
+        verified = [
+            _verify_driver_reference(args.case_id, reference, documents)
+            for reference in references
+        ]
+        print(json.dumps({"case_id": args.case_id, "verified_references": verified},
+                         ensure_ascii=False))
+        return 0
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"FAIL: {exc}")
+        return 1
+
+
+def _driver_receipt_path(case_id: str, stage: str, unit_id: str) -> Path:
+    if not stage_dependencies.is_known(stage):
+        raise ValueError(f"unknown canonical stage: {stage}")
+    _require_safe_id("unit_id", unit_id)
+    return _require_within(case_dir(case_id), "_driver_receipts", stage,
+                           f"{unit_id}.json")
+
+
+@traced_read("dao.read_driver_receipt")
+def cmd_read_driver_receipt(args):
+    try:
+        target = _driver_receipt_path(args.case_id, args.stage, args.unit_id)
+        if not target.exists():
+            print(f"NOT_FOUND: no driver receipt for {args.stage}/{args.unit_id}")
+            return 1
+        print(target.read_text(encoding="utf-8"))
+        return 0
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+
+
+def cmd_write_driver_receipt(args):
+    try:
+        target = _driver_receipt_path(args.case_id, args.stage, args.unit_id)
+        data = json.loads(Path(args.data_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    expected = {
+        "case_id": args.case_id,
+        "run_id": args.run_id,
+        "stage": args.stage,
+        "unit_id": args.unit_id,
+    }
+    if any(data.get(key) != value for key, value in expected.items()):
+        print("FAIL: receipt identity must match case_id/run_id/stage/unit-id arguments")
+        return 1
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id,
+        f"write driver receipt {args.stage}/{args.unit_id}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        errors = _schema_check(data, "driver_receipt.schema.json")
+        if errors:
+            print("FAIL: driver receipt schema validation errors:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
+        target.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(target, data)
+        print(f"PASS: wrote driver receipt {args.stage}/{args.unit_id}")
+        return 0
+    finally:
+        release_lock(target)
+
+
+def _driver_candidate_path(case_id: str, stage: str, unit_id: str,
+                           candidate_id: str) -> Path:
+    if not stage_dependencies.is_known(stage):
+        raise ValueError(f"unknown canonical stage: {stage}")
+    _require_safe_id("unit_id", unit_id)
+    _require_safe_id("candidate_id", candidate_id)
+    return _require_within(case_dir(case_id), "_driver_receipts", stage,
+                           unit_id, f"{candidate_id}.json")
+
+
+@traced_read("dao.read_driver_candidates")
+def cmd_read_driver_candidates(args):
+    """List every completed sub-unit of one driver stage unit.
+
+    Returned as a map keyed by candidate_id so a driver can decide reuse per
+    unit without opening a case directory itself. A missing directory is an
+    empty map, not an error: no unit has completed yet is the ordinary state
+    of a first run, and making it an error would force every caller to treat
+    a cold start as a failure.
+    """
+    try:
+        base = _require_within(case_dir(args.case_id), "_driver_receipts",
+                               args.stage, args.unit_id)
+        if not stage_dependencies.is_known(args.stage):
+            raise ValueError(f"unknown canonical stage: {args.stage}")
+        _require_safe_id("unit_id", args.unit_id)
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    candidates = {}
+    if base.is_dir():
+        for path in sorted(base.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"FAIL: unreadable driver candidate {path.name}: {exc}")
+                return 1
+            if not isinstance(data, dict) or data.get("candidate_id") != path.stem:
+                print(f"FAIL: driver candidate {path.name} does not match its filename")
+                return 1
+            candidates[path.stem] = data
+    print(json.dumps({"case_id": args.case_id, "stage": args.stage,
+                      "unit_id": args.unit_id, "candidates": candidates},
+                     ensure_ascii=False))
+    return 0
+
+
+def cmd_write_driver_candidate(args):
+    """Publish one completed sub-unit result, schema-validated and locked."""
+    try:
+        target = _driver_candidate_path(args.case_id, args.stage, args.unit_id,
+                                        args.candidate_id)
+        data = json.loads(Path(args.data_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    expected = {
+        "case_id": args.case_id,
+        "run_id": args.run_id,
+        "stage": args.stage,
+        "unit_id": args.unit_id,
+        "candidate_id": args.candidate_id,
+    }
+    if any(data.get(key) != value for key, value in expected.items()):
+        print("FAIL: candidate identity must match "
+              "case_id/run_id/stage/unit-id/candidate-id arguments")
+        return 1
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id,
+        f"write driver candidate {args.stage}/{args.unit_id}/{args.candidate_id}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        errors = _schema_check(data, "driver_candidate.schema.json")
+        if errors:
+            print("FAIL: driver candidate schema validation errors:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
+        target.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(target, data)
+        print(f"PASS: wrote driver candidate {args.stage}/{args.unit_id}/{args.candidate_id}")
+        return 0
+    finally:
+        release_lock(target)
+
+
 def _normalize_for_absence(text: str) -> str:
     """Fold away every difference that separates two spellings of one Korean term.
 
@@ -3332,7 +3633,9 @@ def _invalidate_stale_downstream(args, data: dict, target: Path) -> None:
 
 
 def cmd_write_contract(args):
-    if Path(args.filename).name in _PROTECTED_CONTRACT_FILES:
+    normalized_filename = str(args.filename).replace("\\", "/")
+    if (Path(args.filename).name in _PROTECTED_CONTRACT_FILES
+            or normalized_filename.startswith("_driver_receipts/")):
         print(f"FAIL: {args.filename} is DAO-owned and has no write-contract "
               "path -- it is issued only by the DAO command that derives it, "
               "so that a citing contract's reference cannot be satisfied by a "
@@ -4397,6 +4700,27 @@ def cmd_write_reviewed_draft(args):
 
 
 # ------------------------------------------------------------ src ledger --
+
+def make_history_boundary(files, *, mode: str):
+    """Make the canonical, lossless baseline binding for a source ledger.
+
+    The digest is over deterministic JSON of the exact entry list.  Callers
+    receive an independent JSON-shaped copy, so later ledger mutations cannot
+    retroactively change the history baseline this boundary attests to.
+    """
+    if mode not in {"native", "legacy_snapshot"}:
+        raise ValueError(f"unsupported source-ledger history mode: {mode!r}")
+    baseline_state = json.loads(json.dumps(
+        files, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    baseline_bytes = json.dumps(
+        baseline_state, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False).encode("utf-8")
+    return {
+        "mode": mode,
+        "established_at": now_iso(),
+        "baseline_sha256": hashlib.sha256(baseline_bytes).hexdigest(),
+        "baseline_state": baseline_state,
+    }
 
 def source_ledger_path(case_id: str) -> Path:
     return case_dir(case_id) / "_source_ledger.json"
@@ -5719,6 +6043,56 @@ def load_human_review_ledger(case_id: str) -> dict | None:
     return load_json(human_review_ledger_path(case_id))
 
 
+def record_source_digest(case_id, doc_id, held_by, run_id, expect=None):
+    """Record a registered source's digest and return a structured outcome.
+
+    This is an in-process DAO capability for transaction drivers.  The CLI
+    wrapper below remains the public interface and owns its existing output.
+    """
+    def outcome(success, *messages):
+        return {"success": success, "messages": list(messages),
+                "document_id": doc_id}
+
+    actual = registered_source_pdf_sha256(case_id, doc_id)
+    if actual is None:
+        return outcome(False, f"BLOCKED: no readable registered raw source for {doc_id} "
+                       "-- source_pdf_sha256 is derived from the file itself and cannot "
+                       "be recorded without it")
+    if expect and expect != actual:
+        return outcome(False, f"REFUSED: submitted digest {expect!r} does not match the "
+                       f"registered raw source ({actual!r}) -- the file this document "
+                       "was extracted from is not the file the case registered")
+
+    target = case_dir(case_id) / "document_manifest.json"
+    existing_lock = acquire_lock_blocking(
+        target, held_by, run_id, f"record source digest for {doc_id}")
+    if existing_lock is not None:
+        return outcome(False, f"LOCKED: held_by={existing_lock['held_by']} "
+                       f"run_id={existing_lock['run_id']}")
+    try:
+        manifest = json.loads(target.read_text(encoding="utf-8"))
+        entry = next((d for d in manifest["documents"]
+                      if d["document_id"] == doc_id), None)
+        if entry is None:
+            return outcome(False, f"FAIL: {doc_id} is not in document_manifest.json")
+        recorded = entry.get("source_pdf_sha256")
+        if recorded is not None and recorded != actual:
+            return outcome(False, f"REFUSED: {doc_id} already records "
+                           f"{recorded!r}; the registered file now hashes to {actual!r} "
+                           "-- an immutable raw source changed, which is a case-integrity "
+                           "problem, not a field to overwrite")
+        entry["source_pdf_sha256"] = actual
+        manifest["updated_at"] = now_iso()
+        errors = _schema_check(manifest, "document_manifest.schema.json")
+        if errors:
+            return outcome(False, "FAIL: manifest would be schema-invalid -- not written:",
+                           *(f"  - {error}" for error in errors))
+        atomic_write_json(target, manifest)
+        return outcome(True, f"PASS: {doc_id} source_pdf_sha256 = {actual}")
+    finally:
+        release_lock(target)
+
+
 def cmd_record_source_digest(args):
     """Record source_pdf_sha256 by hashing the registered raw file itself.
 
@@ -5728,56 +6102,15 @@ def cmd_record_source_digest(args):
     that disagrees with the file on disk is refused rather than recorded,
     since the disagreement is the finding.
     """
-    actual = registered_source_pdf_sha256(args.case_id, args.doc_id)
-    if actual is None:
-        print(f"BLOCKED: no readable registered raw source for {args.doc_id} "
-              "-- source_pdf_sha256 is derived from the file itself and cannot "
-              "be recorded without it")
-        return 1
-    if args.expect and args.expect != actual:
-        print(f"REFUSED: submitted digest {args.expect!r} does not match the "
-              f"registered raw source ({actual!r}) -- the file this document "
-              "was extracted from is not the file the case registered")
-        return 1
-
-    target = case_dir(args.case_id) / "document_manifest.json"
-    existing_lock = acquire_lock_blocking(
-        target, args.held_by, args.run_id,
-        f"record source digest for {args.doc_id}")
-    if existing_lock is not None:
-        print(f"LOCKED: held_by={existing_lock['held_by']} "
-              f"run_id={existing_lock['run_id']}")
-        return 1
-    try:
-        manifest = json.loads(target.read_text(encoding="utf-8"))
-        entry = next((d for d in manifest["documents"]
-                      if d["document_id"] == args.doc_id), None)
-        if entry is None:
-            print(f"FAIL: {args.doc_id} is not in document_manifest.json")
-            return 1
-        recorded = entry.get("source_pdf_sha256")
-        if recorded is not None and recorded != actual:
-            print(f"REFUSED: {args.doc_id} already records "
-                  f"{recorded!r}; the registered file now hashes to {actual!r} "
-                  "-- an immutable raw source changed, which is a case-integrity "
-                  "problem, not a field to overwrite")
-            return 1
-        entry["source_pdf_sha256"] = actual
-        manifest["updated_at"] = now_iso()
-        errors = _schema_check(manifest, "document_manifest.schema.json")
-        if errors:
-            print(f"FAIL: manifest would be schema-invalid -- not written:")
-            for error in errors:
-                print(f"  - {error}")
-            return 1
-        atomic_write_json(target, manifest)
-        print(f"PASS: {args.doc_id} source_pdf_sha256 = {actual}")
-        return 0
-    finally:
-        release_lock(target)
+    result = record_source_digest(args.case_id, args.doc_id, args.held_by,
+                                  args.run_id, args.expect)
+    for message in result["messages"]:
+        print(message)
+    return 0 if result["success"] else 1
 
 
-def cmd_enable_canonical_uids(args):
+def enable_canonical_uids(case_id, doc_id, held_by, run_id, *,
+                          run_state_lock_already_held=False):
     """Activate canonical_v1 UID verification for one document.
 
     A dedicated, verified command rather than a writable field. Everything it
@@ -5795,19 +6128,20 @@ def cmd_enable_canonical_uids(args):
     not a guarantee -- writing an arbitrary UID would only require turning it
     off first.
     """
-    doc_id = args.doc_id
-    manifest = read_contract_data(args.case_id, "document_manifest.json")
+    def outcome(success, *messages, invalidated=None):
+        return {"success": success, "messages": list(messages),
+                "document_id": doc_id, "invalidated_stages": invalidated or []}
+
+    manifest = read_contract_data(case_id, "document_manifest.json")
     if manifest is None:
-        print("BLOCKED: document_manifest.json does not exist")
-        return 1
+        return outcome(False, "BLOCKED: document_manifest.json does not exist")
     entry = next((d for d in manifest.get("documents", [])
                   if d.get("document_id") == doc_id), None)
     if entry is None:
-        print(f"BLOCKED: {doc_id} is not a registered document")
-        return 1
+        return outcome(False, f"BLOCKED: {doc_id} is not a registered document")
 
     blockers = []
-    actual = registered_source_pdf_sha256(args.case_id, doc_id)
+    actual = registered_source_pdf_sha256(case_id, doc_id)
     recorded = entry.get("source_pdf_sha256")
     if actual is None:
         blockers.append(
@@ -5823,7 +6157,7 @@ def cmd_enable_canonical_uids(args):
             f"recorded source_pdf_sha256 {recorded!r} does not match the "
             f"registered raw source ({actual!r})")
 
-    revision_entry = revision_entry_for(args.case_id, doc_id)
+    revision_entry = revision_entry_for(case_id, doc_id)
     if revision_entry is None:
         blockers.append(
             "no source-text revision is registered -- a canonical UID is "
@@ -5837,29 +6171,51 @@ def cmd_enable_canonical_uids(args):
             "cannot resolve without one")
 
     if blockers:
-        print(f"BLOCKED: cannot enable canonical_v1 for {doc_id}:")
-        for blocker in blockers:
-            print(f"  - {blocker}")
-        return 1
+        return outcome(False, f"BLOCKED: cannot enable canonical_v1 for {doc_id}:",
+                       *(f"  - {blocker}" for blocker in blockers))
 
-    target = revision_index_path(args.case_id)
+    # Every activation transaction takes run-state before revision-index.  The
+    # preflight already owns run-state for its whole attempt-open boundary;
+    # standalone CLI calls acquire it here.  A reverse order would let a CLI
+    # activation hold revision-index while waiting for preflight's run-state
+    # lock, while preflight waited for that revision-index lock.
+    run_state_target = run_state_path(case_id)
+    acquired_run_state_lock = False
+    if not run_state_lock_already_held:
+        existing_run_state_lock = acquire_lock_blocking(
+            run_state_target, held_by, run_id,
+            f"canonical UID activation transaction ({doc_id})")
+        if existing_run_state_lock is not None:
+            return outcome(False,
+                f"FAIL: {doc_id} was NOT switched to canonical_v1 -- the "
+                f"policy stage and its downstream could not be invalidated: "
+                "could not acquire the run-state lock for canonical UID activation -- "
+                f"held_by={existing_run_state_lock['held_by']} "
+                f"run_id={existing_run_state_lock['run_id']}",
+                "  activating canonical UIDs while a stage still claims "
+                "'passed' against unverified artifacts would be exactly "
+                "the fail-open state this gate exists to prevent; "
+                "resolve the run-state lock and retry")
+        acquired_run_state_lock = True
+
+    target = revision_index_path(case_id)
     existing_lock = acquire_lock_blocking(
-        target, args.held_by, args.run_id, f"enable canonical UIDs ({doc_id})")
+        target, held_by, run_id, f"enable canonical UIDs ({doc_id})")
     if existing_lock is not None:
-        print(f"LOCKED: held_by={existing_lock['held_by']} "
-              f"run_id={existing_lock['run_id']}")
-        return 1
+        if acquired_run_state_lock:
+            release_lock(run_state_target)
+        return outcome(False, f"LOCKED: held_by={existing_lock['held_by']} "
+                       f"run_id={existing_lock['run_id']}")
     try:
-        index = load_revision_index(args.case_id)
+        index = load_revision_index(case_id)
         doc_entry = next((d for d in index.get("documents", [])
                           if d.get("document_id") == doc_id), None)
         if doc_entry is None:
             # Re-read under the lock: the precondition pass above ran before
             # acquiring it, so the entry could have gone between the two.
-            print(f"REFUSED: {doc_id} has no revision entry -- there is no "
-                  "recorded state to transition, and activation may not "
-                  "create one")
-            return 1
+            return outcome(False, f"REFUSED: {doc_id} has no revision entry -- there is no "
+                           "recorded state to transition, and activation may not "
+                           "create one")
         # Activation ALWAYS mutates a record that already exists, so a missing
         # uid_scheme here is damage rather than a fresh document. Passing that
         # distinction explicitly is what stops a corrupt entry being repaired
@@ -5868,16 +6224,12 @@ def cmd_enable_canonical_uids(args):
         errors = source_provenance.scheme_transition_errors(
             previous_scheme, "canonical_v1", entry_exists=True)
         if errors:
-            for error in errors:
-                print(f"REFUSED: {error}")
-            return 1
+            return outcome(False, *(f"REFUSED: {error}" for error in errors))
         doc_entry["uid_scheme"] = "canonical_v1"
         schema_errors = _schema_check(index, "revision_index.schema.json")
         if schema_errors:
-            print("FAIL: revision index would be schema-invalid -- not written:")
-            for error in schema_errors:
-                print(f"  - {error}")
-            return 1
+            return outcome(False, "FAIL: revision index would be schema-invalid -- not written:",
+                           *(f"  - {error}" for error in schema_errors))
 
         # P0-3's stale cascade, run BEFORE the scheme flip so a failure leaves
         # nothing half-transitioned. Every artifact this document's policy
@@ -5890,34 +6242,50 @@ def cmd_enable_canonical_uids(args):
         if previous_scheme != "canonical_v1":
             try:
                 invalidated = _invalidate_policy_layer(
-                    args.case_id,
+                    case_id,
                     f"canonical_v1 UID verification enabled for {doc_id}: "
                     "policy artifacts written under the legacy scheme were "
                     "never UID-verified and must be rewritten canonically",
-                    args.held_by, args.run_id)
+                    held_by, run_id,
+                    lock_already_held=True)
             except CascadeFailed as exc:
-                print(f"FAIL: {doc_id} was NOT switched to canonical_v1 -- the "
-                      f"policy stage and its downstream could not be "
-                      f"invalidated: {exc}")
-                print("  activating canonical UIDs while a stage still claims "
-                      "'passed' against unverified artifacts would be exactly "
-                      "the fail-open state this gate exists to prevent; "
-                      "resolve the run-state lock and retry")
-                return 1
+                return outcome(False,
+                    f"FAIL: {doc_id} was NOT switched to canonical_v1 -- the "
+                    f"policy stage and its downstream could not be invalidated: {exc}",
+                    "  activating canonical UIDs while a stage still claims "
+                    "'passed' against unverified artifacts would be exactly "
+                    "the fail-open state this gate exists to prevent; "
+                    "resolve the run-state lock and retry")
         else:
             invalidated = []
 
         atomic_write_json(target, index)
-        print(f"PASS: {doc_id} is now canonical_v1 -- every policy UID on this "
-              "document is recomputed and must match. This cannot be undone.")
+        messages = [f"PASS: {doc_id} is now canonical_v1 -- every policy UID on this "
+                    "document is recomputed and must match. This cannot be undone."]
         if invalidated:
-            print("INVALIDATED (legacy policy artifacts are no longer "
-                  f"citable): {', '.join(sorted(invalidated))}")
-            print("  rewrite this document's policy contracts with canonically "
-                  "derived UIDs, then re-finalize policy_clause_processing.")
-        return 0
+            messages.extend([
+                "INVALIDATED (legacy policy artifacts are no longer "
+                f"citable): {', '.join(sorted(invalidated))}",
+                "  rewrite this document's policy contracts with canonically "
+                "derived UIDs, then re-finalize policy_clause_processing."])
+        return outcome(True, *messages, invalidated=invalidated)
     finally:
         release_lock(target)
+        if acquired_run_state_lock:
+            release_lock(run_state_target)
+
+
+def cmd_enable_canonical_uids(args):
+    """CLI wrapper for canonical UID activation.
+
+    The CLI never exposes the in-process lock-ownership capability; it always
+    takes and releases the run-state lock through the normal cascade path.
+    """
+    result = enable_canonical_uids(args.case_id, args.doc_id, args.held_by,
+                                   args.run_id)
+    for message in result["messages"]:
+        print(message)
+    return 0 if result["success"] else 1
 
 
 # ------------------------------------------- segment derivation receipts --
@@ -9185,6 +9553,61 @@ def build_parser():
     p = sub.add_parser("read-document-text"); p.add_argument("case_id"); p.add_argument("doc_id")
     p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_read_document_text)
+
+    p = sub.add_parser(
+        "read-redacted-text-bundle",
+        help="Return selected active documents' page-labelled redacted text and revision bindings as JSON. Never returns processed-layer paths.")
+    p.add_argument("case_id")
+    p.add_argument("--doc-id", required=True, action="append",
+                   help="active processed document to include; repeat for each document")
+    p.add_argument("--run-id", help="Optional trace attribution for this read.")
+    p.set_defaults(fn=cmd_read_redacted_text_bundle)
+
+    p = sub.add_parser(
+        "verify-evidence-references",
+        help="Verify candidate page/quote/range references against the current redacted text revision.")
+    p.add_argument("case_id")
+    p.add_argument("--references-file", required=True,
+                   help="JSON object containing a non-empty references list")
+    p.add_argument("--run-id", help="Optional trace attribution for this read.")
+    p.set_defaults(fn=cmd_verify_evidence_references)
+
+    p = sub.add_parser("read-driver-receipt",
+                       help="Read one DAO-owned driver resume receipt.")
+    p.add_argument("case_id")
+    p.add_argument("--stage", required=True)
+    p.add_argument("--unit-id", required=True)
+    p.add_argument("--run-id", help="Optional trace attribution for this read.")
+    p.set_defaults(fn=cmd_read_driver_receipt)
+
+    p = sub.add_parser("write-driver-receipt",
+                       help="Schema-validate and publish one DAO-owned driver resume receipt.")
+    p.add_argument("case_id")
+    p.add_argument("--stage", required=True)
+    p.add_argument("--unit-id", required=True)
+    p.add_argument("--data-file", required=True)
+    p.add_argument("--held-by", required=True)
+    p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_write_driver_receipt)
+
+    p = sub.add_parser("read-driver-candidates",
+                       help="Read every DAO-owned completed sub-unit of one driver stage unit.")
+    p.add_argument("case_id")
+    p.add_argument("--stage", required=True)
+    p.add_argument("--unit-id", required=True)
+    p.add_argument("--run-id", help="Optional trace attribution for this read.")
+    p.set_defaults(fn=cmd_read_driver_candidates)
+
+    p = sub.add_parser("write-driver-candidate",
+                       help="Schema-validate and publish one DAO-owned driver sub-unit result.")
+    p.add_argument("case_id")
+    p.add_argument("--stage", required=True)
+    p.add_argument("--unit-id", required=True)
+    p.add_argument("--candidate-id", required=True)
+    p.add_argument("--data-file", required=True)
+    p.add_argument("--held-by", required=True)
+    p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_write_driver_candidate)
 
     p = sub.add_parser("split-core-field-accuracy",
                        help="Recompute an evaluation_result's fact-extraction vs discretionary "

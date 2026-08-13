@@ -90,8 +90,9 @@ _REQUIRES = {
     # evidence base the consistency check cleared. It does NOT require the v1
     # draft -- rebuttal points are built from evidence, not from the draft.
     "denial_validation": ("denial_response", "consistency_check"),
-    # v2 is an UPDATE of v1 that incorporates the rebuttal points, so both.
-    "draft_report_v2": ("draft_report_v1", "denial_validation"),
+    # v2 is an UPDATE of v1 that incorporates rebuttal points and must dispose
+    # of the v1 critic's binding findings, so all three are prerequisites.
+    "draft_report_v2": ("draft_report_v1", "critic_v1", "denial_validation"),
     "critic_v2": ("draft_report_v2",),
     "human_review_v2": ("critic_v2",),
 }
@@ -160,6 +161,28 @@ def dependents_of(stage: str) -> set:
             s for s, prereqs in _REQUIRES.items() if current in prereqs)
     out.discard(stage)
     return out
+
+
+def parallel_frontier(state: dict, candidates=None) -> tuple[str, ...]:
+    """Return graph-ready stages without taking any scheduling action.
+
+    This is intentionally narrower than an orchestrator: it sees only static
+    run-state dependencies.  Dynamic document availability, conflict/lock/
+    medical gates, T13 attempt markers, retries, and dispatch all stay with
+    the caller.  An absent or pending stage is eligible only when the same
+    hard dependency gate that protects ``in_progress`` permits it.
+    """
+    statuses = _stage_status_map(state)
+    requested = KNOWN_STAGES if candidates is None else frozenset(candidates)
+    ready = []
+    for stage in sorted(requested):
+        if not is_known(stage):
+            continue
+        if statuses.get(stage) not in (None, "pending"):
+            continue
+        if not check_dependencies(stage, "in_progress", state):
+            ready.append(stage)
+    return tuple(ready)
 
 
 def _stage_status_map(state: dict) -> dict:

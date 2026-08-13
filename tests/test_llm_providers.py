@@ -171,14 +171,20 @@ def test_claude_cli_provider_preserves_current_transcription_command(monkeypatch
     # trailing "Image: {path}" label (the label form is read as metadata about a
     # never-arriving attachment and the Read tool is never invoked). This
     # assertion guards both against framing creeping back in.
+    # The prompt now travels on stdin (Windows CreateProcess 32,767-char argv
+    # limit), so the framing assertion moves to the stdin payload -- it still
+    # guards exactly the same thing: no anti-refusal preamble, and the image
+    # referenced as an explicit Read instruction.
     assert captured["cmd"] == [
         "claude",
         "-p",
-        f"Read the image file at {img} and then: transcribe prompt",
         "--safe-mode",
         "--allowedTools",
         "Read",
     ]
+    assert captured["kwargs"]["input"] == (
+        f"Read the image file at {img} and then: transcribe prompt"
+    )
     # H1: the Read-enabled child is confined to the image's own directory, not
     # the repo root -- an injected "also read data/ground_truth/..." can't reach.
     assert captured["kwargs"]["cwd"] == str(img.resolve().parent)
@@ -268,6 +274,114 @@ def test_claude_cli_structured_image_fails_closed_without_structured_output(
     assert "structured_output" in str(excinfo.value)
 
 
+def test_claude_cli_structured_text_adapter_normalizes_native_envelope(monkeypatch, tmp_path):
+    captured = {}
+    schema = {
+        "type": "object",
+        "required": ["ok"],
+        "properties": {"ok": {"type": "boolean"}},
+    }
+    structured = {"ok": True}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "structured_output": structured,
+        })
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    result = providers.ClaudeCliProvider(root=tmp_path).analyze_text_structured(
+        "extract", "driver_extract_v1", schema
+    )
+
+    assert json.loads(captured["cmd"][captured["cmd"].index("--json-schema") + 1]) == schema
+    assert result.structured_output == structured
+    assert json.loads(result.text) == structured
+    assert result.provider_name == "claude-cli"
+
+
+def test_fixture_provider_supports_structured_text_driver_surface():
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="fixture", model_name="fixture-model"),
+        env={}, fixture_responses={"analyze_text_structured": '{"ok": true}'},
+    )
+
+    result = provider.analyze_text_structured(
+        "prompt", "driver_v0.1",
+        {"type": "object", "required": ["ok"]},
+    )
+
+    assert result.structured_output == {"ok": True}
+    assert result.text == '{"ok": true}'
+
+
+def test_codex_cli_structured_text_adapter_uses_schema_file_and_cleans_up(
+    monkeypatch, tmp_path
+):
+    captured = {}
+    schema = {
+        "type": "object",
+        "required": ["ok"],
+        "properties": {"ok": {"type": "boolean"}},
+    }
+    structured = {"ok": True}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["schema_path"] = Path(cmd[cmd.index("--output-schema") + 1])
+        captured["output_path"] = Path(cmd[cmd.index("--output-last-message") + 1])
+        captured["schema"] = json.loads(captured["schema_path"].read_text(encoding="utf-8"))
+        captured["output_path"].write_text(json.dumps(structured), encoding="utf-8")
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    result = providers.CodexCliProvider(root=tmp_path).analyze_text_structured(
+        "extract", "driver_extract_v1", schema
+    )
+
+    assert captured["schema"] == schema
+    assert captured["cmd"].count("--output-schema") == 1
+    assert result.structured_output == structured
+    assert json.loads(result.text) == structured
+    assert result.raw_metadata["structured_output_native"] is True
+    assert not captured["schema_path"].exists()
+    assert not captured["output_path"].exists()
+
+
+def test_codex_cli_structured_text_adapter_fails_once_on_non_json(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        Path(cmd[cmd.index("--output-last-message") + 1]).write_text(
+            "not json", encoding="utf-8"
+        )
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    with pytest.raises(providers.ProviderExecutionError, match="non-JSON"):
+        providers.CodexCliProvider(root=tmp_path).analyze_text_structured(
+            "extract", "driver_extract_v1", {"type": "object"}
+        )
+
+    assert len(calls) == 1
+
+
 def test_claude_cli_provider_always_passes_safe_mode(monkeypatch, tmp_path):
     """Regression (CASE_022 real run): claude -p with cwd=ROOT auto-loads the
     project's CLAUDE.md/hooks, and a context-aware reader editorializes --
@@ -312,10 +426,17 @@ def test_claude_cli_provider_reports_missing_command(monkeypatch, tmp_path):
     assert "claude-cli command not found: missing-claude" in str(excinfo.value)
 
 
-def test_claude_cli_provider_closes_stdin(monkeypatch, tmp_path):
-    """Without stdin=DEVNULL the child claude process blocks ~3s waiting for
-    input ('no stdin data received in 3s') and intermittently exits non-zero
-    on a live pipe -- the cause of CASE_003/DOC_008 dying mid-run."""
+def test_claude_cli_provider_never_leaves_child_waiting_on_stdin(monkeypatch, tmp_path):
+    """The child must never block waiting for input it will not get.
+
+    Originally enforced with stdin=DEVNULL: without it the child blocks ~3s
+    ('no stdin data received in 3s') and intermittently exits non-zero on a
+    live pipe -- the cause of CASE_003/DOC_008 dying mid-run. The prompt now
+    travels on stdin, which satisfies the same guarantee more directly (the
+    child reads the prompt, then sees EOF when subprocess closes the pipe).
+    DEVNULL must be GONE, not merely unused: subprocess.run raises if both
+    input= and stdin= are passed.
+    """
     captured = {}
 
     def fake_run(cmd, **kwargs):
@@ -331,7 +452,8 @@ def test_claude_cli_provider_closes_stdin(monkeypatch, tmp_path):
 
     provider.compare_text("compare prompt", "ocr_compare_v0.1")
 
-    assert captured["kwargs"]["stdin"] == providers.subprocess.DEVNULL
+    assert "stdin" not in captured["kwargs"]
+    assert captured["kwargs"]["input"] == "compare prompt"
 
 
 def test_claude_cli_provider_retries_transient_failure_then_succeeds(monkeypatch, tmp_path):
@@ -944,3 +1066,173 @@ def test_codex_compare_text_passes_env_timeout_to_subprocess(monkeypatch, tmp_pa
         "compare prompt", "ocr_compare_v0.1")
 
     assert seen["timeout"] == 150
+
+
+# --------------------------------------------------------------------------
+# Bounded CLI transport (Windows CreateProcess 32,767-char command-line limit).
+#
+# V4a's claim-analysis consolidation call built a 94,063-char argv (61,911
+# prompt + 32,152 schema). CreateProcess failed with ERROR_FILE_NOT_FOUND,
+# surfacing as FileNotFoundError and reported as "claude-cli command not
+# found" for a binary that existed. These tests pin the fix: the prompt is
+# never on the command line, and it reaches the child exactly once via stdin.
+# --------------------------------------------------------------------------
+
+WINDOWS_COMMAND_LINE_LIMIT = 32_767
+
+
+def _capture_claude_run(monkeypatch, stdout="ok"):
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        result = mock.Mock()
+        result.returncode = 0
+        result.stdout = stdout
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    return captured
+
+
+def test_claude_cli_sends_prompt_on_stdin_not_argv(monkeypatch, tmp_path):
+    captured = _capture_claude_run(monkeypatch, stdout="verdict")
+    prompt = "compare these two readings carefully"
+
+    providers.ClaudeCliProvider(root=tmp_path).compare_text(prompt, "ocr_compare_v0.1")
+
+    cmd = captured["cmd"]
+    # -p is still passed; the prompt body is not an argument to it.
+    assert "-p" in cmd
+    assert prompt not in cmd
+    assert not any(prompt in str(part) for part in cmd)
+    # Delivered exactly once, verbatim, over stdin.
+    assert captured["kwargs"]["input"] == prompt
+    assert sum(1 for part in cmd if part == prompt) == 0
+    # input= and stdin= are mutually exclusive in subprocess.run; passing both
+    # raises, so the old DEVNULL must be gone rather than merely unused.
+    assert "stdin" not in captured["kwargs"]
+    assert captured["kwargs"]["text"] is True
+    assert captured["kwargs"]["encoding"] == "utf-8"
+
+
+def test_claude_cli_long_korean_prompt_stays_off_command_line(monkeypatch, tmp_path):
+    """A prompt larger than the whole Windows command line must still run.
+
+    Korean is the realistic case: the consolidation prompt is Korean claim
+    text, and this is the exact shape that made V4a fail structurally.
+    """
+    captured = _capture_claude_run(
+        monkeypatch,
+        stdout=json.dumps({"subtype": "success", "is_error": False,
+                           "structured_output": {"ok": True}}),
+    )
+    long_prompt = "손해사정 청구 사실관계 확인 " * 4_000
+    assert len(long_prompt) > WINDOWS_COMMAND_LINE_LIMIT
+
+    providers.ClaudeCliProvider(root=tmp_path).analyze_text_structured(
+        long_prompt, "claim_analysis_v0.1", {"type": "object"})
+
+    cmd = captured["cmd"]
+    assert all(long_prompt not in str(part) for part in cmd)
+    assert captured["kwargs"]["input"] == long_prompt
+    # The whole constructed command line stays far below the OS limit.
+    assert sum(len(str(part)) + 1 for part in cmd) < WINDOWS_COMMAND_LINE_LIMIT
+
+
+def test_claude_cli_rejects_oversized_inline_schema_before_spawn(monkeypatch, tmp_path):
+    """A large schema must not be misreported as a missing executable on Windows."""
+    called = False
+
+    def fake_run(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("oversized schema must fail before subprocess.run")
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    schema = {"type": "object", "properties": {"payload": {"type": "string", "description": "x" * 9_000}}}
+
+    with pytest.raises(providers.ProviderExecutionError, match="schema is too large"):
+        providers.ClaudeCliProvider(root=tmp_path).analyze_text_structured(
+            "extract", "transport_limit_v0.1", schema)
+
+    assert called is False
+
+
+def test_structured_text_timeout_is_independent_of_compare_timeout(monkeypatch):
+    monkeypatch.delenv("HARNESS_STRUCTURED_TEXT_TIMEOUT", raising=False)
+    monkeypatch.delenv("HARNESS_LLM_COMPARE_TIMEOUT_SECONDS", raising=False)
+
+    assert providers.structured_text_timeout() == 180
+    assert providers.compare_text_timeout() == 60
+
+    # Raising one must not move the other -- the point of splitting them.
+    monkeypatch.setenv("HARNESS_LLM_COMPARE_TIMEOUT_SECONDS", "300")
+    assert providers.structured_text_timeout() == 180
+
+    monkeypatch.setenv("HARNESS_STRUCTURED_TEXT_TIMEOUT", "240")
+    assert providers.structured_text_timeout() == 240
+    assert providers.compare_text_timeout() == 300
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "abc", "0", "-5", "12.5", "99999999"])
+def test_structured_text_timeout_rejects_bad_values_safely(monkeypatch, bad):
+    """Malformed/zero/negative/out-of-range all fall back, never raise.
+
+    An implausibly large value is refused too: a child that effectively never
+    times out is indistinguishable from a hang.
+    """
+    monkeypatch.setenv("HARNESS_STRUCTURED_TEXT_TIMEOUT", bad)
+    assert providers.structured_text_timeout() == 180
+
+
+def test_analyze_text_structured_uses_structured_timeout(monkeypatch, tmp_path):
+    captured = _capture_claude_run(
+        monkeypatch,
+        stdout=json.dumps({"subtype": "success", "is_error": False,
+                           "structured_output": {"ok": True}}),
+    )
+    monkeypatch.setenv("HARNESS_STRUCTURED_TEXT_TIMEOUT", "222")
+    monkeypatch.setenv("HARNESS_LLM_COMPARE_TIMEOUT_SECONDS", "60")
+
+    providers.ClaudeCliProvider(root=tmp_path).analyze_text_structured(
+        "extract facts", "claim_analysis_v0.1", {"type": "object"})
+
+    assert captured["kwargs"]["timeout"] == 222
+
+
+def test_cli_schema_sanitizer_strips_only_documented_keywords():
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"},
+            "nested": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "dependentRequired": {"a": ["b"]},
+                "type": "object",
+            },
+        },
+        "dependentRequired": {"a": ["b"]},
+        "required": ["a"],
+        "additionalProperties": False,
+    }
+    original = json.loads(json.dumps(schema))
+
+    cleaned = providers._cli_json_schema(schema)
+
+    # Both documented keywords removed, at every depth.
+    assert "$schema" not in cleaned
+    assert "dependentRequired" not in cleaned
+    assert "$schema" not in cleaned["properties"]["nested"]
+    assert "dependentRequired" not in cleaned["properties"]["nested"]
+    # Everything else survives untouched.
+    assert cleaned["type"] == "object"
+    assert cleaned["required"] == ["a"]
+    assert cleaned["additionalProperties"] is False
+    assert cleaned["properties"]["a"] == {"type": "string"}
+    assert cleaned["properties"]["nested"]["type"] == "object"
+    # The authoritative input schema is never mutated in place.
+    assert schema == original

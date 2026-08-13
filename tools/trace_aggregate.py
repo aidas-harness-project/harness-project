@@ -534,6 +534,29 @@ def summarize(spans: list[dict], *, case_id: str, run_id: str,
     wall, human, active = compute_sla(spans)
     stage_attempts, by_stage, stage_coverage = summarize_stage_attempts(
         spans, run_state_stages)
+    closed_attempts = [item for item in stage_attempts
+                       if item["pairing_status"] == "complete"]
+    closed_raw_intervals = []
+    for item in closed_attempts:
+        start = _parse_wall(item["started_at"])
+        end = _parse_wall(item["ended_at"])
+        if start is not None and end is not None:
+            closed_raw_intervals.append((start.timestamp(), end.timestamp()))
+    closed_attempt_metrics = {
+        # A sum is load/cost, never elapsed time when stages overlap.
+        "closed_attempt_active_wall_sum_s": round(sum(
+            float(item["active_wall_s"] or 0.0) for item in closed_attempts), 6),
+        # This is intentionally raw wall time: active-time subtraction requires
+        # clipping human intervals across the entire union, not summing each
+        # attempt's subtraction independently.
+        "closed_attempt_raw_wall_union_s": round(_union_length(closed_raw_intervals), 6),
+        # A malformed shard line may itself be a stage marker.  Until a parser
+        # can prove otherwise, treating the closed-attempt interval union as
+        # complete would understate elapsed time with false confidence.
+        "closed_attempt_union_partial": (
+            not stage_coverage["coverage_complete"] or dropped_span_lines > 0
+        ),
+    }
 
     worker_config: dict[str, int] = {}
     observed: dict[str, int] = {}
@@ -599,6 +622,7 @@ def summarize(spans: list[dict], *, case_id: str, run_id: str,
         "stage_attempts": stage_attempts,
         "by_stage": by_stage,
         "stage_coverage": stage_coverage,
+        "closed_attempt_metrics": closed_attempt_metrics,
         "worker_config": worker_config,
         "observed_max_concurrency": observed,
         "cache_stats": {
