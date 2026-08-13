@@ -1,20 +1,109 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "conflict_ledger.schema.json",
-  "title": "_conflict_ledger.json -- cross-source conflict ledger v0.1",
+  "title": "_conflict_ledger.json -- cross-source conflict ledger v0.3",
   "description": "One ledger per case, shared across every stage that can find the case's own sources disagreeing with each other. See harness-guardrails P6. Before any stage starts, the orchestrator checks whether any entry is pending (via the DAO's check_conflicts_clear query, not by reading this file directly) -- if so, it halts and lists every pending entry, old and new. A stage only proceeds once every entry is resolved or false_positive. Note: this ledger is for the case's OWN sources contradicting each other -- an insurer's claim disagreeing with case evidence (denial-validation, Phase 2) is a different kind of comparison and does not belong here.",
   "type": "object",
   "properties": {
+    "ledger_version": { "const": "conflict_ledger.v0.3" },
     "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
     "created_at": { "type": "string", "format": "date-time" },
     "updated_at": { "type": "string", "format": "date-time" },
     "conflicts": {
       "type": "array",
       "items": { "$ref": "#/$defs/conflict_entry" }
+    },
+    "history_boundary": { "$ref": "#/$defs/history_boundary" },
+    "operations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/operation" }
     }
   },
-  "required": ["case_id", "conflicts"],
+  "required": ["ledger_version", "case_id", "conflicts", "history_boundary", "operations"],
   "$defs": {
+    "history_boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["native", "legacy_snapshot"] },
+        "established_at": { "type": "string", "format": "date-time" },
+        "baseline_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "absorbed_operation_count": { "type": "integer", "minimum": 0 },
+        "absorbed_operations_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "forked_operation_count": { "type": "integer", "minimum": 0 },
+        "forked_operations_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "predecessor_state_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "baseline_state": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/conflict_entry" }
+        }
+      },
+      "required": ["mode", "established_at", "baseline_sha256", "baseline_state"],
+      "dependentRequired": {
+        "absorbed_operation_count": ["absorbed_operations_sha256"],
+        "absorbed_operations_sha256": ["absorbed_operation_count"],
+        "forked_operation_count": ["forked_operations_sha256"],
+        "forked_operations_sha256": ["forked_operation_count"]
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" },
+        "request": { "$ref": "#/$defs/operation_request" },
+        "request_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "result": { "$ref": "#/$defs/operation_result" },
+        "completed_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["operation_id", "request", "request_sha256", "result", "completed_at"]
+    },
+    "operation_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
+        "operation_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" },
+        "action": { "enum": ["add", "set_verdict"] },
+        "payload": {
+          "oneOf": [
+            { "$ref": "#/$defs/add_request_payload" },
+            { "$ref": "#/$defs/verdict_request_payload" }
+          ]
+        }
+      },
+      "required": ["case_id", "operation_id", "action", "payload"]
+    },
+    "add_request_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stage": { "$ref": "run_state.schema.json#/$defs/stage_name" },
+        "topic": { "type": "string", "minLength": 1 },
+        "sources": { "type": "array", "minItems": 2, "items": { "type": "object" } }
+      },
+      "required": ["stage", "topic", "sources"]
+    },
+    "verdict_request_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "conflict_id": { "type": "string", "pattern": "^CONFLICT_[0-9]+$" },
+        "verdict": { "enum": ["resolved", "false_positive"] },
+        "note": { "type": "string", "minLength": 1 }
+      },
+      "required": ["conflict_id", "verdict", "note"]
+    },
+    "operation_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": { "enum": ["add", "set_verdict"] },
+        "target_id": { "type": "string", "pattern": "^CONFLICT_[0-9]+$" },
+        "status": { "enum": ["pending", "resolved", "false_positive"] }
+      },
+      "required": ["action", "target_id", "status"]
+    },
     "conflict_entry": {
       "type": "object",
       "properties": {

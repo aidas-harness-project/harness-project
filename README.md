@@ -13,6 +13,13 @@ skills (`.claude/skills/`); session history and open items are tracked in
 [`CLAUDE.md`](CLAUDE.md)'s changelog, [`known-gaps.md`](known-gaps.md), and
 [`open-decisions.md`](open-decisions.md).
 
+The approved medical-appropriateness technical baseline is documented in
+[`docs/medical-appropriateness-screening-requirements.md`](docs/medical-appropriateness-screening-requirements.md).
+Its schemas, fail-closed lifecycle, localhost API/UI, and synthetic tests are technical
+capabilities only. Clinical and operational activation remains disabled; unresolved
+approvals are authoritative in
+[`docs/medical-appropriateness-screening-deferrals.md`](docs/medical-appropriateness-screening-deferrals.md).
+
 ## Core questions
 
 1. Can existing models structure insurance-claim documents well enough to be useful?
@@ -33,7 +40,7 @@ skills (`.claude/skills/`); session history and open items are tracked in
 | `.claude/agents/` | harness | 10 specialized agent definitions (canonical; `.codex/`, `.agents/` are generated copies -- run `tools/sync_agents.py` after editing) |
 | `.claude/skills/` | harness | `loss-adjustment-pipeline` (orchestrator), `harness-guardrails` (always-on rules), `harness-guardrails-dev` (PoC-only rules) |
 | `data/` | run (gitignored) | Case intake copies and intermediate processing state, entirely DAO-managed |
-| `outputs/CASE_XXX/` | deliverables (gitignored, per-case exceptions committed as needed) | Screening report, draft report, evaluation results -- written only via `tools/dao.py` |
+| `outputs/CASE_XXX/` | deliverables (gitignored, per-case exceptions committed as needed) | Screening report and draft report -- written only via `tools/dao.py`; local Evaluation outputs are unavailable |
 
 No agent reads or writes `outputs/`, `data/`, or a ledger/run-state file
 directly -- every access goes through `tools/dao.py` (locking, ledgers,
@@ -41,9 +48,10 @@ run-state, schema-validated writes). See `harness-guardrails` P2/P5/P7/P10.
 
 ## Pipeline overview
 
-Two phases, matching the real workflow: claim comes in, insurer responds,
-you respond to the insurer. Phase 1 is 10 stages (case intake through
-evaluation); Phase 2 adds 2 new stages and reuses Phase 1's agents.
+Two local phases, matching the real workflow: claim comes in, insurer responds,
+you respond to the insurer. Units 1–7 run case intake through validated expert
+review v1, then add 2 Phase 2 stages and finish at validated expert review v2.
+Evaluation is a deferred isolated Unit 11 boundary and cannot run locally.
 
 | Agent | Role |
 | --- | --- |
@@ -55,23 +63,23 @@ evaluation); Phase 2 adds 2 new stages and reuses Phase 1's agents.
 | `denial-validation` | Phase 2: validates insurer denial reasons against evidence, generates rebuttal points |
 | `screening-report` | Assembles the internal triage document from Phase 1 outputs |
 | `draft-report` | Authors the deliverable draft report (v1 in Phase 1, v2 update in Phase 2) |
-| `critic` | Reviews every draft version for unlinked claims and forbidden expressions -- structurally cannot read ground truth |
-| `evaluation` | Sole agent permitted to read ground truth, only after human review completes; compares the reviewed draft against the real final report |
+| `critic` | Reviews every draft version for unlinked claims and forbidden expressions; sanctioned reads deny ground truth |
+| `evaluation` | Deferred placeholder for an isolated Unit 11 service; it cannot run or read ground truth in the local Units 1–7 harness |
 
 Full stage table, internal checkpoints, and I/O contracts: [`pipeline.md`](pipeline.md).
 
 ## Ground-truth isolation (the most important design principle)
 
 The final loss-adjustment report inside each `source-cases/` case is the
-evaluation answer key. It is never fed to a model as input at any stage
-except `evaluation`, which runs only after human review of the draft is
-complete.
+evaluation answer key. It is never fed to a model in the local Units 1–7
+harness. A future isolated Unit 11 service may define a separate controlled
+handoff, but human-review completion does not enable local access.
 
 - `tools/intake_case.py` gates every source file through a per-file review
   ledger (`_source_ledger.json`) before it's usable -- a single rejected
   file blocks the whole case.
-- Every other agent, skill, and orchestrator step is structurally barred
-  from the ground-truth path.
+- Every sanctioned local agent, skill, and orchestrator step is barred from
+  the ground-truth path.
 
 ## Cases
 
@@ -90,9 +98,9 @@ in natural language; the `loss-adjustment-pipeline` skill orchestrates the
 agents in order.
 
 ```
-"Process CASE_003"          -> full initial run (intake through evaluation)
+"Process CASE_003"          -> full authorized run (intake through expert review)
 "Rerun CASE_003 screening"   -> partial rerun
-"Run CASE_003 evaluation"    -> compare against ground truth, produce Go/No-Go material
+"Run CASE_003 evaluation"    -> denied locally; requires deferred isolated Unit 11 service
 ```
 
 Each stage's output must pass `python tools/dao.py write-contract` (schema

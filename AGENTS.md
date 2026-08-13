@@ -27,7 +27,7 @@ material, not a live spec).
 
 ## Harness: loss-adjustment case pipeline
 
-**Goal:** closed-case input → screening report + draft report + evaluation, via 10 specialized agents across 2 phases. See `pipeline.md` for the full stage/agent map, and `.agents/skills/loss-adjustment-pipeline/SKILL.md` for the orchestration logic -- consult these directly for case processing, reruns/updates, or evaluation requests. Simple questions about pipeline design can be answered directly from `pipeline.md`.
+**Goal:** closed-case input → screening report + reviewed draft report through the authorized Units 1–7 local pipeline. Evaluation remains a deferred isolated Unit 11 service and is unavailable locally. See `pipeline.md` for the full stage/agent map and `.agents/skills/loss-adjustment-pipeline/SKILL.md` for orchestration; local evaluation requests must fail closed.
 
 **Changelog:**
 

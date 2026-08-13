@@ -1,14 +1,11 @@
 {
-  "//": "Structural D1/P2 boundary (fleet review). The DAO enforces guardrails along the sanctioned path, but agents have the Read tool -- these deny rules stop a NON-evaluation agent from reading the ground-truth answer key or raw sources directly with Read, turning D1/P2 from prose into a boundary for the Read tool. NOTE: this does NOT seal Bash-based reads (cat/python/etc.) -- a complete seal needs OS-level permissions on data/ground_truth and the source-cases final reports (see open-decisions.md / known-gaps.md). The evaluation stage still reads ground truth ONLY through `python tools/dao.py read-ground-truth`, which is gated on --caller-stage and the human-review flag.",
+  "//": "Structural D1/P2 boundary (fleet review). These deny rules stop local Units 1–7 agents from reading answer-key or raw-source paths through Read. No local Evaluation stage or read-ground-truth command is authorized: Evaluation v1/v2 is deferred to the isolated Unit 11 service with separate storage and credentials. NOTE: this does not seal arbitrary Bash-based reads; the production boundary still requires Unit 11 OS/storage isolation.",
   "permissions": {
     "deny": [
       "Read(./data/ground_truth/**)",
       "Read(./source-cases/**)",
       "Read(./data/raw/**)",
       "Read(./archive/sources/**)"
-    ],
-    "allow": [
-      "Bash(python tools/dao.py read-ground-truth *)"
     ]
   }
 }

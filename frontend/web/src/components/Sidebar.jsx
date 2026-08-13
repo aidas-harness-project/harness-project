@@ -29,6 +29,7 @@ export default function Sidebar({
   ocrReview,
   onRefresh,
   onCaseListChanged,
+  mutationsAvailable,
 }) {
   return (
     <nav className="sidebar">
@@ -41,7 +42,9 @@ export default function Sidebar({
         </button>
       </div>
 
-      <NewCaseRunner onOpenCase={onSelectCase} onCaseListChanged={onCaseListChanged} />
+      {mutationsAvailable && (
+        <NewCaseRunner onOpenCase={onSelectCase} onCaseListChanged={onCaseListChanged} />
+      )}
 
       <div className="nav-scroll">
         <div className="nav-group-label">Phase 1 · Initial Review</div>

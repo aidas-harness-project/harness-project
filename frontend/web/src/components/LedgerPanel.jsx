@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api";
+import { clearDurableOperation, durableOperationId } from "../durableOperationId";
 
 const REVIEW_COLOR = {
   approved: "var(--sage)",
@@ -22,7 +23,7 @@ export function useReviewerName() {
   return [reviewer, update];
 }
 
-export function SourceLedgerPanel({ ledger, caseId, onChanged }) {
+export function SourceLedgerPanel({ ledger, caseId, onChanged, readOnly = false }) {
   const [reviewer, setReviewer] = useReviewerName();
   const [rejecting, setRejecting] = useState(null); // file_name currently entering a reason
   const [reasonText, setReasonText] = useState("");
@@ -37,7 +38,14 @@ export function SourceLedgerPanel({ ledger, caseId, onChanged }) {
     setBusy(fileName);
     setError(null);
     try {
-      await api.setLedgerStatus(caseId, fileName, "approved", reviewer);
+      const signature = JSON.stringify({ fileName, status: "approved", reviewer });
+      const pending = await durableOperationId(
+        `source-ledger:${caseId}:${fileName}`, signature, "ledger",
+      );
+      await api.setLedgerStatus(
+        caseId, fileName, "approved", reviewer, null, pending.operationId,
+      );
+      clearDurableOperation(pending.key);
       onChanged?.();
     } catch (e) {
       setError(e.message);
@@ -52,7 +60,16 @@ export function SourceLedgerPanel({ ledger, caseId, onChanged }) {
     setBusy(fileName);
     setError(null);
     try {
-      await api.setLedgerStatus(caseId, fileName, "rejected", reviewer, reasonText);
+      const signature = JSON.stringify({
+        fileName, status: "rejected", reviewer, reason: reasonText,
+      });
+      const pending = await durableOperationId(
+        `source-ledger:${caseId}:${fileName}`, signature, "ledger",
+      );
+      await api.setLedgerStatus(
+        caseId, fileName, "rejected", reviewer, reasonText, pending.operationId,
+      );
+      clearDurableOperation(pending.key);
       setRejecting(null);
       setReasonText("");
       onChanged?.();
@@ -65,10 +82,12 @@ export function SourceLedgerPanel({ ledger, caseId, onChanged }) {
 
   return (
     <div className="ledger-panel">
-      <label className="reviewer-field">
-        Reviewer name
-        <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="e.g. 김태윤" />
-      </label>
+      {!readOnly && (
+        <label className="reviewer-field">
+          Reviewer name
+          <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="e.g. 김태윤" />
+        </label>
+      )}
       {error && <p className="audit-error">{error}</p>}
       <table>
         <thead>
@@ -77,7 +96,7 @@ export function SourceLedgerPanel({ ledger, caseId, onChanged }) {
             <th>Classification</th>
             <th>Review status</th>
             <th>Reviewer</th>
-            <th>Action</th>
+            {!readOnly && <th>Action</th>}
           </tr>
         </thead>
         <tbody>
@@ -113,34 +132,36 @@ export function SourceLedgerPanel({ ledger, caseId, onChanged }) {
                 {f.rejection_reason && <div className="reason">{f.rejection_reason}</div>}
               </td>
               <td className="muted">{f.reviewed_by || "--"}</td>
-              <td>
-                {f.review_status === "pending" &&
-                  (rejecting === f.file_name ? (
-                    <div className="reject-inline">
-                      <input
-                        placeholder="why is this wrong?"
-                        value={reasonText}
-                        onChange={(e) => setReasonText(e.target.value)}
-                        autoFocus
-                      />
-                      <button className="btn-tiny confirm" onClick={() => confirmReject(f.file_name)} disabled={busy === f.file_name}>
-                        confirm
-                      </button>
-                      <button className="btn-tiny" onClick={() => setRejecting(null)}>
-                        cancel
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="action-row">
-                      <button className="btn-tiny approve" onClick={() => approve(f.file_name)} disabled={busy === f.file_name}>
-                        approve
-                      </button>
-                      <button className="btn-tiny reject" onClick={() => setRejecting(f.file_name)} disabled={busy === f.file_name}>
-                        reject
-                      </button>
-                    </div>
-                  ))}
-              </td>
+              {!readOnly && (
+                <td>
+                  {f.review_status === "pending" &&
+                    (rejecting === f.file_name ? (
+                      <div className="reject-inline">
+                        <input
+                          placeholder="why is this wrong?"
+                          value={reasonText}
+                          onChange={(e) => setReasonText(e.target.value)}
+                          autoFocus
+                        />
+                        <button className="btn-tiny confirm" onClick={() => confirmReject(f.file_name)} disabled={busy === f.file_name}>
+                          confirm
+                        </button>
+                        <button className="btn-tiny" onClick={() => setRejecting(null)}>
+                          cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="action-row">
+                        <button className="btn-tiny approve" onClick={() => approve(f.file_name)} disabled={busy === f.file_name}>
+                          approve
+                        </button>
+                        <button className="btn-tiny reject" onClick={() => setRejecting(f.file_name)} disabled={busy === f.file_name}>
+                          reject
+                        </button>
+                      </div>
+                    ))}
+                </td>
+              )}
             </tr>
           ))}
         </tbody>
@@ -168,7 +189,7 @@ export function SourceLedgerPanel({ ledger, caseId, onChanged }) {
   );
 }
 
-export function ConflictLedgerPanel({ ledger, caseId, onChanged }) {
+export function ConflictLedgerPanel({ ledger, caseId, onChanged, readOnly = false }) {
   const [reviewer] = useReviewerName();
   const [noting, setNoting] = useState(null); // {conflictId, verdict}
   const [noteText, setNoteText] = useState("");
@@ -184,7 +205,15 @@ export function ConflictLedgerPanel({ ledger, caseId, onChanged }) {
     setBusy(conflictId);
     setError(null);
     try {
-      await api.setConflictVerdict(caseId, conflictId, noting.verdict, `${noteText}${reviewer ? ` (${reviewer})` : ""}`);
+      const note = `${noteText}${reviewer ? ` (${reviewer})` : ""}`;
+      const signature = JSON.stringify({ conflictId, verdict: noting.verdict, note });
+      const pending = await durableOperationId(
+        `conflict-ledger:${caseId}:${conflictId}`, signature, "conflict",
+      );
+      await api.setConflictVerdict(
+        caseId, conflictId, noting.verdict, note, pending.operationId,
+      );
+      clearDurableOperation(pending.key);
       setNoting(null);
       setNoteText("");
       onChanged?.();
@@ -219,7 +248,7 @@ export function ConflictLedgerPanel({ ledger, caseId, onChanged }) {
           </div>
           {c.resolution_note && <div className="resolution">Resolution: {c.resolution_note}</div>}
 
-          {c.verdict === "pending" &&
+          {!readOnly && c.verdict === "pending" &&
             (noting?.conflictId === c.conflict_id ? (
               <div className="reject-inline conflict-note">
                 <input

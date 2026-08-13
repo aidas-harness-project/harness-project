@@ -107,7 +107,7 @@ def test_dependents_of_reaches_the_end_of_the_pipeline():
     downstream = sd.dependents_of("policy_clause_processing")
     assert {"claim_analysis", "consistency_check", "screening_report",
             "draft_report_v1", "critic_v1", "draft_report_v2", "critic_v2",
-            "denial_validation", "evaluation"} <= downstream
+        "denial_validation", "human_review_v1", "human_review_v2"} <= downstream
     assert "policy_clause_processing" not in downstream
     assert "document_processing" not in downstream
 

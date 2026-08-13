@@ -5,6 +5,7 @@ import ReportViewer from "./ReportViewer";
 import { SourceLedgerPanel, ConflictLedgerPanel } from "./LedgerPanel";
 import OcrReviewPanel from "./OcrReviewPanel";
 import HumanReviewPanel from "./HumanReviewPanel";
+import MedicalReviewPanel from "./MedicalReviewPanel";
 import { deriveStageStatus } from "../statusLogic";
 import { api } from "../api";
 
@@ -17,7 +18,7 @@ function Checkpoint({ cp, active }) {
   );
 }
 
-export default function StageDetail({ stageDef, index, phaseLabel, runState, ledgers, ocrReview, caseId, onLedgersChanged }) {
+export default function StageDetail({ stageDef, index, phaseLabel, runState, ledgers, ocrReview, caseId, onLedgersChanged, readOnly }) {
   const [contracts, setContracts] = useState({});
   const [report, setReport] = useState(null);
   const derived = deriveStageStatus(stageDef, runState, ledgers, ocrReview);
@@ -47,7 +48,7 @@ export default function StageDetail({ stageDef, index, phaseLabel, runState, led
   }, [stageDef.key, caseId]);
 
   return (
-    <div className="stage-detail">
+    <div className={`stage-detail${stageDef.key === "claim-analysis" ? " medical-detail" : ""}`}>
       <div className="detail-header">
         <div className="detail-heading">
           <span className="detail-eyebrow mono">
@@ -78,25 +79,28 @@ export default function StageDetail({ stageDef, index, phaseLabel, runState, led
       {stageDef.key === "case-intake" && (
         <div className="detail-block">
           <h5 className="mono">_source_ledger.json</h5>
-          <SourceLedgerPanel ledger={ledgers?.source_ledger} caseId={caseId} onChanged={onLedgersChanged} />
+          <SourceLedgerPanel ledger={ledgers?.source_ledger} caseId={caseId} onChanged={onLedgersChanged} readOnly={readOnly} />
         </div>
       )}
       {stageDef.key === "document-pipeline" && (
         <div className="detail-block">
           <h5 className="mono">P8 dual-read review</h5>
-          <OcrReviewPanel caseId={caseId} review={ocrReview} onResolved={onLedgersChanged} />
+          <OcrReviewPanel caseId={caseId} review={ocrReview} onResolved={onLedgersChanged} readOnly={readOnly} />
         </div>
       )}
       {stageDef.key === "consistency-check" && (
         <div className="detail-block">
           <h5 className="mono">_conflict_ledger.json</h5>
-          <ConflictLedgerPanel ledger={ledgers?.conflict_ledger} caseId={caseId} onChanged={onLedgersChanged} />
+          <ConflictLedgerPanel ledger={ledgers?.conflict_ledger} caseId={caseId} onChanged={onLedgersChanged} readOnly={readOnly} />
         </div>
+      )}
+      {stageDef.key === "claim-analysis" && (
+        <MedicalReviewPanel key={caseId} caseId={caseId} />
       )}
       {stageDef.reviewVersion && (
         <div className="detail-block">
           <h5 className="mono">human review gate ({stageDef.reviewVersion})</h5>
-          <HumanReviewPanel caseId={caseId} version={stageDef.reviewVersion} onChanged={onLedgersChanged} />
+          <HumanReviewPanel caseId={caseId} version={stageDef.reviewVersion} onChanged={onLedgersChanged} readOnly={readOnly} />
         </div>
       )}
 
@@ -128,6 +132,7 @@ export default function StageDetail({ stageDef, index, phaseLabel, runState, led
 
       <style>{`
         .stage-detail { max-width: 760px; animation: riseIn 0.3s ease both; }
+        .stage-detail.medical-detail { max-width: 1120px; }
         .detail-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 18px; gap: 16px; }
         .detail-eyebrow { display: block; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--parchment-faint); margin-bottom: 6px; }
         .detail-heading h2 { font-size: 30px; margin-bottom: 4px; }

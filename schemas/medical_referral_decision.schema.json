@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "medical_referral_decision.schema.json",
+  "title": "Medical screening referral decision v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "decision_id": { "$ref": "medical_review_common.schema.json#/$defs/decision_id" },
+    "decision_version": { "type": "integer", "minimum": 1 },
+    "decision": { "enum": ["refer", "do_not_refer", "insufficient_information"] },
+    "decision_origin": { "enum": ["policy", "authorized_human_override"] },
+    "decision_scope": { "const": "screening_route_only" },
+    "issue_id": { "$ref": "medical_common.schema.json#/$defs/issue_id" },
+    "referral_inputs": { "$ref": "medical_referral_inputs.schema.json" },
+    "rationale": { "type": "string", "minLength": 1 },
+    "evidence_locator_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "medical_common.schema.json#/$defs/evidence_locator_id" } },
+    "policy_version": { "type": ["string", "null"] },
+    "actor": { "oneOf": [{ "type": "null" }, { "$ref": "medical_review_common.schema.json#/$defs/actor_assertion" }] },
+    "additional_information_required": { "type": ["string", "null"], "minLength": 1 },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "required": ["decision_id", "decision_version", "decision", "decision_origin", "decision_scope", "issue_id", "referral_inputs", "rationale", "evidence_locator_ids", "policy_version", "actor", "additional_information_required", "created_at"],
+  "allOf": [
+    {
+      "if": { "properties": { "decision_origin": { "const": "policy" } }, "required": ["decision_origin"] },
+      "then": { "properties": { "actor": { "type": "null" }, "policy_version": { "type": "string", "minLength": 1 } } },
+      "else": { "properties": { "actor": { "$ref": "medical_review_common.schema.json#/$defs/actor_assertion" }, "policy_version": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "decision": { "const": "insufficient_information" } }, "required": ["decision"] },
+      "then": { "properties": { "additional_information_required": { "type": "string", "minLength": 1 } } },
+      "else": { "properties": { "additional_information_required": { "type": "null" } } }
+    }
+  ]
+}

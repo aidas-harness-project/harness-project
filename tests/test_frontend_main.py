@@ -15,6 +15,7 @@ the validation that runs BEFORE _run_dao_cli, confirming the attack is
 rejected before it ever reaches a subprocess call.
 """
 import sys
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,11 +39,15 @@ def isolated_main(tmp_path, monkeypatch):
 def _seed_ledger(base, case_id="CASE_009", files=("real_file.pdf",)):
     out_dir = base / "outputs" / case_id
     out_dir.mkdir(parents=True, exist_ok=True)
+    entries = [{"file_name": f, "classification": "raw", "review_status": "pending",
+                "reviewed_by": None, "reviewed_at": None, "rejection_reason": None} for f in files]
     dao.atomic_write_json(out_dir / "_source_ledger.json", {
+        "ledger_version": "source_ledger.v0.4",
         "case_id": case_id, "source_dir": "source-cases/x", "created_at": dao.now_iso(),
         "updated_at": dao.now_iso(),
-        "files": [{"file_name": f, "classification": "raw", "review_status": "pending",
-                   "reviewed_by": None, "reviewed_at": None, "rejection_reason": None} for f in files],
+        "files": entries,
+        "history_boundary": dao.make_history_boundary(entries, mode="native"),
+        "operations": [],
     })
     dao.atomic_write_json(out_dir / "document_manifest.json", {
         "case_id": case_id, "created_at": dao.now_iso(), "documents": [],
@@ -100,7 +105,12 @@ def test_known_ledger_file_name_no_ledger_at_all_rejects_cleanly(isolated_main):
 
 def test_set_ledger_status_endpoint_blocks_flag_smuggling_via_file_name(isolated_main):
     _seed_ledger(isolated_main, files=["real_file.pdf"])
-    body = main.LedgerStatusBody(file_name="--held-by", status="approved", reviewer="attacker")
+    body = main.LedgerStatusBody(
+        file_name="--held-by",
+        status="approved",
+        reviewer="attacker",
+        operation_id="ledger:test-smuggling-0001",
+    )
 
     with pytest.raises(HTTPException) as exc:
         main.set_ledger_status("CASE_009", body)
@@ -109,7 +119,11 @@ def test_set_ledger_status_endpoint_blocks_flag_smuggling_via_file_name(isolated
 
 def test_set_conflict_verdict_endpoint_blocks_flag_smuggling_via_conflict_id(isolated_main):
     _seed_ledger(isolated_main)
-    body = main.ConflictVerdictBody(verdict="resolved", note="attacker note")
+    body = main.ConflictVerdictBody(
+        verdict="resolved",
+        note="attacker note",
+        operation_id="conflict:test-smuggling-0001",
+    )
 
     with pytest.raises(HTTPException) as exc:
         main.set_conflict_verdict("CASE_009", "--held-by", body)
@@ -173,3 +187,20 @@ def test_run_id_matches_the_run_state_schema_pattern(isolated_main, monkeypatch)
     import re
     run_id = _launch_prompt(monkeypatch, isolated_main)["result"]["run_id"]
     assert re.fullmatch(r"RUN_[0-9]{8}_[0-9]+", run_id)
+
+
+def test_generic_dao_api_preserves_authoritative_lock_window(monkeypatch):
+    observed = {}
+
+    def timeout(*_args, **kwargs):
+        observed["timeout"] = kwargs["timeout"]
+        raise subprocess.TimeoutExpired("dao.py", kwargs["timeout"])
+
+    monkeypatch.setattr(main.subprocess, "run", timeout)
+    with pytest.raises(HTTPException) as exc:
+        main._run_dao_cli(
+            ["set-ledger-status", "CASE_009", "a.pdf", "approved"],
+            held_by="human",
+        )
+    assert exc.value.status_code == 504
+    assert observed["timeout"] == 1830

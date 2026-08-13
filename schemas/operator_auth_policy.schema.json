@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "operator_auth_policy.schema.json",
+  "title": "Medical-review operator bearer-token authorization policy v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "operator_auth_policy.v0.1" },
+    "policy_version": { "const": "operator_auth_policy.v0.1" },
+    "operations_enabled": { "type": "boolean" },
+    "approval": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "approved_by": { "type": "string", "minLength": 1 },
+            "approved_at": { "type": "string", "format": "date-time" },
+            "scope": { "type": "string", "minLength": 1 }
+          },
+          "required": ["approved_by", "approved_at", "scope"]
+        }
+      ]
+    },
+    "actors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "actor_id": { "type": "string", "pattern": "^OP_[A-Z0-9_]{1,40}$" },
+          "display_name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "role": {
+            "enum": [
+              "medical_coordinator",
+              "medical_reviewer",
+              "medical_adjudicator"
+            ]
+          },
+          "medical_actor_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+          "token_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "allowed_actions": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "const": "medical_review" }
+          }
+        },
+        "required": ["actor_id", "display_name", "role", "medical_actor_id", "token_sha256", "allowed_actions"]
+      }
+    }
+  },
+  "required": ["schema_version", "policy_version", "operations_enabled", "approval", "actors"],
+  "allOf": [{
+    "if": { "properties": { "operations_enabled": { "const": true } }, "required": ["operations_enabled"] },
+    "then": {
+      "properties": {
+        "approval": { "type": "object" },
+        "actors": { "minItems": 1 }
+      }
+    }
+  }]
+}

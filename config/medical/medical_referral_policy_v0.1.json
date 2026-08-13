@@ -1,0 +1,9 @@
+{
+  "schema_version": "medical_referral_policy.v0.1",
+  "policy_version": "medical_referral_policy.v0.1",
+  "policy_enabled": false,
+  "approval": null,
+  "anomaly_kinds": [],
+  "severity_definitions": [],
+  "referral_rules": []
+}
