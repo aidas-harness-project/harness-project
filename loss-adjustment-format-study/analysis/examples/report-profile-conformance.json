@@ -1,0 +1,90 @@
+{
+  "schema_version": "report_profile_conformance.v1",
+  "purpose": "Pseudonymous machine-conformance scenarios. These prove profile, template, issue, and calculation compatibility; they are not substitutes for reviewed completed reports.",
+  "scenarios": [
+    {
+      "scenario_id": "automobile_compensation_compact",
+      "template_id": "자동차보험_대인배상_간이형",
+      "case_type": "후유장해",
+      "coverage_basis": "자동차보험",
+      "loss_type": "후유장해",
+      "event_type": "accident",
+      "family": "automobile_compensation",
+      "claim_mechanism": "statutory_or_policy_auto_compensation",
+      "mode": "compact",
+      "support_status": "supported",
+      "required_issue_kinds": ["comparative_negligence"],
+      "required_calculation_categories": ["total_damages"]
+    },
+    {
+      "scenario_id": "automobile_self_injury_full",
+      "template_id": "자동차보험_자기신체사고형",
+      "case_type": "후유장해",
+      "coverage_basis": "자동차보험",
+      "loss_type": "후유장해",
+      "event_type": "accident",
+      "family": "automobile_self_injury",
+      "claim_mechanism": "automobile_policy_benefit",
+      "mode": "full",
+      "support_status": "provisional",
+      "required_issue_kinds": ["coverage"],
+      "required_calculation_categories": ["benefit_amount"]
+    },
+    {
+      "scenario_id": "personal_accident_disability_full",
+      "template_id": "개인보험_후유장해형",
+      "case_type": "후유장해",
+      "coverage_basis": "개인보험",
+      "loss_type": "후유장해",
+      "event_type": "accident",
+      "family": "personal_accident_benefit",
+      "claim_mechanism": "personal_accident_policy_benefit",
+      "mode": "full",
+      "support_status": "supported",
+      "required_issue_kinds": ["coverage"],
+      "required_calculation_categories": ["benefit_amount"]
+    },
+    {
+      "scenario_id": "insured_liability_full",
+      "template_id": "배상책임_후유장해형",
+      "case_type": "배상책임",
+      "coverage_basis": "배상책임",
+      "loss_type": "후유장해",
+      "event_type": "accident",
+      "family": "liability_damages",
+      "claim_mechanism": "insured_liability",
+      "mode": "full",
+      "support_status": "supported",
+      "required_issue_kinds": ["liability", "comparative_negligence"],
+      "required_calculation_categories": ["total_damages"]
+    },
+    {
+      "scenario_id": "mutual_liability_full",
+      "template_id": "배상책임_후유장해형",
+      "case_type": "배상책임",
+      "coverage_basis": "배상책임",
+      "loss_type": "후유장해",
+      "event_type": "accident",
+      "family": "liability_damages",
+      "claim_mechanism": "mutual_or_cooperative_liability",
+      "mode": "full",
+      "support_status": "supported",
+      "required_issue_kinds": ["liability", "comparative_negligence"],
+      "required_calculation_categories": ["total_damages"]
+    },
+    {
+      "scenario_id": "disease_diagnosis_full",
+      "template_id": "진단수술비형",
+      "case_type": "진단·수술비",
+      "coverage_basis": "개인보험",
+      "loss_type": "진단·수술비",
+      "event_type": "disease",
+      "family": "disease_benefit",
+      "claim_mechanism": "disease_policy_benefit",
+      "mode": "full",
+      "support_status": "supported",
+      "required_issue_kinds": ["coverage", "diagnosis_definition_match"],
+      "required_calculation_categories": ["benefit_amount"]
+    }
+  ]
+}

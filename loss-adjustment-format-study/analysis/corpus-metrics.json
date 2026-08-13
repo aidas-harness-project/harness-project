@@ -1,0 +1,255 @@
+{
+  "schema_version": "loss_adjustment_corpus_metrics.v0.2",
+  "method_note": "Phrase/component counts are per-document OCR-derived lower bounds. Family groups come from the reviewed analysis/report-index.csv assignments. Each count increments once when any listed regex matches NFC-normalized, Unicode-whitespace-removed text from the reviewed extracted report slice. These are reproducible regex-signal counts, not independently adjudicated ground-truth labels for semantic component presence.",
+  "generator": {
+    "path": "tools/generate_loss_adjustment_corpus_metrics.py",
+    "manifest_sha256": "46a390285e778e0f663a721f4cf4b3e081bf51523a966bc4f09e54f9870d3b57",
+    "report_index_path": "analysis/report-index.csv",
+    "report_index_sha256": "9ab633497cdbe553f4c68441b641a6e34df17f63f98a78762f6daf8f303672db",
+    "component_patterns": {
+      "submission_letter": [
+        "(?:손해사정서|보험금\\s*사정서).{0,100}(?:제출|송부)",
+        "(?:제출|송부)(?:합니다|드립니다)"
+      ],
+      "adjustment_summary": [
+        "사정\\s*(?:요약|결과)",
+        "보험금\\s*사정\\s*요약",
+        "손해액\\s*요약"
+      ],
+      "assignment_and_contract": [
+        "손해사정\\s*(?:위임|수임)",
+        "위임\\s*및\\s*보험계약",
+        "(?:수임|위임)\\s*정보",
+        "위임\\s*계약"
+      ],
+      "accident_or_claim_facts": [
+        "사고\\s*(?:개요|경위|내용|사실)",
+        "사고\\s*및\\s*손해\\s*발생",
+        "보험\\s*사고",
+        "청구\\s*사실",
+        "질병\\s*발생"
+      ],
+      "governing_law_or_policy": [
+        "(?:관계|관련)\\s*법규",
+        "적용\\s*약관",
+        "보험\\s*약관",
+        "보상\\s*책임",
+        "지급\\s*책임"
+      ],
+      "quantification": [
+        "사정\\s*금액",
+        "손해액\\s*(?:산정|계산)",
+        "보험금\\s*(?:사정|산정)",
+        "지급\\s*보험금",
+        "손해\\s*배상금"
+      ],
+      "final_opinion": [
+        "사정\\s*(?:결과\\s*및\\s*)?의견",
+        "최종\\s*의견",
+        "조사\\s*의견",
+        "결\\s*론"
+      ],
+      "reservation_or_variability": [
+        "(?:판단|사정)\\s*유보",
+        "유보(?:함|합니다)",
+        "달라질\\s*수",
+        "변동될\\s*수",
+        "추가\\s*손해"
+      ],
+      "evidence_list": [
+        "증빙\\s*자료",
+        "첨부\\s*자료",
+        "입증\\s*자료",
+        "제출\\s*서류"
+      ]
+    },
+    "tone_patterns": {
+      "evidence_basis": [
+        "근거(?:로|하여)",
+        "기초(?:로|하여)",
+        "에\\s*의하면",
+        "참조(?:로|하여)"
+      ],
+      "attachment_pointer": [
+        "별첨",
+        "첨부",
+        "증빙\\s*자료",
+        "붙임"
+      ],
+      "deemed_appropriate": [
+        "(?:타당|적정)하다고\\s*판단"
+      ],
+      "no_applicable_exclusion": [
+        "면책.{0,40}(?:없|해당하지)",
+        "해당\\s*사항\\s*없"
+      ],
+      "payment_liability_arises": [
+        "지급\\s*책임.{0,30}(?:발생|있)",
+        "보험금.{0,30}지급.{0,30}책임"
+      ],
+      "reservation": [
+        "유보(?:함|합니다)",
+        "판단\\s*유보",
+        "사정\\s*유보"
+      ],
+      "may_change": [
+        "달라질\\s*수",
+        "변동될\\s*수"
+      ]
+    }
+  },
+  "source_document_count": 95,
+  "source_pages_total": 2883,
+  "source_bytes_total": 227287372,
+  "report_count": 94,
+  "no_report_count": 1,
+  "report_pages_total": 864,
+  "all_reviewed": true,
+  "families": {
+    "poc_mixed": {
+      "source_document_count": 9,
+      "report_count": 8,
+      "no_report_count": 1,
+      "report_pages_total": 82,
+      "report_pages_min": 2,
+      "report_pages_median": 11.0,
+      "report_pages_max": 13,
+      "component_document_counts_lower_bound": {
+        "submission_letter": 6,
+        "adjustment_summary": 7,
+        "assignment_and_contract": 1,
+        "accident_or_claim_facts": 7,
+        "governing_law_or_policy": 8,
+        "quantification": 8,
+        "final_opinion": 8,
+        "reservation_or_variability": 6,
+        "evidence_list": 7
+      },
+      "tone_document_counts_lower_bound": {
+        "evidence_basis": 7,
+        "attachment_pointer": 7,
+        "deemed_appropriate": 6,
+        "no_applicable_exclusion": 0,
+        "payment_liability_arises": 4,
+        "reservation": 5,
+        "may_change": 4
+      }
+    },
+    "automobile_ta": {
+      "source_document_count": 16,
+      "report_count": 16,
+      "no_report_count": 0,
+      "report_pages_total": 49,
+      "report_pages_min": 2,
+      "report_pages_median": 3.0,
+      "report_pages_max": 10,
+      "component_document_counts_lower_bound": {
+        "submission_letter": 1,
+        "adjustment_summary": 14,
+        "assignment_and_contract": 0,
+        "accident_or_claim_facts": 11,
+        "governing_law_or_policy": 15,
+        "quantification": 16,
+        "final_opinion": 14,
+        "reservation_or_variability": 1,
+        "evidence_list": 1
+      },
+      "tone_document_counts_lower_bound": {
+        "evidence_basis": 1,
+        "attachment_pointer": 3,
+        "deemed_appropriate": 15,
+        "no_applicable_exclusion": 1,
+        "payment_liability_arises": 1,
+        "reservation": 1,
+        "may_change": 1
+      }
+    },
+    "personal_accident_benefit": {
+      "source_document_count": 40,
+      "report_count": 40,
+      "no_report_count": 0,
+      "report_pages_total": 378,
+      "report_pages_min": 9,
+      "report_pages_median": 9.0,
+      "report_pages_max": 11,
+      "component_document_counts_lower_bound": {
+        "submission_letter": 24,
+        "adjustment_summary": 37,
+        "assignment_and_contract": 1,
+        "accident_or_claim_facts": 40,
+        "governing_law_or_policy": 40,
+        "quantification": 40,
+        "final_opinion": 35,
+        "reservation_or_variability": 38,
+        "evidence_list": 35
+      },
+      "tone_document_counts_lower_bound": {
+        "evidence_basis": 40,
+        "attachment_pointer": 40,
+        "deemed_appropriate": 40,
+        "no_applicable_exclusion": 37,
+        "payment_liability_arises": 33,
+        "reservation": 35,
+        "may_change": 0
+      }
+    },
+    "liability_damages": {
+      "source_document_count": 22,
+      "report_count": 22,
+      "no_report_count": 0,
+      "report_pages_total": 270,
+      "report_pages_min": 10,
+      "report_pages_median": 12.0,
+      "report_pages_max": 14,
+      "component_document_counts_lower_bound": {
+        "submission_letter": 17,
+        "adjustment_summary": 21,
+        "assignment_and_contract": 1,
+        "accident_or_claim_facts": 22,
+        "governing_law_or_policy": 21,
+        "quantification": 22,
+        "final_opinion": 21,
+        "reservation_or_variability": 22,
+        "evidence_list": 20
+      },
+      "tone_document_counts_lower_bound": {
+        "evidence_basis": 22,
+        "attachment_pointer": 22,
+        "deemed_appropriate": 16,
+        "no_applicable_exclusion": 0,
+        "payment_liability_arises": 0,
+        "reservation": 22,
+        "may_change": 20
+      }
+    },
+    "disease_benefit": {
+      "source_document_count": 8,
+      "report_count": 8,
+      "no_report_count": 0,
+      "report_pages_total": 85,
+      "report_pages_min": 9,
+      "report_pages_median": 10.5,
+      "report_pages_max": 13,
+      "component_document_counts_lower_bound": {
+        "submission_letter": 4,
+        "adjustment_summary": 6,
+        "assignment_and_contract": 0,
+        "accident_or_claim_facts": 8,
+        "governing_law_or_policy": 8,
+        "quantification": 8,
+        "final_opinion": 7,
+        "reservation_or_variability": 8,
+        "evidence_list": 6
+      },
+      "tone_document_counts_lower_bound": {
+        "evidence_basis": 7,
+        "attachment_pointer": 8,
+        "deemed_appropriate": 7,
+        "no_applicable_exclusion": 6,
+        "payment_liability_arises": 7,
+        "reservation": 8,
+        "may_change": 0
+      }
+    }
+  }
+}

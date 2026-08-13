@@ -12,15 +12,34 @@ from referencing import Registry, Resource
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schemas"
+TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
+LOSS_ADJUSTMENT_SCHEMA = (
+    ROOT
+    / "loss-adjustment-format-study"
+    / "analysis"
+    / "loss-adjustment-report.schema.json"
+)
+LOSS_ADJUSTMENT_SCHEMA_NAME = "loss_adjustment_report.schema.json"
 
 
 def load_registry():
     schemas = {}
     for p in sorted(SCHEMA_DIR.glob("*.schema.json")):
         schemas[p.name] = json.loads(p.read_text(encoding="utf-8"))
-    registry = Registry().with_resources(
-        (name, Resource.from_contents(s)) for name, s in schemas.items()
+    resources = [
+        (name, Resource.from_contents(schema))
+        for name, schema in schemas.items()
+    ]
+    canonical_report_schema = json.loads(
+        LOSS_ADJUSTMENT_SCHEMA.read_text(encoding="utf-8")
     )
+    resources.append(
+        (
+            canonical_report_schema["$id"],
+            Resource.from_contents(canonical_report_schema),
+        )
+    )
+    registry = Registry().with_resources(resources)
     return schemas, registry
 
 
@@ -73,6 +92,11 @@ def validate_instance(instance: dict, schema_name: str, schemas: dict, registry)
     every `format` keyword -- CASE_021's run surfaced that a malformed date
     would have validated. (date-time additionally needs rfc3339-validator
     installed to be checked; date is built in.)"""
+    if schema_name == LOSS_ADJUSTMENT_SCHEMA_NAME:
+        from validate_loss_adjustment_report import validate_document
+
+        return validate_document(instance, LOSS_ADJUSTMENT_SCHEMA)
+
     validator = Draft202012Validator(schemas[schema_name], registry=registry,
                                      format_checker=Draft202012Validator.FORMAT_CHECKER)
     errors = sorted(validator.iter_errors(instance), key=lambda e: list(e.absolute_path))
@@ -80,4 +104,37 @@ def validate_instance(instance: dict, schema_name: str, schemas: dict, registry)
     for e in errors:
         loc = "/".join(map(str, e.absolute_path)) or "(root)"
         out.append(f"{loc}: {e.message}")
+    if schema_name == "case_type_result.schema.json":
+        out.extend(_report_profile_errors(instance))
     return out
+
+
+def _report_profile_errors(instance: dict) -> list[str]:
+    """Validate the case-type profile against the renderer registry.
+
+    JSON Schema validates the profile internally.  This small cross-file check
+    establishes that its selected template carries the same family, mechanism,
+    mode, and support status.  Historical results without a profile keep their
+    previous validation behavior.
+    """
+    profile = instance.get("report_profile")
+    if not isinstance(profile, dict):
+        return []
+    template_id = instance.get("template_id")
+    if profile.get("support_status") == "unsupported":
+        return [] if template_id is None else [
+            "template_id: unsupported report_profile must not select a template"
+        ]
+    templates = json.loads(TEMPLATE_REGISTRY.read_text(encoding="utf-8"))["templates"]
+    template = templates.get(template_id)
+    if template is None:
+        return [f"template_id: {template_id!r} is not registered"]
+    matches = (
+        profile.get("family") in template.get("report_families", [])
+        and profile.get("claim_mechanism") in template.get("claim_mechanisms", [])
+        and profile.get("mode") == template.get("mode")
+        and profile.get("support_status") == template.get("support_status")
+    )
+    return [] if matches else [
+        f"template_id: {template_id!r} does not match report_profile"
+    ]

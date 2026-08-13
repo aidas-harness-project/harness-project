@@ -9,14 +9,12 @@ list for that section; this tool replaces each placeholder with a
 sequentially-numbered [E#] tag and writes the sidecar from the same data,
 so a tag and its citation can never drift out of sync.
 
-Template enforcement (--template): pass a key from templates/registry.json
-(배상책임_후유장해형, 진단수술비형, screening_report) and the rendered
-sections are validated for presence AND order against that template's
-heading patterns before anything touches disk -- a mismatch is a hard
-exit, same fail/don't-persist contract as the sidecar validation below.
-Without --template the tool renders whatever it's given (correct for
-rebuttal_points.md, whose per-reason structure repeats dynamically and
-has no registry entry on purpose).
+Template enforcement (--template): pass a key from templates/registry.json.
+Sections are validated for presence and order against that template's heading
+patterns before anything touches disk. A mismatch is a hard exit, with the same
+fail/don't-persist contract as sidecar validation. Without --template the tool
+renders whatever it is given (correct for rebuttal_points.md, whose per-reason
+structure repeats dynamically and has no registry entry on purpose).
 
 This writes into outputs/ like any other DAO write path -- locked
 (held-by/run-id, same convention as dao.py write-contract, so dao.py
@@ -26,7 +24,7 @@ either file touches disk; a failure there is this tool's own bug (the
 agent's evidence_references were already well-formed going in), not a data
 problem to route around.
 
-Input (--sections-file), one JSON object:
+Legacy section input (--sections-file), one JSON object:
 {
   "output_path": "outputs/CASE_003/draft_report_v1.md",
   "sections": [
@@ -38,6 +36,17 @@ Input (--sections-file), one JSON object:
 Usage:
     python tools/document_assembly.py --sections-file /tmp/sections.json \\
         --held-by draft-report --run-id RUN_20260710_001
+
+Structured draft input is a schema-valid loss_adjustment_report.v1 object.
+The registry supplies deterministic grouping and headings; evidence IDs resolve
+to exact document/page/quote citations. The structured contract must already
+have been written through dao.py at the canonical case/version path:
+
+    python tools/document_assembly.py \\
+        --structured-report-file outputs/CASE_003/loss_adjustment_report_v1.json \\
+        --template 개인보험_후유장해형 \\
+        --output-path outputs/CASE_003/draft_report_v1.md \\
+        --held-by draft-report --run-id RUN_20260710_001
 """
 import argparse
 import json
@@ -47,7 +56,14 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-from dao import acquire_lock_blocking, release_lock, atomic_write_text, atomic_write_json, now_iso
+from dao import (
+    acquire_lock_blocking,
+    atomic_write_json,
+    atomic_write_text,
+    now_iso,
+    read_contract_data,
+    release_lock,
+)
 from _validation import load_registry, validate_instance
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
@@ -56,7 +72,39 @@ ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
 
 
-_CASE_ID_RE = re.compile(r"(CASE_[0-9]{3})")
+_CASE_OUTPUT_PATH_RE = re.compile(
+    r"^outputs/(?P<case_id>CASE_[0-9]{3})/[^/]+$"
+)
+_DRAFT_REPORT_PATH_RE = re.compile(
+    r"^outputs/(?P<case_id>CASE_[0-9]{3})/draft_report_v(?P<version>[12])\.md$"
+)
+
+
+def structured_contract_location(
+    structured_report_file: str, output_path: str
+) -> tuple[str, str]:
+    """Return the DAO case and filename for a canonical structured render.
+
+    The output path establishes both case identity and draft version. Requiring
+    the matching canonical input path keeps this CLI from becoming an
+    arbitrary-file reader and prevents a v1 contract from silently producing a
+    v2 narrative (or vice versa).
+    """
+    output_match = _DRAFT_REPORT_PATH_RE.fullmatch(output_path)
+    if output_match is None:
+        raise ValueError(
+            "structured output_path must be "
+            "outputs/CASE_NNN/draft_report_v1.md or draft_report_v2.md"
+        )
+    case_id = output_match.group("case_id")
+    version = output_match.group("version")
+    filename = f"loss_adjustment_report_v{version}.json"
+    expected = f"outputs/{case_id}/{filename}"
+    if structured_report_file != expected:
+        raise ValueError(
+            f"structured report must be the canonical DAO contract {expected!r}"
+        )
+    return case_id, filename
 
 
 def verify_citation_quotes(sidecar: dict, case_id: str) -> list[str]:
@@ -155,6 +203,72 @@ def validate_template(headings: list[str], template_key: str) -> list[str]:
     return errors
 
 
+def sections_from_structured_report(
+    document: dict, template_key: str, output_path: str
+) -> dict:
+    """Convert a validated authoring contract into the existing render spec.
+
+    The template registry owns the heading and grouping map.  Evidence IDs in
+    structured statements resolve to exact document/page/quote records here,
+    so the existing renderer can keep owning citation tags and source checks.
+    """
+    templates = json.loads(TEMPLATE_REGISTRY.read_text(encoding="utf-8"))["templates"]
+    template = templates.get(template_key)
+    if template is None:
+        raise ValueError(f"unknown template {template_key!r}")
+    profile = document.get("document_profile", {})
+    family = profile.get("family")
+    if family not in template.get("report_families", []):
+        raise ValueError(f"template {template_key!r} does not accept family {family!r}")
+    if profile.get("claim_mechanism") not in template.get("claim_mechanisms", []):
+        raise ValueError(f"template {template_key!r} does not accept claim mechanism")
+    if profile.get("mode") != template.get("mode"):
+        raise ValueError(f"template {template_key!r} does not accept report mode")
+
+    evidence = {
+        item["evidence_id"]: item for item in document.get("evidence_registry", [])
+    }
+    sections = []
+    headings = template.get("render_headings", [])
+    groups = template.get("structured_section_groups", [])
+    if len(headings) != len(groups):
+        raise ValueError(f"template {template_key!r} has an invalid structured render map")
+    for heading, group in zip(headings, groups):
+        content_parts = []
+        references = []
+        if not group:
+            content_parts.append(profile.get("title", ""))
+        for section_name in group:
+            section = document["sections"][section_name]
+            if len(group) > 1:
+                content_parts.append(f"### {section['heading']}")
+            if section["status"] != "included":
+                content_parts.append(section["rationale"])
+                continue
+            for statement in section["statements"]:
+                evidence_ids = statement["evidence_refs"]
+                content_parts.append(
+                    statement["text"] + " " + " ".join("{{E}}" for _ in evidence_ids)
+                )
+                for evidence_id in evidence_ids:
+                    source = evidence[evidence_id]
+                    reference = {
+                        "document_id": source["document_id"],
+                        "quote": source["quote"],
+                    }
+                    if source.get("page") is not None:
+                        reference["page"] = source["page"]
+                    references.append(reference)
+        sections.append(
+            {
+                "heading": heading,
+                "content": "\n\n".join(content_parts),
+                "evidence_references": references,
+            }
+        )
+    return {"output_path": output_path, "sections": sections}
+
+
 def render(spec: dict) -> tuple[str, dict]:
     output_path = spec["output_path"]
     lines = []
@@ -200,7 +314,16 @@ def render(spec: dict) -> tuple[str, dict]:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sections-file", required=True, help="Path to the section-spec JSON described above")
+    source = ap.add_mutually_exclusive_group(required=True)
+    source.add_argument("--sections-file", help="Path to the section-spec JSON described above")
+    source.add_argument(
+        "--structured-report-file",
+        help="Canonical outputs/CASE_NNN/loss_adjustment_report_vN.json contract",
+    )
+    ap.add_argument(
+        "--output-path",
+        help="Required with --structured-report-file; relative narrative path under outputs/",
+    )
     ap.add_argument("--held-by", required=True, help="Calling agent name, e.g. draft-report")
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--template", help="Key in templates/registry.json to enforce section "
@@ -212,7 +335,49 @@ def main():
     # this they are discarded silently (see trace.configure_from_args).
     trace_mod.configure_from_args(args)
 
-    spec = json.loads(Path(args.sections_file).read_text(encoding="utf-8"))
+    if args.structured_report_file:
+        if not args.template:
+            sys.exit("error: --structured-report-file requires --template")
+        if not args.output_path:
+            sys.exit("error: --structured-report-file requires --output-path")
+        try:
+            case_id, contract_filename = structured_contract_location(
+                args.structured_report_file, args.output_path
+            )
+        except ValueError as exc:
+            sys.exit(f"error: {exc} -- nothing written")
+        document = read_contract_data(case_id, contract_filename)
+        if document is None:
+            sys.exit(
+                "error: canonical DAO contract does not exist at "
+                f"{args.structured_report_file!r} -- nothing written"
+            )
+        schemas, registry = load_registry()
+        report_errors = validate_instance(
+            document, "loss_adjustment_report.schema.json", schemas, registry
+        )
+        if report_errors:
+            sys.exit(
+                "error: structured report failed loss_adjustment_report.schema.json "
+                "-- nothing written:\n"
+                + "\n".join(f"  - {error}" for error in report_errors)
+            )
+        report_case = document.get("case_reference", {}).get("case_id")
+        if case_id != report_case:
+            sys.exit(
+                "error: structured report case_reference.case_id does not match "
+                "the output_path case -- nothing written"
+            )
+        try:
+            spec = sections_from_structured_report(
+                document, args.template, args.output_path
+            )
+        except ValueError as exc:
+            sys.exit(f"error: {exc} -- nothing written")
+    else:
+        if args.output_path:
+            sys.exit("error: --output-path is only valid with --structured-report-file")
+        spec = json.loads(Path(args.sections_file).read_text(encoding="utf-8"))
 
     if args.template:
         headings = [s["heading"] for s in spec["sections"]]
@@ -242,21 +407,22 @@ def main():
     # document whose citations do not resolve must not reach disk, because
     # every checker downstream (read-evidence-tags, check-untagged-claims)
     # reads the tag layer and would report it clean.
-    case_match = _CASE_ID_RE.search(rel)
-    if case_match:
-        quote_errors = verify_citation_quotes(sidecar, case_match.group(1))
-        if quote_errors:
-            sys.exit(
-                "error: citation quotes do not appear in the processed source "
-                "-- nothing written:\n"
-                + "\n".join(f"  - {e}" for e in quote_errors)
-                + "\n  Quote from data/processed/<CASE>/<DOC>/redacted_text.md, "
-                  "do not reconstruct from memory. Whitespace differences are "
-                  "tolerated; wrong words and wrong documents are not.")
-    else:
-        print(f"WARNING: output_path {rel!r} carries no CASE_NNN, so citation "
-              "quotes could not be verified against a processed source.",
-              file=sys.stderr)
+    case_match = _CASE_OUTPUT_PATH_RE.fullmatch(rel)
+    if case_match is None:
+        sys.exit(
+            f"error: output_path {rel!r} must identify its case as "
+            "outputs/CASE_NNN/<filename> so citation quotes can be verified "
+            "-- nothing written"
+        )
+    quote_errors = verify_citation_quotes(sidecar, case_match.group("case_id"))
+    if quote_errors:
+        sys.exit(
+            "error: citation quotes do not appear in the processed source "
+            "-- nothing written:\n"
+            + "\n".join(f"  - {e}" for e in quote_errors)
+            + "\n  Quote from data/processed/<CASE>/<DOC>/redacted_text.md, "
+              "do not reconstruct from memory. Whitespace differences are "
+              "tolerated; wrong words and wrong documents are not.")
 
     schemas, registry = load_registry()
     errors = validate_instance(sidecar, "evidence_sidecar.schema.json", schemas, registry)

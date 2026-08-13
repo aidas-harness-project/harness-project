@@ -76,23 +76,26 @@ for rebuttal generation).
 # Document-assembly tool
 
 Narrative outputs (`screening_report.md`, `draft_report_v*.md`,
-`rebuttal_points.md`) are never hand-written directly by an agent. An agent
-provides per-section `{content, evidence_references}` (with `{{E}}`
-placeholders inline wherever a citation belongs) to
-`tools/document_assembly.py`, which renders the file and auto-generates the
-`[E#]` tags plus the `.evidence.json` sidecar in one pass -- see
-harness-guardrails P1.
+`rebuttal_points.md`) are never hand-written directly by an agent. Screening
+and rebuttal inputs use per-section `{content, evidence_references}` with
+`{{E}}` placeholders. Draft reports first become a DAO-governed
+`loss_adjustment_report_v*.json`; `document_assembly.py
+--structured-report-file` validates the full authoring contract, maps its
+structured sections through the selected registry template, renders the
+Korean narrative, and generates `[E#]` tags plus the `.evidence.json` sidecar
+in one pass. See harness-guardrails P1.
 
-**Section/template rules are defined** for `배상책임_후유장해형`
-(변형 A, I~VII) and `진단수술비형` (변형 B, I~VI) -- see `templates/`
-(`draft-report.md`, `screening-report.md`, `rebuttal-points.md`,
-`forbidden-expressions.md`, `component-output.md`), adopted from the wiki
-2026-07-13. `실손형`/`기타형` still have no ground-truth basis (TODO in
-`templates/draft-report.md`). Section presence/order is structurally
-enforced (2026-07-14): `document_assembly.py --template <key>` validates
-against `templates/registry.json` and refuses to write on mismatch --
-rebuttal_points is the one deliberate exception (dynamic per-reason
-structure, no registry entry). See open-decisions.md #2.
+The registry contains supported forms for liability damages, disease benefit,
+personal-accident disability benefit, and compact third-party automobile
+compensation. Automobile self-injury is present only as a provisional form and
+always requires professional review. `case_type_result.report_profile` must
+match the selected template's family, claim mechanism, mode, and support
+status. `실손` and otherwise unsupported/unknown cases use
+`other_review_required`, require `template_id: null`, and halt before drafting;
+there is no closest-template fallback. Section presence and order are
+structurally enforced by `templates/registry.json`. Rebuttal points remain the
+one deliberate dynamic exception. See `templates/draft-report.md`, the format
+study authoring rules/schema, and `open-decisions.md` #2.
 
 # Taxonomy
 
@@ -114,9 +117,12 @@ after CASE_030 found a 청약서류 had no type to land in and was absorbed into
 
 ## Case types
 
-후유장해 (permanent disability), 진단·수술비 (diagnosis/surgery cost), 실손
-(out-of-pocket medical), 배상책임 (liability), 기타 (other). Determines
-`template_id` at claim-analysis's checkpoint 3.
+Classification retains the legacy `case_type` while using two primary axes:
+`coverage_basis` (`배상책임`, `개인보험`, `자동차보험`) and `loss_type`
+(`후유장해`, `진단·수술비`, `실손`, `기타`). Claim-analysis checkpoint 3 then
+derives `report_profile` (family, claim mechanism, presentation mode, support
+status) and selects a compatible `template_id`, or fails closed when no
+evidence-backed form exists.
 
 ## Denial/reduction reason codes (R-codes)
 
