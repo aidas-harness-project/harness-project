@@ -508,17 +508,10 @@ def main():
         print("\n(dry run) pass --init-ledger to create the review ledger, or --execute to copy once it's approved.")
         return
 
-    # TEMPORARY (2026-08-14): dao.validated_source_ledger() does not exist on
-    # this branch. It was added by 633bd7b0 on the medical-appropriateness
-    # branch, whose tools/dao.py was discarded wholesale by merge 3569d50 (the
-    # merge result is byte-identical to parent1 378515fe, while intake_case.py
-    # kept parent2's version -- so these two files come from different merge
-    # parents). Restoring it means re-integrating ~70 functions, which is a
-    # separate task. Reverted to the pre-merge read until then; the D1 drift
-    # guard and the pending/rejected check below are unaffected.
-    ledger = load_json(source_ledger_path(args.case_id))
-    if ledger is None:
-        sys.exit("error: no _source_ledger.json found -- run with --init-ledger first.")
+    try:
+        ledger = dao.validated_source_ledger(args.case_id)
+    except ValueError as exc:
+        sys.exit(f"error: source ledger is not executable: {exc}")
     pending = [e["file_name"] for e in ledger["files"] if e["review_status"] == "pending"]
     rejected = [e["file_name"] for e in ledger["files"] if e["review_status"] == "rejected"]
     if pending or rejected:

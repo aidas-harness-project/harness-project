@@ -41,6 +41,11 @@ def _seed_source_case(tmp_path, case_id="CASE_005", extra_files=None):
         "operations": [],
     }), encoding="utf-8")
     (out_dir / "_run_state.json").write_text(json.dumps({
+        # run_state.schema.json requires both of these; the fixture predates
+        # them and only passed while dao.py's writer did not produce them
+        # either (merge 3569d50 kept parent1's dao.py against a newer schema).
+        "run_state_version": "run_state.v0.3",
+        "medical_review_adopted": False,
         "case_id": case_id, "run_id": "RUN_20260701_001",
         "stages": [{"stage_name": "document_processing", "status": "passed", "attempt_count": 1,
                     "backup_path": "outputs/" + case_id + "/_backups/step_01_document_processing"}],

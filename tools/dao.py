@@ -535,9 +535,78 @@ def load_run_state(case_id: str) -> dict:
     p = run_state_path(case_id)
     existing = load_json(p)
     if existing is not None:
-        return existing
-    return {"case_id": case_id, "run_id": None, "created_at": now_iso(),
-            "updated_at": now_iso(), "stages": [], "human_input_status": []}
+        return _normalize_legacy_run_state(case_id, existing)
+    return {
+        "run_state_version": "run_state.v0.3",
+        "case_id": case_id,
+        "run_id": None,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "stages": [],
+        "human_input_status": [],
+        "medical_review_adopted": False,
+    }
+
+
+def _normalize_legacy_run_state(case_id: str, state: dict) -> dict:
+    """Give a pre-v0.3 run state the two fields the schema now requires.
+
+    `run_state.schema.json` requires `run_state_version` and
+    `medical_review_adopted`, but the run-state writer on this branch predates
+    both (merge 3569d50 kept parent1's dao.py while the schema moved on), so a
+    freshly created run state failed its own validation and no new case could
+    open a stage at all. Transplanted from 633bd7b0.
+
+    `medical_review_adopted` is derived from what is on disk rather than
+    defaulted: a case that already carries medical-review artifacts has adopted
+    the flow whether or not anything recorded the fact. The legacy Evaluation
+    stage rename is kept as written -- a wait whose draft version cannot be
+    read unambiguously raises rather than guessing which version it belonged to.
+    """
+    if "run_state_version" in state:
+        return state
+    state = json.loads(json.dumps(state))
+    evaluation_versions = set()
+    for entry in state.get("human_input_status", []):
+        if entry.get("stage_name") != "evaluation":
+            continue
+        match = re.search(
+            r"draft_report_v([12])(?:_reviewed)?\.md",
+            entry.get("description", ""),
+        )
+        if match is None:
+            raise ValueError(
+                "legacy Evaluation wait has no unambiguous draft version")
+        version = match.group(1)
+        evaluation_versions.add(version)
+        entry["stage_name"] = f"human_review_v{version}"
+    for entry in state.get("stages", []):
+        if entry.get("stage_name") != "evaluation":
+            continue
+        if len(evaluation_versions) != 1:
+            raise ValueError(
+                "legacy Evaluation stage has no unique human-review version")
+        entry["stage_name"] = f"human_review_v{next(iter(evaluation_versions))}"
+    state["run_state_version"] = "run_state.v0.3"
+    state["medical_review_adopted"] = _medical_artifacts_present(case_id)
+    return state
+
+
+def _medical_artifacts_present(case_id: str) -> bool:
+    """True when the case already carries medical-review state on disk.
+
+    A symlink counts: the question is whether the name is claimed, not whether
+    it resolves, so a dangling link cannot make an adopted case look unadopted.
+    """
+    directory = case_dir(case_id)
+    return any(
+        path.exists() or path.is_symlink()
+        for path in (
+            directory / "medical_variables.json",
+            directory / "_medical_review_ledger.json",
+            directory / "_medical_variable_revisions",
+        )
+    )
 
 
 def save_run_state(case_id: str, state: dict) -> None:
@@ -4701,26 +4770,443 @@ def cmd_write_reviewed_draft(args):
 
 # ------------------------------------------------------------ src ledger --
 
-def make_history_boundary(files, *, mode: str):
-    """Make the canonical, lossless baseline binding for a source ledger.
+def _canonical_json_bytes(data) -> bytes:
+    """Deterministic JSON bytes -- the digest basis for every ledger binding.
+
+    Kept byte-compatible with `make_history_boundary` below, which sorts keys
+    at hash time. That is what lets this validator accept a boundary written by
+    the builder already on this branch: the stored `baseline_state` may carry a
+    different key order, but the digest is taken over the sorted form either
+    way. Verified against a real boundary before transplanting.
+    """
+    return json.dumps(
+        data, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _validate_generic_ledger(ledger: dict, case_id: str, schema_name: str,
+                             *, replay_history: bool = True) -> None:
+    """Schema-check a ledger, then prove every operation binds to real state.
+
+    Transplanted from 633bd7b0 (see _normalize_legacy_run_state for why this
+    was missing). Three bindings are checked, and each catches a different way
+    a ledger can lie: the request digest catches a rewritten request, the
+    result/target check catches an operation that claims to have changed an
+    entry that does not exist or does not match, and the replay below catches
+    a final state that no sequence of the recorded operations could produce.
+    """
+    errors = _schema_check(ledger, schema_name)
+    if errors:
+        raise ValueError(f"{schema_name} is invalid: " + "; ".join(errors))
+    if ledger.get("case_id") != case_id:
+        raise ValueError("ledger belongs to a different case")
+    operation_ids = [op["operation_id"] for op in ledger["operations"]]
+    if len(operation_ids) != len(set(operation_ids)):
+        raise ValueError("ledger has duplicate operation_id")
+    source_names = {e["file_name"] for e in ledger.get("files", [])}
+    conflict_ids = {e["conflict_id"] for e in ledger.get("conflicts", [])}
+    for operation in ledger["operations"]:
+        request = operation["request"]
+        if (request["case_id"] != case_id
+                or request["operation_id"] != operation["operation_id"]
+                or hashlib.sha256(_canonical_json_bytes(request)).hexdigest()
+                != operation["request_sha256"]):
+            raise ValueError("ledger operation request binding is invalid")
+        payload = request["payload"]
+        result = operation["result"]
+        if schema_name == "source_ledger.schema.json":
+            expected = {"action": "set_status",
+                        "target_id": payload["file_name"],
+                        "status": payload["status"]}
+            target_exists = result["target_id"] in source_names
+        elif request["action"] == "add":
+            expected = {"action": "add", "target_id": result["target_id"],
+                        "status": "pending"}
+            target_exists = result["target_id"] in conflict_ids
+            conflict = next(
+                (e for e in ledger["conflicts"]
+                 if e["conflict_id"] == result["target_id"]), None)
+            target_exists = target_exists and conflict is not None and all((
+                conflict["raised_by_stage"] == payload["stage"],
+                conflict["field_or_topic"] == payload["topic"],
+                conflict["sources"] == payload["sources"],
+            ))
+        else:
+            expected = {"action": "set_verdict",
+                        "target_id": payload["conflict_id"],
+                        "status": payload["verdict"]}
+            target_exists = result["target_id"] in conflict_ids
+        if result != expected or not target_exists:
+            raise ValueError("ledger operation result binding is invalid")
+    if replay_history:
+        _replay_generic_ledger_history(ledger, schema_name)
+
+
+def _replay_generic_ledger_history(ledger: dict, schema_name: str) -> None:
+    """Replay the operation log onto the baseline and demand the current state.
+
+    This is the check that makes the ledger tamper-evident rather than merely
+    well-formed: an entry edited in place without a matching operation shows up
+    here as a replay mismatch, because the recorded history cannot produce it.
+    """
+    boundary = ledger["history_boundary"]
+    baseline = boundary["baseline_state"]
+    if boundary["baseline_sha256"] != hashlib.sha256(
+            _canonical_json_bytes(baseline)).hexdigest():
+        raise ValueError("ledger history boundary digest is invalid")
+    replayed = json.loads(json.dumps(baseline))
+    absorbed_count = boundary.get("absorbed_operation_count", 0)
+    if absorbed_count > len(ledger["operations"]):
+        raise ValueError("ledger absorbed-operation boundary exceeds history")
+    absorbed = ledger["operations"][:absorbed_count]
+    if "absorbed_operations_sha256" in boundary and boundary[
+            "absorbed_operations_sha256"] != hashlib.sha256(
+            _canonical_json_bytes(absorbed)).hexdigest():
+        raise ValueError("ledger absorbed-operation boundary digest is invalid")
+    for operation in ledger["operations"][absorbed_count:]:
+        request = operation["request"]
+        payload = request["payload"]
+        result = operation["result"]
+        completed_at = operation["completed_at"]
+        if schema_name == "source_ledger.schema.json":
+            entry = next((i for i in replayed
+                          if i["file_name"] == payload["file_name"]), None)
+            if entry is None:
+                raise ValueError("ledger operation targets no baseline file")
+            entry["review_status"] = payload["status"]
+            entry["reviewed_by"] = payload["reviewer"]
+            entry["reviewed_at"] = completed_at
+            entry["rejection_reason"] = (
+                payload["reason"] if payload["status"] == "rejected" else None)
+        elif request["action"] == "add":
+            replayed.append({
+                "conflict_id": result["target_id"],
+                "raised_by_stage": payload["stage"],
+                "field_or_topic": payload["topic"],
+                "sources": payload["sources"],
+                "verdict": "pending",
+                "resolution_note": None,
+                "resolved_at": None,
+            })
+        else:
+            entry = next((i for i in replayed
+                          if i["conflict_id"] == payload["conflict_id"]), None)
+            if entry is None:
+                raise ValueError("ledger operation targets no replayed conflict")
+            entry["verdict"] = payload["verdict"]
+            entry["resolution_note"] = payload["note"]
+            entry["resolved_at"] = completed_at
+    current = (ledger["files"] if schema_name == "source_ledger.schema.json"
+               else ledger["conflicts"])
+    if replayed != current:
+        raise ValueError("ledger state does not replay from its history boundary")
+
+
+def _validate_predecessor_final_state(ledger: dict, schema_name: str) -> None:
+    """Refuse to absorb a predecessor whose state contradicts its own receipts.
+
+    Absorbing operations means trusting that the current state is what they
+    produced. If the newest receipt for an entry disagrees with that entry, the
+    ledger was edited outside its operation log, and freezing that into a new
+    baseline would make the edit permanent and invisible.
+    """
+    if schema_name == "source_ledger.schema.json":
+        latest = {}
+        for operation in ledger["operations"]:
+            latest[operation["request"]["payload"]["file_name"]] = operation
+        current = {entry["file_name"]: entry for entry in ledger["files"]}
+        for file_name, operation in latest.items():
+            payload = operation["request"]["payload"]
+            entry = current.get(file_name)
+            if entry is None:
+                raise ValueError(
+                    "predecessor source ledger receipt targets a missing file")
+            expected_reason = (
+                payload["reason"] if payload["status"] == "rejected" else None)
+            if (entry["review_status"] != payload["status"]
+                    or entry.get("reviewed_by") != payload["reviewer"]
+                    or entry.get("rejection_reason") != expected_reason):
+                raise ValueError(
+                    "predecessor source ledger contradicts its latest receipt")
+        return
+    expected = {}
+    for operation in ledger["operations"]:
+        request = operation["request"]
+        payload = request["payload"]
+        target_id = operation["result"]["target_id"]
+        if request["action"] == "add":
+            expected[target_id] = {
+                "raised_by_stage": payload["stage"],
+                "field_or_topic": payload["topic"],
+                "sources": payload["sources"],
+                "verdict": "pending",
+                "resolution_note": None,
+            }
+        else:
+            expected.setdefault(target_id, {})
+            expected[target_id].update({
+                "verdict": payload["verdict"],
+                "resolution_note": payload["note"],
+            })
+    current = {entry["conflict_id"]: entry for entry in ledger["conflicts"]}
+    for target_id, fields in expected.items():
+        if target_id not in current:
+            raise ValueError(
+                "predecessor conflict ledger receipt targets a missing conflict")
+        if any(current[target_id].get(k) != v for k, v in fields.items()):
+            raise ValueError(
+                "predecessor conflict ledger contradicts its latest receipt")
+
+
+def _normalize_predecessor_timestamps(ledger: dict, schema_name: str) -> None:
+    """Align an absorbed entry's timestamp with the receipt that produced it.
+
+    The 60-second window is the tolerance for state authored just before its
+    receipt was committed. A negative or larger gap means the two were not
+    written by the same operation, so the pairing is refused rather than
+    normalized into agreement.
+    """
+    latest = {}
+    for operation in ledger["operations"]:
+        payload = operation["request"]["payload"]
+        target_id = (payload["file_name"]
+                     if schema_name == "source_ledger.schema.json"
+                     else operation["result"]["target_id"])
+        latest[target_id] = operation
+    state_key = ("files" if schema_name == "source_ledger.schema.json"
+                 else "conflicts")
+    id_key = "file_name" if state_key == "files" else "conflict_id"
+    current = {entry[id_key]: entry for entry in ledger[state_key]}
+    for target_id, operation in latest.items():
+        entry = current[target_id]
+        action = operation["request"]["action"]
+        completed_at = operation["completed_at"]
+        timestamp_key = "reviewed_at" if state_key == "files" else "resolved_at"
+        if state_key == "conflicts" and action == "add":
+            if entry.get(timestamp_key) is not None:
+                raise ValueError(
+                    "pending predecessor conflict has a resolution timestamp")
+            continue
+        authored_at = entry.get(timestamp_key)
+        if not isinstance(authored_at, str):
+            raise ValueError("predecessor receipt has no authored state timestamp")
+        try:
+            authored = datetime.fromisoformat(authored_at)
+            completed = datetime.fromisoformat(completed_at)
+        except ValueError as exc:
+            raise ValueError("predecessor state timestamp is invalid") from exc
+        delay = (completed - authored).total_seconds()
+        if delay < 0 or delay > 60:
+            raise ValueError(
+                "predecessor state timestamp is inconsistent with its receipt")
+        entry[timestamp_key] = completed_at
+
+
+def _normalize_legacy_generic_ledger(ledger: dict, *, version: str,
+                                     state_key: str, schema_name: str,
+                                     predecessor_versions: set) -> dict:
+    """Bring a pre-history-chain ledger up to the current version.
+
+    A ledger written before the chain existed carries no operations to replay,
+    so its current state becomes the baseline (`legacy_snapshot`) rather than
+    being rejected -- the history starts now instead of pretending to reach
+    back. A ledger that has operations but no boundary is validated WITHOUT
+    replay first, then its operations are absorbed into the new boundary.
+    """
+    has_version = "ledger_version" in ledger
+    has_operations = "operations" in ledger
+    has_boundary = "history_boundary" in ledger
+    if not has_version and not has_operations and not has_boundary:
+        ledger = json.loads(json.dumps(ledger))
+        ledger["ledger_version"] = version
+        ledger["operations"] = []
+        ledger["history_boundary"] = make_history_boundary(
+            ledger[state_key], mode="legacy_snapshot",
+            established_at=(ledger.get("updated_at") or ledger.get("created_at")
+                            or "1970-01-01T00:00:00+00:00"))
+        return ledger
+    if (has_version and has_operations and not has_boundary
+            and ledger.get("ledger_version") in predecessor_versions):
+        candidate = json.loads(json.dumps(ledger))
+        candidate["ledger_version"] = version
+        candidate["history_boundary"] = make_history_boundary(
+            candidate[state_key], mode="legacy_snapshot")
+        _validate_generic_ledger(candidate, candidate.get("case_id"),
+                                 schema_name, replay_history=False)
+        _validate_predecessor_final_state(candidate, schema_name)
+        absorbed = candidate["operations"]
+        predecessor_state = json.loads(json.dumps(candidate[state_key]))
+        _normalize_predecessor_timestamps(candidate, schema_name)
+        candidate["history_boundary"] = make_history_boundary(
+            candidate[state_key], mode="legacy_snapshot",
+            absorbed_operations=absorbed,
+            predecessor_state=predecessor_state)
+        return candidate
+    if not (has_version and has_operations and has_boundary):
+        raise ValueError("ledger version/operation/history boundary is incomplete")
+    return ledger
+
+
+def _prepare_ledger_operation(ledger: dict, args, action: str,
+                              payload: dict) -> tuple:
+    """Build an operation envelope, or return the one already committed.
+
+    The idempotency here is the point of `--operation-id`: a retried approval
+    with the same id and the same request is a no-op that returns the original
+    result, while the same id carrying a DIFFERENT request is refused rather
+    than silently overwriting history.
+    """
+    operation_id = getattr(args, "operation_id", None)
+    if not isinstance(operation_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}", operation_id):
+        raise ValueError("operation_id has an invalid format")
+    request = {"case_id": args.case_id, "operation_id": operation_id,
+               "action": action, "payload": payload}
+    request_sha256 = hashlib.sha256(_canonical_json_bytes(request)).hexdigest()
+    matches = [op for op in ledger["operations"]
+               if op.get("operation_id") == operation_id]
+    if len(matches) > 1:
+        raise ValueError("duplicate committed operation_id")
+    if matches:
+        if matches[0].get("request_sha256") != request_sha256:
+            raise ValueError("operation_id was committed for a different request")
+        if matches[0].get("request") != request:
+            raise ValueError("operation_id request envelope is inconsistent")
+        result = matches[0].get("result")
+        if not isinstance(result, dict):
+            raise ValueError("committed operation result is invalid")
+        return request, request_sha256, result
+    return request, request_sha256, None
+
+
+def _commit_ledger_operation(ledger: dict, args, request: dict,
+                             request_sha256: str, result: dict,
+                             completed_at: str) -> None:
+    ledger["operations"].append({
+        "operation_id": args.operation_id,
+        "request": request,
+        "request_sha256": request_sha256,
+        "result": result,
+        "completed_at": completed_at,
+    })
+
+
+def validated_source_ledger(case_id: str) -> dict:
+    """The source ledger, proven to bind to its own recorded history.
+
+    This is what `intake_case.py --execute` calls before copying anything: a
+    ledger whose approvals cannot be replayed from its baseline is not an
+    approval record, and D2's whole point is that the copy is gated on a real
+    one.
+    """
+    ledger = load_json(source_ledger_path(case_id))
+    if ledger is None:
+        raise ValueError("source ledger not found")
+    ledger = _normalize_legacy_generic_ledger(
+        ledger, version="source_ledger.v0.4", state_key="files",
+        schema_name="source_ledger.schema.json",
+        predecessor_versions={"source_ledger.v0.3"})
+    _validate_generic_ledger(ledger, case_id, "source_ledger.schema.json")
+    return ledger
+
+
+def validated_conflict_ledger(case_id: str, *, allow_missing: bool = False) -> dict:
+    """The conflict ledger, same binding guarantee as the source ledger."""
+    existing = load_json(conflict_ledger_path(case_id))
+    if existing is not None:
+        existing = _normalize_legacy_generic_ledger(
+            existing, version="conflict_ledger.v0.3", state_key="conflicts",
+            schema_name="conflict_ledger.schema.json",
+            predecessor_versions={"conflict_ledger.v0.2"})
+        _validate_generic_ledger(existing, case_id,
+                                 "conflict_ledger.schema.json")
+        return existing
+    if not allow_missing:
+        raise ValueError("conflict ledger is missing")
+    return {
+        "ledger_version": "conflict_ledger.v0.3",
+        "case_id": case_id,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "conflicts": [],
+        "history_boundary": make_history_boundary([], mode="native"),
+        "operations": [],
+    }
+
+
+def validated_run_state(case_id: str, *, allow_missing: bool = False) -> dict:
+    """The run state, schema-valid and free of duplicate ids.
+
+    Narrower than 633bd7b0's version by design: the reconciliation-operation
+    bindings it also checked belong to the medical-review flow, which is not
+    transplanted here (see the C-scope note in the commit message). Everything
+    checked below is independent of that flow.
+    """
+    path = run_state_path(case_id)
+    path_missing = not path.exists()
+    state = load_run_state(case_id)
+    if _medical_artifacts_present(case_id):
+        state["medical_review_adopted"] = True
+    if allow_missing and path_missing:
+        return state
+    errors = _schema_check(state, "run_state.schema.json")
+    if errors:
+        raise ValueError("run state is invalid: " + "; ".join(errors))
+    if state.get("case_id") != case_id:
+        raise ValueError("run state belongs to a different case")
+    stage_names = [entry["stage_name"] for entry in state["stages"]]
+    if len(stage_names) != len(set(stage_names)):
+        raise ValueError("run state has duplicate stage_name")
+    human_input_ids = [entry["human_input_id"]
+                       for entry in state.get("human_input_status", [])
+                       if "human_input_id" in entry]
+    if len(human_input_ids) != len(set(human_input_ids)):
+        raise ValueError("run state has duplicate human_input_id")
+    return state
+
+
+def make_history_boundary(files, *, mode: str, established_at: str = None,
+                          absorbed_operations: list = None,
+                          forked_operations: list = None,
+                          predecessor_state: list = None):
+    """Make the canonical, lossless baseline binding for a ledger.
 
     The digest is over deterministic JSON of the exact entry list.  Callers
     receive an independent JSON-shaped copy, so later ledger mutations cannot
     retroactively change the history baseline this boundary attests to.
+
+    `absorbed_operations` records operations that happened BEFORE this boundary
+    was established -- an upgraded ledger keeps them in `operations` for the
+    audit trail, but they are not replayed onto the new baseline, since the
+    baseline already reflects them. Counting and digesting them is what stops
+    that exemption from becoming a place to hide an extra operation.
     """
     if mode not in {"native", "legacy_snapshot"}:
         raise ValueError(f"unsupported source-ledger history mode: {mode!r}")
     baseline_state = json.loads(json.dumps(
         files, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
-    baseline_bytes = json.dumps(
-        baseline_state, sort_keys=True, separators=(",", ":"),
-        ensure_ascii=False).encode("utf-8")
-    return {
+    boundary = {
         "mode": mode,
-        "established_at": now_iso(),
-        "baseline_sha256": hashlib.sha256(baseline_bytes).hexdigest(),
+        "established_at": established_at or now_iso(),
+        "baseline_sha256": hashlib.sha256(
+            _canonical_json_bytes(baseline_state)).hexdigest(),
         "baseline_state": baseline_state,
     }
+    if absorbed_operations is not None:
+        absorbed = json.loads(json.dumps(absorbed_operations))
+        boundary["absorbed_operation_count"] = len(absorbed)
+        boundary["absorbed_operations_sha256"] = hashlib.sha256(
+            _canonical_json_bytes(absorbed)).hexdigest()
+    if forked_operations is not None:
+        forked = json.loads(json.dumps(forked_operations))
+        boundary["forked_operation_count"] = len(forked)
+        boundary["forked_operations_sha256"] = hashlib.sha256(
+            _canonical_json_bytes(forked)).hexdigest()
+    if predecessor_state is not None:
+        predecessor = json.loads(json.dumps(predecessor_state))
+        boundary["predecessor_state_sha256"] = hashlib.sha256(
+            _canonical_json_bytes(predecessor)).hexdigest()
+    return boundary
 
 def source_ledger_path(case_id: str) -> Path:
     return case_dir(case_id) / "_source_ledger.json"
@@ -4754,18 +5240,62 @@ def cmd_set_ledger_status(args):
         if args.status == "rejected" and not args.reason:
             print("ERROR: --reason is required to set status rejected")
             return 1
+        # A v0.4 ledger carries a replayable history, so a status change has to
+        # be RECORDED as an operation, not just written into the entry. Writing
+        # it in place leaves a ledger whose current state cannot be replayed
+        # from its own baseline -- which validated_source_ledger() rejects, and
+        # rightly: that is indistinguishable from tampering. (This is what
+        # CASE_142 hit: --init-ledger wrote v0.4 while this writer still wrote
+        # v0.3-style.) A legacy ledger is upgraded here, on first mutation.
+        #
+        # The ledger is validated BEFORE it is extended: a writer that appends
+        # to a tampered history would launder the tampering into a longer chain
+        # that still verifies from its new baseline. Read-side validation alone
+        # cannot prevent that, so the write path re-proves the chain too.
+        try:
+            ledger = _normalize_legacy_generic_ledger(
+                ledger, version="source_ledger.v0.4", state_key="files",
+                schema_name="source_ledger.schema.json",
+                predecessor_versions={"source_ledger.v0.3"})
+            _validate_generic_ledger(
+                ledger, args.case_id, "source_ledger.schema.json")
+        except ValueError as exc:
+            print(f"ERROR: source ledger is not writable: {exc}")
+            return 1
+
+        payload = {"file_name": args.file_name, "status": args.status,
+                   "reviewer": args.reviewer, "reason": args.reason}
+        try:
+            request, request_sha256, committed = _prepare_ledger_operation(
+                ledger, args, "set_status", payload)
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+        if committed is not None:
+            print(f"OK: {args.file_name} -> {args.status} (already recorded"
+                  f" under operation_id {args.operation_id})")
+            return 0
+        operation = (request, request_sha256)
+
         found = False
+        completed_at = now_iso()
         for entry in ledger["files"]:
             if entry["file_name"] == args.file_name:
                 entry["review_status"] = args.status
                 entry["reviewed_by"] = args.reviewer
-                entry["reviewed_at"] = now_iso()
+                entry["reviewed_at"] = completed_at
                 entry["rejection_reason"] = args.reason if args.status == "rejected" else None
                 found = True
                 break
         if not found:
             print(f"NOT_FOUND: no entry for file {args.file_name!r} in ledger")
             return 1
+        if operation is not None:
+            request, request_sha256 = operation
+            _commit_ledger_operation(
+                ledger, args, request, request_sha256,
+                {"action": "set_status", "target_id": args.file_name,
+                 "status": args.status}, completed_at)
         ledger["updated_at"] = now_iso()
         errors = _schema_check(ledger, "source_ledger.schema.json")
         if errors:
@@ -4781,9 +5311,17 @@ def cmd_set_ledger_status(args):
 
 
 def cmd_check_source_ledger_clear(args):
-    ledger = load_json(source_ledger_path(args.case_id))
-    if ledger is None:
-        print(json.dumps({"clear": False, "error": "ledger not found"}))
+    # "Clear" has to mean the approvals are real, not merely that the strings
+    # say "approved" -- this is the gate --execute and the SLA marker both hang
+    # off, so a ledger whose history does not replay must not read as clear.
+    try:
+        ledger = validated_source_ledger(args.case_id)
+    except ValueError as exc:
+        if "not found" in str(exc):
+            print(json.dumps({"clear": False, "error": "ledger not found"}))
+        else:
+            print(json.dumps({"clear": False, "error": str(exc)},
+                             ensure_ascii=False))
         return 1
     pending = [e["file_name"] for e in ledger["files"] if e["review_status"] == "pending"]
     rejected = [e["file_name"] for e in ledger["files"] if e["review_status"] == "rejected"]
@@ -5911,10 +6449,27 @@ def conflict_ledger_path(case_id: str) -> Path:
 
 
 def load_conflict_ledger(case_id: str) -> dict:
+    """The conflict ledger, upgraded to the history-tracked shape if needed.
+
+    Unlike validated_conflict_ledger this does not replay -- callers that are
+    about to WRITE validate explicitly first, and read-only callers should not
+    acquire a new failure mode on a ledger they only count entries in.
+    """
     existing = load_json(conflict_ledger_path(case_id))
     if existing is not None:
-        return existing
-    return {"case_id": case_id, "created_at": now_iso(), "updated_at": now_iso(), "conflicts": []}
+        return _normalize_legacy_generic_ledger(
+            existing, version="conflict_ledger.v0.3", state_key="conflicts",
+            schema_name="conflict_ledger.schema.json",
+            predecessor_versions={"conflict_ledger.v0.2"})
+    return {
+        "ledger_version": "conflict_ledger.v0.3",
+        "case_id": case_id,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "conflicts": [],
+        "history_boundary": make_history_boundary([], mode="native"),
+        "operations": [],
+    }
 
 
 def cmd_read_conflict_ledger(args):
@@ -5935,11 +6490,30 @@ def cmd_add_conflict_entry(args):
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return 1
     try:
-        ledger = load_conflict_ledger(args.case_id)
+        try:
+            ledger = load_conflict_ledger(args.case_id)
+            _validate_generic_ledger(ledger, args.case_id,
+                                     "conflict_ledger.schema.json")
+        except ValueError as exc:
+            print(f"ERROR: conflict ledger is not writable: {exc}")
+            return 1
         sources = json.loads(Path(args.sources_file).read_text(encoding="utf-8"))
         n = len(ledger["conflicts"]) + 1
+        conflict_id = f"CONFLICT_{n}"
+        payload = {"stage": args.stage, "topic": args.topic, "sources": sources}
+        try:
+            request, request_sha256, committed = _prepare_ledger_operation(
+                ledger, args, "add", payload)
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+        if committed is not None:
+            print(f"OK: added {committed['target_id']} (already recorded under"
+                  f" operation_id {args.operation_id})")
+            return 0
+        completed_at = now_iso()
         ledger["conflicts"].append({
-            "conflict_id": f"CONFLICT_{n}",
+            "conflict_id": conflict_id,
             "raised_by_stage": args.stage,
             "field_or_topic": args.topic,
             "sources": sources,
@@ -5947,6 +6521,10 @@ def cmd_add_conflict_entry(args):
             "resolution_note": None,
             "resolved_at": None,
         })
+        _commit_ledger_operation(
+            ledger, args, request, request_sha256,
+            {"action": "add", "target_id": conflict_id, "status": "pending"},
+            completed_at)
         ledger["updated_at"] = now_iso()
         errors = _schema_check(ledger, "conflict_ledger.schema.json")
         if errors:
@@ -5969,14 +6547,37 @@ def cmd_set_conflict_verdict(args):
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return 1
     try:
-        ledger = load_conflict_ledger(args.case_id)
+        try:
+            ledger = load_conflict_ledger(args.case_id)
+            _validate_generic_ledger(ledger, args.case_id,
+                                     "conflict_ledger.schema.json")
+        except ValueError as exc:
+            print(f"ERROR: conflict ledger is not writable: {exc}")
+            return 1
         entry = next((c for c in ledger["conflicts"] if c["conflict_id"] == args.conflict_id), None)
         if entry is None:
             print(f"NOT_FOUND: {args.conflict_id}")
             return 1
+        payload = {"conflict_id": args.conflict_id, "verdict": args.verdict,
+                   "note": args.note}
+        try:
+            request, request_sha256, committed = _prepare_ledger_operation(
+                ledger, args, "set_verdict", payload)
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+        if committed is not None:
+            print(f"OK: {args.conflict_id} -> {args.verdict} (already recorded"
+                  f" under operation_id {args.operation_id})")
+            return 0
+        completed_at = now_iso()
         entry["verdict"] = args.verdict
         entry["resolution_note"] = args.note
-        entry["resolved_at"] = now_iso()
+        entry["resolved_at"] = completed_at
+        _commit_ledger_operation(
+            ledger, args, request, request_sha256,
+            {"action": "set_verdict", "target_id": args.conflict_id,
+             "status": args.verdict}, completed_at)
         ledger["updated_at"] = now_iso()
         errors = _schema_check(ledger, "conflict_ledger.schema.json")
         if errors:
@@ -5997,8 +6598,13 @@ def pending_conflict_ids(case_id: str) -> list[str]:
     Shared by the CLI check and the finalize gate so the two cannot drift into
     disagreeing about what "clear" means -- the drift that let a documented
     gate be enforced in prose only.
+
+    Validated, not merely read: "no pending verdicts" is only meaningful if the
+    verdicts are the ones the ledger's own history records. A ledger that fails
+    its chain raises rather than reporting clear, so P6 fails closed.
     """
     ledger = load_conflict_ledger(case_id)
+    _validate_generic_ledger(ledger, case_id, "conflict_ledger.schema.json")
     return [c["conflict_id"] for c in ledger["conflicts"]
             if c.get("verdict") == "pending"]
 
@@ -6024,7 +6630,11 @@ CONFLICT_GATED_STAGES = frozenset({
 
 @traced_read("dao.check_conflicts_clear")
 def cmd_check_conflicts_clear(args):
-    pending = pending_conflict_ids(args.case_id)
+    try:
+        pending = pending_conflict_ids(args.case_id)
+    except ValueError as exc:
+        print(json.dumps({"clear": False, "error": str(exc)}, ensure_ascii=False))
+        return 1
     clear = not pending
     print(json.dumps({"clear": clear, "pending": pending}))
     return 0 if clear else 1
@@ -9743,6 +10353,14 @@ def build_parser():
     p = sub.add_parser("set-ledger-status")
     p.add_argument("case_id"); p.add_argument("file_name"); p.add_argument("status", choices=["pending", "approved", "rejected"])
     p.add_argument("--reviewer"); p.add_argument("--reason")
+    # Optional so a pre-v0.4 ledger still works without one; a v0.4 ledger
+    # refuses the write without it, because that is the id its history binds
+    # the operation to. intake_case.py's own instructions already tell the
+    # reviewer to pass this.
+    p.add_argument("--operation-id", default=None,
+                   help="Unique id for this approval, required for a v0.4 "
+                        "(history-tracked) ledger. Re-running with the same id "
+                        "and the same request is an idempotent no-op.")
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_set_ledger_status)
 
@@ -9830,12 +10448,18 @@ def build_parser():
     p = sub.add_parser("add-conflict-entry")
     p.add_argument("case_id"); p.add_argument("--stage", required=True)
     p.add_argument("--topic", required=True); p.add_argument("--sources-file", required=True)
+    p.add_argument("--operation-id", default=None,
+                   help="Unique id binding this entry into the ledger history. "
+                        "Re-running with the same id is an idempotent no-op.")
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_add_conflict_entry)
 
     p = sub.add_parser("set-conflict-verdict")
     p.add_argument("case_id"); p.add_argument("conflict_id")
     p.add_argument("verdict", choices=["resolved", "false_positive"]); p.add_argument("--note", required=True)
+    p.add_argument("--operation-id", default=None,
+                   help="Unique id binding this verdict into the ledger history. "
+                        "Re-running with the same id is an idempotent no-op.")
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_set_conflict_verdict)
 
