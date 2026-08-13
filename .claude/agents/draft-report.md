@@ -14,11 +14,30 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full.
 
 # Checkpoint — v1 (Phase 1)
 
-Read (via the DAO): `screening_report.json` + `case_type_result.json`'s `template_id`/`case_type`. Template structure: `templates/draft-report.md` (변형 A 배상책임_후유장해형 / 변형 B 진단수술비형) — read it before drafting; section presence/order is structurally enforced, not just prompted. You provide per-section content + `evidence_references` to `python tools/document_assembly.py --sections-file <spec.json> --held-by draft-report --run-id RUN_ID --template <template_id>` (the `--template` flag validates your sections against `templates/registry.json` and refuses to write on any mismatch — a refusal means fix your section list, not drop the flag), which renders `draft_report_v1.md` and auto-generates `[E#]` tags + the `.evidence.json` sidecar in one pass — never hand-write a tag. **`document_assembly.py` verifies every citation quote against `data/processed/<CASE>/<DOC>/redacted_text.md` before writing anything, and refuses the whole document if one does not resolve.** Quote from the processed text; never reconstruct one from memory or from an earlier draft you are revising. Whitespace differences are tolerated (extraction line-wraps mid-sentence), wrong words and wrong `document_id`s are not — 29 of CASE_909's 190 v2 citations failed this way, mostly quotes recalled rather than copied plus bills attributed to the wrong document. Separately, write `draft_report_metadata_v1.json` via the DAO: `python tools/dao.py write-contract CASE_ID draft_report_metadata_v1.json --data-file <path> --schema-name draft_report_metadata.schema.json --held-by draft-report --run-id RUN_ID --stage draft_report_v1` (`--schema-name` takes the full filename; a bare contract name is refused) — document-assembly does not produce this file itself. It's a lean generation record (`version`, `template_id`, `case_type`, `section_count`, `evidence_tag_count`, `source_refs`, output paths), not a duplicate of the sidecar's citations or of `_run_state.json`'s progression tracking. Filename carries `_v1` (matching `draft_report_v1.md`/`.evidence.json`'s own convention) — a flat `draft_report_metadata.json` would get silently overwritten by the v2 write below, destroying the v1 record.
+Read via the DAO: `screening_report.json` and `case_type_result.json`, including `report_profile`, `template_id`, and `case_type`. If `support_status: unsupported` or `template_id: null`, halt before drafting. Report the unsupported family/type and required corpus material; never substitute a nearby template. A `provisional` profile remains `review_required` through this stage.
+
+Build `loss_adjustment_report_v1.json` against `loss-adjustment-format-study/analysis/llm-authoring-rules.md`. Every evidence-registry item is one exact redacted source locator with `document_id`, optional `page`, and verbatim `quote`; statements cite its `evidence_id`. Populate the family-specific reasoning issues, typed calculations, final assessment, and review gates. The model-authored finalization is only `draft` or `review_required`.
+
+Stage and publish the generated JSON through the DAO:
+
+```text
+python tools/dao.py stage-input CASE_ID RUN_ID loss_adjustment_report_v1 < GENERATED_FILE
+python tools/dao.py write-contract CASE_ID loss_adjustment_report_v1.json --data-file <STAGED_PATH> --schema-name loss_adjustment_report.schema.json --held-by draft-report --run-id RUN_ID --stage draft_report_v1
+```
+
+The DAO runs the full format validator, including evidence-ID integrity, family/mechanism compatibility, exact calculation recomputation, outcome reconciliation, and review gates. After that write succeeds, render only from the governed structured artifact:
+
+```text
+python tools/document_assembly.py --structured-report-file outputs/CASE_ID/loss_adjustment_report_v1.json --output-path outputs/CASE_ID/draft_report_v1.md --held-by draft-report --run-id RUN_ID --template <template_id>
+```
+
+The assembly tool deterministically groups the structured sections under the registry headings, generates `[E#]` tags and the `.evidence.json` sidecar together, and verifies every quote against the processed redacted source before writing either output. Never hand-write a tag or maintain a separate section spec for a draft report.
+
+Separately write `draft_report_metadata_v1.json` through `stage-input` + `write-contract`. Record the exact `report_profile`, `structured_report_path`, `template_id`, case type, counts, source refs, and narrative/sidecar paths. Filename carries `_v1`; never overwrite it with v2 metadata.
 
 # Checkpoint — v2 (Phase 2, after `denial-validation` runs)
 
-Read: `draft_report_v1.md` + `rebuttal_points.json`. Update/extend the draft to incorporate the rebuttal arguments. Write `draft_report_v2.md` via the same `document_assembly.py --held-by draft-report --run-id RUN_ID --template <template_id>` mechanism, and `draft_report_metadata_v2.json` (a fresh file, not an overwrite of v1's — `version: "v2"`, `source_refs` pointing at `draft_report_v1.md` + `rebuttal_points.json`).
+Read via the DAO: `loss_adjustment_report_v1.json`, `draft_report_v1.md`, and `rebuttal_points.json`. Update the structured reasoning, calculations, assessment, and sections; write `loss_adjustment_report_v2.json` through the same staged DAO path and render `draft_report_v2.md` from it with `--structured-report-file`. Write fresh `draft_report_metadata_v2.json` with `structured_report_path` for v2 and source refs pointing at the v1 structured report plus rebuttal points. Never overwrite a v1 artifact.
 
 # Content rules
 

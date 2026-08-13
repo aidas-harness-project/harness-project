@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "case_type_result.schema.json",
-  "title": "case_type_result.json -- case-type classification v0.2",
-  "description": "Produced by claim-analysis's checkpoint 3 (Case Type Classification). Determines template_id for the report template downstream -- a mandatory, independently schema-validated gate, see claim-analysis.md. v0.2 (2026-08-04) adds the two-axis classification -- coverage_basis (who pays, on what legal basis) and loss_type (what loss is computed) -- which replaces the flat case_type enum plus its secondary_case_types hedge. The axes are ADDITIVE and OPTIONAL in this version so an in-flight case (CASE_907) can complete against v0.1 semantics; case_type remains required. Once CASE_907 finishes, v0.3 makes the axes required and case_type deprecated. See open-decisions.md #8/#8a. Rationale for the split: every multi-type case on record straddles in the same direction (배상책임 x 후유장해) because the two questions are orthogonal, and templates/registry.json's key 배상책임_후유장해형 is already a compound of both axes.",
+  "title": "case_type_result.json -- case-type classification v0.3",
+  "description": "Produced by claim-analysis's checkpoint 3. v0.3 adds an optional report_profile bridge from the broad coverage/loss axes to the format-study family, claim mechanism, mode, and support status. Historical outputs remain readable without it; new runs must produce it. Supported/provisional profiles select a matching registry template, while unsupported profiles fail closed with template_id null.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -54,9 +54,10 @@
           }
         },
         "template_id": {
-          "type": "string",
-          "description": "Report template identifier. Canonical keys per templates/registry.json: 배상책임_후유장해형, 진단수술비형 (실손형/기타형 still TODO, no ground-truth basis yet -- use the closest variant and record it in warnings). document_assembly.py --template enforces section presence/order against exactly this value at render time, so a non-registry id breaks the draft stage."
+          "type": ["string", "null"],
+          "description": "Report template identifier from templates/registry.json. Null is required when report_profile.support_status is unsupported; an unsupported case must never borrow the closest template."
         },
+        "report_profile": { "$ref": "#/$defs/report_profile" },
         "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
         "evidence_references": {
           "type": "array",
@@ -102,9 +103,153 @@
         "required": ["case_type_source"]
       },
       "then": { "required": ["axis_cross_check"] }
+    },
+    {
+      "if": {
+        "required": ["report_profile"],
+        "properties": {
+          "report_profile": {
+            "properties": { "support_status": { "const": "unsupported" } },
+            "required": ["support_status"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "template_id": { "type": "null" },
+          "review_required": { "const": true }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["report_profile"],
+        "properties": {
+          "report_profile": {
+            "properties": { "support_status": { "const": "provisional" } },
+            "required": ["support_status"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "template_id": { "type": "string" },
+          "review_required": { "const": true }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["report_profile"],
+        "properties": {
+          "report_profile": {
+            "properties": { "support_status": { "const": "supported" } },
+            "required": ["support_status"]
+          }
+        }
+      },
+      "then": { "properties": { "template_id": { "type": "string" } } }
     }
   ],
   "$defs": {
+    "report_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format_contract_version",
+        "family",
+        "claim_mechanism",
+        "mode",
+        "support_status"
+      ],
+      "properties": {
+        "format_contract_version": { "const": "loss_adjustment_report.v1" },
+        "family": {
+          "enum": [
+            "automobile_compensation",
+            "automobile_self_injury",
+            "personal_accident_benefit",
+            "liability_damages",
+            "disease_benefit",
+            "other_review_required"
+          ]
+        },
+        "claim_mechanism": {
+          "enum": [
+            "statutory_or_policy_auto_compensation",
+            "automobile_policy_benefit",
+            "personal_accident_policy_benefit",
+            "insured_liability",
+            "mutual_or_cooperative_liability",
+            "disease_policy_benefit",
+            "other_review_required"
+          ]
+        },
+        "mode": { "enum": ["full", "compact"] },
+        "support_status": { "enum": ["supported", "provisional", "unsupported"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "family": { "const": "automobile_compensation" } } },
+          "then": {
+            "properties": {
+              "claim_mechanism": { "const": "statutory_or_policy_auto_compensation" },
+              "mode": { "const": "compact" },
+              "support_status": { "const": "supported" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "family": { "const": "automobile_self_injury" } } },
+          "then": {
+            "properties": {
+              "claim_mechanism": { "const": "automobile_policy_benefit" },
+              "mode": { "const": "full" },
+              "support_status": { "const": "provisional" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "family": { "const": "personal_accident_benefit" } } },
+          "then": {
+            "properties": {
+              "claim_mechanism": { "const": "personal_accident_policy_benefit" },
+              "mode": { "const": "full" },
+              "support_status": { "const": "supported" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "family": { "const": "liability_damages" } } },
+          "then": {
+            "properties": {
+              "claim_mechanism": { "enum": ["insured_liability", "mutual_or_cooperative_liability"] },
+              "mode": { "const": "full" },
+              "support_status": { "const": "supported" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "family": { "const": "disease_benefit" } } },
+          "then": {
+            "properties": {
+              "claim_mechanism": { "const": "disease_policy_benefit" },
+              "mode": { "const": "full" },
+              "support_status": { "const": "supported" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "family": { "const": "other_review_required" } } },
+          "then": {
+            "properties": {
+              "claim_mechanism": { "const": "other_review_required" },
+              "support_status": { "const": "unsupported" }
+            }
+          }
+        }
+      ]
+    },
     "case_type": {
       "description": "DEPRECATED as of v0.2 -- superseded by the coverage_basis + loss_type axis pair. Still required in v0.2 so pre-2026-08-04 outputs (CASE_021/024/112/908) stay readable and an in-flight case can complete unchanged; becomes optional-then-removed in v0.3. Kept in Korean -- matches pipeline.md's case-type taxonomy. Known defect motivating the split: this enum conflates two orthogonal questions, has no value for 자동차보험 (the largest series in the corpus, 16 files), and its 기타 value does double duty for 'unusual claim' and 'not a claim at all'.",
       "enum": ["후유장해", "진단·수술비", "실손", "배상책임", "기타"]

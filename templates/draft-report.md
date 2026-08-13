@@ -1,7 +1,7 @@
 ---
 type: Template
 title: 손해사정서 초안 기본 구조
-description: 정답지 손해사정서 4건(배상책임/후유장해형 3건 + 진단·수술비형 4보험사판)에서 구조만 추출한 양식. 사건 유형별 변형 A/B로 구성.
+description: 정답지 4건의 구조와 보호된 95문서 양식 연구를 결합한 사건 유형별 손해사정서·보험금사정서 초안 양식.
 tags: [template, draft]
 timestamp: 2026-07-13T00:00:00+09:00
 resource: ../_workspace/RUN_20260708_001/form-template-export.md
@@ -31,17 +31,28 @@ adopted_from: wiki/templates/draft-report.md
 
 # 사건 유형별 변형
 
-정답지 4케이스는 두 계열로 나뉜다. `case_type_result.json`의 `template_id`로
-선택한다.
+`case_type_result.json`의 `report_profile`이 양식 계열·청구 메커니즘·표현
+모드·지원 상태를 정하고, 그 프로필과 일치하는 `template_id`만 선택할 수 있다.
+아래 첫 두 양식은 격리된 정답지의 구조 근거와 보호된 양식 연구를 함께
+사용한다. 나머지 세 양식은 보호된 양식 연구의 집계·구조 규칙에서 도출했다.
 
-| `template_id` | 문서 표제 | 대응 사건 유형(`pipeline.md`의 Case types) | 근거 케이스 | 섹션 수 |
+| `template_id` | 문서 표제 | `report_profile` | 근거 수준 | 섹션 수 |
 | --- | --- | --- | --- | --- |
-| `배상책임_후유장해형` (변형 A) | 손해사정서 | 배상책임 / 후유장해 | CASE_003, CASE_004, CASE_005 | 로마숫자 I~VII |
-| `진단수술비형` (변형 B) | 보험금사정서 | 진단·수술비 | CASE_006 (4개 보험사판) | 로마숫자 I~VI |
-| `실손형` | — | 실손 | **TODO — 근거 정답지 미확보.** 확보 전까지 변형 A를 임시 기반으로 쓰되 draft-report가 `warnings`에 명시 | — |
-| `기타형` | — | 기타 | **TODO — 근거 정답지 미확보.** | — |
+| `배상책임_후유장해형` (변형 A) | 손해사정서 | `liability_damages` / `insured_liability` 또는 `mutual_or_cooperative_liability` / `full` | supported — 정답지 3건 + 배상책임 연구군 22건 | 로마숫자 I~VII |
+| `진단수술비형` (변형 B) | 보험금사정서 | `disease_benefit` / `disease_policy_benefit` / `full` | supported — 정답지 1케이스(4개 보험사판) + 질병 연구군 8건 | 로마숫자 I~VI |
+| `개인보험_후유장해형` | 보험금사정서 | `personal_accident_benefit` / `personal_accident_policy_benefit` / `full` | supported — 개인상해 연구군 40건 | 로마숫자 I~VII |
+| `자동차보험_대인배상_간이형` | 손해사정서 | `automobile_compensation` / `statutory_or_policy_auto_compensation` / `compact` | supported — 간이형 15건 | 로마숫자 I~VI |
+| `자동차보험_자기신체사고형` | 보험금사정서 | `automobile_self_injury` / `automobile_policy_benefit` / `full` | **provisional** — 완전형 1건으로 얇음; 항상 전문 검토 필요 | 로마숫자 I~VII |
 
-두 변형 모두 아래 "공통 앞부분"을 공유하고, 본문 섹션(I~VI/VII)에서 갈린다.
+`실손`과 근거 없는 `기타` 유형에는 등록된 양식이 없다. 이 경우
+`other_review_required` / `support_status: unsupported` /
+`template_id: null`로 기록하고 초안 작성을 중단한다. 다른 양식을 임시로 빌려
+쓰지 않는다.
+
+아래 상세 절은 정답지에서 추출한 원래 변형 A/B를 설명한다. 추가된 세 양식의
+섹션 순서와 구조화 필드 매핑은 `templates/registry.json` 및
+`loss-adjustment-format-study/analysis/llm-authoring-rules.md`가 규정한다.
+원래 두 변형은 아래 "공통 앞부분"을 공유하고, 본문 섹션(I~VI/VII)에서 갈린다.
 감액/면책 국면은 감액사유 R코드(`pipeline.md`의 Denial/reduction reason
 codes)와 대응한다. 코드를 고정된 한 절에 일괄 배치하지 않고 사유의 성격에
 따라 약관·면책 검토, 의학적 판단, 책임 제한, 손해·보험금 계산 절에 각각
@@ -220,6 +231,7 @@ codes)와 대응한다. 코드를 고정된 한 절에 일괄 배치하지 않�
 | 2026-07-06 | 최초 8섹션 구조(개요/자료/쟁점/약관/의학/감액검토/의견/첨부) — 파이프라인 설계 시 임의 구성 | 실제 손사서 양식 부재로 잠정 구조 채택 |
 | 2026-07-08 | **정답지 4건(CASE_003~006) 실제 양식으로 전면 교체.** 임의 8섹션 → 정답지 실제 목차(변형 A 로마숫자 I~VII / 변형 B I~VI)로 대체. `template_id` 값을 `배상책임_후유장해형`/`진단수술비형`으로 구체화(기존 "후유장해형" 단일값 폐기). 실손형/기타형은 근거 정답지 미확보로 TODO 유지. | wiki `log.md` — critic-evaluation이 `data/ground_truth/`에서 구조만 추출(격리 절차 준수), 케이스 고유 값 없이 병합 |
 | 2026-07-13 | `wiki/templates/draft-report.md`에서 harness-project `templates/draft-report.md`로 채택(adopt). 이 시점부터 harness-project 사본이 1차 소스. 링크를 harness-project 실제 경로(`.claude/agents/`, `pipeline.md`)에 맞게 갱신 | `open-decisions.md` #2, `schemas/case_type_result.schema.json` 등이 이 구조를 "pending"으로 잘못 표시하고 있던 것을 발견 -- 실제로는 wiki에 이미 존재했음 |
+| 2026-08-11 | 보호된 95문서 양식 연구의 family/mechanism/mode를 라이브 `report_profile`과 레지스트리에 연결. 개인보험 후유장해·자동차 대인배상 양식을 지원하고 자기신체사고를 provisional로 등록. 실손/기타의 임시 fallback을 삭제하고 fail-closed로 변경 | 근거 없는 양식 차용을 막고, 분류 → 구조화 계약 → 결정적 렌더링을 하나의 검증 경로로 만들기 위함 |
 
 # Citations
 

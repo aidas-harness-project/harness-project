@@ -5,6 +5,7 @@ found while fixing it: the DAO-bypass itself, schema_name_for() not
 resolving *.evidence.json, and render() emitting page: null.
 """
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,9 @@ import dao
 @pytest.fixture
 def isolated_da(tmp_path, monkeypatch):
     monkeypatch.setattr(da, "ROOT", tmp_path)
+    monkeypatch.setattr(dao, "ROOT", tmp_path)
+    monkeypatch.setattr(dao, "OUTPUTS", tmp_path / "outputs")
+    monkeypatch.setattr(dao, "DATA", tmp_path / "data")
     # Real processed text for the documents these specs cite. main() verifies
     # every citation quote against this layer before writing, so a fixture
     # without it would exercise the refusal path instead of the render path --
@@ -82,6 +86,49 @@ def _run_main(sections_file, held_by="draft-report", run_id="RUN_X"):
         sys.argv = argv
 
 
+def _run_structured_main(structured_file, output_path, template="진단수술비형"):
+    import sys
+    argv = sys.argv
+    sys.argv = [
+        "document_assembly.py",
+        "--structured-report-file",
+        structured_file,
+        "--output-path",
+        output_path,
+        "--held-by",
+        "draft-report",
+        "--run-id",
+        "RUN_X",
+        "--template",
+        template,
+    ]
+    try:
+        da.main()
+    finally:
+        sys.argv = argv
+
+
+def _write_structured_contract(root, document, case_id="CASE_009", version=1):
+    """Seed the renderer through the same DAO write used by pipeline agents."""
+    source = root / f"structured-input-v{version}.json"
+    source.write_text(json.dumps(document), encoding="utf-8")
+    filename = f"loss_adjustment_report_v{version}.json"
+    rc = dao.cmd_write_contract(
+        SimpleNamespace(
+            case_id=case_id,
+            filename=filename,
+            data_file=str(source),
+            schema_name="loss_adjustment_report.schema.json",
+            held_by="draft-report",
+            run_id="RUN_X",
+            purpose="document assembly test",
+            stage=None,
+        )
+    )
+    assert rc == 0
+    return f"outputs/{case_id}/{filename}"
+
+
 def test_full_render_writes_md_and_valid_sidecar_and_releases_lock(isolated_da):
     spec = {"output_path": "outputs/CASE_009/draft_report_v1.md", "sections": [
         {"heading": "1. Overview", "content": "Claim {{E}} filed.",
@@ -101,6 +148,102 @@ def test_full_render_writes_md_and_valid_sidecar_and_releases_lock(isolated_da):
     from _validation import load_registry, validate_instance
     schemas, registry = load_registry()
     assert validate_instance(sidecar, "evidence_sidecar.schema.json", schemas, registry) == []
+
+
+def test_full_render_from_structured_contract_uses_verified_citations(isolated_da):
+    project_root = Path(__file__).resolve().parent.parent
+    document = json.loads(
+        (
+            project_root
+            / "loss-adjustment-format-study"
+            / "analysis"
+            / "examples"
+            / "example-disease-benefit.json"
+        ).read_text(encoding="utf-8")
+    )
+    document["case_reference"]["case_id"] = "CASE_009"
+    for evidence in document["evidence_registry"]:
+        target = (
+            isolated_da
+            / "data"
+            / "processed"
+            / "CASE_009"
+            / evidence["document_id"]
+        )
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "redacted_text.md").write_text(evidence["quote"], encoding="utf-8")
+    structured_file = _write_structured_contract(isolated_da, document)
+    output_path = "outputs/CASE_009/draft_report_v1.md"
+
+    _run_structured_main(structured_file, output_path)
+
+    rendered = isolated_da / output_path
+    sidecar = rendered.with_suffix(".evidence.json")
+    assert rendered.exists()
+    assert sidecar.exists()
+    assert "[E1]" in rendered.read_text(encoding="utf-8")
+
+
+def test_structured_render_refuses_case_id_mismatch(isolated_da):
+    project_root = Path(__file__).resolve().parent.parent
+    document = json.loads(
+        (
+            project_root
+            / "loss-adjustment-format-study"
+            / "analysis"
+            / "examples"
+            / "example-disease-benefit.json"
+        ).read_text(encoding="utf-8")
+    )
+    structured_file = _write_structured_contract(isolated_da, document)
+
+    with pytest.raises(SystemExit, match="case_reference.case_id"):
+        _run_structured_main(
+            structured_file, "outputs/CASE_009/draft_report_v1.md"
+        )
+
+    assert not (isolated_da / "outputs/CASE_009/draft_report_v1.md").exists()
+
+
+def test_structured_render_refuses_arbitrary_input_file(isolated_da):
+    arbitrary = isolated_da / "loss_adjustment_report_v1.json"
+    arbitrary.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="canonical DAO contract"):
+        _run_structured_main(
+            str(arbitrary), "outputs/CASE_009/draft_report_v1.md"
+        )
+
+    assert not (isolated_da / "outputs/CASE_009/draft_report_v1.md").exists()
+
+
+def test_structured_render_refuses_case_or_version_path_mismatch(isolated_da):
+    with pytest.raises(SystemExit, match="canonical DAO contract"):
+        _run_structured_main(
+            "outputs/CASE_009/loss_adjustment_report_v2.json",
+            "outputs/CASE_009/draft_report_v1.md",
+        )
+
+
+def test_render_refuses_output_without_case_identity(isolated_da):
+    spec = {
+        "output_path": "outputs/draft_report_v1.md",
+        "sections": [
+            {
+                "heading": "1. Overview",
+                "content": "Claim {{E}} filed.",
+                "evidence_references": [
+                    {"document_id": "DOC_001", "quote": "claim filed"}
+                ],
+            }
+        ],
+    }
+    sections_file = _write_sections_file(isolated_da, spec)
+
+    with pytest.raises(SystemExit, match="must identify its case"):
+        _run_main(sections_file)
+
+    assert not (isolated_da / "outputs/draft_report_v1.md").exists()
 
 
 def test_locked_target_is_not_rendered(isolated_da, monkeypatch):
@@ -176,6 +319,54 @@ def test_template_extra_section_fails_when_not_allowed():
 def test_template_unknown_key_fails():
     errors = da.validate_template(_headings_b(), "no_such_template")
     assert errors and "unknown template" in errors[0]
+
+
+def test_structured_report_converts_to_template_sections_and_citations():
+    document = json.loads(
+        (
+            da.ROOT
+            / "loss-adjustment-format-study"
+            / "analysis"
+            / "examples"
+            / "example-disease-benefit.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    spec = da.sections_from_structured_report(
+        document,
+        "진단수술비형",
+        "outputs/CASE_009/draft_report_v1.md",
+    )
+
+    headings = [section["heading"] for section in spec["sections"]]
+    assert da.validate_template(headings, "진단수술비형") == []
+    assert len(headings) == 7
+    assert spec["sections"][0]["evidence_references"] == []
+    assert "{{E}}" in spec["sections"][1]["content"]
+    assert spec["sections"][1]["evidence_references"][0] == {
+        "document_id": "DOC_101",
+        "page": 7,
+        "quote": "특별약관에 질병 정의와 진단확정 요건이 기재되어 있음.",
+    }
+
+
+def test_structured_report_refuses_a_template_from_another_family():
+    document = json.loads(
+        (
+            da.ROOT
+            / "loss-adjustment-format-study"
+            / "analysis"
+            / "examples"
+            / "example-disease-benefit.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    with pytest.raises(ValueError, match="does not accept family"):
+        da.sections_from_structured_report(
+            document,
+            "배상책임_후유장해형",
+            "outputs/CASE_009/draft_report_v1.md",
+        )
 
 
 def test_template_screening_report_conforms():

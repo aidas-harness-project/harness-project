@@ -1,0 +1,1468 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/loss-adjustment-report.schema.json",
+  "title": "Evidence-grounded Korean loss-adjustment report authoring contract",
+  "description": "A draft-only structured content model for a Korean 손해사정서 or 보험금사정서. It permits only draft or review-required finalization; authenticated human approval and release attestations are outside this model-authored schema. Rendering rules and cross-field review invariants are defined in llm-authoring-rules.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "document_profile",
+    "case_reference",
+    "evidence_registry",
+    "sections",
+    "reasoning_issues",
+    "calculations",
+    "final_assessment",
+    "review_gates"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "loss_adjustment_report.v1"
+    },
+    "document_profile": {
+      "$ref": "#/$defs/documentProfile"
+    },
+    "case_reference": {
+      "$ref": "#/$defs/caseReference"
+    },
+    "evidence_registry": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/evidenceSource"
+      }
+    },
+    "sections": {
+      "$ref": "#/$defs/sections"
+    },
+    "reasoning_issues": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/reasoningIssue"
+      }
+    },
+    "calculations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/calculation"
+      }
+    },
+    "final_assessment": {
+      "$ref": "#/$defs/finalAssessment"
+    },
+    "review_gates": {
+      "$ref": "#/$defs/reviewGates"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "document_profile": {
+            "properties": {
+              "family": {
+                "const": "automobile_compensation"
+              }
+            },
+            "required": [
+              "family"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reasoning_issues": {
+            "contains": {
+              "properties": {
+                "issue_kind": {
+                  "const": "comparative_negligence"
+                }
+              },
+              "required": [
+                "issue_kind"
+              ]
+            }
+          },
+          "calculations": {
+            "contains": {
+              "properties": {
+                "category": {
+                  "const": "total_damages"
+                }
+              },
+              "required": [
+                "category"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "document_profile": {
+            "properties": {
+              "family": {
+                "const": "automobile_self_injury"
+              }
+            },
+            "required": [
+              "family"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reasoning_issues": {
+            "contains": {
+              "properties": {
+                "issue_kind": {
+                  "const": "coverage"
+                }
+              },
+              "required": [
+                "issue_kind"
+              ]
+            }
+          },
+          "calculations": {
+            "contains": {
+              "properties": {
+                "category": {
+                  "const": "benefit_amount"
+                }
+              },
+              "required": [
+                "category"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "document_profile": {
+            "properties": {
+              "family": {
+                "const": "personal_accident_benefit"
+              }
+            },
+            "required": [
+              "family"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reasoning_issues": {
+            "contains": {
+              "properties": {
+                "issue_kind": {
+                  "const": "coverage"
+                }
+              },
+              "required": [
+                "issue_kind"
+              ]
+            }
+          },
+          "calculations": {
+            "contains": {
+              "properties": {
+                "category": {
+                  "const": "benefit_amount"
+                }
+              },
+              "required": [
+                "category"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "document_profile": {
+            "properties": {
+              "family": {
+                "const": "liability_damages"
+              }
+            },
+            "required": [
+              "family"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reasoning_issues": {
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "issue_kind": {
+                      "const": "liability"
+                    }
+                  },
+                  "required": [
+                    "issue_kind"
+                  ]
+                }
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "issue_kind": {
+                      "const": "comparative_negligence"
+                    }
+                  },
+                  "required": [
+                    "issue_kind"
+                  ]
+                }
+              }
+            ]
+          },
+          "calculations": {
+            "contains": {
+              "properties": {
+                "category": {
+                  "const": "total_damages"
+                }
+              },
+              "required": [
+                "category"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "document_profile": {
+            "properties": {
+              "family": {
+                "const": "disease_benefit"
+              }
+            },
+            "required": [
+              "family"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reasoning_issues": {
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "issue_kind": {
+                      "const": "coverage"
+                    }
+                  },
+                  "required": [
+                    "issue_kind"
+                  ]
+                }
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "issue_kind": {
+                      "const": "diagnosis_definition_match"
+                    }
+                  },
+                  "required": [
+                    "issue_kind"
+                  ]
+                }
+              }
+            ]
+          },
+          "calculations": {
+            "contains": {
+              "properties": {
+                "category": {
+                  "const": "benefit_amount"
+                }
+              },
+              "required": [
+                "category"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "document_profile": {
+            "properties": {
+              "family": {
+                "const": "other_review_required"
+              }
+            },
+            "required": [
+              "family"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "review_gates": {
+            "properties": {
+              "finalization": {
+                "enum": [
+                  "draft",
+                  "review_required"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "document_profile": {
+            "required": [
+              "family"
+            ],
+            "properties": {
+              "family": {
+                "const": "automobile_self_injury"
+              }
+            }
+          },
+          "case_reference": {
+            "required": [
+              "disability_benefit_claimed"
+            ],
+            "properties": {
+              "disability_benefit_claimed": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reasoning_issues": {
+            "contains": {
+              "properties": {
+                "issue_kind": {
+                  "const": "disability"
+                }
+              },
+              "required": [
+                "issue_kind"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "document_profile": {
+            "required": [
+              "family"
+            ],
+            "properties": {
+              "family": {
+                "enum": [
+                  "automobile_compensation",
+                  "automobile_self_injury",
+                  "personal_accident_benefit"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "case_reference": {
+            "properties": {
+              "event_type": {
+                "enum": [
+                  "accident",
+                  "mixed"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "document_profile": {
+            "required": [
+              "family"
+            ],
+            "properties": {
+              "family": {
+                "enum": [
+                  "disease_benefit"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "case_reference": {
+            "properties": {
+              "event_type": {
+                "enum": [
+                  "disease",
+                  "mixed"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "document_profile": {
+            "required": [
+              "family"
+            ],
+            "properties": {
+              "family": {
+                "enum": [
+                  "liability_damages"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "case_reference": {
+            "properties": {
+              "event_type": {
+                "enum": [
+                  "accident",
+                  "mixed",
+                  "other"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "document_profile": {
+            "required": [
+              "family"
+            ],
+            "properties": {
+              "family": {
+                "enum": [
+                  "other_review_required"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "case_reference": {
+            "properties": {
+              "event_type": {
+                "enum": [
+                  "mixed",
+                  "other"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "documentProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "claim_mechanism",
+        "mode",
+        "title",
+        "language",
+        "ordered_components"
+      ],
+      "properties": {
+        "family": {
+          "enum": [
+            "automobile_compensation",
+            "automobile_self_injury",
+            "personal_accident_benefit",
+            "liability_damages",
+            "disease_benefit",
+            "other_review_required"
+          ]
+        },
+        "claim_mechanism": {
+          "x-family-mechanisms": {
+            "automobile_compensation": [
+              "statutory_or_policy_auto_compensation"
+            ],
+            "automobile_self_injury": [
+              "automobile_policy_benefit"
+            ],
+            "personal_accident_benefit": [
+              "personal_accident_policy_benefit"
+            ],
+            "liability_damages": [
+              "insured_liability",
+              "mutual_or_cooperative_liability"
+            ],
+            "disease_benefit": [
+              "disease_policy_benefit"
+            ],
+            "other_review_required": [
+              "other_review_required"
+            ]
+          },
+          "enum": [
+            "statutory_or_policy_auto_compensation",
+            "automobile_policy_benefit",
+            "personal_accident_policy_benefit",
+            "insured_liability",
+            "mutual_or_cooperative_liability",
+            "disease_policy_benefit",
+            "other_review_required"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "full",
+            "compact"
+          ]
+        },
+        "title": {
+          "enum": [
+            "손해사정서",
+            "보험금사정서"
+          ]
+        },
+        "language": {
+          "const": "ko-KR"
+        },
+        "ordered_components": {
+          "type": "array",
+          "minItems": 6,
+          "uniqueItems": true,
+          "description": "The custom validator treats the items.enum sequence below as canonical rendering order.",
+          "items": {
+            "enum": [
+              "cover",
+              "submission_letter",
+              "inner_cover",
+              "summary",
+              "assignment_contract",
+              "facts",
+              "governing_basis",
+              "analysis",
+              "calculations",
+              "conclusion",
+              "evidence_index",
+              "signature"
+            ]
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "full"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "ordered_components": {
+                "const": [
+                  "cover",
+                  "submission_letter",
+                  "inner_cover",
+                  "summary",
+                  "assignment_contract",
+                  "facts",
+                  "governing_basis",
+                  "analysis",
+                  "calculations",
+                  "conclusion",
+                  "evidence_index",
+                  "signature"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "caseReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "pseudonymization_status",
+        "event_type",
+        "disability_benefit_claimed"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pseudonymization_status": {
+          "const": "pseudonymized"
+        },
+        "event_type": {
+          "enum": [
+            "accident",
+            "disease",
+            "mixed",
+            "other"
+          ]
+        },
+        "contract_reference": {
+          "type": "string"
+        },
+        "claim_reference": {
+          "type": "string"
+        },
+        "disability_benefit_claimed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "evidenceSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "source_kind",
+        "title",
+        "locator",
+        "document_id",
+        "quote",
+        "available"
+      ],
+      "properties": {
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^E[1-9][0-9]*$"
+        },
+        "source_kind": {
+          "enum": [
+            "policy",
+            "contract_schedule",
+            "medical_record",
+            "diagnostic_report",
+            "expert_opinion",
+            "accident_record",
+            "claim_form",
+            "income_record",
+            "legal_authority",
+            "payment_record",
+            "other"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "locator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "document_id": {
+          "type": "string",
+          "pattern": "^DOC_[0-9]{3,}$"
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "quote": {
+          "type": "string",
+          "minLength": 1
+        },
+        "document_date": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "available": {
+          "type": "boolean"
+        }
+      }
+    },
+    "supportedStatement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "evidence_refs",
+        "support_type",
+        "confidence",
+        "human_review_required"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^E[1-9][0-9]*$"
+          }
+        },
+        "support_type": {
+          "enum": [
+            "direct",
+            "derived",
+            "professional_judgment"
+          ]
+        },
+        "confidence": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "uncertainty_note": {
+          "type": "string"
+        },
+        "human_review_required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "heading",
+        "status",
+        "rationale",
+        "statements"
+      ],
+      "properties": {
+        "heading": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "included",
+            "not_applicable",
+            "deferred"
+          ]
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "statements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/supportedStatement"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "included"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "statements": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "not_applicable",
+                  "deferred"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "rationale": {
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "assignment_contract",
+        "facts",
+        "governing_basis",
+        "analysis",
+        "calculation_summary",
+        "conclusion",
+        "evidence_index"
+      ],
+      "properties": {
+        "summary": {
+          "$ref": "#/$defs/section"
+        },
+        "assignment_contract": {
+          "$ref": "#/$defs/section"
+        },
+        "facts": {
+          "$ref": "#/$defs/section"
+        },
+        "governing_basis": {
+          "$ref": "#/$defs/section"
+        },
+        "analysis": {
+          "$ref": "#/$defs/section"
+        },
+        "calculation_summary": {
+          "$ref": "#/$defs/section"
+        },
+        "conclusion": {
+          "$ref": "#/$defs/section"
+        },
+        "evidence_index": {
+          "$ref": "#/$defs/section"
+        }
+      }
+    },
+    "ruleReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rule_type",
+        "citation",
+        "rule_text",
+        "evidence_refs"
+      ],
+      "properties": {
+        "rule_type": {
+          "enum": [
+            "law",
+            "policy",
+            "precedent",
+            "medical_criteria",
+            "calculation_standard",
+            "other"
+          ]
+        },
+        "citation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rule_text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^E[1-9][0-9]*$"
+          }
+        }
+      }
+    },
+    "reasoningIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue_id",
+        "issue_kind",
+        "question",
+        "facts",
+        "rules",
+        "application_steps",
+        "counterevidence",
+        "alternative_interpretations",
+        "unresolved_items",
+        "finding",
+        "disposition",
+        "outcome_effect"
+      ],
+      "properties": {
+        "issue_id": {
+          "type": "string",
+          "pattern": "^I[1-9][0-9]*$"
+        },
+        "issue_kind": {
+          "enum": [
+            "coverage",
+            "causation",
+            "diagnosis_definition_match",
+            "exclusion",
+            "liability",
+            "comparative_negligence",
+            "disability",
+            "income_basis",
+            "damages",
+            "other"
+          ]
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1
+        },
+        "facts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/supportedStatement"
+          }
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/ruleReference"
+          }
+        },
+        "application_steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/supportedStatement"
+          }
+        },
+        "counterevidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/supportedStatement"
+          }
+        },
+        "alternative_interpretations": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "unresolved_items": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "finding": {
+          "$ref": "#/$defs/supportedStatement"
+        },
+        "disposition": {
+          "enum": [
+            "supported",
+            "not_supported",
+            "partially_supported",
+            "undetermined",
+            "human_review_required"
+          ]
+        },
+        "outcome_effect": {
+          "enum": [
+            "supports_payment",
+            "reduces_payment",
+            "denies_payment",
+            "none"
+          ]
+        }
+      }
+    },
+    "calculationInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "input_type"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "input_type": {
+          "enum": [
+            "literal",
+            "calculation_ref"
+          ]
+        },
+        "calculation_ref": {
+          "type": "string",
+          "pattern": "^C[1-9][0-9]*$"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+        },
+        "unit": {
+          "enum": [
+            "KRW",
+            "ratio"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^E[1-9][0-9]*$"
+          }
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "input_type": {"const": "literal"}
+          },
+          "required": ["value", "unit", "evidence_refs"],
+          "not": {"required": ["calculation_ref"]}
+        },
+        {
+          "properties": {
+            "input_type": {"const": "calculation_ref"}
+          },
+          "required": ["calculation_ref"],
+          "not": {
+            "anyOf": [
+              {"required": ["value"]},
+              {"required": ["unit"]},
+              {"required": ["evidence_refs"]}
+            ]
+          }
+        }
+      ]
+    },
+    "calculation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calculation_id",
+        "category",
+        "label",
+        "operation",
+        "inputs",
+        "result",
+        "currency",
+        "rounding_rule",
+        "status"
+      ],
+      "properties": {
+        "calculation_id": {
+          "type": "string",
+          "pattern": "^C[1-9][0-9]*$"
+        },
+        "category": {
+          "enum": [
+            "benefit_amount",
+            "consolation",
+            "treatment_cost",
+            "future_treatment_cost",
+            "lost_income",
+            "lost_earning_capacity",
+            "nursing_cost",
+            "other_damages",
+            "comparative_fault",
+            "total_damages",
+            "other"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation": {
+          "enum": [
+            "identity",
+            "sum",
+            "subtract",
+            "multiply",
+            "divide"
+          ]
+        },
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/calculationInput"
+          }
+        },
+        "result": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "currency": {
+          "const": "KRW"
+        },
+        "rounding_rule": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "unit"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "none",
+                "truncate",
+                "half_up"
+              ]
+            },
+            "unit": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "provisional",
+            "human_review_required"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "complete"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "money": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "currency"
+      ],
+      "properties": {
+        "value": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "currency": {
+          "const": "KRW"
+        }
+      }
+    },
+    "finalAssessment": {
+      "type": "object",
+      "description": "Net payable assessment. A not_payable outcome has a zero final amount even when separately typed calculations show a positive gross loss or policy amount; the reasoning issues must explain the denying coverage, exclusion, liability, or other basis.",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "amount",
+        "reasoning_summary",
+        "evidence_refs",
+        "reservations"
+      ],
+      "properties": {
+        "outcome": {
+          "enum": [
+            "payable",
+            "partially_payable",
+            "not_payable",
+            "undetermined",
+            "human_review_required"
+          ]
+        },
+        "amount": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/money"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "net_calculation_ref": {
+          "type": "string",
+          "pattern": "^C[1-9][0-9]*$"
+        },
+        "reasoning_summary": {
+          "$ref": "#/$defs/supportedStatement"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^E[1-9][0-9]*$"
+          }
+        },
+        "denial_basis_issue_refs": {
+          "description": "Required for not_payable. References the evidenced reasoning issues that explain why a gross amount, if any, produces zero net payable amount.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^I[1-9][0-9]*$"
+          }
+        },
+        "reservations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "outcome"
+            ],
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "payable",
+                  "partially_payable"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "net_calculation_ref"
+            ],
+            "not": {
+              "required": [
+                "denial_basis_issue_refs"
+              ]
+            },
+            "properties": {
+              "amount": {
+                "$ref": "#/$defs/money"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "outcome"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "not_payable"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "denial_basis_issue_refs"
+            ],
+            "not": {
+              "required": [
+                "net_calculation_ref"
+              ]
+            },
+            "properties": {
+              "amount": {
+                "type": "object",
+                "required": [
+                  "value"
+                ],
+                "properties": {
+                  "value": {
+                    "const": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "outcome"
+            ],
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "undetermined",
+                  "human_review_required"
+                ]
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["net_calculation_ref"]
+                },
+                {
+                  "required": ["denial_basis_issue_refs"]
+                }
+              ]
+            },
+            "properties": {
+              "amount": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "reviewGates": {
+      "type": "object",
+      "description": "Model-authored preflight states for a non-final draft. A passed value is not authenticated evidence that a human or professional review occurred; trusted release approval is outside this schema.",
+      "additionalProperties": false,
+      "required": [
+        "evidence",
+        "calculation",
+        "medical",
+        "legal",
+        "finalization"
+      ],
+      "properties": {
+        "evidence": {
+          "enum": [
+            "passed",
+            "review_required",
+            "blocked"
+          ]
+        },
+        "calculation": {
+          "enum": [
+            "passed",
+            "review_required",
+            "blocked"
+          ]
+        },
+        "medical": {
+          "enum": [
+            "not_applicable",
+            "passed",
+            "review_required",
+            "blocked"
+          ]
+        },
+        "legal": {
+          "enum": [
+            "not_applicable",
+            "passed",
+            "review_required",
+            "blocked"
+          ]
+        },
+        "finalization": {
+          "enum": [
+            "draft",
+            "review_required"
+          ]
+        }
+      }
+    }
+  }
+}

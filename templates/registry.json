@@ -4,6 +4,30 @@
     "배상책임_후유장해형": {
       "source": "templates/draft-report.md (변형 A)",
       "document_title": "손해사정서",
+      "report_families": ["liability_damages"],
+      "claim_mechanisms": ["insured_liability", "mutual_or_cooperative_liability"],
+      "mode": "full",
+      "support_status": "supported",
+      "render_headings": [
+        "표지 · 제출 공문 · 속표지 (양식 고정부)",
+        "I. 사정 요약",
+        "II. 위임 및 보험계약사항",
+        "III. 사고 및 손해 발생",
+        "IV. 관계법규 및 보상책임",
+        "V. 사정 기초",
+        "VI. 손해배상금 사정",
+        "VII. 증빙자료"
+      ],
+      "structured_section_groups": [
+        [],
+        ["summary"],
+        ["assignment_contract"],
+        ["facts"],
+        ["governing_basis"],
+        ["analysis"],
+        ["calculation_summary", "conclusion"],
+        ["evidence_index"]
+      ],
       "heading_patterns": [
         "^표지",
         "^I\\. 사정 요약",
@@ -24,6 +48,28 @@
     "진단수술비형": {
       "source": "templates/draft-report.md (변형 B)",
       "document_title": "보험금사정서",
+      "report_families": ["disease_benefit"],
+      "claim_mechanisms": ["disease_policy_benefit"],
+      "mode": "full",
+      "support_status": "supported",
+      "render_headings": [
+        "표지 · 제출 공문 · 속표지 (양식 고정부)",
+        "I. 사정 요약",
+        "II. 위임 및 보험계약사항",
+        "III. 보험사고 발생의 조사·확인한 사실",
+        "IV. 관계법규 및 약관의 적용·판단",
+        "V. 보험금 사정",
+        "VI. 증빙자료"
+      ],
+      "structured_section_groups": [
+        [],
+        ["summary"],
+        ["assignment_contract"],
+        ["facts"],
+        ["governing_basis", "analysis"],
+        ["calculation_summary", "conclusion"],
+        ["evidence_index"]
+      ],
       "heading_patterns": [
         "^표지",
         "^I\\. 사정 요약",
@@ -37,6 +83,132 @@
       "analytical_heading_patterns": [
         "^IV\\. 관계법규 및 약관의 적용·판단",
         "^V\\. 보험금 사정"
+      ]
+    },
+    "개인보험_후유장해형": {
+      "source": "loss-adjustment-format-study/analysis/llm-authoring-rules.md (full benefit report)",
+      "document_title": "보험금사정서",
+      "report_families": ["personal_accident_benefit"],
+      "claim_mechanisms": ["personal_accident_policy_benefit"],
+      "mode": "full",
+      "support_status": "supported",
+      "render_headings": [
+        "표지 · 제출 공문 · 속표지 (양식 고정부)",
+        "I. 사정 요약",
+        "II. 위임 및 보험계약사항",
+        "III. 보험사고 및 치료 사실",
+        "IV. 보험금 지급책임",
+        "V. 보험금 사정",
+        "VI. 사정 결과 및 의견",
+        "VII. 증빙자료"
+      ],
+      "structured_section_groups": [
+        [],
+        ["summary"],
+        ["assignment_contract"],
+        ["facts"],
+        ["governing_basis", "analysis"],
+        ["calculation_summary"],
+        ["conclusion"],
+        ["evidence_index"]
+      ],
+      "heading_patterns": [
+        "^표지",
+        "^I\\. 사정 요약",
+        "^II\\. 위임 및 보험계약사항",
+        "^III\\. 보험사고 및 치료 사실",
+        "^IV\\. 보험금 지급책임",
+        "^V\\. 보험금 사정",
+        "^VI\\. 사정 결과 및 의견",
+        "^VII\\. 증빙자료"
+      ],
+      "allow_extra_sections": false,
+      "analytical_heading_patterns": [
+        "^IV\\. 보험금 지급책임",
+        "^V\\. 보험금 사정",
+        "^VI\\. 사정 결과 및 의견"
+      ]
+    },
+    "자동차보험_대인배상_간이형": {
+      "source": "loss-adjustment-format-study/analysis/llm-authoring-rules.md (compact automobile report)",
+      "document_title": "손해사정서",
+      "report_families": ["automobile_compensation"],
+      "claim_mechanisms": ["statutory_or_policy_auto_compensation"],
+      "mode": "compact",
+      "support_status": "supported",
+      "render_headings": [
+        "I. 사정 요약",
+        "II. 위임 및 당사자",
+        "III. 사고 및 치료 사실",
+        "IV. 과실 및 적용 기준",
+        "V. 손해액 사정",
+        "VI. 사정 결과 및 의견"
+      ],
+      "structured_section_groups": [
+        ["summary"],
+        ["assignment_contract"],
+        ["facts"],
+        ["governing_basis", "analysis"],
+        ["calculation_summary"],
+        ["conclusion", "evidence_index"]
+      ],
+      "heading_patterns": [
+        "^I\\. 사정 요약",
+        "^II\\. 위임 및 당사자",
+        "^III\\. 사고 및 치료 사실",
+        "^IV\\. 과실 및 적용 기준",
+        "^V\\. 손해액 사정",
+        "^VI\\. 사정 결과 및 의견"
+      ],
+      "allow_extra_sections": false,
+      "analytical_heading_patterns": [
+        "^IV\\. 과실 및 적용 기준",
+        "^V\\. 손해액 사정",
+        "^VI\\. 사정 결과 및 의견"
+      ]
+    },
+    "자동차보험_자기신체사고형": {
+      "source": "loss-adjustment-format-study/analysis/llm-authoring-rules.md (automobile self-injury; provisional)",
+      "document_title": "보험금사정서",
+      "report_families": ["automobile_self_injury"],
+      "claim_mechanisms": ["automobile_policy_benefit"],
+      "mode": "full",
+      "support_status": "provisional",
+      "render_headings": [
+        "표지 · 제출 공문 · 속표지 (양식 고정부)",
+        "I. 사정 요약",
+        "II. 위임 및 보험계약사항",
+        "III. 사고 및 치료 사실",
+        "IV. 약관 및 보상책임",
+        "V. 보험금 사정",
+        "VI. 사정 결과 및 의견",
+        "VII. 증빙자료"
+      ],
+      "structured_section_groups": [
+        [],
+        ["summary"],
+        ["assignment_contract"],
+        ["facts"],
+        ["governing_basis", "analysis"],
+        ["calculation_summary"],
+        ["conclusion"],
+        ["evidence_index"]
+      ],
+      "heading_patterns": [
+        "^표지",
+        "^I\\. 사정 요약",
+        "^II\\. 위임 및 보험계약사항",
+        "^III\\. 사고 및 치료 사실",
+        "^IV\\. 약관 및 보상책임",
+        "^V\\. 보험금 사정",
+        "^VI\\. 사정 결과 및 의견",
+        "^VII\\. 증빙자료"
+      ],
+      "allow_extra_sections": false,
+      "analytical_heading_patterns": [
+        "^IV\\. 약관 및 보상책임",
+        "^V\\. 보험금 사정",
+        "^VI\\. 사정 결과 및 의견"
       ]
     },
     "screening_report": {

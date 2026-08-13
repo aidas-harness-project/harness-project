@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loss_adjustment_report.schema.json",
+  "title": "Live-pipeline alias for the canonical structured loss-adjustment report",
+  "$ref": "https://example.invalid/schemas/loss-adjustment-report.schema.json"
+}

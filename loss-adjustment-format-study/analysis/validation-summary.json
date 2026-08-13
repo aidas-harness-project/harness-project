@@ -1,0 +1,117 @@
+{
+  "schema_version": "loss_adjustment_format_study_validation.v4",
+  "candidate_evidence": {
+    "protected_fixture_committed": false,
+    "protected_fixture_used_for_verification": true,
+    "protected_fixture_scope": "present only as ignored local files in the rebuild worktree; absent from commits and pull-request diffs",
+    "corpus_validation": "passed_against_authorized_local_fixture",
+    "metrics_staleness_check": "passed_after_report_index_migration",
+    "external_fixture_result": {
+      "source_documents": 95,
+      "reports": 94,
+      "no_report_documents": 1,
+      "errors": 0
+    },
+    "example_validation": "passed",
+    "report_profile_conformance": "passed_for_every_represented_family_and_claim_mechanism",
+    "live_structured_render_contract": "passed",
+    "focused_tests": {
+      "passed": 144,
+      "failed": 0,
+      "files": [
+        "tests/test_extract_loss_adjustment_sections.py",
+        "tests/test_generate_loss_adjustment_corpus_metrics.py",
+        "tests/test_validate_loss_adjustment_report.py",
+        "tests/test_loss_adjustment_schema_artifacts.py",
+        "tests/test_report_profile_integration.py",
+        "tests/test_structured_report_pipeline_contract.py",
+        "tests/test_document_assembly.py",
+        "tests/test_validation.py"
+      ]
+    },
+    "repository_tests": {
+      "status": "not_green_in_isolated_rebuild_worktree",
+      "passed": 1849,
+      "failed": 21,
+      "errors": 14,
+      "skipped": 29,
+      "study_test_failures": 0,
+      "context": "The remaining failures are outside this change: schema/review-point tests require ignored outputs fixtures absent from the isolated worktree, and one independent canonical-UID baseline test fails. The 144-test format-study and live-integration slice is green."
+    },
+    "note": "Protected artifacts remain ignored and absent from the branch diff. The authorized fixture was copied mechanically into the isolated rebuild worktree, its exact legacy report-index shape was migrated to manifest-bound headers, corpus validation passed, metrics were regenerated, and the staleness check passed."
+  },
+  "historical_completed_study_snapshot": {
+    "source_documents": 95,
+    "reviewed_decisions": 95,
+    "independently_reviewed_decisions": 95,
+    "independent_boundary_mismatches": 0,
+    "reports": 94,
+    "no_report_documents": 1,
+    "source_pages": 2883,
+    "report_pages": 864,
+    "pdf_cuts": 94,
+    "text_extracts": 94,
+    "report_metadata_files": 94,
+    "no_report_metadata_files": 1,
+    "page_markers": 864,
+    "rendered_source_output_pages_verified": 864,
+    "exact_reviewed_text_slices_verified": 94,
+    "scope_note": "These aggregate facts come from the completed protected-fixture study. The current candidate validator confirmed the 95-document inventory and all extracted outputs against the authorized local fixture, and regenerated metrics pass the staleness check."
+  },
+  "historical_ocr_cache_provenance": {
+    "source_bound_documents": 95,
+    "recomputed_from_source": 12,
+    "reviewed_legacy_sidecar": 83,
+    "scope_note": "The 12/83 provenance split is historical, but the current candidate validator accepted every source- and sidecar-bound cache record in the authorized external fixture."
+  },
+  "historical_visual_boundary_sample": {
+    "documents": [
+      "DOC_002",
+      "DOC_019",
+      "DOC_026",
+      "DOC_066",
+      "DOC_088"
+    ],
+    "confirmed": 5,
+    "failed": 0
+  },
+  "authoring_contract": {
+    "json_schema_draft": "2020-12",
+    "schema_meta_validation": "passed",
+    "example_validation": "passed",
+    "custom_cross_field_validation": "passed",
+    "model_authored_finalization": [
+      "draft",
+      "review_required"
+    ],
+    "embedded_approval_records_allowed": false,
+    "deterministic_exact_rational_recomputation": true,
+    "typed_literal_and_calculation_reference_inputs": true,
+    "free_form_calculation_formula_allowed": false,
+    "explicit_net_calculation_reference_required": true,
+    "all_calculations_reachable_from_net_root": true,
+    "payable_amount_must_be_positive": true,
+    "all_payable_calculations_must_be_complete": true,
+    "not_payable_requires_explicit_denial_effect": true,
+    "negative_exact_results_rejected_before_rounding": true,
+    "rounding_unit_enforced_for_none_mode": true,
+    "open_professional_judgment_prevents_gate_self_clearance": true,
+    "family_event_and_component_invariants": true,
+    "all_represented_family_mechanism_pairs_have_conformance_scenarios": true,
+    "case_type_profile_registry_cross_check": true,
+    "unsupported_profiles_fail_closed": true,
+    "live_dao_structured_report_contract": true,
+    "deterministic_structured_narrative_render": true
+  },
+  "metrics_contract": {
+    "schema_version": "loss_adjustment_corpus_metrics.v0.2",
+    "generator": "tools/generate_loss_adjustment_corpus_metrics.py",
+    "reviewed_report_index_is_family_source": true,
+    "report_index_binds_source_hash_and_size": true,
+    "report_index_hash_embedded": true,
+    "regex_definitions_embedded": true,
+    "independently_adjudicated_semantic_labels": false,
+    "legacy_index_migration_is_exact_shape_and_manifest_bound": true,
+    "current_candidate_staleness_check": "passed"
+  }
+}
