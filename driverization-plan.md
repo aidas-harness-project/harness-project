@@ -19,6 +19,14 @@ should become a full driver. CASE_135 showed a flat agent-cost distribution:
 shared deterministic leaves, race-free inter-stage parallelism, and targeted
 claim fan-out come before semantic-stage wrappers.
 
+**Scheduling distinction:** driverization reduces fixed, repeated work *inside*
+a stage. DAG scheduling reduces waiting *between* independent stages. They are
+separate levers: a scheduler must use the dependency graph and per-stage DAO
+preflights whether the selected stage implementation is an agent or a driver.
+The authoritative rollout order and scheduler design are in
+`plans/driverization/case135-measurement-replan.md` and
+`plans/driverization/orchestration-scheduler.md`.
+
 ## Common Driver Contract
 
 Every driver will:
@@ -41,41 +49,29 @@ Every driver will:
    contracts only via `dao.py write-contract`.
 8. Return a compact progress report and never move a stage attempt boundary.
 
-## Workstream A: Claim Analysis
+## Workstream A: Claim Analysis — archived, not selected for throughput promotion
 
-### Target
+Claim analysis remains agent-led for now. The agent-led checkpoint-1 control
+completed. Driver attempts exposed material prompt-transport and consolidation
+costs, so this pilot is not being promoted or continued for speed.
 
-Create `tools/run_claim_analysis.py` with the existing four checkpoint
-contracts. Initial execution is serial because each checkpoint consumes the
-previous checkpoint's validated output.
+No definitive driver-versus-agent speed comparison is claimed here. Such a
+claim requires that the latest CASE_601 driver run completed successfully and
+recorded a valid final wall time; this plan does not treat an incomplete or
+otherwise invalid run as timing evidence.
 
-| Checkpoint | Provider judgement | Deterministic driver responsibility |
-|---|---|---|
-| 1. Claim fields | Extract facts from supplied redacted text; distinguish case facts from cited precedent or unrelated material | Select relevant processed text, deduplicate it, verify every quote, normalize fixed date/period shapes, write `extracted_claim_fields.json` |
-| 2. Coverage | Match facts to policy coverage and decide applicability | Select policy excerpts, obtain a fresh policy snapshot, validate source/UID clause references, write `coverage_result.json` |
-| 3. Case type | Infer axes only where no adjuster input exists; perform the independent cross-check where it does | Read `adjuster_case_type`, deterministically select canonical `template_id` from `templates/registry.json`, validate case-type shape, write `case_type_result.json` |
-| 4. Requirement matching | Identify policy conditions and determine `met`, `not_met`, or `uncertain` | Preserve checkpoint-2 coverage joins, deterministically assign stable `REQ-N` identifiers and order, validate policy references/snapshot, write `requirement_matching_result.json` |
+The design findings are retained as rejected/archived evidence, not an active
+implementation roadmap:
 
-### Non-goals
+- Persisting one candidate per document gives interruption-safe evidence and
+  resume boundaries.
+- Deterministic grouping makes the consolidation input reproducible.
+- The model should select among stable candidate IDs rather than create its
+  own identifiers.
 
-- Do not use regexes to make medical, legal, causation, coverage, or
-  applicability determinations.
-- Do not derive a case type from a filename or override a supplied adjuster
-  type.
-- Do not treat a missing accident date after redaction as a value; represent it
-  as absent/uncertain with the required review routing.
-
-### Tests and measurement
-
-1. Add unit tests for resume after each of the four contracts.
-2. Add tests for quote mismatch, stale policy snapshot, invalid source/UID
-   reference, and exactly-one correction behavior.
-3. Verify the CLI adapter passes `--output-schema` and fails closed when the
-   provider returns invalid JSON.
-4. Compare one cold, identical-case driver run with an agent-led baseline;
-   report provider time, DAO/tool time, driver time, and unattributed time.
-5. Only after semantic equivalence is established, assess parallel field
-   extraction within checkpoint 1. Checkpoints themselves remain serial.
+Any reassessment requires a new design with a demonstrated end-to-end speed
+advantage while preserving semantic and evidence equivalence. The shared
+driver platform remains active for the policy and denial-response workstreams.
 
 ## Workstream B: Consistency Check
 
@@ -437,3 +433,66 @@ render `screening_report.md` and its evidence sidecar using the required
 - Benchmark input assembly, semantic synthesis, JSON validation/write, and
   narrative render separately. Compare against an agent-led cold baseline
   before enabling any internal parallel synthesis.
+
+## Experiment support: stage-cut forks for cold V4 arms
+
+A V4 comparison needs two arms that are input-identical and genuinely cold.
+Neither existing fork mode produces that from a finished case:
+
+- the default fork copies the source's *current* state, so a completed case
+  yields a fork carrying every downstream contract -- the driver returns
+  `reused` without calling a provider, and an agent sees a finished contract;
+- `--from-step` needs a P10 backup, and a case that never snapshotted the
+  relevant step (CASE_140) has none to restore.
+
+`fork_case.py --through-stage document_processing` closes that gap. It copies
+only the artifacts written at or before the named stage, then rebuilds a fresh
+run state. It is mutually exclusive with `--from-step`: one cuts current state
+at a stage boundary, the other restores an earlier whole snapshot, and
+combining them would leave the fork's meaning ambiguous.
+
+**The allowlist is derived from stage ownership, not filename shape.** A
+contract is retained only if the stage that writes it is at or before the cut;
+anything unrecognized is excluded rather than carried, because a fork that
+silently inherits an unknown contract is exactly the falsely-complete state
+the mode exists to prevent.
+
+Retained: `document_manifest.json`, `page_chunks.json`, `_source_ledger.json`
+(reviewed D2 intake state, so the fork need not repeat intake),
+`_revision_index.json`, the segment/table indices, and the per-document
+document-pipeline families (`ocr_result_*`, `classification_result_*`,
+`redaction_result_*`, `segmentation_proposal_*`), plus `data/processed/`.
+
+Excluded: every `claim_analysis` and later contract, `_driver_receipts/`
+(which also holds per-unit driver candidates), `_trace/`, `_backups/`,
+`_timing_summary.json`, rendered reports, locks, and human/medical review
+state.
+
+**Refusal conditions, checked before anything is copied.** The source's
+run-state must record the cut stage as `passed`; the manifest must exist and
+list documents; every text-processed document must have redacted text on disk;
+no lock may be present. Later contracts existing on disk is explicitly *not*
+accepted as evidence a stage completed -- CASE_140 is exactly that shape, with
+a full downstream tree above a run-state that still reads
+`document_processing: in_progress`.
+
+### Boundary ambiguity, recorded rather than resolved silently
+
+`stage_dependencies` makes `claim_analysis` require `policy_clause_processing`,
+not `document_processing`. So a fork cut at document processing does **not**
+resume directly at claim analysis: the ready frontier is
+`policy_clause_processing` (plus `denial_response`, `indexing`,
+`document_segmentation`), and an attempt to open `claim_analysis` is correctly
+refused until the policy stage passes.
+
+That is the graph's real shape, not a defect in the cut, and the mode does not
+paper over it by fabricating a `policy_clause_processing: passed` row. A V4a
+claim-analysis arm must therefore run the policy stage on the fork first --
+for a case whose policy documents are all `text_only_no_normalization`,
+`run_policy_pipeline_driver.py` is the no-op route that satisfies it.
+
+The rebuilt run state records only `intake` (when the source recorded it) and
+the cut stage as passed, with `attempt_count` reset to 1 so P9's retry budget
+is not pre-spent, and `backup_path` carried from the source because the schema
+requires a passed stage to carry one. No timing markers, no
+`human_input_status`, and no medical-adoption flag are inherited.
