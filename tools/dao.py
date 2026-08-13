@@ -72,6 +72,12 @@ Subcommands:
         (audited one-time repair for legacy dependency-invalid or
          passed-without-backup entries; invalid passes are downgraded, never
          given fabricated backups)
+    reset-document-processing CASE_ID NEW_RUN_ID --held-by NAME
+        --confirm-case-id CASE_ID
+        (operator-requested cold Stage-2 restart. Moves existing Stage-2
+        contracts to a recoverable project-local backup, resets the manifest
+        to intake-owned fields, and issues a fresh run-state. Raw input and the
+        reviewed source ledger are never touched.)
     finalize-stage CASE_ID RUN_ID STAGE --held-by NAME
         (dependency-checked; builds+validates the P10 snapshot, then records
          status=passed + backup_path + completed_at in one run-state lock)
@@ -416,6 +422,182 @@ def load_run_state(case_id: str) -> dict:
 def save_run_state(case_id: str, state: dict) -> None:
     state["updated_at"] = now_iso()
     atomic_write_json(run_state_path(case_id), state)
+
+
+_DOCUMENT_PROCESSING_OUTPUT_PATTERNS = (
+    "ocr_result_*.json",
+    "classification_result_*.json",
+    "redaction_result_*.json",
+    "segmentation_proposal_*.json",
+    "page_chunks.json",
+)
+
+_DOCUMENT_PROCESSING_DERIVED_MANIFEST_FIELDS = frozenset({
+    "source_total_pages", "extraction_method", "downstream_disposition",
+    "non_text_verification", "segmentation_proposal_path",
+    "provisional_document_type", "provisional_type_label",
+    "source_file_name", "source_page_start", "source_page_end",
+    "document_role", "source_document_id", "page_map",
+})
+
+
+def _intake_state_document(document: dict) -> dict:
+    """Return one physical intake document with Stage-2 projections cleared.
+
+    A segmented child cannot be reconstructed from intake-owned fields alone,
+    so the reset command refuses such cases before reaching this helper.
+    Unknown non-Stage-2 fields are preserved; only fields whose owner is
+    document_processing/segmentation are removed or reset.
+    """
+    reset = {
+        key: value for key, value in document.items()
+        if key not in _DOCUMENT_PROCESSING_DERIVED_MANIFEST_FIELDS
+    }
+    reset.update({
+        "pages": None,
+        "ocr_status": "pending",
+        "segmentation_status": (
+            "pending_review" if document.get("file_format") == "pdf"
+            else "not_applicable"),
+        "segmentation_reviewed_by": None,
+        "segmentation_reviewed_at": None,
+        "segmentation_review_note": None,
+        "ocr_text_path": None,
+        "ocr_quality": None,
+        "uncertain_region_count": None,
+        "cross_validation_status": None,
+        "redacted_text_path": None,
+        "document_type": None,
+        "classification_confidence": None,
+    })
+    return reset
+
+
+def reset_document_processing(case_id: str, new_run_id: str, held_by: str,
+                              confirm_case_id: str) -> dict:
+    """Recoverably reset Stage 2 after an explicit operator restart request.
+
+    Existing contracts are MOVED, not deleted, to
+    ``_stage2_reset_backups/<case>/<old>_to_<new>_<timestamp>/outputs``.
+    Processed page text is deliberately left in place: checkpoint 1 rewrites
+    every page through the DAO, while removing it here would require locking
+    an unbounded file set and would make the reset less recoverable.  The
+    authoritative OCR/classification/redaction contracts are removed, so
+    run_checkpoint1 cannot take its ``already_extracted`` short-circuit.
+    """
+    _require_safe_id("case_id", case_id)
+    _require_safe_id("run_id", new_run_id)
+    if confirm_case_id != case_id:
+        return {"status": "refused", "reason": (
+            f"--confirm-case-id must exactly equal {case_id}")}
+
+    case = case_dir(case_id)
+    manifest_target = case / "document_manifest.json"
+    state_target = run_state_path(case_id)
+    if not manifest_target.exists():
+        return {"status": "refused", "reason": "document_manifest.json is missing"}
+
+    artifact_paths: list[Path] = []
+    for pattern in _DOCUMENT_PROCESSING_OUTPUT_PATTERNS:
+        artifact_paths.extend(path for path in case.glob(pattern) if path.is_file())
+    artifact_paths = sorted(set(artifact_paths), key=lambda path: path.name)
+    lock_targets = [manifest_target, state_target, *artifact_paths]
+
+    # A restart is a run-start operation: any pre-existing lock halts
+    # immediately. It must never enter the 15-minute mid-run polling loop.
+    for target in lock_targets:
+        existing = read_lock(target)
+        if existing is not None:
+            return {"status": "refused", "reason": "pre-existing lock",
+                    "target": str(target), "lock": existing}
+
+    acquired: list[Path] = []
+    try:
+        for target in lock_targets:
+            existing = acquire_lock(
+                target, held_by, new_run_id,
+                f"cold reset document_processing for {case_id}")
+            if existing is not None:
+                return {"status": "refused", "reason": "lock race",
+                        "target": str(target), "lock": existing}
+            acquired.append(target)
+
+        # Fresh reads happen only after all reset-owned targets are locked.
+        manifest = load_json(manifest_target)
+        old_state = load_json(state_target) or load_run_state(case_id)
+        documents = (manifest or {}).get("documents", [])
+        non_physical = [
+            doc.get("document_id") for doc in documents
+            if doc.get("document_role") == "segment"
+            or doc.get("source_file_name")
+            or doc.get("downstream_disposition") == "superseded_bundle"
+        ]
+        if non_physical:
+            return {"status": "refused", "reason": (
+                "case already contains segmented/superseded documents; cold "
+                "reset cannot reconstruct intake state safely"),
+                "documents": non_physical}
+
+        reset_manifest = dict(manifest)
+        reset_manifest["created_at"] = now_iso()
+        reset_manifest["updated_at"] = now_iso()
+        reset_manifest["documents"] = [
+            _intake_state_document(doc) for doc in documents]
+        reset_state = {
+            "case_id": case_id,
+            "run_id": new_run_id,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+            "stages": [],
+            "human_input_status": [],
+        }
+
+        manifest_errors = _schema_check(
+            reset_manifest, "document_manifest.schema.json")
+        state_errors = _schema_check(reset_state, "run_state.schema.json")
+        if manifest_errors or state_errors:
+            return {"status": "refused", "reason": "reset state failed schema validation",
+                    "manifest_errors": manifest_errors,
+                    "run_state_errors": state_errors}
+
+        old_run_id = old_state.get("run_id") or "NO_RUN"
+        stamp = datetime.now(KST).strftime("%Y%m%dT%H%M%S")
+        backup = _require_within(
+            ROOT / "_stage2_reset_backups", case_id,
+            f"{old_run_id}_to_{new_run_id}_{stamp}")
+        output_backup = backup / "outputs"
+        output_backup.mkdir(parents=True, exist_ok=False)
+        shutil.copy2(manifest_target, output_backup / manifest_target.name)
+        if state_target.exists():
+            shutil.copy2(state_target, output_backup / state_target.name)
+        for artifact in artifact_paths:
+            shutil.move(str(artifact), str(output_backup / artifact.name))
+
+        stale_scratch = case / "_stage2_scratch"
+        if stale_scratch.exists():
+            shutil.move(str(stale_scratch), str(output_backup / stale_scratch.name))
+
+        atomic_write_json(manifest_target, reset_manifest)
+        atomic_write_json(state_target, reset_state)
+        return {
+            "status": "reset",
+            "case_id": case_id,
+            "old_run_id": old_run_id,
+            "new_run_id": new_run_id,
+            "backup_path": str(backup),
+            "contracts_archived": [path.name for path in artifact_paths],
+            "processed_text_retained_for_overwrite": True,
+        }
+    finally:
+        for target in reversed(acquired):
+            release_lock(target)
+
+
+def cmd_reset_document_processing(args):
+    result = reset_document_processing(
+        args.case_id, args.new_run_id, args.held_by, args.confirm_case_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("status") == "reset" else 1
 
 
 # ------------------------------------------------------------------ nouns --
@@ -9054,6 +9236,17 @@ def build_parser():
     p.add_argument("case_id"); p.add_argument("run_id")
     p.add_argument("--held-by", required=True)
     p.set_defaults(fn=cmd_migrate_run_state_v03)
+
+    p = sub.add_parser(
+        "reset-document-processing",
+        help="Recoverably reset Stage 2 contracts/manifest/run-state for an operator-requested cold rerun.")
+    p.add_argument("case_id")
+    p.add_argument("new_run_id")
+    p.add_argument("--held-by", required=True)
+    p.add_argument(
+        "--confirm-case-id", required=True,
+        help="Destructive-scope confirmation; must exactly equal case_id.")
+    p.set_defaults(fn=cmd_reset_document_processing)
 
     p = sub.add_parser("set-human-input-status")
     p.add_argument("case_id"); p.add_argument("stage")

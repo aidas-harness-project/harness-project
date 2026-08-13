@@ -65,6 +65,19 @@ def test_bundle_awaiting_split_is_not_classified(monkeypatch):
         "children classify individually after the split")
 
 
+def test_intake_pending_pdf_is_not_classified_before_segmentation(monkeypatch):
+    manifest = _install_manifest(
+        monkeypatch,
+        _doc("DOC_001"),
+        _doc("DOC_005", segmentation_status="pending_review"),
+    )
+
+    picked = [d["document_id"]
+              for d in rds.select_classification_documents(manifest)]
+
+    assert picked == ["DOC_001"]
+
+
 def test_superseded_bundle_and_expert_review_only_are_skipped(monkeypatch):
     manifest = _install_manifest(
         monkeypatch,

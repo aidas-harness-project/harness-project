@@ -182,7 +182,8 @@ def select_classification_documents(manifest: dict,
     redundant:
 
     * the retained superseded bundle -- its children carry its pages;
-    * a bundle still awaiting its split (`segmentation_status: required`) --
+    * a PDF still awaiting its proposal/split (`segmentation_status` is
+      `pending_review` or `required`) --
       `document_type` is a per-document value and one label cannot be right
       for a bundle mixing a 진단서, a 검사보고서 and a 진료비 명세서;
     * `expert_review_only` -- `resolve_as_non_text` already assigned its type
@@ -199,7 +200,7 @@ def select_classification_documents(manifest: dict,
             continue
         if doc.get("downstream_disposition") == "expert_review_only":
             continue
-        if doc.get("segmentation_status") == "required":
+        if doc.get("segmentation_status") in {"pending_review", "required"}:
             continue
         if doc.get("document_type"):
             continue

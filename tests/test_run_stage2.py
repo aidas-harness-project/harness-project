@@ -94,10 +94,18 @@ class TestSelectors:
     def test_pending_bundle_is_one_marked_required(self) -> None:
         manifest = {"documents": [
             _doc("DOC_001", segmentation_status="not_required"),
-            _doc("DOC_005", segmentation_status="required"),
+            _doc("DOC_004", file_format="pdf", segmentation_status="pending_review"),
+            _doc("DOC_005", file_format="pdf", segmentation_status="required"),
             _doc("DOC_006", segmentation_status="completed"),
         ]}
-        assert [d["document_id"] for d in s2.pending_bundles(manifest)] == ["DOC_005"]
+        assert [d["document_id"] for d in s2.pending_bundles(manifest)] == [
+            "DOC_004", "DOC_005"]
+
+    def test_non_pdf_pending_review_is_not_a_segmentation_target(self) -> None:
+        manifest = {"documents": [
+            _doc("DOC_001", file_format="text", segmentation_status="pending_review"),
+        ]}
+        assert s2.pending_bundles(manifest) == []
 
     def test_unclassified_children_are_split_children_without_a_type(self) -> None:
         manifest = {"documents": [
@@ -186,3 +194,14 @@ def test_page_chunks_envelope_fields_are_added() -> None:
     for field in ('"case_id": case_id', '"component": "document-pipeline"',
                   '"status": "success"', '"run_id": run_id', '"created_at"'):
         assert field in src, f"driver must set {field} on the page_chunks contract"
+
+
+def test_stage2_scratch_is_never_under_outputs() -> None:
+    """Transient payloads are not shared contracts and must not bypass DAO."""
+    assert s2.SCRATCH_ROOT == s2.ROOT / "_stage2_scratch"
+    assert s2.ROOT / "outputs" not in s2.SCRATCH_ROOT.parents
+
+
+def test_top_level_provider_reaches_segmentation_propose() -> None:
+    src = (TOOLS / "run_stage2.py").read_text(encoding="utf-8")
+    assert 'propose_argv += ["--provider", provider]' in src

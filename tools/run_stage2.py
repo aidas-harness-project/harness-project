@@ -72,6 +72,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -83,6 +84,7 @@ from llm_providers import SUPPORTED_PROVIDERS
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
+SCRATCH_ROOT = ROOT / "_stage2_scratch"
 
 # Statuses that mean "this phase did its job". Enumerated from what the tools
 # actually emit rather than guessed, and kept as an explicit ALLOW-list so an
@@ -151,9 +153,24 @@ def _manifest(case_id: str) -> dict:
 
 
 def pending_bundles(manifest: dict) -> list[dict]:
-    """Documents a human has marked as needing a split, not yet split."""
+    """PDFs whose segmentation proposal/split still has to run.
+
+    ``pending_review`` is the intake state.  The proposal is what supplies the
+    page-boundary evidence a reviewer (or the explicit plumbing-run bypass)
+    approves, so waiting for somebody to change the manifest to ``required``
+    before proposing creates a circular gate: nothing ever produces the
+    evidence needed to make that decision.
+    """
     return [d for d in manifest.get("documents", [])
-            if d.get("segmentation_status") == "required"]
+            if d.get("file_format") == "pdf"
+            and d.get("downstream_disposition") != "superseded_bundle"
+            and d.get("segmentation_status") in {"pending_review", "required"}]
+
+
+def _proposal(case_id: str, doc_id: str) -> dict | None:
+    """DAO-only read of an existing proposal for interruption-safe resume."""
+    return _dao.read_contract_data(
+        case_id, f"segmentation_proposal_{doc_id}.json")
 
 
 def unclassified_children(manifest: dict) -> list[dict]:
@@ -305,15 +322,36 @@ def run_stage2(
             report(f"phase: segmentation ({len(bundles)} bundle(s))")
         for bundle in bundles:
             doc_id = bundle["document_id"]
-            step = _run(common([str(TOOLS / "segment_case.py"), "propose",
-                                case_id, doc_id]),
-                        phase=f"segment.propose:{doc_id}", progress=report)
-            steps.append(step)
-            if not _phase_ok(step):
-                return stop(f"segment.propose:{doc_id}",
-                            "segmentation proposal failed or was partial")
+            proposal = _proposal(case_id, doc_id)
+            if proposal is None:
+                propose_argv = common([
+                    str(TOOLS / "segment_case.py"), "propose", case_id, doc_id])
+                if provider:
+                    propose_argv += ["--provider", provider]
+                step = _run(propose_argv,
+                            phase=f"segment.propose:{doc_id}", progress=report)
+                steps.append(step)
+                if not _phase_ok(step):
+                    return stop(f"segment.propose:{doc_id}",
+                                "segmentation proposal failed or was partial")
+                proposal = _proposal(case_id, doc_id)
+                if proposal is None:
+                    return stop(f"segment.propose:{doc_id}",
+                                "proposal command succeeded but no DAO-governed "
+                                "proposal exists")
 
-            if not auto_approve_segmentation:
+            review_status = proposal.get("review_status")
+            if review_status == "rejected":
+                return stop(
+                    f"segment.approve:{doc_id}",
+                    "the existing segmentation proposal was rejected; an "
+                    "automatic rerun must not overwrite that decision",
+                    gate=True)
+            if review_status not in {"pending", "approved"}:
+                return stop(f"segment.approve:{doc_id}",
+                            f"unknown proposal review_status {review_status!r}")
+
+            if review_status != "approved" and not auto_approve_segmentation:
                 return stop(
                     f"segment.approve:{doc_id}",
                     "boundary approval is a human gate: a reviewer must see the "
@@ -322,13 +360,21 @@ def run_stage2(
                     "--auto-approve-segmentation for a timing/plumbing run.",
                     gate=True)
 
-            reviewer = segmentation_reviewer or f"{held_by} (auto-approved)"
-            step = _run(common([str(TOOLS / "segment_case.py"), "approve",
-                                case_id, doc_id, "--reviewer", reviewer]),
-                        phase=f"segment.approve:{doc_id}", progress=report)
-            steps.append(step)
-            if not _phase_ok(step):
-                return stop(f"segment.approve:{doc_id}", "approval failed")
+            if review_status != "approved":
+                reviewer = segmentation_reviewer or f"{held_by} (auto-approved)"
+                step = _run(common([str(TOOLS / "segment_case.py"), "approve",
+                                    case_id, doc_id, "--reviewer", reviewer]),
+                            phase=f"segment.approve:{doc_id}", progress=report)
+                steps.append(step)
+                if not _phase_ok(step):
+                    return stop(f"segment.approve:{doc_id}", "approval failed")
+                not_ready = (step.get("result") or {}).get("not_ready") or []
+                if not_ready:
+                    return stop(
+                        f"segment.approve:{doc_id}",
+                        "proposal is still not ready to split: "
+                        + "; ".join(str(item) for item in not_ready),
+                        gate=True)
 
             step = _run(common([str(TOOLS / "segment_case.py"), "split",
                                 case_id, doc_id]),
@@ -408,15 +454,17 @@ def run_stage2(
 
         # ---- phase 7: write the page_chunks contract ------------------------
         report("phase: write page_chunks contract")
-        scratch = ROOT / "outputs" / case_id / "_stage2_scratch"
-        scratch.mkdir(parents=True, exist_ok=True)
-        payload = scratch / "page_chunks.json"
-        payload.write_text(json.dumps(chunks, ensure_ascii=False, indent=2),
-                           encoding="utf-8")
-        step = _run(common([str(TOOLS / "dao.py"), "write-contract", case_id,
-                            "page_chunks.json", "--data-file", str(payload),
-                            "--schema-name", "page_chunks.schema.json"]),
-                    phase="write_page_chunks", progress=report)
+        SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+                prefix=f"{case_id}_{run_id}_", dir=SCRATCH_ROOT) as temp_dir:
+            payload = Path(temp_dir) / "page_chunks.json"
+            payload.write_text(json.dumps(chunks, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+            step = _run(common([str(TOOLS / "dao.py"), "write-contract", case_id,
+                                "page_chunks.json", "--data-file", str(payload),
+                                "--schema-name", "page_chunks.schema.json",
+                                "--stage", "document_processing"]),
+                        phase="write_page_chunks", progress=report)
         steps.append(step)
         if step["returncode"] != 0:
             return stop("write_page_chunks", "page_chunks contract write failed")
