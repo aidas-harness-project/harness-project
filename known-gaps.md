@@ -31,6 +31,7 @@ the same pass.
 | 45 | PARTIAL | Medical appropriateness technical baseline is not operationally activated |
 | 46 | PARTIAL | P8 billing-table disagreements: dpi rejected by measurement; reader stability still open |
 | 47 | OPEN | P8 correlated error observed live: both readers invented the same caption |
+| 48 | PARTIAL | Merge 3569d50 discarded parent2's dao.py wholesale; halves still inconsistent |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
@@ -3429,7 +3430,7 @@ theoretical: one run caught it, the next one did not, on the same page.
 
 ---
 
-## 47. Lock-poll policy (T7): measured under real document parallelism, and dropped -- RESOLVED 2026-08-11
+## 49. Lock-poll policy (T7): measured under real document parallelism, and dropped -- RESOLVED 2026-08-11
 
 P5 polls a held lock every **30 seconds** for up to 15 minutes. That cadence
 suits what P5 was written for -- a lock held by a person or a long stage,
@@ -3489,3 +3490,71 @@ whose workers genuinely do no work between acquisitions. If such a driver is
 ever added, re-measure with its `lock.acquire` spans rather than assuming
 either result -- both the 4.5-minute figure and this 0-poll figure are true,
 of different workloads.
+
+## 48. Merge 3569d50 discarded parent2's `dao.py` wholesale -- PARTIAL 2026-08-14
+
+Found by trying to intake a fresh case (CASE_142) for a Stage 2 timing run.
+`intake_case.py --execute` died on `AttributeError: module 'dao' has no
+attribute 'validated_source_ledger'`, and the cause was not a missing
+function but a merge that dropped half a file.
+
+**What happened.** Merge `3569d50` ("Merge main with PR #21 medical
+appropriateness pipeline") has two parents:
+
+```
+parent1  378515fe   dao.py  9,328 lines
+parent2  7c2e72e4   dao.py 10,796 lines
+result   3569d50    dao.py  9,328 lines  -- byte-identical to parent1
+```
+
+`git diff 378515fe 3569d50 -- tools/dao.py` is empty: parent2's `dao.py` was
+discarded entirely, not merged. But the merge kept parent2's versions of
+`intake_case.py`, `run_scenario_matrix.py`, `medical_repository.py`,
+`medical_review_ledger.py`, the schemas, and 11 test modules -- so those
+files call an API that no longer exists. **The two halves of the repository
+come from different merge parents.**
+
+`git` considers this fully merged (`merge-base --is-ancestor 7c2e72e4 HEAD`
+is true, and re-running `git merge` reports "Already up to date"), because
+"take parent1's version" is a valid conflict resolution as far as git is
+concerned. **Re-merging cannot recover it**; the content has to be
+transplanted by hand.
+
+**Why nobody noticed.** The dead paths are all *new-case* paths. No case has
+been intaken since the merge -- every run reused an existing case or a fork.
+The first fresh intake hit it immediately, in two places:
+
+- `intake_case.py --execute` -> `validated_source_ledger` missing
+- `dao.py update-run-state` on a new case -> `run_state.schema.json` requires
+  `run_state_version` and `medical_review_adopted`, and `grep` for either in
+  `dao.py` returned nothing. **No new case could open a stage at all.**
+
+**Fixed (commit `c9f8e92`, "C scope").** The ledger history chain and the two
+run-state fields, transplanted from `633bd7b0` and adapted to this branch's
+lock model. Scope was chosen by computing the transitive closure of the three
+`validated_*` entry points: 12 functions, none lock-bound, none medical --
+so the chain could be restored without touching either contested subsystem.
+Writers were the half that mattered: validators alone would have made every
+approved ledger unreadable, since the writers still mutated entries in place
+without recording an operation, which is indistinguishable from tampering.
+All 56 source ledgers on disk now pass; suite went 156 failures -> 79.
+
+**Still open.** ~58 of parent2's 70 missing functions, and the divergence in
+47 functions the two versions both define:
+
+| Area | State |
+|---|---|
+| Kernel-lock primitives (19 fns) | **Deliberately not taken.** This branch keeps its `O_EXCL` + dead-owner-reclaim model (`8d818ff`, fleet-review TOCTOU fix). Decision recorded by the user 2026-08-14. |
+| Medical-review flow (20 fns) | Missing. `tools/medical_repository.py` and `tools/medical_review_ledger.py` are present but call a DAO API that is not there. 8 test modules cannot import. |
+| `fork_case.py` D1 hardening | Missing. Parent2 **removed** `--include-ground-truth` and rejects a ground-truth data namespace; this branch still offers both. 6 failing tests, 2 of them D1 guards. Worth prioritising -- it is a live answer-key exposure surface. |
+| Snapshot inventory (7 fns) | Missing. |
+| `atomic_*_beneath` write layer (9 fns) | Missing. |
+| 47 diverged common functions | Unreconciled; includes `_finalize_stage`, `_update_run_state`, `atomic_write_json`, `build_parser`, `main`. |
+
+The remaining transplant needs whoever owns the medical-appropriateness work,
+because "the tests pass" would only show the code runs, not that the
+adjudication logic is right.
+
+*(Numbering note: two pre-existing items both claim 47 -- the P8 correlated-error
+item and the lock-poll item. Not renumbered here to avoid breaking citations to
+either; this item takes 48.)*
