@@ -3565,7 +3565,7 @@ All 56 source ledgers on disk now pass; suite went 156 failures -> 79.
 | Area | State |
 |---|---|
 | Kernel-lock primitives (19 fns) | **Deliberately not taken.** This branch keeps its `O_EXCL` + dead-owner-reclaim model (`8d818ff`, fleet-review TOCTOU fix). Decision recorded by the user 2026-08-14. |
-| Medical-review flow (20 fns) | Missing. `tools/medical_repository.py` and `tools/medical_review_ledger.py` are present but call a DAO API that is not there. 8 test modules cannot import. |
+| Medical-review flow (20 fns) | **RESTORED 2026-08-14** -- see "Medical-review restoration" below. |
 | `fork_case.py` D1 hardening | Missing. Parent2 **removed** `--include-ground-truth` and rejects a ground-truth data namespace; this branch still offers both. 6 failing tests, 2 of them D1 guards. Worth prioritising -- it is a live answer-key exposure surface. |
 | Snapshot inventory (7 fns) | Missing. |
 | `atomic_*_beneath` write layer (9 fns) | Missing. |
@@ -3574,6 +3574,104 @@ All 56 source ledgers on disk now pass; suite went 156 failures -> 79.
 The remaining transplant needs whoever owns the medical-appropriateness work,
 because "the tests pass" would only show the code runs, not that the
 adjudication logic is right.
+
+### Medical-review restoration (2026-08-14)
+
+**Why parent2's `dao.py` could not simply be restored.** It does `import fcntl`
+unguarded at line 141, and its lock layer is built on `fcntl.flock`. `fcntl` is
+POSIX-only and does not exist on Windows, which is this machine's platform --
+`os.supports_dir_fd` is empty here and `O_DIRECTORY`/`O_NOFOLLOW` are both
+absent. Parent2's `dao.py` therefore could not import, let alone run, on this
+machine. The other developer's environment is Linux, which is why the divergence
+was invisible on their side. **This constraint was not previously recorded, and
+it is the reason "just take parent2's version" is not an available fix.**
+
+**What was actually missing.** The adjudication logic was never lost --
+`medical_repository.py` (689 lines), `medical_review_ledger.py` (4,257) and
+`medical_contracts.py` (497) all survived the merge intact. What went missing
+was every DAO-side entry point they call back into: 18 symbols, measured by
+scanning `dao.<attr>` across all three modules. Restored:
+
+- 4 `MEDICAL_*_CONFIG` path constants (the `config/medical/*.json` files were
+  all on disk already)
+- 5 path/revision helpers (`medical_variables_path`,
+  `medical_variable_revisions_dir`, `medical_review_ledger_path`,
+  `_load_medical_revision`, `load_medical_review_ledger`)
+- 6 write-layer functions (`atomic_write_bytes`, `atomic_create_bytes[_json]`,
+  `atomic_create_bytes_in_directory`, `remove_managed_file_if_content`,
+  `ensure_conflict_ledger`) plus `AtomicWriteCommittedError`
+- 3 lock functions as a **shim** over this branch's `O_EXCL` model, not a port
+  of parent2's `flock` model. The kernel-lock decision stands unchanged; the
+  handle is opaque at all four call sites (verified -- no attribute access on
+  it anywhere in `tools/medical_*.py`), so carrying the target suffices.
+  Nothing here forks worker processes, so the fork-safety those semantics
+  bought has no situation to protect in this codebase.
+- 12 `cmd_*` CLI commands + their argparse registrations
+
+**Portability, stated honestly.** `atomic_create_bytes_in_directory` and
+`remove_managed_file_if_content` originally pinned a directory with an
+`O_DIRECTORY|O_NOFOLLOW` handle and did every subsequent open/stat/unlink
+`dir_fd`-relative, so a symlink swapped in mid-call could not redirect the
+write. Windows has no `dir_fd`. The same guarantees are re-established per
+operation with `lstat` (directory not a symlink; child not a symlink; child a
+regular file with `st_nlink == 1`, which NTFS maintains). **This is a narrower
+window than a pinned handle, not an equivalent one.** The one guarantee that is
+genuinely POSIX-only is directory-fsync durability, reported through
+`_fsync_directory` returning False rather than silently skipped.
+
+**The gate is scoped forward, by user decision.** Between the merge and this
+restoration the clearance gate did not run at all: a census of `outputs/` found
+**53 cases, zero medical artifacts, 9 with `claim_analysis` recorded `passed`**
+(CASE_021/024/112/135/142/907/908/909/911) through a gate that was not there --
+and `claim_analysis` is gated regardless of `medical_review_adopted`, because
+the medical variables are an INPUT to it. Enforcing retroactively would mark
+finished runs, several with recorded evaluation results, as failed for a check
+that was not running when they executed. So `run_state` gains
+`medical_gate_status`: a run state created from the restoration onward is
+`enforced`; every pre-existing one is stamped `never_evaluated` exactly once on
+first load. **`never_evaluated` is not a pass and not an exemption** -- it
+records that the question was never asked, which is otherwise indistinguishable
+from `medical_review_adopted: false` meaning "asked and not required".
+
+**Wired at two independent points, and that mattered.** The gate is consulted
+in `_update_run_state` AND in `_finalize_stage`. These are separate routes to
+`passed` -- `finalize-stage` does not delegate to `_update_run_state` -- so a
+gate wired into only one has a way around it. This was found the hard way: the
+finalize test kept passing with the `_update_run_state` call deleted, because
+`cmd_finalize_stage` was refusing for an unrelated policy-layer reason and the
+assertion was only on the return code. The test now asserts the medical reason
+specifically, and both wiring points were verified by deleting each in turn and
+confirming exactly one test fails each time.
+
+**Also closed while restoring:** the medical-ownership guards had no consumer
+on this branch. `read_contract_data` (the in-process path pipeline tools
+import) and `cmd_write_text` now both refuse medical-owned contracts --
+previously the generic writer could replace `medical_variables.json`,
+`extracted_claim_fields.json` or a file under `_medical_variable_revisions/`,
+and `_PROTECTED_CONTRACT_FILES` could not catch the last of those because it
+matches basenames only. A regression caught during this work: the read guard
+initially swallowed the traversal `ValueError` and returned 1, downgrading a
+path-safety violation to an ordinary failure; the path is now resolved first so
+traversal still exits hard.
+
+**Verified.** 139 -> 104 suite failures, **35 newly passing, zero regressions**
+(clean-tree baseline captured by `git stash` and diffed). 30 new tests in
+`tests/test_medical_gate_restoration.py`. The full publication path -- canonical
+write, immutable revision, digest binding, ledger init -- was exercised
+end-to-end on Windows and passes.
+
+**Still open.** 11 failures in `tests/test_dao_medical_variables.py` are
+**test-environment limits, not logic gaps**: 5 need `os.symlink` (WinError 1314
+-- Developer Mode or admin), 1 needs `os.mkfifo` (absent on Windows), and 3
+inject a failure into the parent-directory `os.open` that Windows never
+performs. They should pass unchanged on the Linux developer's machine. Also
+still open: `tests/test_medical_operation_ids.py` argv5-7 expect
+`--operation-id` to be *required* on `set-ledger-status`/`add-conflict-entry`/
+`set-conflict-verdict`, while this branch deliberately made it optional for
+pre-v0.4 ledgers and enforces it at write time instead -- a real, documented
+divergence from parent2 that needs a decision, not a patch. And the adjudication
+logic itself is untouched by this work, so item 48's caution still holds: these
+tests show the code runs, not that the medical judgments are right.
 
 *(Numbering note: two pre-existing items both claim 47 -- the P8 correlated-error
 item and the lock-poll item. Not renumbered here to avoid breaking citations to
