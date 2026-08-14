@@ -259,3 +259,78 @@ def test_probe_treats_unreadable_record_as_absent(tmp_path):
         assert sc._parent_ocr_available("CASE_900", "DOC_001") is False
     finally:
         sc.ROOT = orig_root
+
+
+# --- the digest a child without a file still owes ------------------------
+
+def test_child_without_a_file_resolves_its_parents_digest(tmp_path, monkeypatch):
+    """`source_pdf_sha256` is the first input to every canonical UID. A child
+    with no PDF of its own must still answer 'which registered file am I made
+    of', and the honest answer is the parent's file.
+
+    Caught by running the real pipeline, not by reading: dropping child PDFs
+    made `record-source-digest` return
+    'no readable registered raw source for DOC_009', which blocks canonical UID
+    activation and with it the whole policy stage.
+    """
+    import dao
+
+    outputs = tmp_path / "outputs" / "CASE_900"
+    outputs.mkdir(parents=True)
+    raw = tmp_path / "data" / "raw" / "CASE_900"
+    raw.mkdir(parents=True)
+    (raw / "DOC_001.pdf").write_bytes(b"%PDF-1.4 parent bytes")
+
+    manifest = {"case_id": "CASE_900", "documents": [
+        {"document_id": "DOC_001", "file_name": "DOC_001.pdf",
+         "file_path": "data/raw/CASE_900/DOC_001.pdf", "file_format": "pdf",
+         "file_size_bytes": 21, "ocr_status": "not_applicable",
+         "downstream_disposition": "superseded_bundle"},
+        {"document_id": "DOC_002", "file_name": "DOC_002.pdf",
+         "file_path": None, "file_format": "pdf", "file_size_bytes": None,
+         "ocr_status": "completed", "source_file_name": "DOC_001.pdf",
+         "source_page_start": 1, "source_page_end": 5},
+        {"document_id": "DOC_003", "file_name": "DOC_003.pdf",
+         "file_path": None, "file_format": "pdf", "file_size_bytes": None,
+         "ocr_status": "completed", "source_file_name": "DOC_001.pdf",
+         "source_page_start": 6, "source_page_end": 12},
+    ]}
+    (outputs / "document_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr(dao, "OUTPUTS", tmp_path / "outputs")
+    monkeypatch.setattr(dao, "DATA", tmp_path / "data")
+
+    parent = dao.registered_source_pdf_sha256("CASE_900", "DOC_001")
+    child = dao.registered_source_pdf_sha256("CASE_900", "DOC_002")
+    sibling = dao.registered_source_pdf_sha256("CASE_900", "DOC_003")
+
+    assert parent is not None
+    assert child == parent
+    # Siblings share a digest because they ARE the same file; what separates
+    # them is the page range, which the UID scheme carries separately.
+    assert sibling == parent
+
+
+def test_child_naming_no_parent_still_resolves_to_nothing(tmp_path, monkeypatch):
+    """The fallback must not become 'find any file'. A document with neither a
+    file nor a named parent has no registered source, and saying otherwise
+    would mint a UID against a file the case never tied it to."""
+    import dao
+
+    outputs = tmp_path / "outputs" / "CASE_900"
+    outputs.mkdir(parents=True)
+    (tmp_path / "data" / "raw" / "CASE_900").mkdir(parents=True)
+
+    manifest = {"case_id": "CASE_900", "documents": [
+        {"document_id": "DOC_002", "file_name": "DOC_002.pdf",
+         "file_path": None, "file_format": "pdf", "file_size_bytes": None,
+         "ocr_status": "completed"},
+    ]}
+    (outputs / "document_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr(dao, "OUTPUTS", tmp_path / "outputs")
+    monkeypatch.setattr(dao, "DATA", tmp_path / "data")
+
+    assert dao.registered_source_pdf_sha256("CASE_900", "DOC_002") is None

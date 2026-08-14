@@ -4713,6 +4713,42 @@ def _canonical_state_blockers(case_id: str, doc_ids, action: str) -> list[str]:
     return blockers
 
 
+def _raw_file_entry_for(manifest, entry):
+    """The manifest entry whose file_path locates `entry`'s bytes on disk.
+
+    Usually `entry` itself. But a split child that inherited the parent's
+    already-processed pages has no PDF of its own -- writing one produced 44MB
+    from an 11.4MB intake on CASE_142 and nothing ever opened it -- so its
+    bytes live in the parent named by source_file_name, and it is identified
+    inside that parent by source_page_start/end.
+
+    Resolving to the parent is what keeps the digest MEANINGFUL rather than
+    merely available: `source_pdf_sha256` exists to answer "which registered
+    file is this document made of", and for such a child the honest answer is
+    the parent's file. Returning None instead would block canonical UID
+    activation for every child of an OCR'd bundle, which is exactly the
+    regression this function's own caller reports as
+    "no readable registered raw source".
+
+    Sibling children of one parent therefore share a digest. That is correct:
+    they ARE the same file, and what distinguishes them is the page range,
+    which the UID scheme carries separately.
+    """
+    if entry is None:
+        return None
+    if entry.get("file_path"):
+        return entry
+    source_name = entry.get("source_file_name")
+    if not source_name:
+        return None
+    # The parent is the entry whose own file is named source_file_name. Match
+    # on file_name rather than document_id: source_file_name records the raw
+    # file, and a bundle keeps its file_path after being superseded.
+    return next(
+        (d for d in manifest.get("documents", [])
+         if d.get("file_name") == source_name and d.get("file_path")), None)
+
+
 def registered_source_pdf_sha256(case_id: str, doc_id: str):
     """Hash the registered raw source file ourselves (Part 11J commit b).
 
@@ -4721,6 +4757,9 @@ def registered_source_pdf_sha256(case_id: str, doc_id: str):
     never registered -- the one input that establishes WHICH document this is
     would establish nothing. The manifest's file_path is only used to locate
     the file; the digest always comes from reading it.
+
+    For a split child with no file of its own, the located file is its
+    parent's -- see `_raw_file_entry_for`.
     """
     manifest = read_contract_data(case_id, "document_manifest.json")
     if manifest is None:
@@ -4728,6 +4767,7 @@ def registered_source_pdf_sha256(case_id: str, doc_id: str):
     entry = next(
         (d for d in manifest.get("documents", [])
          if d.get("document_id") == doc_id), None)
+    entry = _raw_file_entry_for(manifest, entry)
     if entry is None or not entry.get("file_path"):
         return None
     # file_path is repo-relative ("data/raw/CASE_030/DOC_005.pdf"). Resolve it
