@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "timing_summary.schema.json",
+  "title": "_timing_summary.json -- aggregated run timing v0.2",
+  "description": "Produced by `dao.py aggregate-trace`, once, after a run reaches its SLA end marker. It is the only permanent artifact of the tracing layer: the raw span shards under outputs/CASE_X/_trace/ are diagnostic scratch, written without a lock by a single writer per shard (see tools/trace.py's docstring for why that is not a P5 bypass), and may be deleted at any time. Ordinary span rollups are measured from perf_counter deltas. Cross-process stage_attempt intervals are separately derived from paired wall-clock start/end trace events and never enter ordinary self-time arithmetic. Run-state started_at/completed_at remain marker-movement fields and are never substituted for missing trace events. active_s is the value the 30-minute SLA is judged on.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "type": "string" },
+    "case_id": {
+      "type": "string",
+      "pattern": "^CASE_[0-9]+$"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^RUN_[0-9]{8}_[0-9]+$"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601. When aggregate-trace ran, NOT when the run happened."
+    },
+    "span_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Spans successfully parsed and included in the rollups."
+    },
+    "shard_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "dropped_span_lines": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Lines that could not be parsed as a span and were discarded -- normally a torn final line from a process killed mid-write. Reported rather than repaired: losing one observation must be cheaper than any attempt to protect one. A large value here means the rollups below are incomplete and should be read with that in mind."
+    },
+    "sla_wall_clock_s": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Wall-clock seconds between the sla.phase1.start and sla.phase1.end markers, computed from their t_start_wall anchors (not perf_counter, which is not comparable across processes). null when either marker is absent from the trace."
+    },
+    "human_wait_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Union of all human_wait span intervals falling inside the SLA window. A union, not a sum, so two gates open at once are not counted twice."
+    },
+    "active_s": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "sla_wall_clock_s minus human_wait_s. THIS is the number the SLA target is judged against; the raw wall clock includes human gate waiting that the pipeline cannot control. null when sla_wall_clock_s is null."
+    },
+    "critical_path": {
+      "type": "array",
+      "description": "The root-to-leaf chain with the greatest accumulated self-time, longest contributor first. Answers 'what would have to get faster for the run to get faster'.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "op": { "type": "string" },
+          "span_id": { "type": "string" },
+          "category": { "type": "string" },
+          "self_time_s": { "type": "number", "minimum": 0 },
+          "duration_s": { "type": "number", "minimum": 0 },
+          "share_of_total": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "self_time_s as a fraction of total self-time across all spans."
+          }
+        },
+        "required": ["op", "self_time_s"],
+        "additionalProperties": false
+      }
+    },
+    "by_category": {
+      "type": "object",
+      "description": "Self-time rollup per span category. This and by_op are the decision-making output -- 'provider 42%, lock wait 31%' -- and the plan holds implementation ordering until they exist.",
+      "additionalProperties": { "$ref": "#/$defs/rollup_entry" }
+    },
+    "by_op": {
+      "type": "object",
+      "description": "Self-time rollup per op name.",
+      "additionalProperties": { "$ref": "#/$defs/rollup_entry" }
+    },
+    "total_self_time_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Sum of every span's self-time. Exceeds active_s whenever real parallelism occurred -- that gap is the parallel speedup, not an error."
+    },
+    "stage_attempts": {
+      "type": "array",
+      "description": "Cross-process stage-attempt wall intervals paired from trace events. These never enter by_op/by_category/critical_path/total_self_time_s.",
+      "items": { "$ref": "#/$defs/stage_attempt" }
+    },
+    "by_stage": {
+      "type": "object",
+      "description": "Per-stage attempt cost. unattributed_active_s is not a claim about model reasoning.",
+      "additionalProperties": { "$ref": "#/$defs/stage_rollup" }
+    },
+    "stage_coverage": { "$ref": "#/$defs/stage_coverage" },
+    "closed_attempt_metrics": {
+      "type": "object",
+      "description": "Explicitly separates the sum of closed stage-attempt active walls from their raw-wall interval union. Neither is whole-run elapsed when coverage is partial.",
+      "properties": {
+        "closed_attempt_active_wall_sum_s": { "type": "number", "minimum": 0 },
+        "closed_attempt_raw_wall_union_s": { "type": "number", "minimum": 0 },
+        "closed_attempt_union_partial": { "type": "boolean" }
+      },
+      "required": ["closed_attempt_active_wall_sum_s", "closed_attempt_raw_wall_union_s", "closed_attempt_union_partial"],
+      "additionalProperties": false
+    },
+    "worker_config": {
+      "type": "object",
+      "description": "Configured worker counts observed in pool spans, keyed by pool name.",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "observed_max_concurrency": {
+      "type": "object",
+      "description": "Peak simultaneous entries actually measured, keyed by pool name. Divergence from worker_config is the finding: a pool configured for 4 that never exceeded 1 is serialised by something else.",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "cache_stats": {
+      "type": "object",
+      "properties": {
+        "cache_hits": { "type": "integer", "minimum": 0 },
+        "cache_misses": { "type": "integer", "minimum": 0 },
+        "cache_hit_spans": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Spans whose status was cache_hit."
+        }
+      },
+      "additionalProperties": false
+    },
+    "retry_stats": {
+      "type": "object",
+      "properties": {
+        "provider_calls": { "type": "integer", "minimum": 0 },
+        "provider_errors": { "type": "integer", "minimum": 0 },
+        "total_attempts": { "type": "integer", "minimum": 0 },
+        "by_reason_code": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "lock_stats": {
+      "type": "object",
+      "description": "Lock contention rollup. wait covers acquisition; held covers ownership. 'How long I waited' and 'how long I made others wait' are separate questions and separate spans.",
+      "properties": {
+        "acquire_count": { "type": "integer", "minimum": 0 },
+        "total_wait_s": { "type": "number", "minimum": 0 },
+        "max_wait_s": { "type": "number", "minimum": 0 },
+        "total_poll_count": { "type": "integer", "minimum": 0 },
+        "total_held_s": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "input_class": {
+      "description": "Case size class per the plan's measured page distribution. Set by the caller; null when not declared.",
+      "enum": ["S-min", "S", "M", "L", "XL", "embedded", null]
+    },
+    "cold_or_warm": {
+      "description": "cold means resume caches were cleared before the run -- only cold numbers are SLA-judgable. null when not declared.",
+      "enum": ["cold", "warm", null]
+    },
+    "dropped_attrs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Attr values discarded across all spans for not matching their category's allow-list. Non-zero means some detail was suppressed by the content filter; what was suppressed is deliberately not recorded."
+    }
+  },
+  "required": ["schema_version", "case_id", "run_id", "generated_at", "span_count", "dropped_span_lines"],
+  "additionalProperties": false,
+  "$defs": {
+    "stage_attempt": {
+      "type": "object",
+      "properties": {
+        "stage_name": { "$ref": "run_state.schema.json#/$defs/stage_name" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "outcome": {
+          "enum": ["passed", "failed", "partial", "schema_failed", "finalize_refused", "interrupted", "open", "unknown"]
+        },
+        "pairing_status": {
+          "description": "abandoned: a start marker exists and a cascade recorded that it ended this attempt. Distinct from open (still running, or lost to a crash) because the fate is known and no further marker is owed. Duration stays null either way -- the abandon timestamp is when the cascade ran, not when work stopped.",
+          "enum": ["complete", "open", "abandoned", "orphan_end", "duplicate_marker", "invalid_order"]
+        },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "ended_at": { "type": ["string", "null"], "format": "date-time" },
+        "raw_wall_s": { "type": ["number", "null"], "minimum": 0 },
+        "human_wait_s": { "type": "number", "minimum": 0 },
+        "active_wall_s": { "type": ["number", "null"], "minimum": 0 },
+        "observed_tool_overlap_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Union of already-instrumented non-marker tool intervals inside active portions of this attempt. Null when stage ownership is ambiguous."
+        },
+        "unattributed_active_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "active_wall_s minus observed tool overlap. This is NOT model reasoning time; it may contain any work absent from current tool spans."
+        },
+        "owned_tool_overlap_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "The subset of observed_tool_overlap_s from spans that NAMED this stage and attempt at write time, rather than being attributed by falling inside the window. Under concurrency this is the trustworthy figure: the remainder was inferred from a timestamp."
+        },
+        "ambiguous_tool_overlap_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Union of intervals from spans written while SEVERAL stage attempts were open, which named all of them as candidates and none as owner. Reported separately and never added to observed_tool_overlap_s: this time is real and belongs to exactly one of the concurrent stages, but nothing on disk says which."
+        },
+        "attribution_status": {
+          "description": "complete_explicit_ownership: this attempt's window overlaps another stage's, but every tool span inside it named its owning stage at write time, so the numbers are attributable anyway. overlapping_stage_attempts remains the verdict when unowned spans sit in a contested window -- a timestamp cannot say which stage they belong to, and charging them to both would double-count.",
+          "enum": ["complete", "complete_explicit_ownership", "overlapping_stage_attempts", "open", "abandoned", "orphan_end", "duplicate_marker", "invalid_order"]
+        },
+        "in_sla_window": { "type": "boolean" }
+      },
+      "required": ["stage_name", "attempt", "outcome", "pairing_status", "started_at", "ended_at", "raw_wall_s", "human_wait_s", "active_wall_s", "observed_tool_overlap_s", "unattributed_active_s", "attribution_status", "in_sla_window"],
+      "additionalProperties": false
+    },
+    "stage_rollup": {
+      "type": "object",
+      "properties": {
+        "attempt_count_observed": { "type": "integer", "minimum": 0 },
+        "closed_attempt_count": { "type": "integer", "minimum": 0 },
+        "failed_attempt_count": { "type": "integer", "minimum": 0 },
+        "open_attempt_count": { "type": "integer", "minimum": 0 },
+        "abandoned_attempt_count": { "type": "integer", "minimum": 0 },
+        "total_attempt_active_wall_s": { "type": "number", "minimum": 0 },
+        "passed_attempt_active_wall_s": { "type": "number", "minimum": 0 },
+        "human_wait_s": { "type": "number", "minimum": 0 },
+        "observed_tool_overlap_s": { "type": ["number", "null"], "minimum": 0 },
+        "unattributed_active_s": { "type": ["number", "null"], "minimum": 0 },
+        "attribution_complete": { "type": "boolean" },
+        "skipped": { "type": "boolean" }
+      },
+      "required": ["attempt_count_observed", "closed_attempt_count", "failed_attempt_count", "open_attempt_count", "total_attempt_active_wall_s", "passed_attempt_active_wall_s", "human_wait_s", "observed_tool_overlap_s", "unattributed_active_s", "attribution_complete", "skipped"],
+      "additionalProperties": false
+    },
+    "stage_coverage": {
+      "type": "object",
+      "properties": {
+        "run_state_attempts_expected": { "type": "integer", "minimum": 0 },
+        "trace_attempts_started": { "type": "integer", "minimum": 0 },
+        "trace_attempts_closed": { "type": "integer", "minimum": 0 },
+        "complete_attempts": { "type": "integer", "minimum": 0 },
+        "open_attempts": { "type": "integer", "minimum": 0 },
+        "abandoned_attempts": { "type": "integer", "minimum": 0 },
+        "orphan_end_attempts": { "type": "integer", "minimum": 0 },
+        "duplicate_marker_attempts": { "type": "integer", "minimum": 0 },
+        "invalid_order_attempts": { "type": "integer", "minimum": 0 },
+        "missing_marker_attempts": { "type": "integer", "minimum": 0 },
+        "coverage_complete": { "type": "boolean" }
+      },
+      "required": ["run_state_attempts_expected", "trace_attempts_started", "trace_attempts_closed", "complete_attempts", "open_attempts", "orphan_end_attempts", "duplicate_marker_attempts", "invalid_order_attempts", "missing_marker_attempts", "coverage_complete"],
+      "additionalProperties": false
+    },
+    "rollup_entry": {
+      "type": "object",
+      "properties": {
+        "self_time_s": { "type": "number", "minimum": 0 },
+        "duration_s": { "type": "number", "minimum": 0 },
+        "count": { "type": "integer", "minimum": 0 },
+        "share_of_total": { "type": "number", "minimum": 0, "maximum": 1 },
+        "error_count": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["self_time_s", "count"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -40,6 +40,8 @@ from fork_case import next_free_case_id, copy_outputs_and_rewrite_case_id, copy_
 from llm_providers import ProviderConfigError, ProviderExecutionError, SUPPORTED_PROVIDERS
 from ocr_extract import build_ocr_providers
 from run_checkpoint1 import build_classifier_provider, run_checkpoint1, resolve_from_raw_ocr
+# tools/trace.py, not the stdlib `trace` module.
+import trace as trace_mod
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -189,6 +191,10 @@ def main():
     ap.add_argument("--comparator-model", help="Model name for --comparator")
     ap.add_argument("--classifier-model", help="Model name for --classifier-provider")
     args = ap.parse_args()
+    # Switch tracing on before any instrumented path runs. This tool does not
+    # raise spans itself, but the dao/provider calls below do -- and without
+    # this they are discarded silently (see trace.configure_from_args).
+    trace_mod.configure_from_args(args)
 
     try:
         matrix = run_matrix(

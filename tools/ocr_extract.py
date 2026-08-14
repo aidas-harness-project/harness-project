@@ -30,13 +30,20 @@ Usage:
 """
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+# tools/trace.py, not the stdlib `trace` module -- tools/ precedes stdlib on
+# sys.path for every entry point in this repo.
+import trace as trace_mod
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -248,7 +255,37 @@ def scratch_dir(case_id: str, doc_id: str):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def _split_to_page_images_fitz(doc_path: Path, out_dir: Path, max_pages: int | None = None) -> list[Path]:
+DEFAULT_RENDER_DPI = 200
+RENDER_DPI_ENV = "HARNESS_OCR_DPI"
+# Above this, a full page render starts costing more in provider-side image
+# handling than the extra detail is worth; a bad value should not silently
+# become an enormous one.
+MAX_RENDER_DPI = 600
+
+
+def _resolve_render_dpi(dpi: int | None = None) -> int:
+    """Explicit argument wins, then HARNESS_OCR_DPI, then the default.
+
+    Both render backends (pymupdf and pdftoppm) must agree: the dpi is a
+    property of the page image the READER sees, so letting it depend on which
+    backend happens to be installed would make P8 agreement depend on the host
+    rather than on the document. An unparseable, non-positive, or absurd env
+    value falls back to the default instead of raising -- rendering is not the
+    place to fail a run on a typo, and a silent 0-dpi render would be worse.
+    """
+    if dpi is None:
+        raw = os.environ.get(RENDER_DPI_ENV, "")
+        try:
+            dpi = int(raw) if raw.strip() else None
+        except ValueError:
+            dpi = None
+    if dpi is None or dpi <= 0 or dpi > MAX_RENDER_DPI:
+        return DEFAULT_RENDER_DPI
+    return dpi
+
+
+def _split_to_page_images_fitz(doc_path: Path, out_dir: Path, max_pages: int | None = None,
+                               dpi: int | None = None) -> list[Path]:
     import fitz  # pymupdf
 
     doc = fitz.open(doc_path)
@@ -257,7 +294,7 @@ def _split_to_page_images_fitz(doc_path: Path, out_dir: Path, max_pages: int | N
         paths = []
         for i in range(page_count):
             page = doc.load_page(i)
-            pix = page.get_pixmap(dpi=200)
+            pix = page.get_pixmap(dpi=_resolve_render_dpi(dpi))
             out_path = out_dir / f"page_{i + 1:03d}.png"
             pix.save(out_path)
             paths.append(out_path)
@@ -289,13 +326,14 @@ def _pdftoppm_page_number(path: Path) -> int:
     return int(match.group(1)) if match else 0
 
 
-def _split_to_page_images_pdftoppm(doc_path: Path, out_dir: Path, max_pages: int | None = None) -> list[Path]:
+def _split_to_page_images_pdftoppm(doc_path: Path, out_dir: Path, max_pages: int | None = None,
+                                   dpi: int | None = None) -> list[Path]:
     command = _find_pdftoppm()
     if command is None:
         sys.exit("error: pymupdf missing and pdftoppm not found for PDF rendering")
 
     prefix = out_dir / "page"
-    cmd = [command, "-png", "-r", "200"]
+    cmd = [command, "-png", "-r", str(_resolve_render_dpi(dpi))]
     if max_pages is not None:
         cmd.extend(["-f", "1", "-l", str(max_pages)])
     cmd.extend([str(doc_path), str(prefix)])
@@ -315,15 +353,18 @@ def _split_to_page_images_pdftoppm(doc_path: Path, out_dir: Path, max_pages: int
     return paths
 
 
-def split_to_page_images(doc_path: Path, out_dir: Path, max_pages: int | None = None) -> list[Path]:
+def split_to_page_images(doc_path: Path, out_dir: Path, max_pages: int | None = None,
+                         dpi: int | None = None) -> list[Path]:
     """max_pages caps how many pages get rendered (from the start) -- used by
     intake_case.py's content pre-check, which only needs the first few pages,
     not a full render. None (default) renders every page, unchanged from
-    this function's original behavior."""
+    this function's original behavior.
+
+    dpi=None keeps the 200-dpi default (see _resolve_render_dpi)."""
     try:
-        return _split_to_page_images_fitz(doc_path, out_dir, max_pages)
+        return _split_to_page_images_fitz(doc_path, out_dir, max_pages, dpi)
     except ImportError:
-        return _split_to_page_images_pdftoppm(doc_path, out_dir, max_pages)
+        return _split_to_page_images_pdftoppm(doc_path, out_dir, max_pages, dpi)
 
 
 def build_ocr_providers(
@@ -367,23 +408,198 @@ def _resume_cache_dir(case_id: str, doc_id: str) -> Path:
     return SCRATCH_ROOT / "_resume" / f"{case_id}_{doc_id}"
 
 
-def _load_cached_page(cache_dir: Path, page: int) -> dict | None:
+# Bumped when the CACHE ENTRY's own shape changes. An entry written before
+# fingerprinting existed carries no `fingerprint` key at all and is treated as
+# a miss, which is the intended handling: it cannot be shown to match.
+OCR_CACHE_FORMAT_VERSION = 1
+
+
+def _cache_fingerprint(img_path: Path, reader_a, reader_b, comparator,
+                       dpi: int | None = None, single_reader: bool = False) -> str:
+    """What the cached P8 verdict is only valid FOR.
+
+    Until 2026-08-11 this cache was keyed on case_id/doc_id/page alone, so a
+    re-run with a different render dpi, a different reader provider or model,
+    or a revised prompt was served the OLD verdict as a hit -- silently. That
+    is worse here than in the redaction cache: the cached value is a P8
+    AGREEMENT decision, so a stale hit can report `agreed` for a page pair
+    that was never actually read at the current settings, and P8 is the gate
+    everything downstream trusts.
+
+    Every input that can change the verdict is in here:
+
+    * sha256 of the exact page IMAGE bytes -- this is what the readers see, so
+      it covers render dpi, the render backend, and a re-rendered source
+      without needing to enumerate them.
+    * `OCR_PROMPT_VERSION` -- a revised transcription or comparison prompt
+      usually means the previous one misread something.
+    * both readers' and the comparator's provider+model -- a different model
+      is a different reader, and P8's premise is which two readers agreed.
+
+    A mismatch on any of them is a miss, and a miss re-runs the real calls.
+    """
+    try:
+        digest = hashlib.sha256(img_path.read_bytes()).hexdigest()
+    except OSError:
+        # Unreadable image -> a fingerprint nothing can match, so the page is
+        # re-read rather than served from cache on a guess.
+        digest = "unreadable"
+
+    def _label(provider) -> str:
+        return (f"{getattr(provider, 'provider_name', 'unknown')}"
+                f":{getattr(provider, 'model_name', None)}")
+
+    if single_reader:
+        # A single-reader page carries NO P8 verdict at all, so it must never be
+        # interchangeable with a dual-read cache entry in either direction: a
+        # single-reader hit would hand a throughput run's unvalidated text to a
+        # run that asked for cross-validation, and a dual-read hit would let a
+        # --single-reader run report an `agreed` it never paid for. Different
+        # namespace, not a different reader list.
+        return (f"{OCR_CACHE_FORMAT_VERSION}:{OCR_PROMPT_VERSION}:"
+                f"{_resolve_render_dpi(dpi)}:single_reader:{_label(reader_a)}:{digest}")
+
+    readers = f"{_label(reader_a)}|{_label(reader_b)}|{_label(comparator)}"
+    return (f"{OCR_CACHE_FORMAT_VERSION}:{OCR_PROMPT_VERSION}:"
+            f"{_resolve_render_dpi(dpi)}:{readers}:{digest}")
+
+
+def _load_cached_page(cache_dir: Path, page: int, fingerprint: str | None = None) -> dict | None:
+    """Return the cached page result, or None.
+
+    Fails closed in every ambiguous case -- unreadable file, malformed JSON,
+    missing fingerprint, fingerprint mismatch. A miss costs three provider
+    calls; a wrong hit reports a P8 verdict that was never measured under the
+    current settings.
+    """
     p = cache_dir / f"page_{page:03d}.json"
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        entry = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None  # corrupt/partial cache entry -> re-transcribe this page
+    if not isinstance(entry, dict):
+        return None
+    if fingerprint is not None and entry.get("fingerprint") != fingerprint:
+        return None  # different dpi/provider/model/prompt, or a pre-fingerprint entry
+    return entry
 
 
-def _save_cached_page(cache_dir: Path, page: int, page_result: dict) -> None:
+def _save_cached_page(cache_dir: Path, page: int, page_result: dict,
+                      fingerprint: str | None = None) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
+    entry = dict(page_result)
+    if fingerprint is not None:
+        entry["fingerprint"] = fingerprint
     # atomic write so an interrupt mid-write never leaves a half-page that
     # would be trusted on resume.
     tmp = cache_dir / f"page_{page:03d}.json.tmp"
-    tmp.write_text(json.dumps(page_result, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
     tmp.replace(cache_dir / f"page_{page:03d}.json")
+
+
+# Raised 4 -> 8 on 2026-08-11. Measured on a real 12-page scan at dd6d8aa:
+# 141.32s -> 86.06s, a 1.64x speedup from this constant alone. The new corpus
+# is entirely scans, so this applies to every case rather than a subset.
+#
+# 2026-08-11: raised 8 -> 16 (user decision), explicitly recorded at the time
+# as "a deliberate bet, not a measurement" -- 16 had never been compared
+# against anything. The bet's stated safety net was that being wrong would
+# cost rate-limit failures rather than slowness.
+#
+# 2026-08-12: measured twice, and the two measurements disagree -- which is
+# the whole point, because they measure different workloads.
+#
+# First, 24 TRIVIAL `claude -p` calls (no image, no reasoning) at varying
+# width peaked at 12 and degraded above it: 12 -> 19.9s, 16 -> 23.6s,
+# 24 -> 32.1s. That curve is real but it is the SPAWN curve: with model work
+# held at ~0, a call is nothing but local process cost, so contention
+# dominates immediately. Setting OCR to 12 from that number was applying a
+# short-call result to a long-call workload.
+#
+# Second, the actual thing: 34 REAL scanned pages (every OCR page in
+# CASE_911 -- DOC_002's 15 plus the 11 medical children's 19), batch larger
+# than every width tested so each is genuinely distinct:
+#
+#   workers   wall     per page   mean latency
+#     12      75.2s     2.21s       23.5s
+#     24      54.6s     1.61s       23.4s   <- chosen
+#     34      53.0s     1.56s       28.6s
+#
+# 12 -> 24 is a 20.6s (27%) win with per-call latency FLAT (23.5 -> 23.4),
+# i.e. no contention had begun at 24. 24 -> 34 buys only 1.6s more while
+# latency jumps +5.2s -- work is being queued inside the calls, the onset of
+# saturation, for essentially no wall-clock return.
+#
+# Why this workload tolerates ~2x the trivial-call width: a real OCR call
+# spends ~23s awaiting the model with the local CPU idle, so the 4.34s of
+# spawn cost is a small share of each call rather than all of it. An earlier
+# 15-page run appeared to show "16 is fastest" and was discarded as
+# unreadable -- with only 15 items, W=16 and W=24 both dispatch the whole
+# batch at once and are the same configuration.
+#
+# Raised 12 -> 24 on that measurement. This deliberately DIFFERS from the
+# short-call ops (redaction/classify/segment-judge), which stay at 12 where
+# their own measurement put them; one global width would have to be wrong
+# for one of the two.
+#
+# This is a per-DOCUMENT knob, so demand is this value x HARNESS_DOC_WORKERS
+# (24 x 3 = 72). The process-wide in-flight cap (T6) is what actually bounds
+# that; it is set to this same 24 so a single document can reach full width
+# while several documents cannot multiply past it.
+DEFAULT_OCR_WORKERS = 24
+
+# Turns P8 off for every OCR call in the process, so a development session does
+# not have to remember --single-reader on each invocation. Set
+# HARNESS_SINGLE_READER=1 in the dev environment; unset (or 0) keeps full dual-read
+# P8, which is what an evaluation run needs.
+#
+# Deliberately an env var rather than flipping the flag's default: a default of
+# True would leave no way to ask for P8 on the command line, and the PoC's
+# evaluation runs need exactly that. Precedence matches every other knob here --
+# an explicit argument wins, then the env var, then the default (off).
+SINGLE_READER_ENV = "HARNESS_SINGLE_READER"
+
+
+def resolve_single_reader(single_reader: bool | None) -> bool:
+    """Whether to run with P8 off. Explicit argument wins, then the env var.
+
+    `None` means "not specified" -- only then is the environment consulted.
+    Passing True or False explicitly is always honoured, so an evaluation run
+    can force dual-read P8 even inside a shell that exports the dev default.
+    """
+    if single_reader is not None:
+        return bool(single_reader)
+    raw = os.environ.get(SINGLE_READER_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _resolve_workers(max_workers: int | None) -> int:
+    """Page-level concurrency. Explicit argument wins, then HARNESS_OCR_WORKERS,
+    then DEFAULT_OCR_WORKERS.
+
+    The ceiling is not CPU-derived: the work is provider round-trips, not local
+    computation, so the real limits are the backend's rate limit and -- for the
+    CLI providers -- one child process per in-flight call. HARNESS_LLM_MAX_INFLIGHT
+    can still cap the whole process rather than one document, but it is
+    uncapped by default since 2026-08-11, so nothing bounds this globally
+    unless that env var is set. A value <= 1 restores the strictly sequential
+    loop, which is also what a single-page document gets.
+    """
+    if max_workers is None:
+        raw = os.environ.get("HARNESS_OCR_WORKERS")
+        if raw is None or not raw.strip():
+            return DEFAULT_OCR_WORKERS
+        try:
+            max_workers = int(raw)
+        except ValueError:
+            raise ProviderConfigError(
+                f"HARNESS_OCR_WORKERS must be an integer, got {raw!r}"
+            ) from None
+    if max_workers < 1:
+        return 1
+    return max_workers
 
 
 def run_ocr(
@@ -395,6 +611,9 @@ def run_ocr(
     reader_b=None,
     comparator=None,
     resume: bool = True,
+    max_workers: int | None = None,
+    dpi: int | None = None,
+    single_reader: bool | None = None,
 ) -> dict:
     """The actual dual-path OCR loop, extracted out of main() so callers
     (run_checkpoint1.py) can invoke it in-process instead of shelling out
@@ -412,7 +631,31 @@ def run_ocr(
     pages, otherwise loses everything on any interruption since ocr_result is
     only written after the whole document finishes). The cache is cleared on
     full completion. Page images are deterministic per PDF, so a cached page N
-    always corresponds to the same source page."""
+    always corresponds to the same source page.
+
+    max_workers controls how many PAGES are in flight at once (see
+    _resolve_workers). Pages are independent -- each is two reads plus one
+    comparison over one image -- so this is a wall-time change only: results are
+    collected into page-indexed slots and returned in source order, each page's
+    two reads still see the same image, and a page still costs exactly one pass.
+    The two readers of a single page stay sequential relative to each other, so
+    P8's pairing cannot drift. Pass max_workers=1 for the original strictly
+    sequential behaviour.
+
+    single_reader=True is a DEVELOPMENT-ONLY throughput mode that turns P8 off
+    rather than relaxing it: reader_b and the comparator are never called, so a
+    page costs one read instead of two-plus-a-comparison. There is no agreement
+    to report, so every page is recorded as `single_reader` (never `agreed` --
+    nothing agreed) and the document's cross_validation_mode becomes
+    `single_reader_no_cross_validation`. Nothing produced this way is admissible
+    as PoC evaluation text: the four real extraction faults P8 caught on this
+    corpus (CASE_012's fabricated appendix, CASE_021's second fabricated
+    addition and its KCD I678 misread, CASE_022's context contamination) were
+    each visible ONLY as a disagreement between two reads, and a single read
+    would have carried all four downstream silently. Use it for timing and
+    plumbing runs; leave it off for any case whose text accuracy is judged."""
+    single_reader = resolve_single_reader(single_reader)
+
     if not doc_path.exists():
         sys.exit(f"error: document not found -- {doc_path}")
 
@@ -435,62 +678,179 @@ def run_ocr(
                 case_id, doc_id, doc_path, page_texts, progress=progress
             )
 
-    if reader_a is None or reader_b is None or comparator is None:
+    if single_reader:
+        # Only reader_a is ever used, so only reader_a is required. Building the
+        # other two would be harmless but misleading -- a constructed provider
+        # reads as a configured one, and nothing here calls them.
+        if reader_a is None:
+            reader_a = build_ocr_providers()["reader_a"]
+        reader_b = None
+        comparator = None
+    elif reader_a is None or reader_b is None or comparator is None:
         providers = build_ocr_providers()
         reader_a = reader_a or providers["reader_a"]
         reader_b = reader_b or providers["reader_b"]
         comparator = comparator or providers["comparator"]
 
     cache_dir = _resume_cache_dir(case_id, doc_id)
+    workers = _resolve_workers(max_workers)
 
-    pages_out = []
     with scratch_dir(case_id, doc_id) as tmp_dir:
         if doc_path.suffix.lower() == ".pdf":
-            page_images = split_to_page_images(doc_path, tmp_dir)
+            page_images = split_to_page_images(doc_path, tmp_dir, dpi=dpi)
         else:
             page_images = [doc_path]  # already a single image
 
-        for i, img_path in enumerate(page_images, start=1):
-            cached = _load_cached_page(cache_dir, i) if resume else None
-            if cached is not None:
-                pages_out.append(cached)
-                msg = f"page {i}/{len(page_images)}: {cached['agreement']} (cached)"
-                progress(msg) if progress else print(msg, file=sys.stderr)
-                continue
+        total = len(page_images)
+        # Results are collected into a page-indexed slot, never appended, so the
+        # output order is the SOURCE order no matter which page finishes first.
+        # Downstream writes pages[i] as page i+1's text, so an
+        # order-of-completion list would silently file one page's text under
+        # another's number.
+        slots: list[dict | None] = [None] * total
+        progress_lock = threading.Lock()
 
-            reading_a = transcribe_once(img_path, reader_a)
-            reading_b = transcribe_once(img_path, reader_b)
-            result = compare(reading_a["text"], reading_b["text"], comparator)
-            page_result = {
-                "page": i,
-                "reading_a": reading_a["text"],
-                "reading_b": reading_b["text"],
-                "agreement": result["agreement"],
-                "disagreement_details": result["disagreement_details"],
-                "provider_metadata": {
-                    "reader_a": reading_a["metadata"],
-                    "reader_b": reading_b["metadata"],
-                    "comparator": result["metadata"],
-                },
-            }
-            if resume:
-                _save_cached_page(cache_dir, i, page_result)
-            pages_out.append(page_result)
-            msg = f"page {i}/{len(page_images)}: {result['agreement']}"
-            progress(msg) if progress else print(msg, file=sys.stderr)
+        def report(msg: str) -> None:
+            # progress() is called from worker threads once workers > 1; a
+            # caller's callback (and plain print) is not guaranteed thread-safe.
+            with progress_lock:
+                progress(msg) if progress else print(msg, file=sys.stderr)
+
+        concurrency = trace_mod.ConcurrencyProbe()
+
+        def process_page(index: int, img_path: Path) -> None:
+            page_no = index + 1
+            with trace_mod.span("ocr.page", category="io", case_id=case_id,
+                                doc_id=doc_id, page=page_no) as sp, concurrency.enter():
+                fingerprint = _cache_fingerprint(img_path, reader_a, reader_b,
+                                                 comparator, dpi,
+                                                 single_reader=single_reader)
+                cached = (_load_cached_page(cache_dir, page_no, fingerprint)
+                          if resume else None)
+                if cached is not None:
+                    slots[index] = cached
+                    sp.set_status("cache_hit")
+                    report(f"page {page_no}/{total}: {cached['agreement']} (cached)")
+                    return
+
+                # reader_a and reader_b are deliberately BOTH given img_path: P8's
+                # premise is two independent reads of the same page. They stay
+                # sequential relative to each other -- the parallelism is across
+                # pages, so pairing can never drift.
+                reading_a = transcribe_once(img_path, reader_a)
+                if single_reader:
+                    # No second read and no comparison: there is no agreement to
+                    # report, so `agreement` says exactly that rather than
+                    # borrowing a P8 verdict word. reading_b is null (not a copy
+                    # of reading_a, which would read as two reads concurring)
+                    # and disagreement_details is empty because nothing was
+                    # compared -- not because nothing differed.
+                    page_result = {
+                        "page": page_no,
+                        "reading_a": reading_a["text"],
+                        "reading_b": None,
+                        "agreement": "single_reader",
+                        "disagreement_details": [],
+                        "provider_metadata": {
+                            "reader_a": reading_a["metadata"],
+                            "reader_b": None,
+                            "comparator": None,
+                        },
+                    }
+                else:
+                    reading_b = transcribe_once(img_path, reader_b)
+                    result = compare(reading_a["text"], reading_b["text"], comparator)
+                    page_result = {
+                        "page": page_no,
+                        "reading_a": reading_a["text"],
+                        "reading_b": reading_b["text"],
+                        "agreement": result["agreement"],
+                        "disagreement_details": result["disagreement_details"],
+                        "provider_metadata": {
+                            "reader_a": reading_a["metadata"],
+                            "reader_b": reading_b["metadata"],
+                            "comparator": result["metadata"],
+                        },
+                    }
+                # Cache before publishing the slot: an interrupt between the two
+                # loses nothing (the page is re-read), whereas the reverse could
+                # report a page as done that was never persisted.
+                if resume:
+                    _save_cached_page(cache_dir, page_no, page_result, fingerprint)
+                slots[index] = page_result
+                # Reads from page_result, not from `result`: the comparator
+                # verdict only exists on the dual-read branch, so referencing it
+                # here crashed every --single-reader page with an UnboundLocalError.
+                report(f"page {page_no}/{total}: {page_result['agreement']}")
+
+        with trace_mod.span("pool.ocr_pages", category="compute",
+                            case_id=case_id, doc_id=doc_id,
+                            worker_count=min(workers, total),
+                            items=total) as pool_span:
+            if workers <= 1 or total <= 1:
+                for index, img_path in enumerate(page_images):
+                    process_page(index, img_path)
+            else:
+                with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
+                    # run_in_context: concurrent.futures does NOT propagate
+                    # contextvars into workers, so submitting process_page raw
+                    # would leave every ocr.page span parented at None. The
+                    # page loop is the most expensive thing in the pipeline;
+                    # orphaning its spans would make it precisely the part the
+                    # critical path could not explain.
+                    submit = trace_mod.run_in_context(process_page)
+                    futures = {
+                        pool.submit(submit, index, img_path): index
+                        for index, img_path in enumerate(page_images)
+                    }
+                    # Surface the first failure, but only after every in-flight page
+                    # has settled -- a page that already finished has been cached,
+                    # and killing the pool early would throw that work away. That is
+                    # the property the sequential loop had for free: a crash on page
+                    # 7 kept pages 1-6.
+                    first_error = None
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except BaseException as exc:  # noqa: BLE001 -- re-raised below
+                            first_error = first_error or exc
+                    if first_error is not None:
+                        raise first_error
+            pool_span.set(observed_max_concurrency=concurrency.max_observed)
+
+        pages_out = [slot for slot in slots if slot is not None]
+        if len(pages_out) != total:
+            missing = [i + 1 for i, slot in enumerate(slots) if slot is None]
+            raise ProviderExecutionError(
+                f"OCR produced no result for page(s) {missing} of {doc_path}; "
+                "refusing to return a document with silently missing pages"
+            )
 
     # Full document finished -> the per-page resume cache is no longer needed.
     if resume:
         shutil.rmtree(cache_dir, ignore_errors=True)
 
-    cross_validation_mode, cross_validation_note = _classify_cross_validation(reader_a, reader_b)
+    if single_reader:
+        cross_validation_mode = "single_reader_no_cross_validation"
+        cross_validation_note = (
+            f"P8 was NOT performed: --single-reader ran one read "
+            f"({_metadata_for(reader_a).get('provider_name')}, model "
+            f"{_metadata_for(reader_a).get('model_name')}) per page with no "
+            "second reader and no comparison. Every page is `single_reader`, "
+            "never `agreed` -- nothing agreed. This text is unvalidated: a "
+            "misread, a fabricated addition, or context contamination would be "
+            "carried downstream with nothing able to detect it. Development "
+            "throughput mode only; not admissible for PoC evaluation."
+        )
+    else:
+        cross_validation_mode, cross_validation_note = _classify_cross_validation(reader_a, reader_b)
 
     return {
         "document_path": str(doc_path),
         "providers": {
             "reader_a": _metadata_for(reader_a),
-            "reader_b": _metadata_for(reader_b),
-            "comparator": _metadata_for(comparator),
+            "reader_b": _metadata_for(reader_b) if reader_b is not None else None,
+            "comparator": _metadata_for(comparator) if comparator is not None else None,
         },
         "cross_validation_mode": cross_validation_mode,
         "cross_validation_note": cross_validation_note,
@@ -678,7 +1038,25 @@ def main():
     ap.add_argument("--reader-a-model", help="Model name for --reader-a")
     ap.add_argument("--reader-b-model", help="Model name for --reader-b")
     ap.add_argument("--comparator-model", help="Model name for --comparator")
+    # Optional, and deliberately not synthesized when absent: this tool is
+    # usually driven as a library by run_checkpoint1 (which configures tracing
+    # itself). Run standalone it has no run to attribute spans to, and a
+    # made-up id would put shards where `aggregate-trace --run-id` never
+    # looks -- traced in appearance, unreachable in fact.
+    ap.add_argument("--run-id", default=None,
+                    help="Record this run's spans under outputs/<case>/_trace/<run-id>/. "
+                         "Without it, a standalone run is simply not traced.")
+    ap.add_argument("--workers", type=int, default=None, metavar="N",
+                    help="Pages transcribed concurrently (default %d, or HARNESS_OCR_WORKERS). "
+                         "1 = the strictly sequential loop. Output is identical either way -- "
+                         "pages are always returned in source order." % DEFAULT_OCR_WORKERS)
+    ap.add_argument("--dpi", type=int, default=None, metavar="N",
+                    help="Page render resolution (default %d, or HARNESS_OCR_DPI). "
+                         "Higher resolution costs proportionally more provider-side "
+                         "image handling, so raise it deliberately -- see known-gaps "
+                         "item 45." % DEFAULT_RENDER_DPI)
     args = ap.parse_args()
+    trace_mod.configure_from_args(args)
 
     try:
         providers = build_ocr_providers(
@@ -696,6 +1074,8 @@ def main():
             reader_a=providers["reader_a"],
             reader_b=providers["reader_b"],
             comparator=providers["comparator"],
+            max_workers=args.workers,
+            dpi=args.dpi,
         )
     except ProviderConfigError as exc:
         sys.exit(f"error: {exc}")

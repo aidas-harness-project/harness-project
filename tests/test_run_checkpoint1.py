@@ -1152,3 +1152,71 @@ def test_falling_back_to_raw_page_text_is_recorded(tmp_path, monkeypatch):
     assert written["classification_text_source"] == "raw_page_text"
     assert written["review_required"] is True, \
         "reading unredacted text is a fact a reviewer should see"
+
+
+def test_page_range_slice_preserves_the_text_layer(tmp_path):
+    """A sliced page must extract the same text its source page does.
+
+    Regression: _page_range_pdf used insert_pdf(), which rebuilds each page's
+    resources into a fresh document and drops the glyphs of a page whose text
+    is drawn in a subset TrueType font with a mislabelled WinAnsi encoding --
+    what Korean insurer PDFs use ("ABCDEE+바탕체"). A page extracting 0 chars
+    reads as a genuine scan to ocr_extract's embedded-text check, which routes
+    the whole document to vision OCR. Nothing fails loudly; the symptoms are
+    cost and a quality downgrade on the path where vision has been observed
+    hallucinating an insurer slogan.
+
+    segment_case.split_bundle fixed exactly this in its own slicer and measured
+    it (CASE_905, 323 pages: insert_pdf lost 3 cover pages, select lost 0).
+    This slicer -- the other place the repo cuts a PDF -- was never updated.
+    Re-measured on CASE_902 DOC_001 (249p, 248 with text): insert_pdf lost
+    pages 2-7 and 248; select lost none and reproduced every char count.
+
+    NOTE on fixture fidelity, same as test_segment_case's equivalent: a
+    synthetic PyMuPDF document does not reproduce the font corruption -- both
+    slicers keep its text -- so this asserts the invariant (slice text ==
+    source text) rather than proving the old implementation fails. The measured
+    evidence lives on the real PDFs named above.
+    """
+    fitz = pytest.importorskip("fitz")
+
+    pdf_path = tmp_path / "textful.pdf"
+    with fitz.open() as doc:
+        for i in range(6):
+            page = doc.new_page()
+            page.insert_text((72, 100), f"PAGE {i + 1} CONTENT", fontsize=14)
+        doc.save(pdf_path)
+
+    with fitz.open(pdf_path) as doc:
+        source = [doc[i].get_text().strip() for i in range(6)]
+    assert all(source), "fixture must have text on every page"
+
+    with rc1._page_range_pdf(pdf_path, "CASE_009", "DOC_001", 2, 5) as sliced:
+        with fitz.open(sliced) as d:
+            assert d.page_count == 4
+            got = [d[i].get_text().strip() for i in range(4)]
+
+    assert got == source[1:5], (
+        "the slice must reproduce its source pages' text exactly")
+
+
+def test_page_range_slice_does_not_mutate_the_raw_source(tmp_path):
+    """select() mutates the document it is called on, so the slicer must open
+    its own handle. P2 makes raw input immutable, and a slicer that wrote back
+    to data/raw would be the worst possible way to break it."""
+    fitz = pytest.importorskip("fitz")
+
+    pdf_path = tmp_path / "source.pdf"
+    with fitz.open() as doc:
+        for i in range(5):
+            page = doc.new_page()
+            page.insert_text((72, 100), f"PAGE {i + 1}", fontsize=14)
+        doc.save(pdf_path)
+    before = pdf_path.read_bytes()
+
+    with rc1._page_range_pdf(pdf_path, "CASE_009", "DOC_001", 2, 3) as sliced:
+        assert sliced != pdf_path
+
+    assert pdf_path.read_bytes() == before, "the raw source PDF was modified"
+    with fitz.open(pdf_path) as doc:
+        assert doc.page_count == 5, "the raw source lost pages"

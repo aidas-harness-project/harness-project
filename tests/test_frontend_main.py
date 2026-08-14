@@ -130,6 +130,65 @@ def test_set_conflict_verdict_endpoint_blocks_flag_smuggling_via_conflict_id(iso
     assert exc.value.status_code == 400
 
 
+# ------------------------------------------------ T1: SLA run-id pinning --
+
+def _launch_prompt(monkeypatch, tmp_path, case_id="CASE_009"):
+    """Capture the prompt /api/cases/{id}/run would hand the agent, without
+    actually launching a claude subprocess."""
+    staging = tmp_path / "uploads" / case_id
+    staging.mkdir(parents=True)
+    (staging / "doc.pdf").write_bytes(b"%PDF-1.4\n")
+    monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(main, "LOGS_DIR", tmp_path / "logs")
+    monkeypatch.setattr(main, "RUNS_FILE", tmp_path / "_runs.json", raising=False)
+    captured = {}
+
+    class _FakeProc:
+        pid = 4242
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return _FakeProc()
+
+    monkeypatch.setattr(main.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(main, "_load_runs", lambda: {})
+    monkeypatch.setattr(main, "_save_runs", lambda runs: captured.setdefault("runs", runs))
+    result = main.run_case(case_id)
+    captured["result"] = result
+    captured["prompt"] = captured["argv"][2]
+    return captured
+
+
+def test_run_prompt_pins_one_run_id_and_the_ledger_clear_call(isolated_main, monkeypatch):
+    """Both SLA markers must land under the SAME _trace/<run_id>/, so the
+    backend pins the id rather than letting the agent invent one per step."""
+    cap = _launch_prompt(monkeypatch, isolated_main)
+    run_id = cap["result"]["run_id"]
+    assert run_id.startswith("RUN_")
+    prompt = cap["prompt"]
+    # The id is stated once as a global instruction and again on the call that
+    # opens the SLA window.
+    assert f"Use exactly this run id" in prompt
+    assert run_id in prompt
+    assert f"check-source-ledger-clear CASE_009 --run-id {run_id}" in prompt
+    assert cap["runs"]["CASE_009"]["run_id"] == run_id
+
+
+def test_run_prompt_keeps_draft_report_v1_as_the_scope_end(isolated_main, monkeypatch):
+    """T1 deliberately does NOT extend the prompt to critic_v1 -- the original
+    B9 'mismatch' was the SLA definition being too long, not the frontend
+    being too short (plan section 2.1, user decision 2026-08-10)."""
+    prompt = _launch_prompt(monkeypatch, isolated_main)["prompt"]
+    assert "draft report v1" in prompt
+    assert "critic_v1 may still run" in prompt
+
+
+def test_run_id_matches_the_run_state_schema_pattern(isolated_main, monkeypatch):
+    import re
+    run_id = _launch_prompt(monkeypatch, isolated_main)["result"]["run_id"]
+    assert re.fullmatch(r"RUN_[0-9]{8}_[0-9]+", run_id)
+
+
 def test_generic_dao_api_preserves_authoritative_lock_window(monkeypatch):
     observed = {}
 

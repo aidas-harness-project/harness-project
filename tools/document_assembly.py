@@ -65,6 +65,8 @@ from dao import (
     release_lock,
 )
 from _validation import load_registry, validate_instance
+# tools/trace.py, not the stdlib `trace` module.
+import trace as trace_mod
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
@@ -328,6 +330,10 @@ def main():
                     "presence/order against (e.g. 진단수술비형, screening_report). Omit only for "
                     "documents with no registry entry (rebuttal_points).")
     args = ap.parse_args()
+    # Switch tracing on before any instrumented path runs. This tool does not
+    # raise spans itself, but the dao/provider calls below do -- and without
+    # this they are discarded silently (see trace.configure_from_args).
+    trace_mod.configure_from_args(args)
 
     if args.structured_report_file:
         if not args.template:

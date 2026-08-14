@@ -5,7 +5,9 @@
   "description": "The list of every document in a case and its processing status. This is a shared state file updated by multiple stages in sequence, not a single component's output -- it does not use the common output envelope. Update discipline: each stage adds only its own owner fields and never modifies fields it does not own (owner is documented per field below). This discipline is enforced structurally by DAO locks and validators (see harness-guardrails P5). v0.7 combines the human-reviewed Stage 1 segmentation gate with first-class physical/segment lineage: physical PDFs must be reviewed as required or not_required before Stage 2; derived page-range segments declare their source_document_id, page_map, derivation_method, and derived_text_path, and are validated by DAO lineage checks.",
   "type": "object",
   "properties": {
-    "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
+    "case_id": {
+      "$ref": "common_component_output.schema.json#/$defs/case_id"
+    },
     "created_at": {
       "type": "string",
       "format": "date-time",
@@ -18,14 +20,20 @@
     },
     "documents": {
       "type": "array",
-      "items": { "$ref": "#/$defs/document_entry" }
+      "items": {
+        "$ref": "#/$defs/document_entry"
+      }
     },
     "adjuster_case_type": {
       "type": "object",
       "description": "owner: Case Intake (Stage 1). OPTIONAL and additive as of 2026-08-04 -- absent on every pre-existing case, and on any case whose adjuster did not supply a type. The loss adjuster's own classification, recorded at intake alongside the input material. This is a practice fact the adjuster holds at engagement time, not something extractable from any document (no document states a case's type), so it is provenance-labelled rather than evidence-quoted -- see open-decisions.md #8. claim-analysis reads it as the source for case_type_result's coverage_basis/loss_type, still forms its own independent view, and routes a contradiction to review rather than overriding it. Must NOT influence Stage 1 boundary detection: the text-anchor path is deterministic, and an expectation like 'a 후유장해 case should have a 장해진단서' would turn it into a biased guess.",
       "properties": {
-        "coverage_basis": { "$ref": "case_type_result.schema.json#/$defs/coverage_basis" },
-        "loss_type": { "$ref": "case_type_result.schema.json#/$defs/loss_type" },
+        "coverage_basis": {
+          "$ref": "case_type_result.schema.json#/$defs/coverage_basis"
+        },
+        "loss_type": {
+          "$ref": "case_type_result.schema.json#/$defs/loss_type"
+        },
         "is_claim_case": {
           "type": "boolean",
           "description": "False when the intaken material carries no claim at all (policy/증권/청약 only, as in CASE_030). Both axes must then be null."
@@ -35,24 +43,42 @@
           "minLength": 1,
           "description": "Who supplied it -- the adjuster's name or identifier. This provenance stands in for the document quote P1 would otherwise require, so it is mandatory."
         },
-        "supplied_at": { "type": "string", "format": "date-time" },
+        "supplied_at": {
+          "type": "string",
+          "format": "date-time"
+        },
         "note": {
           "type": "string",
           "description": "Optional free-text context from the adjuster (e.g. which insurer's coverage is disputed, or why the case straddles)."
         }
       },
-      "required": ["coverage_basis", "loss_type", "supplied_by", "supplied_at"],
+      "required": [
+        "coverage_basis",
+        "loss_type",
+        "supplied_by",
+        "supplied_at"
+      ],
       "allOf": [
         {
           "description": "Rule: a non-claim case carries no type on either axis.",
           "if": {
-            "properties": { "is_claim_case": { "const": false } },
-            "required": ["is_claim_case"]
+            "properties": {
+              "is_claim_case": {
+                "const": false
+              }
+            },
+            "required": [
+              "is_claim_case"
+            ]
           },
           "then": {
             "properties": {
-              "coverage_basis": { "type": "null" },
-              "loss_type": { "type": "null" }
+              "coverage_basis": {
+                "type": "null"
+              },
+              "loss_type": {
+                "type": "null"
+              }
             }
           }
         },
@@ -60,21 +86,34 @@
           "description": "Rule: a claim case must name both axes -- a half-classified claim would select a template from one axis alone.",
           "if": {
             "not": {
-              "properties": { "is_claim_case": { "const": false } },
-              "required": ["is_claim_case"]
+              "properties": {
+                "is_claim_case": {
+                  "const": false
+                }
+              },
+              "required": [
+                "is_claim_case"
+              ]
             }
           },
           "then": {
             "properties": {
-              "coverage_basis": { "type": "string" },
-              "loss_type": { "type": "string" }
+              "coverage_basis": {
+                "type": "string"
+              },
+              "loss_type": {
+                "type": "string"
+              }
             }
           }
         }
       ]
     }
   },
-  "required": ["case_id", "documents"],
+  "required": [
+    "case_id",
+    "documents"
+  ],
   "$defs": {
     "document_entry": {
       "type": "object",
@@ -88,7 +127,10 @@
           "description": "owner: Case Intake"
         },
         "document_role": {
-          "enum": ["physical", "segment"],
+          "enum": [
+            "physical",
+            "segment"
+          ],
           "description": "owner: Case Intake / document-pipeline. 'physical' = an entry with its own real file in data/raw, including a child PDF that Stage 1 materialized by splitting an intake bundle (its source_file_name/source_page_start/source_page_end retain that audit trail). 'segment' = processed text derived from an already-processed physical parent and has no raw file of its own; it requires source_document_id plus a DAO-issued page_map, e.g. CASE_030's DOC_004/005/006 carved from the 240-page policy. Absent is treated as 'physical' for backward compatibility."
         },
         "policy_processing_role": {
@@ -103,298 +145,619 @@
         },
         "source_document_id": {
           "anyOf": [
-            { "$ref": "common_component_output.schema.json#/$defs/document_id" },
-            { "type": "null" }
+            {
+              "$ref": "common_component_output.schema.json#/$defs/document_id"
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "owner: document-pipeline. For a segment: the physical parent document_id this segment was carved from. Must exist in this manifest and must not equal this document's own id (no self-parent); the lineage validator additionally forbids cycles. null/absent for a physical document."
         },
         "derivation_method": {
           "anyOf": [
-            { "enum": ["page_extraction", "embedded_text_segment", "ocr_segment"] },
-            { "type": "null" }
+            {
+              "enum": [
+                "page_extraction",
+                "embedded_text_segment",
+                "ocr_segment"
+              ]
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "owner: document-pipeline. How a segment's text was derived from its parent. Honest label -- a segment carved from a parent's already-extracted text is 'embedded_text_segment'/'page_extraction', NOT presented as if it underwent its own independent OCR."
         },
         "derived_text_path": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "owner: document-pipeline. For a segment: the processed redacted text path (data/processed/CASE_XXX/DOC_XXX/redacted_text.md) built from the declared page range. null for a physical document (which uses redacted_text_path).",
           "pattern": "^data/processed/CASE_[0-9]+/DOC_[0-9]+/redacted_text\\.md$"
         },
         "derived_text_sha256": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "pattern": "^[a-f0-9]{64}$",
           "description": "owner: document-pipeline. SHA-256 of the exact derived redacted_text.md bytes for a segment. The DAO recomputes it on manifest writes, document-processing finalize, and normalized-policy writes so a segment cannot change after its lineage was approved."
         },
         "page_map": {
-          "type": ["array", "null"],
+          "type": [
+            "array",
+            "null"
+          ],
           "description": "owner: document-pipeline. For a segment: the explicit mapping from each of the segment's logical printed pages to the parent's PDF physical page. Distinguishes the printed page number that appears in <<<PAGE page=N>>> markers (logical_page) from the parent PDF's physical page index (source_physical_page), which can differ. The lineage validator checks that logical_page values match the segment's own redacted-text markers exactly.",
-          "items": { "$ref": "#/$defs/page_map_entry" }
+          "items": {
+            "$ref": "#/$defs/page_map_entry"
+          }
         },
         "segment_page_ranges": {
-          "type": ["array", "null"],
+          "type": [
+            "array",
+            "null"
+          ],
           "description": "owner: document-pipeline. For a segment: the logical page ranges (possibly NON-contiguous -- DOC_004 is [{57,58},{118,119}]) this segment covers. A single {start,end} spanning a gap (e.g. 57-119) is wrong and is rejected by the lineage validator. Derivable from page_map but stated explicitly for readability and range-validity checks.",
-          "items": { "$ref": "#/$defs/page_range" }
+          "items": {
+            "$ref": "#/$defs/page_range"
+          }
         },
         "file_path": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "owner: Case Intake. Original raw path (data/raw/CASE_XXX/...) for a physical document; null for a segment (a segment has no raw file of its own).",
           "anyOf": [
-            { "type": "string", "pattern": "^data/raw/" },
-            { "type": "null" }
+            {
+              "type": "string",
+              "pattern": "^data/raw/"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "file_format": {
           "anyOf": [
-            { "enum": ["pdf", "image", "text", "spreadsheet", "other"] },
-            { "type": "null" }
+            {
+              "enum": [
+                "pdf",
+                "image",
+                "text",
+                "spreadsheet",
+                "other"
+              ]
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "owner: Case Intake. null for a segment (no file of its own)."
         },
         "file_size_bytes": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "description": "owner: Case Intake. null for a segment (no file of its own)."
         },
         "pre_flagged_type": {
           "anyOf": [
-            { "$ref": "common_component_output.schema.json#/$defs/document_type" },
-            { "type": "null" }
+            {
+              "$ref": "common_component_output.schema.json#/$defs/document_type"
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "owner: Case Intake. Set when a document's type is already known at intake (e.g. an insurer-response document flagged during the source-ledger review) -- classification trusts this instead of running inference. null if not pre-flagged."
         },
         "provisional_document_type": {
           "anyOf": [
-            { "$ref": "common_component_output.schema.json#/$defs/document_type" },
-            { "type": "null" }
+            {
+              "$ref": "common_component_output.schema.json#/$defs/document_type"
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "owner: Case Intake (segmentation). A PRE-OCR VISUAL GUESS carried over from segmentation_proposal_{source_document_id}.json, inferred from a cropped, downscaled contact-sheet cell. NOT authoritative and NOT a substitute for classification: document-pipeline's checkpoint 1 still owns document_type and must run its own inference against the real OCR'd text. Contrast pre_flagged_type directly above -- that one a human asserted, so classification trusts it and skips inference; this one a model guessed from a deliberately low-fidelity image, so it must not be wired into the same short-circuit. null for documents that did not come from a segmented bundle."
         },
         "source_file_name": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "owner: Case Intake (segmentation). The bundle this logical document was split out of. null for a document intaken whole."
         },
         "source_page_start": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "description": "owner: Case Intake (segmentation). 1-based inclusive page in the source bundle. null for a document intaken whole. Provenance back to the immutable original is why the superseded bundle entry is retained rather than deleted."
         },
         "source_page_end": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "description": "owner: Case Intake (segmentation). 1-based inclusive. source_page_end >= source_page_start is enforced by the tool, not here -- JSON Schema cannot compare sibling values."
         },
         "segmentation_proposal_path": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "owner: Case Intake (segmentation). Backpointer to the proposal that produced this entry, so an auditor can see which boundaries a human approved and what evidence the model gave."
         },
         "segmentation_status": {
-          "enum": ["pending_review", "required", "not_required", "completed", "not_applicable"],
+          "enum": [
+            "pending_review",
+            "required",
+            "not_required",
+            "completed",
+            "not_applicable"
+          ],
           "description": "owner: segmentation, as a RECORD of what happened -- no longer a gate. `completed` is set by the split on the superseded bundle and on every child; non-PDF inputs are `not_applicable`. `pending_review`/`required`/`not_required` are DEPRECATED as pre-decisions: they existed when segmentation ran before OCR, where an unsplit bundle would be read and classified as one document, so a human had to declare 'bundle or not' from a filename before anything could run. With OCR first that failure cannot occur (pages are pages; classification happens after the split), and whether a PDF is a bundle is an OUTPUT of `propose` -- one proposed boundary means one document -- so it cannot be a precondition for producing the text `propose` reads. The three values remain in the enum so pre-2026-08-05 manifests still validate; nothing new should write them, and the DAO preflight no longer blocks on any of them. The human judgement moved to the boundary-approval gate, where a reviewer sees the proposed ranges and the title line each cut is made on."
         },
         "segmentation_reviewed_by": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1,
           "description": "owner: human intake reviewer. Required when segmentation_status is required or not_required."
         },
         "segmentation_reviewed_at": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "date-time",
           "description": "owner: human intake reviewer. Required when segmentation_status is required or not_required."
         },
         "segmentation_review_note": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "owner: human intake reviewer. Optional reason for the bundle/non-bundle decision."
         },
         "pages": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "description": "owner: document-pipeline (checkpoint 1). Number of pages actually processed in this document entry. For a page-range run this may be smaller than source_total_pages."
         },
         "source_total_pages": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "description": "owner: document-pipeline (checkpoint 1). Immutable physical page count read from the original PDF container before any page-range extraction. Required by policy parent-coverage finalization so total pages cannot be self-declared by the policy agent. null for non-PDF inputs and segments."
         },
         "source_pdf_sha256": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "pattern": "^[a-f0-9]{64}$",
           "description": "owner: document-pipeline (checkpoint 1). SHA-256 of the immutable raw source file itself. Every segment carved from this parent binds its page mapping to this digest, so extracting from a DIFFERENT file -- or from a file that changed after the segments were derived -- is detectable rather than being an unverifiable claim about which PDF a page came from. null for non-PDF inputs and segments."
         },
         "ocr_status": {
-          "enum": ["pending", "completed", "failed", "not_applicable"],
+          "enum": [
+            "pending",
+            "completed",
+            "failed",
+            "not_applicable"
+          ],
           "description": "owner: document-pipeline (checkpoint 1). Initialized to pending by Case Intake."
         },
         "ocr_text_path": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "owner: document-pipeline (checkpoint 1). data/processed/CASE_XXX/DOC_XXX/text.md"
         },
         "ocr_quality": {
           "anyOf": [
-            { "enum": ["high", "medium", "low"] },
-            { "type": "null" }
+            {
+              "enum": [
+                "high",
+                "medium",
+                "low"
+              ]
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "owner: document-pipeline (checkpoint 1). Copied from ocr_result_{document_id}.json's summary. null before OCR. Detail (uncertain-region list/positions, cross-validation outcome) lives only in ocr_result_{document_id}.json -- this manifest stays a lightweight roster."
         },
         "uncertain_region_count": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "description": "owner: document-pipeline (checkpoint 1). Sum of ocr_result_{document_id}.json's uncertain_regions for this document. null before OCR."
         },
         "cross_validation_status": {
           "anyOf": [
-            { "enum": ["agreed", "disagreed_pending_review", "disagreed_resolved", "non_text_verified", "not_run"] },
-            { "type": "null" }
+            {
+              "enum": [
+                "agreed",
+                "disagreed_pending_review",
+                "disagreed_resolved",
+                "assume_reading_a_unreviewed",
+                "single_reader_no_cross_validation",
+                "non_text_verified",
+                "not_run"
+              ]
+            },
+            {
+              "type": "null"
+            }
           ],
-          "description": "owner: document-pipeline (checkpoint 1). Result of P8's dual-path (OCR engine vs. blind vision-model read) cross-validation. Mirrors ocr_result_{document_id}.json's own cross_validation_status enum -- found out of sync for real when a real resolution's write was correctly rejected by schema validation (this file hadn't been updated when 'disagreed_resolved' was added there)."
+          "description": "owner: document-pipeline (checkpoint 1). Result of P8's dual-path (OCR engine vs. blind vision-model read) cross-validation. Mirrors ocr_result_{document_id}.json's own cross_validation_status enum -- found out of sync for real when a real resolution's write was correctly rejected by schema validation (this file hadn't been updated when 'disagreed_resolved' was added there). 'assume_reading_a_unreviewed' mirrors ocr_result's value of the same name: one or more pages disagreed and reading_a was auto-taken under the --on-disagreement assume-reading-a throughput policy, with no human adjudication. Added 2026-08-11 -- this enum had drifted behind ocr_result.schema.json's, so a document the OCR contract could legally describe was rejected at the manifest write. Same desync this field's own history records for 'disagreed_resolved'."
         },
         "redacted_text_path": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "owner: document-pipeline (checkpoint 2). data/processed/CASE_XXX/DOC_XXX/redacted_text.md"
         },
         "document_type": {
           "anyOf": [
-            { "$ref": "common_component_output.schema.json#/$defs/document_type" },
-            { "type": "null" }
+            {
+              "$ref": "common_component_output.schema.json#/$defs/document_type"
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "owner: document-pipeline (checkpoint 1). null before classification (or copied directly from pre_flagged_type when pre-flagged)."
         },
         "classification_confidence": {
           "anyOf": [
-            { "$ref": "common_component_output.schema.json#/$defs/confidence" },
-            { "type": "null" }
+            {
+              "$ref": "common_component_output.schema.json#/$defs/confidence"
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "owner: document-pipeline (checkpoint 1). null before classification; null (not 1.0) when pre-flagged, since no inference confidence applies."
         },
         "extraction_method": {
           "anyOf": [
-            { "enum": ["embedded_text", "ocr", "mixed", "non_text_image"] },
-            { "type": "null" }
+            {
+              "enum": [
+                "embedded_text",
+                "ocr",
+                "mixed",
+                "non_text_image"
+              ]
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "owner: document-pipeline (checkpoint 1). non_text_image is human-verified visual evidence that must not be converted into synthetic page text."
         },
         "downstream_disposition": {
           "anyOf": [
-            { "enum": ["automated_text_pipeline", "text_only_no_normalization", "expert_review_only", "superseded_bundle"] },
-            { "type": "null" }
+            {
+              "enum": [
+                "automated_text_pipeline",
+                "text_only_no_normalization",
+                "expert_review_only",
+                "superseded_bundle"
+              ]
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "owner: document-pipeline, except superseded_bundle which is owned by Case Intake (segmentation). automated_text_pipeline is the full path: processed text AND, for an insurance_policy, a normalized clause contract that policy_clause_processing verifies before it may finalize. text_only_no_normalization is the same minus that last obligation -- the document is redacted, chunked, and citable as evidence exactly as usual, but owes no clause contract. It exists because normalizing a policy bundle is not free (one 145-page bundle carries 800+ conditions) and no downstream stage consumes the result: denial-response and claim-analysis address clauses by document_id, page, and quoted text, verified verbatim against the processed source, never by which normalized bucket a condition was filed under. Normalization is therefore opt-IN, for the specific policy documents a case actually disputes. expert_review_only is a different thing entirely: it excludes the document from text redaction, chunking, and automated downstream evidence use, so its text is never read at all. superseded_bundle marks a raw bundle that segmentation has replaced with per-document entries: it is excluded from every downstream stage but retained so provenance back to the immutable source survives. It is deliberately a separate value from expert_review_only, whose conditional below asserts a human verified photographic evidence -- a claim that is simply untrue of a superseded bundle, and encoding it that way would put a false human verification into the record."
         },
         "normalization_dispute_note": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "owner: DAO (promote-policy-document). Why this policy document was promoted from text_only_no_normalization to automated_text_pipeline -- i.e. which denial reason or policy_match disputes it. Normalization is opt-IN, so a promotion is a claim that the case actually turns on this document; recording the claim is what keeps the opt-in from drifting back into normalize-everything. Appended to, never replaced, when a second reason disputes the same document. Absent/null on a document that was never promoted."
         },
         "non_text_verification": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "properties": {
-            "verified_by": { "type": "string", "minLength": 1 },
-            "verified_at": { "type": "string", "format": "date-time" },
-            "note": { "type": "string", "minLength": 1 },
-            "reviewer_role": { "$ref": "common_component_output.schema.json#/$defs/reviewer_role" }
+            "verified_by": {
+              "type": "string",
+              "minLength": 1
+            },
+            "verified_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "note": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reviewer_role": {
+              "$ref": "common_component_output.schema.json#/$defs/reviewer_role"
+            }
           },
-          "required": ["verified_by", "verified_at", "note", "reviewer_role"]
+          "required": [
+            "verified_by",
+            "verified_at",
+            "note",
+            "reviewer_role"
+          ]
         }
       },
-      "required": ["document_id", "file_name", "file_path", "file_format", "file_size_bytes", "ocr_status"],
+      "required": [
+        "document_id",
+        "file_name",
+        "file_path",
+        "file_format",
+        "file_size_bytes",
+        "ocr_status"
+      ],
       "allOf": [
         {
           "description": "A segment declares its lineage: parent id, how it was derived, its derived text path, and its page ranges (all non-null). This is the schema half; the DAO's lineage validator checks the parent exists, no self-parent/cycle, ranges are valid, and the declared logical pages match the segment's redacted-text markers.",
           "if": {
-            "properties": { "document_role": { "const": "segment" } },
-            "required": ["document_role"]
+            "properties": {
+              "document_role": {
+                "const": "segment"
+              }
+            },
+            "required": [
+              "document_role"
+            ]
           },
           "then": {
             "properties": {
-              "source_document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
-              "derivation_method": { "enum": ["page_extraction", "embedded_text_segment", "ocr_segment"] },
-              "derived_text_path": { "type": "string", "minLength": 1 },
-              "derived_text_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-              "segment_page_ranges": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/page_range" } },
-              "page_map": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/page_map_entry" } }
+              "source_document_id": {
+                "$ref": "common_component_output.schema.json#/$defs/document_id"
+              },
+              "derivation_method": {
+                "enum": [
+                  "page_extraction",
+                  "embedded_text_segment",
+                  "ocr_segment"
+                ]
+              },
+              "derived_text_path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "derived_text_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "segment_page_ranges": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "$ref": "#/$defs/page_range"
+                }
+              },
+              "page_map": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "$ref": "#/$defs/page_map_entry"
+                }
+              }
             },
-            "required": ["source_document_id", "derivation_method", "derived_text_path", "derived_text_sha256", "segment_page_ranges", "page_map"]
+            "required": [
+              "source_document_id",
+              "derivation_method",
+              "derived_text_path",
+              "derived_text_sha256",
+              "segment_page_ranges",
+              "page_map"
+            ]
           }
         },
         {
           "description": "A physical document (document_role physical or absent) must have a real raw file_path -- it may not be null the way a segment's is.",
           "if": {
             "anyOf": [
-              { "properties": { "document_role": { "const": "physical" } }, "required": ["document_role"] },
-              { "not": { "required": ["document_role"] } }
+              {
+                "properties": {
+                  "document_role": {
+                    "const": "physical"
+                  }
+                },
+                "required": [
+                  "document_role"
+                ]
+              },
+              {
+                "not": {
+                  "required": [
+                    "document_role"
+                  ]
+                }
+              }
             ]
           },
           "then": {
             "properties": {
-              "file_path": { "type": "string", "pattern": "^data/raw/" }
+              "file_path": {
+                "type": "string",
+                "pattern": "^data/raw/"
+              }
             },
-            "required": ["file_path"]
+            "required": [
+              "file_path"
+            ]
           }
         },
         {
           "if": {
-            "properties": { "downstream_disposition": { "const": "expert_review_only" } },
-            "required": ["downstream_disposition"]
+            "properties": {
+              "downstream_disposition": {
+                "const": "expert_review_only"
+              }
+            },
+            "required": [
+              "downstream_disposition"
+            ]
           },
           "then": {
             "properties": {
-              "extraction_method": { "const": "non_text_image" },
-              "ocr_status": { "const": "not_applicable" },
-              "cross_validation_status": { "const": "non_text_verified" },
-              "redacted_text_path": { "type": "null" },
-              "document_type": { "const": "other" },
-              "classification_confidence": { "type": "null" }
+              "extraction_method": {
+                "const": "non_text_image"
+              },
+              "ocr_status": {
+                "const": "not_applicable"
+              },
+              "cross_validation_status": {
+                "const": "non_text_verified"
+              },
+              "redacted_text_path": {
+                "type": "null"
+              },
+              "document_type": {
+                "const": "other"
+              },
+              "classification_confidence": {
+                "type": "null"
+              }
             },
-            "required": ["extraction_method", "cross_validation_status", "non_text_verification"]
+            "required": [
+              "extraction_method",
+              "cross_validation_status",
+              "non_text_verification"
+            ]
           }
         },
         {
           "if": {
-            "properties": { "downstream_disposition": { "const": "superseded_bundle" } },
-            "required": ["downstream_disposition"]
+            "properties": {
+              "downstream_disposition": {
+                "const": "superseded_bundle"
+              }
+            },
+            "required": [
+              "downstream_disposition"
+            ]
           },
           "then": {
             "properties": {
-              "ocr_status": { "const": "not_applicable" },
-              "redacted_text_path": { "type": "null" }
+              "ocr_status": {
+                "const": "not_applicable"
+              },
+              "redacted_text_path": {
+                "type": "null"
+              }
             },
-            "required": ["segmentation_proposal_path"],
+            "required": [
+              "segmentation_proposal_path"
+            ],
             "description": "A superseded bundle is never OCR'd or redacted as a whole -- its pages are processed through the DOC_XXX entries segmentation created. Requiring segmentation_proposal_path means an entry can only claim to be superseded if it points at the proposal that superseded it."
           }
         },
         {
           "if": {
-            "properties": { "source_page_start": { "type": "integer" } },
-            "required": ["source_page_start"]
+            "properties": {
+              "source_page_start": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "source_page_start"
+            ]
           },
           "then": {
-            "required": ["source_file_name", "source_page_end"],
+            "required": [
+              "source_file_name",
+              "source_page_end"
+            ],
             "description": "A page range never exists half-specified: a start without an end or a source file is unusable provenance."
           }
         },
         {
           "if": {
-            "properties": { "segmentation_status": { "enum": ["required", "not_required"] } },
-            "required": ["segmentation_status"]
+            "properties": {
+              "segmentation_status": {
+                "enum": [
+                  "required",
+                  "not_required"
+                ]
+              }
+            },
+            "required": [
+              "segmentation_status"
+            ]
           },
           "then": {
-            "required": ["segmentation_reviewed_by", "segmentation_reviewed_at"],
+            "required": [
+              "segmentation_reviewed_by",
+              "segmentation_reviewed_at"
+            ],
             "properties": {
-              "segmentation_reviewed_by": { "type": "string", "minLength": 1 },
-              "segmentation_reviewed_at": { "type": "string", "format": "date-time" }
+              "segmentation_reviewed_by": {
+                "type": "string",
+                "minLength": 1
+              },
+              "segmentation_reviewed_at": {
+                "type": "string",
+                "format": "date-time"
+              }
             },
             "description": "A bundle/non-bundle decision is a genuine human intake decision and must be attributable."
           }
         },
         {
           "if": {
-            "properties": { "segmentation_status": { "const": "completed" } },
-            "required": ["segmentation_status"]
+            "properties": {
+              "segmentation_status": {
+                "const": "completed"
+              }
+            },
+            "required": [
+              "segmentation_status"
+            ]
           },
           "then": {
             "anyOf": [
-              { "required": ["source_page_start", "source_page_end", "segmentation_proposal_path"] },
               {
-                "properties": { "downstream_disposition": { "const": "superseded_bundle" } },
-                "required": ["downstream_disposition", "segmentation_proposal_path"]
+                "required": [
+                  "source_page_start",
+                  "source_page_end",
+                  "segmentation_proposal_path"
+                ]
+              },
+              {
+                "properties": {
+                  "downstream_disposition": {
+                    "const": "superseded_bundle"
+                  }
+                },
+                "required": [
+                  "downstream_disposition",
+                  "segmentation_proposal_path"
+                ]
               }
             ],
             "description": "Completed means either a logical child with source-page provenance or the retained superseded bundle; an unsplit intake document cannot self-assert completion."
@@ -406,18 +769,33 @@
       "type": "object",
       "description": "An inclusive logical (printed) page range. start <= end enforced by the lineage validator, not the schema (schema can't compare two of its own fields).",
       "properties": {
-        "start": { "type": "integer", "minimum": 1 },
-        "end": { "type": "integer", "minimum": 1 }
+        "start": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 1
+        }
       },
-      "required": ["start", "end"],
+      "required": [
+        "start",
+        "end"
+      ],
       "additionalProperties": false
     },
     "page_map_entry": {
       "type": "object",
       "description": "Maps one of a segment's logical printed pages to the parent PDF's physical page. logical_page is the number that appears in the segment's <<<PAGE page=N>>> markers (and in evidence-reference `page` values); source_physical_page is the parent PDF's 1-based physical page index, which may differ from the printed number. physical_page_sha256 and logical_page_evidence bind that mapping to the actual parent page rather than leaving it a declaration: a page offset asserted by a caller cannot be distinguished from a correct one unless the page's real content is hashed and its printed number independently read back.",
       "properties": {
-        "logical_page": { "type": "integer", "minimum": 1 },
-        "source_physical_page": { "type": "integer", "minimum": 1 },
+        "logical_page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source_physical_page": {
+          "type": "integer",
+          "minimum": 1
+        },
         "physical_page_sha256": {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$",
@@ -433,7 +811,10 @@
           "description": "owner: document-pipeline. Present ONLY on a page projected from a P0-6 unverified_override_receipt (segment_page_map_unverified_v1) -- an ocr_segment whose mapping could not be confirmed against the parent PDF's own pages. Absent on every page projected from a real segment_page_map_v2 receipt, where physical_page_sha256/logical_page_evidence carry the actual proof instead. A page with this field never also carries physical_page_sha256/logical_page_evidence -- there is nothing genuine to put there."
         }
       },
-      "required": ["logical_page", "source_physical_page"],
+      "required": [
+        "logical_page",
+        "source_physical_page"
+      ],
       "additionalProperties": false
     }
   }

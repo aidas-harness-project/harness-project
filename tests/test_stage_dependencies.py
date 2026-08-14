@@ -73,6 +73,36 @@ def test_screening_requires_both_claim_and_consistency():
     assert sd.check_dependencies("screening_report", "in_progress", st) == []
 
 
+def test_draft_v2_requires_critic_v1_in_addition_to_draft_and_validation():
+    """v2 must have the findings it is required to address, not merely v1."""
+    state = _state(("draft_report_v1", "passed"),
+                   ("denial_validation", "passed"))
+    blockers = sd.check_dependencies("draft_report_v2", "in_progress", state)
+    assert any("critic_v1" in blocker and "absent" in blocker
+               for blocker in blockers), blockers
+
+    state["stages"].append({"stage_name": "critic_v1", "status": "passed"})
+    assert sd.check_dependencies("draft_report_v2", "in_progress", state) == []
+
+
+def test_parallel_frontier_returns_only_static_graph_ready_candidates():
+    state = _state(("document_processing", "passed"),
+                   ("policy_clause_processing", "pending"),
+                   ("denial_response", "pending"))
+    assert sd.parallel_frontier(
+        state, {"policy_clause_processing", "denial_response", "claim_analysis"}
+    ) == ("denial_response", "policy_clause_processing")
+
+
+def test_parallel_frontier_does_not_admit_started_or_blocked_stages():
+    state = _state(("document_processing", "passed"),
+                   ("policy_clause_processing", "in_progress"),
+                   ("claim_analysis", "pending"))
+    assert sd.parallel_frontier(
+        state, {"policy_clause_processing", "claim_analysis"}
+    ) == ()
+
+
 def test_only_indexing_is_skippable():
     assert sd.is_skippable("indexing")
     assert not sd.is_skippable("policy_clause_processing")

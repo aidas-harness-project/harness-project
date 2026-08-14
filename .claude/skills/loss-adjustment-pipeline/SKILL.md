@@ -9,6 +9,54 @@ Coordinates the authorized local pipeline across two phases to produce screening
 
 **Execution mode: sub-agent pipeline.** Every stage below is dispatched as a subagent call naming that agent's definition file (`.claude/agents/{name}.md`), with `model: opus`. All inter-agent data passes through the DAO as files — agent return values carry only a summary and warnings, never the actual contract data.
 
+### What a dispatch briefing may contain
+
+An agent's *procedure* already lives in its definition file, which is injected
+as its system prompt. The briefing you write is only the part that definition
+cannot know: which case, which run, and which decisions the orchestrator has
+already made. Anything else you add is either redundant or harmful.
+
+**Put in the briefing:**
+
+- `case_id`, `run_id`, `held_by`, and the instruction to pass `--run-id` on
+  every DAO call including reads.
+- **Orchestrator-owned decisions the agent must not make or revisit** — a P8
+  reduction (`HARNESS_SINGLE_READER` / `--on-disagreement`), a delegated human
+  gate and the name to record for it, a scoping decision such as which
+  documents are in scope.
+- Where to resume, named as a checkpoint (`"checkpoint 1 is complete; start
+  from checkpoint 2"`), and what to produce.
+- The stop rule: report a blocked state and halt; do not work around it, patch
+  tools, or investigate root causes in the code.
+
+**Keep out of the briefing — this is the rule that gets broken:**
+
+- **Contract state.** Never list per-document `document_type`, page counts,
+  `ocr_status`, `cross_validation_status`, or any other value the agent can
+  read from `document_manifest.json` and its contracts. Tell it what to do and
+  let it read what is true. Handing it the state means (a) you cannot tell
+  whether it read the DAO at all or just trusted your summary, (b) a stale
+  briefing silently overrides current fact, and (c) a timed run stops paying
+  the read cost a real run pays, so the SLA number measures a run nobody will
+  ever perform.
+- **Expected findings.** Never say what a document contains, what a bundle will
+  split into, or what a classification should come out as — even from a
+  previous run of the same source. An agent told a 19-page bundle holds "a
+  진단서, two REPORTs, an 입퇴원확인서 and two 진료비 명세서" can produce exactly
+  that partition without the page text supporting it, and nothing downstream
+  can distinguish that from a real reading. This is the difference between
+  dispatching a stage and dictating its answer.
+- **Restatements of the agent's own definition.** Checkpoint order, DAO-only
+  access, "do not call finalize-stage", schema-validation behaviour — all
+  already in the spec. Repeating them creates a second copy that drifts (the
+  2026-07-17 forbidden-expression shape) and makes it ambiguous which text
+  governs when they disagree.
+
+The test to apply before dispatching: **if the briefing were deleted and
+replaced with "resume CASE_X from checkpoint N", would the agent still reach
+the right answer?** If no, find what is missing and add only that. If a line
+would merely save the agent a DAO read, cut it.
+
 There is no standalone `run_pipeline.py` process. This skill is the executable
 orchestration contract: a case-processing request must follow every gate below
 in order. Calling a later tool directly bypasses orchestration and is not a
@@ -18,11 +66,136 @@ pipeline run.
 
 `document_segmentation` is **deprecated and must never be written**. It remains in the schema enum only so runs recorded before 2026-08-05 (CASE_112) still validate; their record is accurate for how they actually executed and is deliberately not rewritten. Segmentation is now a checkpoint *inside* `document_processing`: the bundle is OCR'd and redacted, then split, then its children are classified and redacted — so document processing runs on both sides of the split and the two cannot be separate stages without one of them being wrong about what is in progress.
 
+## Stage-attempt lifecycle (T13 — required around every dispatch)
+
+The orchestrator owns stage attempt boundaries and finalization. Stage agents
+write their governed outputs and return a summary/warnings; they do **not**
+call `finalize-stage` themselves.
+
+After the ordinary conflict/lock/dependency gates clear and immediately before
+dispatching a stage, begin exactly one attempt:
+
+```text
+python tools/dao.py update-run-state CASE_ID RUN_ID STAGE in_progress --held-by orchestrator
+```
+
+A replay while that attempt is already `in_progress` is idempotent: it neither
+increments `attempt_count` nor emits another timing marker. Contract writes
+with `--stage` are checkpoints inside this invocation; they do not begin an
+attempt and do not count as P9 retries.
+
+After a successful agent return, the orchestrator alone calls:
+
+```text
+python tools/dao.py finalize-stage CASE_ID RUN_ID STAGE --held-by orchestrator
+```
+
+Only a successful P10 finalization closes the attempt as `passed`. A refused
+finalize emits no passed marker. Close a non-successful invocation explicitly:
+
+```text
+python tools/dao.py update-run-state CASE_ID RUN_ID STAGE failed \
+  --attempt-outcome {failed|partial|schema_failed|finalize_refused} \
+  --held-by orchestrator
+```
+
+For a process interruption whose real end time is unknowable, use
+`--attempt-outcome interrupted` before retrying. This records the state as
+failed and leaves the timing interval open rather than turning an overnight
+gap into work cost. Then begin the retry with a new `in_progress` transition.
+P9's three-attempt limit applies to these explicit dispatch attempts, not to
+the number of contract checkpoints written inside one attempt.
+
+The timing layer is diagnostic: `HARNESS_TRACE=0` or a trace-write failure
+does not change any gate or state transition. `aggregate-trace` reports
+incomplete stage coverage instead of reconstructing missing timings from
+run-state marker timestamps.
+
+**Stage 2 runs as one command, not as a sequence you supervise.** Dispatch
+`document-pipeline` to run `python tools/run_stage2.py CASE_ID --held-by
+document-pipeline --run-id RUN_ID --provider claude-cli`, which performs every
+mechanical step (checkpoint 1 → checkpoint 2 → segmentation → child
+classification → child redaction → chunking → contract write) and stops at the
+four real gates. Stage 2 is driven from code because its checkpoint control is
+deterministic and its real human gates stay explicit. Do not ask an agent to
+invoke the individual checkpoint tools in sequence — that is the serialization
+this removes. The driver never moves a run-state marker: `update-run-state` and
+`finalize-stage` stay yours (T13).
+
+**Do not cite an exact Stage 2 speedup ratio.** Earlier revisions of this skill
+quoted `897s` agent-led against `79s` driven, with `~510s` of model round trips.
+That is a **historical observation, not reproducible from retained timing
+records**: CASE_911's closed agent-led `document_processing` attempt of 897.4s is
+real and DAO-verifiable, but no retained trace provides a closed, cold,
+input-equivalent driver arm, and no dispatch-boundary instrumentation exists to
+recover per-decision-round timing. A future performance claim requires a
+controlled cold A/B and that instrumentation.
+
+**Policy UID preflight runs before its attempt, not inside it.** Before opening
+`policy_clause_processing`, dispatch `python tools/run_policy_preflight.py
+CASE_ID --held-by orchestrator --run-id RUN_ID`. It performs only the existing
+digest/UID-enable DAO sequence for in-scope noncanonical policy documents and
+may invalidate stale artifacts while no policy attempt is open. A nonzero
+result is a blocked precondition: do not open or dispatch the policy stage.
+
+**Reducing P8 for a throughput run is YOUR decision, never an agent's.**
+Stage 2's cost is dominated by dual-read OCR (the corpus is overwhelmingly
+scans), so two flags exist on `run_document_stage.py` (and pass through
+`run_stage2.py`) to cut it. Pass one only
+when the run's purpose is timing or plumbing, name it explicitly in the
+briefing you dispatch, and never let a stage adopt one on its own to get past
+a document that blocked:
+
+- `--on-disagreement assume-reading-a` — dual reads still run and are still
+  compared; only the halt is deferred. Disagreed pages take reading_a and
+  record `agreement: assume_reading_a` plus an `auto_resolution` block. A
+  deferral of the judgement, not a finding: on CASE_911/DOC_005 both reads were
+  wrong on 8 of 19 pages (the source was scanned 90° rotated).
+- `--single-reader` — P8 off entirely. One read per page, no comparison,
+  roughly half the calls and wall time. Pages record `agreement: single_reader`
+  and the document reads `cross_validation_status:
+  single_reader_no_cross_validation`, `ocr_quality: low`.
+
+**Development sessions set `HARNESS_SINGLE_READER=1`**, which makes P8-off the
+default for every OCR call without passing the flag each time. It is an env var
+rather than a changed default so an evaluation run can still force real
+dual-read P8 with `--dual-read`; an explicit flag always beats the environment,
+and passing `--on-disagreement` also implies dual-read (a disagreement policy is
+meaningless without a comparison). Check the variable before treating a run's
+output as evaluation-grade — a case can be P8-off without any flag appearing in
+the command you see.
+
+Mutually exclusive, rejected together at parse. Neither is gated by
+`finalize-stage` — a run using either completes normally and the resulting
+`review_required: true` is an honest grade on the text, not a work order. That
+is exactly why **a case processed with either flag must not be used as
+evaluation input**: nothing downstream will stop you, so the scoping decision
+is yours here. Record which flag was used in the run notes; a later reader must
+not have to infer from a passing stage that P8 was reduced or skipped.
+
+**Pass `--run-id` on read commands too**, and require the same of every
+dispatched agent. `read-contract`, `read-document-text`, `read-page-text`,
+`search-document-text`, `policy-snapshot`, `read-ledger`,
+`check-conflicts-clear` and `get-last-passed-stage` accept an optional
+`--run-id`; supplying it records that read's cost into the run's trace, and
+omitting it means the read still works but records nothing. Measured on
+CASE_910 this accounts for under 2% of an analysis stage, so it is not a
+performance lever — it is what lets a stage's remaining unattributed time be
+stated honestly instead of merely assumed.
+
 ## Phase 0 — context and gating (every run)
 
 1. **Resolve `run_id`**: new run → issue `RUN_{YYYYMMDD}_{NNN}`. Resuming → read `_run_state.json` via the DAO's `get_last_passed_stage(case_id)` query; resume from the next stage after the last one that passed. Do not restart from scratch just because a run was interrupted — that's what P10's per-step backups exist for.
 2. **Intake check**: if `data/raw/CASE_XXX/` doesn't exist yet, run intake first (D2 — `_source_ledger.json` gate, every file `pending`→human sets `approved`/`rejected`, whole case blocks on any rejection). Never skip the human confirmation step.
    - **Segmentation**: a raw source may be a *bundle* concatenating several logical documents. **Do not decide in advance which PDFs are bundles.** That question is answered by `propose`, from the text — a proposal with one boundary is a single document, several boundaries is a bundle — so it cannot be a precondition for producing that text. Run every PDF through `tools/segment_case.py` (`propose` → `approve` → `split`); a single-boundary proposal simply splits into itself and the document continues unchanged.
+
+3. **Start the SLA clock**: once intake review is finished, run
+   `python tools/dao.py check-source-ledger-clear CASE_ID --run-id RUN_ID`. A `clear` result
+   emits the `sla.phase1.start` marker, which is what makes the run's timing measurable at all
+   — without it `aggregate-trace` reports `active_s: n/a` and no 30-minute judgment is possible.
+   It is idempotent (safe to call repeatedly) and it does **not** add a human gate: it only reads
+   the ledger you already had to satisfy, so when D2 eventually goes away this check simply
+   always passes. Pass `--run-id` — without it the check still works but records nothing.
 
 **OCR the bundle first.** `propose` resolves its evidence in the order processed text → the PDF's own embedded layer → vision, and the deterministic paths are both better and cheaper than vision. Only the first reaches a scan, which is most of this corpus, so a `required` bundle takes this sequence:
 
@@ -43,8 +216,9 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
 
    Records under the `document_processing` stage — segmentation is one of its checkpoints, not a stage of its own. Segmentation's own output is document STRUCTURE, not text or type: `document-pipeline` still owns real classification, and a `provisional_type_label` is never copied into `document_type`.
 3. **Conflict-ledger check**: before dispatching *any* stage, call `check_conflicts_clear(case_id)`. If not clear, halt and report every pending entry (old and new) — do not proceed past an unresolved conflict, no matter which stage raised it.
-4. **Lock check**: call `python tools/dao.py check-lock CASE_ID TARGET` for the stage target. Halt only when the DAO reports active ownership. Persistent unlocked diagnostic sidecars are expected and pathname presence alone never means a lock is held (P5).
+4. **Lock check**: if a stage's target file already has a `.lock` present at run start/resume, do not poll and do not assume it's stale — halt, report the lock's full contents, wait for human confirmation (P5).
 5. **Medical-clearance check**: after canonical medical variables have been published, call `python tools/dao.py check-medical-reviews-clear CASE_ID` immediately before every downstream agent dispatch. Halt while it reports blocked. The DAO independently repeats this check before downstream `in_progress`/`passed` transitions and snapshots.
+6. **Begin the stage attempt** using the T13 lifecycle command above, then dispatch. Never infer an attempt start from the first output write.
 
 ## Phase 1 — initial claim review
 
@@ -63,6 +237,16 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
 
 `denial-response` is **not** a numbered Phase 1 stage — it's dependency-triggered. It runs whenever a flagged insurer-response document's processed text (from stage 2) is ready, whether that happens to be during Phase 1 (closed-case packs that bundle the insurer notice from the start) or later. Same agent, same mechanism, no phase-based scheduling exception needed.
 
+**Readiness lanes:** Phase labels do not serialize graph-independent work. After
+document processing, policy preflight → `policy_clause_processing` and an
+eligible `denial_response` may be dispatched concurrently, after separate
+preflights and T13 attempt opens. `denial_validation` starts as soon as both
+`denial_response` and `consistency_check` pass; it may overlap the independent
+v1 draft/critic lane. Do not open publishable `screening_report` while an
+insurer-response input exists but `denial_reason_result.json` is absent. Each
+concurrent member retains its own locks, attempt boundary, result handling, and
+downstream gate; a phase label is never a reason to delay a ready stage.
+
 **Claim-analysis medical gate**: after the agent publishes its evidence-derived candidate with `write-medical-variables`, do not mark `claim_analysis` passed or call `snapshot-backup` until `python tools/dao.py check-medical-reviews-clear CASE_ID` succeeds. The DAO also rejects both transitions without clearance. The orchestrator does not open review items, choose referral policy, or stand in for a human decision.
 
 **Between stage 9 and the external handoff**: once `critic` passes, call `dao.py request-expert-review CASE_ID {v1|v2}` to mark `human_input_status: waiting` (P7) and hand the reviewed draft + `critic_result_v{version}.json` to a genuine human reviewer. Once validated human-owned review content exists, the human-only `dao.py mark-human-review-complete CASE_ID {v1|v2} --reviewer NAME` records the future Unit 11 handoff prerequisite. It does not enable local Evaluation or ground-truth access.
@@ -70,6 +254,10 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
 ## Phase 2 — insurer denial/reduction response
 
 Only two genuinely new stages — everything else is Phase 1's agents reused on new input.
+
+`draft_report_v2` is a strict join: `draft_report_v1`, `critic_v1`, and
+`denial_validation` must all be passed. The critic dependency is correctness,
+not a reason to delay the earlier denial-validation dispatch.
 
 | # | Stage | Agent | Internal checkpoints |
 |---|---|---|---|
@@ -84,13 +272,29 @@ Only two genuinely new stages — everything else is Phase 1's agents reused on 
 
 | Situation | Response |
 |---|---|
-| Schema validation fails twice (P4) | Halt; the user may request validated retries, provide a manual correction for validation, or abandon the run |
-| Stage returns `partial` or fails (P9) | Retry the stage (from its last internal checkpoint, not from scratch) up to 3 fixed attempts, then halt for user audit |
+| Schema validation fails twice (P4) | Halt, present retry-N-times / fix-manually / abandon-run to the user |
+| Stage returns `partial` or fails (P9) | Close the current attempt with `--attempt-outcome partial` or `failed`, then retry from its last internal checkpoint up to 3 explicit dispatch attempts; after 3, halt for user audit |
 | Conflict-ledger has any `pending` entry (P6) | Halt before dispatching the next stage, list all pending entries |
 | Extraction cross-validation disagrees (P8) | Halt immediately, no tolerance threshold, even for one field on one document |
 | Human input pending (P7) | Wait — `human_input_status` in `_run_state.json` (written via `dao.py set-human-input-status`/`request-expert-review`) shows exactly what's pending; never fabricate a stand-in, and never call `mark-human-review-complete` yourself |
 | Any local ground-truth or Evaluation attempt (D1) | Halt immediately; the deferred isolated service is unavailable |
 
 ## Completion report
+
+**Aggregate the run's timing first.** After `draft_report_v1` finalizes (which emits
+`sla.phase1.end`), run once:
+
+```
+python tools/dao.py aggregate-trace CASE_ID --run-id RUN_ID --held-by <name>     [--input-class S|M|L|XL] [--cold-or-warm cold|warm]
+```
+
+This is the ONLY manual step in the timing path — spans are recorded automatically by every
+tool, and both SLA markers are emitted by the DAO itself, but nothing calls the aggregator on
+its own, so skipping it means the run leaves raw shards and no `_timing_summary.json`. It is
+read-only over the trace, runs after the work is done, and contends with nothing. Report
+`active_s` (the SLA number: wall clock minus human-gate waiting) and the top `by_category`
+entries. `active_s: n/a` means a marker is missing, not that the run was instant — usually the
+Phase 0 ledger check was skipped or run without `--run-id`. Read it back later with
+`dao.py read-timing-summary CASE_ID`. `HARNESS_TRACE=0` disables tracing entirely.
 
 At the end of a run (or when halted), report to the user: per-stage pass/fail/pending status from `_run_state.json`, validation PASS/FAIL/SKIP tally, `review_required` count and routing (손사/의사), any partial/warning list, and next actions (e.g. awaiting human review). Ask for feedback — this harness evolves from it, see the root `CLAUDE.md` changelog.

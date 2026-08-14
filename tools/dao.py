@@ -54,18 +54,30 @@ Subcommands:
     write-reviewed-draft CASE_ID {v1|v2} --text-file PATH --held-by NAME --run-id RUN_ID
     check-lock CASE_ID FILENAME
     read-ledger CASE_ID
-    set-ledger-status CASE_ID FILE_NAME STATUS --operation-id OPERATION_ID --held-by NAME --run-id RUN_ID
+    set-ledger-status CASE_ID FILE_NAME STATUS --held-by NAME --run-id RUN_ID
         [--reviewer NAME] [--reason TEXT]
     check-source-ledger-clear CASE_ID
     read-evidence-tags DOC_PATH
     check-forbidden-expressions DOC_PATH
+    aggregate-trace CASE_ID --run-id RID --held-by NAME
+        [--input-class {S-min|S|M|L|XL|embedded}] [--cold-or-warm {cold|warm}]
+        (rolls this run's tools/trace.py span shards up into
+         _timing_summary.json; run once, after the SLA end marker)
+    read-timing-summary CASE_ID
     update-run-state CASE_ID RUN_ID STAGE STATUS --held-by NAME
         (STATUS in pending|in_progress|failed|skipped; 'passed' is refused here --
-         a stage passes only via finalize-stage, atomically with its snapshot)
+         a stage passes only via finalize-stage, atomically with its snapshot;
+         failed accepts --attempt-outcome for T13/P9 diagnostics)
     migrate-run-state-v03 CASE_ID RUN_ID --held-by NAME
         (audited one-time repair for legacy dependency-invalid or
          passed-without-backup entries; invalid passes are downgraded, never
          given fabricated backups)
+    reset-document-processing CASE_ID NEW_RUN_ID --held-by NAME
+        --confirm-case-id CASE_ID
+        (operator-requested cold Stage-2 restart. Moves existing Stage-2
+        contracts to a recoverable project-local backup, resets the manifest
+        to intake-owned fields, and issues a fresh run-state. Raw input and the
+        reviewed source ledger are never touched.)
     finalize-stage CASE_ID RUN_ID STAGE --held-by NAME
         (dependency-checked; builds+validates the P10 snapshot, then records
          status=passed + backup_path + completed_at in one run-state lock)
@@ -77,9 +89,8 @@ Subcommands:
     snapshot-backup CASE_ID RUN_ID STAGE --held-by NAME
     read-conflict-ledger CASE_ID
     add-conflict-entry CASE_ID --stage STAGE --topic TOPIC --sources-file PATH
-        --operation-id OPERATION_ID --held-by NAME --run-id RUN_ID
-    set-conflict-verdict CASE_ID CONFLICT_ID VERDICT --note TEXT
-        --operation-id OPERATION_ID --held-by NAME --run-id RUN_ID
+        --held-by NAME --run-id RUN_ID
+    set-conflict-verdict CASE_ID CONFLICT_ID VERDICT --note TEXT --held-by NAME --run-id RUN_ID
     check-conflicts-clear CASE_ID
     read-human-review-ledger CASE_ID
     record-human-review CASE_ID --artifact-kind {policy_audit_finding|unpaged_physical_exclusion}
@@ -136,19 +147,17 @@ Subcommands:
     read-table-region-index CASE_ID
 """
 import argparse
-import ctypes
-import errno
-import fcntl
+import functools
 import hashlib
 import json
 import os
+import hashlib
+import platform
 import re
 import secrets
 import shutil
-import socket
 import stat
 import sys
-import threading
 import time
 import unicodedata
 import uuid
@@ -159,7 +168,6 @@ from typing import Mapping, NamedTuple
 sys.stdout.reconfigure(encoding="utf-8")
 
 from _validation import load_registry, validate_instance
-import medical_repository
 import _cross_contract
 import dao_transaction
 import source_provenance
@@ -174,31 +182,80 @@ import policy_audit
 import policy_roles
 import human_review
 import llm_providers
+import trace as trace_mod
+import trace_aggregate
+
+# Captured at import so a traced read can report part of the per-process cost it
+# was charged before its own body began. Each CLI subcommand is its own process,
+# so this is paid per call and is invisible to any span inside it. It is a LOWER
+# BOUND -- the interpreter boot and the imports above this line are already spent
+# by the time it runs. See _startup_seconds().
+_PROCESS_START_WALL = time.time()
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
 DATA = ROOT / "data"
 FORBIDDEN_TEMPLATE = ROOT / "templates" / "forbidden-expressions.md"
-MEDICAL_STRUCTURING_CONFIG = (
-    ROOT / "config" / "medical" / "medical_structuring_v0.1.json"
-)
-MEDICAL_PROJECTION_CONFIG = (
-    ROOT / "config" / "medical" / "medical_projection_v0.1.json"
-)
-MEDICAL_REVIEW_ROLE_CONFIG = (
-    ROOT / "config" / "medical" / "medical_review_roles_v0.1.json"
-)
-MEDICAL_REVIEW_REQUEST_CONFIG = (
-    ROOT / "config" / "medical" / "medical_review_request_v0.1.json"
-)
-MEDICAL_REFERRAL_POLICY = (
-    ROOT / "config" / "medical" / "medical_referral_policy_v0.1.json"
-)
 KST = timezone(timedelta(hours=9))
 
+MEDICAL_CONFIG_DIR = ROOT / "config" / "medical"
+MEDICAL_STRUCTURING_CONFIG = MEDICAL_CONFIG_DIR / "medical_structuring_v0.1.json"
+MEDICAL_PROJECTION_CONFIG = MEDICAL_CONFIG_DIR / "medical_projection_v0.1.json"
+MEDICAL_REVIEW_ROLE_CONFIG = MEDICAL_CONFIG_DIR / "medical_review_roles_v0.1.json"
+MEDICAL_REVIEW_REQUEST_CONFIG = (
+    MEDICAL_CONFIG_DIR / "medical_review_request_v0.1.json"
+)
+MEDICAL_REFERRAL_POLICY_CONFIG = (
+    MEDICAL_CONFIG_DIR / "medical_referral_policy_v0.1.json"
+)
 
-class AtomicWriteCommittedError(OSError):
-    """The destination was replaced, but directory durability was not confirmed."""
+# --- POSIX/Windows portability for the medical write layer -------------------
+# The medical-review modules were authored on Linux against O_DIRECTORY,
+# O_NOFOLLOW and dir_fd-relative os.open/unlink/stat. Windows has none of the
+# four (verified: os.supports_dir_fd is empty there), so the original code
+# could not import, let alone run, on this machine -- which is why merge
+# 3569d50 kept parent1's dao.py and the whole flow went dark.
+#
+# These constants degrade the FLAGS, never the CHECKS. The symlink and
+# hardlink guards below are re-expressed with lstat-based equivalents, so a
+# Windows run still refuses to follow a link or write through a shared inode;
+# it just proves it with a different syscall. The one guarantee that is
+# genuinely POSIX-only is directory-fsync durability, and that is reported
+# honestly (see _fsync_directory) rather than silently skipped.
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_HAS_DIR_FD = os.open in os.supports_dir_fd and os.unlink in os.supports_dir_fd
+
+
+def _fsync_directory(directory: Path) -> bool:
+    """Best-effort parent-directory fsync. True when durability was confirmed.
+
+    POSIX can fsync a directory handle; Windows cannot open one at all. The
+    caller decides what an unconfirmed sync means -- this never pretends.
+    """
+    if not _O_DIRECTORY:
+        return False
+    try:
+        fd = os.open(directory, os.O_RDONLY | _O_DIRECTORY)
+    except OSError:
+        return False
+    try:
+        os.fsync(fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def _is_private_regular_file(metadata) -> bool:
+    """A managed file must be a regular file nobody else holds a link to.
+
+    st_nlink is maintained on NTFS, so the hardlink half of this check is real
+    on both platforms.
+    """
+    return stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
 
 
 def now_iso() -> str:
@@ -244,10 +301,60 @@ def load_json(path: Path):
 
 def atomic_write_json(path: Path, obj) -> None:
     """Write to a temp file in the same directory, then atomically replace."""
-    atomic_write_bytes(
-        path,
-        json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8"),
-    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+class AtomicWriteCommittedError(OSError):
+    """The destination was replaced, but directory durability was not confirmed."""
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Durably publish exact bytes without reformatting or a trailing newline.
+
+    Ported from the medical branch. The POSIX original raised
+    AtomicWriteCommittedError when the parent-directory fsync failed; on a
+    platform with no directory handles at all there is nothing to fail, and
+    raising on every single write would make the whole flow unusable. So the
+    error keeps its exact meaning -- "the replace landed, durability did not" --
+    and is raised only where that distinction is observable.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if _O_DIRECTORY and not _fsync_directory(path.parent):
+        raise AtomicWriteCommittedError(
+            f"{path} was replaced but parent-directory durability was not confirmed"
+        )
+
+
+def atomic_create_bytes(path: Path, content: bytes) -> bool:
+    """Durably create a file once; return False if it already exists.
+
+    An existing file with identical bytes is a satisfied post-condition (the
+    caller's retry), not a conflict. Differing bytes raise -- that is a real
+    collision the caller must see.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return atomic_create_bytes_in_directory(path.parent, path.name, content)
 
 
 def atomic_create_json(path: Path, obj) -> bool:
@@ -258,174 +365,84 @@ def atomic_create_json(path: Path, obj) -> bool:
     )
 
 
-def atomic_create_bytes(path: Path, content: bytes) -> bool:
-    """Durably create exact bytes once without following an existing symlink."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        if path.is_symlink():
-            raise ValueError(f"refusing existing symlink at managed path: {path}")
-        return False
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
-    return True
-
-
 def atomic_create_bytes_in_directory(
     directory: Path,
     filename: str,
     content: bytes,
 ) -> bool:
-    """Create or compare exact bytes relative to one no-follow directory handle."""
+    """Create or compare exact bytes for one private child of `directory`.
+
+    The POSIX original pinned the directory with an O_DIRECTORY|O_NOFOLLOW
+    handle and did every subsequent open/stat/unlink dir_fd-relative, so a
+    symlink swapped in mid-call could not redirect the write. Windows offers
+    no dir_fd, so the same guarantees are re-established per operation:
+
+      * the directory itself must not be a symlink (lstat, not stat);
+      * the created/inspected child must not be a symlink;
+      * the child must be a regular file with st_nlink == 1, so no hardlink
+        aliases the bytes we are about to trust.
+
+    This is a narrower window than a pinned handle, not an equivalent one. It
+    is the strongest check the platform allows, and the difference is recorded
+    here rather than left for someone to rediscover.
+    """
     if not filename or Path(filename).name != filename:
         raise ValueError(f"unsafe descriptor-relative filename: {filename!r}")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
-        directory_fd = os.open(directory, flags)
-    except FileNotFoundError:
-        try:
-            os.mkdir(directory, 0o700)
-        except FileExistsError:
-            pass
-        try:
-            directory_fd = os.open(directory, flags)
-        except OSError as exc:
-            raise ValueError(
-                f"cannot open managed directory without following links: {directory}"
-            ) from exc
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as exc:
         raise ValueError(
             f"cannot open managed directory without following links: {directory}"
         ) from exc
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError(
+            f"cannot open managed directory without following links: {directory}"
+        )
 
-    created = False
-    created_identity = None
+    target = directory / filename
     try:
-        directory_metadata = os.fstat(directory_fd)
-        try:
-            file_fd = os.open(
-                filename,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=directory_fd,
+        fd = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
+            0o600,
+        )
+    except FileExistsError:
+        if target.is_symlink():
+            raise ValueError(
+                f"existing managed file is not a private regular file: {target}"
             )
-        except FileExistsError:
-            try:
-                file_fd = os.open(
-                    filename,
-                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                    dir_fd=directory_fd,
-                )
-            except OSError as exc:
-                raise ValueError(
-                    f"cannot inspect existing managed file: {directory / filename}"
-                ) from exc
-            try:
-                file_metadata = os.fstat(file_fd)
-                if (
-                    not stat.S_ISREG(file_metadata.st_mode)
-                    or file_metadata.st_nlink != 1
-                ):
-                    raise ValueError(
-                        f"existing managed file is not a private regular file: "
-                        f"{directory / filename}"
-                    )
-                with os.fdopen(file_fd, "rb") as stream:
-                    file_fd = -1
-                    existing = stream.read()
-            finally:
-                if file_fd >= 0:
-                    os.close(file_fd)
-            if existing != content:
-                raise ValueError(
-                    f"existing managed file content mismatch: {directory / filename}"
-                )
+        try:
+            metadata = os.stat(target, follow_symlinks=False)
+            existing = target.read_bytes()
         except OSError as exc:
             raise ValueError(
-                f"cannot create managed file: {directory / filename}"
+                f"cannot inspect existing managed file: {target}"
             ) from exc
-        else:
-            created = True
-            with os.fdopen(file_fd, "wb") as stream:
-                stream.write(content)
-                stream.flush()
-                os.fsync(stream.fileno())
-                created_identity = _owned_file_identity(os.fstat(stream.fileno()))
-            os.fsync(directory_fd)
+        if not _is_private_regular_file(metadata):
+            raise ValueError(
+                f"existing managed file is not a private regular file: {target}"
+            )
+        if existing != content:
+            raise ValueError(
+                f"existing managed file content mismatch: {target}"
+            )
+        return False
+    except OSError as exc:
+        raise ValueError(f"cannot create managed file: {target}") from exc
 
-        try:
-            path_metadata = directory.lstat()
-        except OSError as exc:
-            raise ValueError(
-                f"managed directory identity changed during publication: {directory}"
-            ) from exc
-        if (
-            not stat.S_ISDIR(path_metadata.st_mode)
-            or path_metadata.st_dev != directory_metadata.st_dev
-            or path_metadata.st_ino != directory_metadata.st_ino
-        ):
-            raise ValueError(
-                f"managed directory identity changed during publication: {directory}"
-            )
-        try:
-            verification_fd = os.open(directory, flags)
-        except OSError as exc:
-            raise ValueError(
-                f"managed directory identity changed during publication: {directory}"
-            ) from exc
-        try:
-            verification_metadata = os.fstat(verification_fd)
-        finally:
-            os.close(verification_fd)
-        if (
-            verification_metadata.st_dev != directory_metadata.st_dev
-            or verification_metadata.st_ino != directory_metadata.st_ino
-        ):
-            raise ValueError(
-                f"managed directory identity changed during publication: {directory}"
-            )
-        return created
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
     except BaseException:
-        if created and created_identity is not None:
-            try:
-                current_fd = os.open(
-                    filename,
-                    os.O_PATH | os.O_NOFOLLOW | os.O_NONBLOCK,
-                    dir_fd=directory_fd,
-                )
-            except OSError:
-                pass
-            else:
-                try:
-                    try:
-                        current_metadata = os.fstat(current_fd)
-                    except OSError:
-                        current_identity = None
-                    else:
-                        current_identity = _owned_file_identity(current_metadata)
-                finally:
-                    os.close(current_fd)
-                if current_identity == created_identity:
-                    try:
-                        os.unlink(filename, dir_fd=directory_fd)
-                        os.fsync(directory_fd)
-                    except OSError:
-                        pass
+        try:
+            target.unlink()
+        except OSError:
+            pass
         raise
-    finally:
-        os.close(directory_fd)
+    _fsync_directory(directory)
+    return True
 
 
 def remove_managed_file_if_content(
@@ -433,203 +450,36 @@ def remove_managed_file_if_content(
     filename: str,
     expected: bytes,
 ) -> bool:
-    """Remove one private regular child only while its exact bytes still match."""
+    """Remove one private regular child only while its exact bytes still match.
+
+    Every negative answer is a refusal to delete, never an exception: the
+    caller is rolling back and must not be derailed by a file that already
+    changed underneath it.
+    """
     if not filename or Path(filename).name != filename:
         raise ValueError(f"unsafe descriptor-relative filename: {filename!r}")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    target = directory / filename
     try:
-        directory_fd = os.open(directory, flags)
+        if directory.is_symlink() or target.is_symlink():
+            return False
+        metadata = os.stat(target, follow_symlinks=False)
+        if not _is_private_regular_file(metadata):
+            return False
+        if target.read_bytes() != expected:
+            return False
+        current = os.stat(target, follow_symlinks=False)
     except OSError:
         return False
+    # Re-check identity: a swap between the read and the unlink would
+    # otherwise delete a file whose contents we never verified.
+    if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+        return False
     try:
-        try:
-            file_fd = os.open(
-                filename,
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                dir_fd=directory_fd,
-            )
-        except OSError:
-            return False
-        try:
-            metadata = os.fstat(file_fd)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-                return False
-            with os.fdopen(file_fd, "rb") as stream:
-                file_fd = -1
-                existing = stream.read()
-        finally:
-            if file_fd >= 0:
-                os.close(file_fd)
-        if existing != expected:
-            return False
-        try:
-            current = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
-        except OSError:
-            return False
-        if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
-            return False
-        try:
-            os.unlink(filename, dir_fd=directory_fd)
-            os.fsync(directory_fd)
-        except OSError:
-            return False
-        return True
-    finally:
-        os.close(directory_fd)
-
-
-def atomic_write_text(path: Path, text: str) -> None:
-    atomic_write_bytes(path, text.encode("utf-8"))
-
-
-def _open_parent_directory_beneath(
-    directory: Path,
-    relative_path: str,
-) -> tuple[int, str]:
-    """Open a relative target's real parent without following any ancestor."""
-    relative = Path(relative_path)
-    if (
-        relative.is_absolute()
-        or not relative.parts
-        or any(part in {"", ".", ".."} for part in relative.parts)
-    ):
-        raise ValueError("target path must be a safe relative path")
-    directory.mkdir(parents=True, exist_ok=True)
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    current_fd = os.open(directory, flags)
-    try:
-        for part in relative.parts[:-1]:
-            try:
-                next_fd = os.open(part, flags, dir_fd=current_fd)
-            except FileNotFoundError:
-                try:
-                    os.mkdir(part, 0o700, dir_fd=current_fd)
-                except FileExistsError:
-                    pass
-                try:
-                    next_fd = os.open(part, flags, dir_fd=current_fd)
-                except OSError as exc:
-                    raise ValueError(
-                        f"target ancestor is not a real directory: {part}"
-                    ) from exc
-            except OSError as exc:
-                raise ValueError(
-                    f"target ancestor is not a real directory: {part}"
-                ) from exc
-            os.close(current_fd)
-            current_fd = next_fd
-        return current_fd, relative.parts[-1]
-    except BaseException:
-        os.close(current_fd)
-        raise
-
-
-def atomic_write_bytes_beneath(
-    directory: Path,
-    relative_path: str,
-    content: bytes,
-    expected_parent_identity: tuple[int, int] | None = None,
-) -> None:
-    """Atomically write below a real directory without following ancestors."""
-    current_fd, leaf = _open_parent_directory_beneath(directory, relative_path)
-    try:
-        current_metadata = os.fstat(current_fd)
-        current_identity = (current_metadata.st_dev, current_metadata.st_ino)
-        if (
-            expected_parent_identity is not None
-            and current_identity != expected_parent_identity
-        ):
-            raise ValueError("target parent identity changed after lock acquisition")
-        temporary = f".{leaf}.tmp.{os.getpid()}.{time.time_ns()}"
-        temporary_created = False
-        try:
-            temporary_fd = os.open(
-                temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=current_fd,
-            )
-            temporary_created = True
-            with os.fdopen(temporary_fd, "wb") as stream:
-                stream.write(content)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(
-                temporary,
-                leaf,
-                src_dir_fd=current_fd,
-                dst_dir_fd=current_fd,
-            )
-            temporary_created = False
-            os.fsync(current_fd)
-            if expected_parent_identity is not None:
-                verification_fd, verification_leaf = _open_parent_directory_beneath(
-                    directory,
-                    relative_path,
-                )
-                try:
-                    verification_metadata = os.fstat(verification_fd)
-                    verification_identity = (
-                        verification_metadata.st_dev,
-                        verification_metadata.st_ino,
-                    )
-                    if (
-                        verification_leaf != leaf
-                        or verification_identity != expected_parent_identity
-                    ):
-                        raise ValueError(
-                            "target parent identity changed during generic write"
-                        )
-                finally:
-                    os.close(verification_fd)
-        finally:
-            if temporary_created:
-                try:
-                    os.unlink(temporary, dir_fd=current_fd)
-                except OSError:
-                    pass
-    finally:
-        os.close(current_fd)
-
-
-def atomic_write_text_beneath(
-    directory: Path,
-    relative_path: str,
-    text: str,
-    expected_parent_identity: tuple[int, int] | None = None,
-) -> None:
-    atomic_write_bytes_beneath(
-        directory,
-        relative_path,
-        text.encode("utf-8"),
-        expected_parent_identity,
-    )
-
-
-def atomic_write_bytes(path: Path, content: bytes) -> None:
-    """Durably publish exact bytes without reformatting or a trailing newline."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
-    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, path)
-        try:
-            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except OSError as exc:
-            raise AtomicWriteCommittedError(
-                f"{path} was replaced but parent-directory durability was not confirmed: {exc}"
-            ) from exc
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+        target.unlink()
+    except OSError:
+        return False
+    _fsync_directory(directory)
+    return True
 
 
 def _restore_file_preimage(path: Path, preimage: bytes | None) -> None:
@@ -661,200 +511,166 @@ def lock_path(target: Path) -> Path:
     return target.with_name(target.name + ".lock")
 
 
-def _safe_lock_descriptor(fd: int) -> bool:
-    metadata = os.fstat(fd)
-    return (
-        stat.S_ISREG(metadata.st_mode)
-        and metadata.st_uid == os.geteuid()
-        and metadata.st_nlink == 1
-    )
+# A lock's owner, recorded so a waiter can tell a live holder from a dead one.
+# `held_by` is a human label ("Claude", "Dev") and several processes legitimately
+# share one, so it can never answer "is that holder still running?".
+#
+# The boot id is what makes the pid trustworthy. Pids are recycled, so a bare
+# pid from a previous boot can match an unrelated live process and make a stale
+# lock look held forever. Reclaim therefore requires the SAME machine and the
+# SAME boot; anything else is left alone and waits out P5's cap as before.
+_MACHINE_ID = f"{platform.node()}"
 
 
-_KERNEL_LOCK_TOKENS_GUARD = threading.Lock()
+def _boot_id() -> str:
+    """Identifies this boot of this machine. Falls back to the empty string
+    when psutil is unavailable, which disables reclaim rather than guessing:
+    a wrong reclaim breaks the mutual exclusion the lock exists to provide."""
+    try:
+        import psutil
+    except ImportError:
+        return ""
+    try:
+        return str(int(psutil.boot_time()))
+    except Exception:
+        return ""
 
 
-class _KernelLockToken:
-    """Non-filesystem kernel ownership for one logical lock coordinate.
+def _lock_owner() -> dict:
+    return {"machine": _MACHINE_ID, "pid": os.getpid(), "boot_id": _boot_id()}
 
-    Linux abstract UNIX socket names cannot be unlinked or replaced through a
-    pathname. The persistent ``.lock`` file remains a human-readable sidecar,
-    while this token prevents a replacement sidecar from creating a second
-    owner of the same logical lock.
+
+def _owner_is_dead(owner) -> bool:
+    """True only when the recorded owner is PROVABLY gone.
+
+    Every uncertain case returns False (treat as held): a missing owner record
+    (a lock written by an older version), a different machine or boot, no
+    psutil, or any error interrogating the process. Waiting on an already-dead
+    holder costs time; reclaiming a live holder's lock corrupts shared state.
     """
-
-    def __init__(self, owner: socket.socket):
-        self.owner = owner
-
-    def close(self) -> None:
-        with _KERNEL_LOCK_TOKENS_GUARD:
-            owner = self.owner
-            self.owner = None
-            _KERNEL_LOCK_TOKENS.discard(self)
-        if owner is not None:
-            owner.close()
-
-    def discard_after_fork(self) -> None:
-        """Close a child duplicate without consulting an inherited guard."""
-        if self.owner is not None:
-            self.owner.close()
-            self.owner = None
-
-
-_KERNEL_LOCK_TOKENS = set()
-
-
-def _kernel_lock_address(key: str) -> bytes:
-    digest = hashlib.sha256(os.fsencode(key)).hexdigest().encode("ascii")
-    return b"\0aidas-harness-lock-" + digest
-
-
-def _try_kernel_lock(key: str) -> _KernelLockToken | None:
-    with _KERNEL_LOCK_TOKENS_GUARD:
-        flags = socket.SOCK_DGRAM | getattr(socket, "SOCK_CLOEXEC", 0)
-        owner = socket.socket(socket.AF_UNIX, flags)
-        try:
-            owner.bind(_kernel_lock_address(key))
-        except OSError as error:
-            owner.close()
-            if error.errno in {errno.EADDRINUSE, errno.EACCES}:
-                return None
-            raise
-        token = _KernelLockToken(owner)
-        _KERNEL_LOCK_TOKENS.add(token)
-        return token
-
-
-def _lock_key(path: Path) -> str:
-    return str(path.absolute())
-
-
-def _read_lock_metadata_path(path: Path) -> dict:
+    if not isinstance(owner, dict):
+        return False
+    pid = owner.get("pid")
+    if not isinstance(pid, int):
+        return False
+    if owner.get("machine") != _MACHINE_ID:
+        return False
+    boot = owner.get("boot_id")
+    if not boot or boot != _boot_id():
+        return False
     try:
-        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return {"held_by": "unknown", "run_id": "unknown", "purpose": "active kernel lock"}
+        import psutil
+    except ImportError:
+        return False
     try:
-        if not _safe_lock_descriptor(fd):
-            return {"held_by": "unknown", "run_id": "unknown", "purpose": "unsafe lock path"}
-        return _read_lock_fd(fd)
-    finally:
-        os.close(fd)
+        return not psutil.pid_exists(pid)
+    except Exception:
+        return False
+
+
+def _reclaim_if_dead(target: Path, existing) -> bool:
+    """Remove a lock whose owner is provably dead. Returns True if reclaimed.
+
+    The unlink is guarded by the lock's own bytes: if the file changed between
+    the staleness decision and the removal, somebody else acted on it first and
+    this caller must not remove whatever is there now.
+    """
+    if not _owner_is_dead((existing or {}).get("owner")):
+        return False
+    lp = lock_path(target)
+    try:
+        current = lp.read_bytes()
+    except FileNotFoundError:
+        return True
+    if json.loads(current.decode("utf-8")) != existing:
+        return False
+    try:
+        lp.unlink()
+    except FileNotFoundError:
+        pass
+    return True
 
 
 def read_lock(target: Path):
     lp = lock_path(target)
-    token = _try_kernel_lock(_lock_key(lp))
-    if token is None:
-        return _read_lock_metadata_path(lp)
-    token.close()
+    if not lp.exists():
+        return None
     try:
-        fd = os.open(lp, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+        return load_json(lp)
     except FileNotFoundError:
+        # The holder released between exists() and read_text(). The blocking
+        # acquire loop will immediately retry the atomic O_EXCL create.
         return None
-    except OSError:
-        return {"held_by": "unknown", "run_id": "unknown", "purpose": "unsafe lock path"}
-    try:
-        if not _safe_lock_descriptor(fd):
-            return {"held_by": "unknown", "run_id": "unknown", "purpose": "unsafe lock path"}
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return _read_lock_fd(fd)
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return None
-    finally:
-        os.close(fd)
-
-
-def _read_lock_fd(fd: int) -> dict:
-    placeholder = {
-        "held_by": "unknown",
-        "run_id": "unknown",
-        "purpose": "lock being written",
-    }
-    try:
-        raw = os.pread(fd, 64 * 1024, 0)
-        value = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        return placeholder
-    return {**placeholder, **value} if isinstance(value, dict) else placeholder
-
-
-class _GenericLockHandle:
-    def __init__(self, fd: int, token: _KernelLockToken):
-        self.fd = fd
-        self.token = token
-        self.owner_pid = os.getpid()
-        self.owner_thread = threading.get_ident()
-
-
-_LOCK_HANDLES: dict[tuple[int, int, str], list[_GenericLockHandle]] = {}
-_LOCK_HANDLES_GUARD = threading.Lock()
+    except (json.JSONDecodeError, ValueError):
+        # A lock created by O_EXCL but not yet content-filled (tiny race window):
+        # it IS held, we just can't read who by yet. Report a placeholder rather
+        # than crash or treat it as free.
+        return {"held_by": "unknown", "run_id": "unknown", "purpose": "lock being written"}
 
 
 def acquire_lock(target: Path, held_by: str, run_id: str, purpose: str):
     """Returns None on success, or the existing lock dict if already held.
 
-    Uses a persistent regular file plus a kernel advisory lock. Release closes
-    only the descriptor this process owns and never unlinks a pathname, so a
-    replacement owner cannot be deleted between an identity check and unlink."""
+    Uses an atomic O_CREAT|O_EXCL create so two racing callers cannot both
+    observe 'no lock' and both acquire it (the prior read-then-write was TOCTOU
+    -- fleet review proved 5 processes acquiring one lock). Exactly one caller's
+    create succeeds; every other gets FileExistsError and reports the holder."""
     lp = lock_path(target)
     lp.parent.mkdir(parents=True, exist_ok=True)
-    key = _lock_key(lp)
-    token = _try_kernel_lock(key)
-    if token is None:
-        return _read_lock_metadata_path(lp)
     try:
-        fd = os.open(
-            lp,
-            os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o644,
-        )
-    except OSError:
-        token.close()
-        return {"held_by": "unknown", "run_id": "unknown", "purpose": "unsafe lock path"}
-    if not _safe_lock_descriptor(fd):
-        os.close(fd)
-        token.close()
-        return {"held_by": "unknown", "run_id": "unknown", "purpose": "unsafe lock path"}
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        existing = _read_lock_fd(fd)
-        os.close(fd)
-        token.close()
-        return existing
-    try:
-        payload = json.dumps(
-            {"held_by": held_by, "run_id": run_id, "started_at": now_iso(), "purpose": purpose},
-            ensure_ascii=False,
-            indent=2,
-        ).encode("utf-8")
-        os.ftruncate(fd, 0)
-        os.pwrite(fd, payload, 0)
-        os.fsync(fd)
-    except BaseException:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-        token.close()
-        raise
-    owner_key = (os.getpid(), threading.get_ident(), key)
-    with _LOCK_HANDLES_GUARD:
-        _LOCK_HANDLES.setdefault(owner_key, []).append(_GenericLockHandle(fd, token))
+        fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return read_lock(target) or {"held_by": "unknown", "run_id": "unknown",
+                                     "purpose": "already held"}
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump({"held_by": held_by, "run_id": run_id,
+                   "started_at": now_iso(), "purpose": purpose,
+                   "owner": _lock_owner()}, f, ensure_ascii=False, indent=2)
     return None
 
 
+# Windows holds a brief unlink-blocking handle whenever a waiter reads the
+# lock file. Short and bounded on purpose: this runs on the success path of
+# every write, so it must not become a stall of its own.
+_RELEASE_RETRY_ATTEMPTS = 5
+_RELEASE_RETRY_DELAY_SECONDS = 0.05
+
+
 def release_lock(target: Path) -> None:
-    key = (os.getpid(), threading.get_ident(), _lock_key(lock_path(target)))
-    with _LOCK_HANDLES_GUARD:
-        handles = _LOCK_HANDLES.get(key, [])
-        handle = handles.pop() if handles else None
-        if not handles:
-            _LOCK_HANDLES.pop(key, None)
-    if handle is not None:
-        fcntl.flock(handle.fd, fcntl.LOCK_UN)
-        os.close(handle.fd)
-        handle.token.close()
+    """Release is atomic for the same reason acquire is: `exists()` then
+    `unlink()` is a TOCTOU window, and a concurrent releaser landing inside it
+    makes this raise FileNotFoundError. That crash surfaced for real on
+    CASE_907 -- ten polarity workers, once the poll interval dropped to
+    sub-second and commits actually overlapped -- and it aborts a caller that
+    had already committed its write, so the work looks failed when it
+    succeeded. Ask forgiveness, not permission: the post-condition wanted here
+    is "no lock file remains", and another process having already removed it
+    satisfies that.
+
+    Windows adds a second way to lose that race. `read_lock` opens this file on
+    every poll, and while any handle is open `unlink` raises PermissionError
+    (WinError 32) instead of succeeding. Letting that escape is strictly worse
+    than the FileNotFoundError above: the releaser dies AFTER committing its
+    write and LEAVES THE LOCK BEHIND, so every other worker on a shared
+    case-level file blocks on an owner that no longer exists. That is exactly
+    how CASE_140 deadlocked -- one DOC_002 writer hit this and stalled the
+    DOC_001/DOC_003 workers, whose own work was entirely independent.
+
+    A brief retry covers the poll-read window, which is short by construction.
+    If the file still cannot be removed, the lock is left for the dead-owner
+    reclaim to collect rather than killing a caller whose write already
+    succeeded -- releasing is cleanup, and failing it must not fail the work."""
+    lp = lock_path(target)
+    for attempt in range(_RELEASE_RETRY_ATTEMPTS):
+        try:
+            lp.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if attempt == _RELEASE_RETRY_ATTEMPTS - 1:
+                break
+            time.sleep(_RELEASE_RETRY_DELAY_SECONDS)
 
 
 # P5's mid-run poll-and-wait cadence -- module-level, not bound into a
@@ -902,319 +718,91 @@ def acquire_lock_blocking(target: Path, held_by: str, run_id: str, purpose: str)
     nothing else could have written since), or the lock dict still held once
     LOCK_MAX_WAIT_SECONDS is exceeded (same failure contract as acquire_lock).
     """
-    waited = 0.0
-    while True:
-        existing = acquire_lock(target, held_by, run_id, purpose)
-        if existing is None:
-            return None
-        if waited >= LOCK_MAX_WAIT_SECONDS:
-            return existing
-        time.sleep(LOCK_POLL_INTERVAL_SECONDS)
-        waited += LOCK_POLL_INTERVAL_SECONDS
+    # The highest-value span in the DAO: wait_s and poll_count together are
+    # the whole contention story, and the repo's own comment above records 4.5
+    # minutes of pure polling on CASE_907 without any way to see it in
+    # aggregate. lock_kind carries the target's basename (a filename, not a
+    # path -- trace's allow-list sanitises it to a bounded identifier) so a
+    # rollup can say WHICH file serialises the run.
+    with trace_mod.span("lock.acquire", category="lock",
+                        lock_kind=target.name) as sp:
+        waited = 0.0
+        polls = 0
+        reclaimed = 0
+        while True:
+            existing = acquire_lock(target, held_by, run_id, purpose)
+            if existing is None:
+                sp.set(wait_s=waited, poll_count=polls, acquired=True,
+                       reclaimed_dead_locks=reclaimed)
+                return None
+            # A holder that died without releasing would otherwise hold this
+            # target for the full cap and, through a shared case-level file,
+            # stall every other worker behind it. Reclaim only when the owner
+            # is provably gone, then retry the atomic create immediately --
+            # winning that create is still what grants the lock, so two
+            # waiters reclaiming at once cannot both proceed.
+            if _reclaim_if_dead(target, existing):
+                reclaimed += 1
+                continue
+            if waited >= LOCK_MAX_WAIT_SECONDS:
+                sp.set(wait_s=waited, poll_count=polls, acquired=False)
+                sp.set_status("error")
+                return existing
+            time.sleep(LOCK_POLL_INTERVAL_SECONDS)
+            waited += LOCK_POLL_INTERVAL_SECONDS
+            polls += 1
 
 
-def _owned_file_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
-    """Identity strong enough to reject a replacement that reuses an inode."""
-    return (
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_ctime_ns,
-        metadata.st_size,
-    )
+# --- owned-lock shim over this branch's O_EXCL lock model --------------------
+# The medical-review modules call acquire_owned_lock[_blocking]/
+# release_owned_lock, which on the Linux branch were fcntl.flock handles that
+# retained kernel ownership and deliberately never unlinked the lock pathname
+# (so a forked child could not release its parent's lock by pathname alone).
+#
+# Two reasons this is a shim rather than a port:
+#   1. fcntl does not exist on Windows, and this branch's O_EXCL +
+#      dead-owner-reclaim model is the one the user chose to keep (8d818ff,
+#      fleet-review TOCTOU fix; decision recorded 2026-08-14).
+#   2. Nothing here forks worker processes -- fork_case.py copies directories,
+#      it does not fork -- so the fork-safety the owned-lock semantics bought
+#      has no situation to protect in this codebase.
+#
+# The handle is opaque at all four call sites (verified: no attribute access on
+# the returned object anywhere in tools/medical_*.py), so carrying the target
+# is sufficient. The (lock, existing) tuple contract is preserved exactly.
 
 
 class _OwnedPathLock:
-    """Kernel-owned lock released only through its retained descriptor."""
+    """Opaque handle pairing an acquired lock with the target it guards."""
 
-    def __init__(self, target: Path, fd: int, token: _KernelLockToken):
+    def __init__(self, target: Path):
         self.target = target
-        self.fd = fd
-        self.token = token
-        self.owner_pid = os.getpid()
         self.released = False
 
-    def discard_after_fork(self) -> None:
-        if self.released:
-            return
-        os.close(self.fd)
-        self.token.close()
-        self.released = True
 
-
-_OWNED_LOCK_HANDLES = set()
-
-
-def acquire_owned_lock(
-    target: Path,
-    held_by: str,
-    run_id: str,
-    purpose: str,
-) -> tuple[_OwnedPathLock | None, dict | None]:
-    """Acquire a compatible persistent lock and retain its kernel ownership."""
-    lp = lock_path(target)
-    lp.parent.mkdir(parents=True, exist_ok=True)
-    token = _try_kernel_lock(_lock_key(lp))
-    if token is None:
-        return None, _read_lock_metadata_path(lp)
-    try:
-        fd = os.open(
-            lp,
-            os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o644,
-        )
-    except OSError:
-        token.close()
-        return None, {
-            "held_by": "unknown",
-            "run_id": "unknown",
-            "purpose": "unsafe lock path",
-        }
-    try:
-        if not _safe_lock_descriptor(fd):
-            raise OSError("unsafe lock path")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        existing = _read_lock_fd(fd)
-        os.close(fd)
-        token.close()
+def acquire_owned_lock(target: Path, held_by: str, run_id: str, purpose: str):
+    """Non-blocking acquire. Returns (handle, None) or (None, existing_lock)."""
+    existing = acquire_lock(target, held_by, run_id, purpose)
+    if existing is not None:
         return None, existing
-    except OSError:
-        os.close(fd)
-        token.close()
-        return None, {"held_by": "unknown", "run_id": "unknown", "purpose": "unsafe lock path"}
-    try:
-        payload = json.dumps(
-            {"held_by": held_by, "run_id": run_id, "started_at": now_iso(), "purpose": purpose},
-            ensure_ascii=False,
-            indent=2,
-        ).encode("utf-8")
-        os.ftruncate(fd, 0)
-        os.pwrite(fd, payload, 0)
-        os.fsync(fd)
-    except BaseException:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-        token.close()
-        raise
-    lock = _OwnedPathLock(target, fd, token)
-    _OWNED_LOCK_HANDLES.add(lock)
-    return lock, None
+    return _OwnedPathLock(target), None
 
 
-def acquire_owned_lock_blocking(
-    target: Path,
-    held_by: str,
-    run_id: str,
-    purpose: str,
-) -> tuple[_OwnedPathLock | None, dict | None]:
-    """Wait for and acquire an identity-preserving pathname lock."""
-    waited = 0.0
-    while True:
-        owned, existing = acquire_owned_lock(target, held_by, run_id, purpose)
-        if owned is not None:
-            return owned, None
-        if waited >= LOCK_MAX_WAIT_SECONDS:
-            return None, existing
-        time.sleep(LOCK_POLL_INTERVAL_SECONDS)
-        waited += LOCK_POLL_INTERVAL_SECONDS
+def acquire_owned_lock_blocking(target: Path, held_by: str, run_id: str,
+                                purpose: str):
+    """Blocking acquire with the same tuple contract as acquire_owned_lock."""
+    existing = acquire_lock_blocking(target, held_by, run_id, purpose)
+    if existing is not None:
+        return None, existing
+    return _OwnedPathLock(target), None
 
 
-def release_owned_lock(lock: _OwnedPathLock) -> None:
-    """Release only the retained kernel lock; never unlink a pathname."""
-    if lock.released:
+def release_owned_lock(lock: "_OwnedPathLock") -> None:
+    """Idempotent release. Double-release is a no-op, matching the original."""
+    if lock is None or lock.released:
         return
-    if os.getpid() != lock.owner_pid:
-        lock.discard_after_fork()
-        return
-    fcntl.flock(lock.fd, fcntl.LOCK_UN)
-    os.close(lock.fd)
-    lock.token.close()
+    release_lock(lock.target)
     lock.released = True
-    _OWNED_LOCK_HANDLES.discard(lock)
-
-
-class _AnchoredLock:
-    """Owned generic lock retained by parent and locked-file descriptors."""
-
-    def __init__(
-        self,
-        parent_fd: int,
-        name: str,
-        lock_fd: int,
-        token: _KernelLockToken,
-    ):
-        self.parent_fd = parent_fd
-        self.name = name
-        self.lock_fd = lock_fd
-        self.token = token
-        self.owner_pid = os.getpid()
-        self.released = False
-        parent_metadata = os.fstat(parent_fd)
-        self.parent_identity = (parent_metadata.st_dev, parent_metadata.st_ino)
-
-    def discard_after_fork(self) -> None:
-        if self.released:
-            return
-        os.close(self.lock_fd)
-        os.close(self.parent_fd)
-        self.token.close()
-        self.released = True
-
-
-def acquire_lock_beneath(
-    directory: Path,
-    relative_path: str,
-    held_by: str,
-    run_id: str,
-    purpose: str,
-) -> tuple[_AnchoredLock | None, dict | None]:
-    """Acquire a compatible target lock without following target ancestors."""
-    parent_fd, leaf = _open_parent_directory_beneath(directory, relative_path)
-    name = leaf + ".lock"
-    logical_lock_path = Path(str((directory / relative_path).absolute()) + ".lock")
-    token = _try_kernel_lock(_lock_key(logical_lock_path))
-    if token is None:
-        existing = _read_lock_metadata_path(
-            Path(f"/proc/self/fd/{parent_fd}") / name
-        )
-        os.close(parent_fd)
-        return None, existing
-    try:
-        try:
-            fd = os.open(
-                name,
-                os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
-                0o644,
-                dir_fd=parent_fd,
-            )
-        except OSError:
-            os.close(parent_fd)
-            token.close()
-            return None, {
-                "held_by": "unknown",
-                "run_id": "unknown",
-                "purpose": "unsafe lock path",
-            }
-        try:
-            if not _safe_lock_descriptor(fd):
-                raise OSError("unsafe lock path")
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            existing = _read_lock_fd(fd)
-            os.close(fd)
-            os.close(parent_fd)
-            token.close()
-            return None, existing
-        except OSError:
-            os.close(fd)
-            os.close(parent_fd)
-            token.close()
-            return None, {
-                "held_by": "unknown",
-                "run_id": "unknown",
-                "purpose": "unsafe lock path",
-            }
-        try:
-            payload = json.dumps(
-                {
-                    "held_by": held_by,
-                    "run_id": run_id,
-                    "started_at": now_iso(),
-                    "purpose": purpose,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ).encode("utf-8")
-            os.ftruncate(fd, 0)
-            os.pwrite(fd, payload, 0)
-            os.fsync(fd)
-        except BaseException:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
-            raise
-        lock = _AnchoredLock(parent_fd, name, fd, token)
-        _OWNED_LOCK_HANDLES.add(lock)
-        return lock, None
-    except BaseException:
-        os.close(parent_fd)
-        token.close()
-        raise
-
-
-def acquire_lock_beneath_blocking(
-    directory: Path,
-    relative_path: str,
-    held_by: str,
-    run_id: str,
-    purpose: str,
-) -> tuple[_AnchoredLock | None, dict | None]:
-    waited = 0.0
-    while True:
-        lock, existing = acquire_lock_beneath(
-            directory,
-            relative_path,
-            held_by,
-            run_id,
-            purpose,
-        )
-        if lock is not None:
-            return lock, None
-        if waited >= LOCK_MAX_WAIT_SECONDS:
-            return None, existing
-        time.sleep(LOCK_POLL_INTERVAL_SECONDS)
-        waited += LOCK_POLL_INTERVAL_SECONDS
-
-
-def release_lock_beneath(lock: _AnchoredLock) -> None:
-    """Release the retained kernel lock without unlinking any pathname."""
-    if lock.released:
-        return
-    if os.getpid() != lock.owner_pid:
-        lock.discard_after_fork()
-        return
-    try:
-        fcntl.flock(lock.lock_fd, fcntl.LOCK_UN)
-        os.close(lock.lock_fd)
-    finally:
-        os.close(lock.parent_fd)
-        lock.token.close()
-        lock.released = True
-        _OWNED_LOCK_HANDLES.discard(lock)
-
-
-def _prepare_lock_registry_for_fork() -> None:
-    _KERNEL_LOCK_TOKENS_GUARD.acquire()
-
-
-def _release_lock_registry_after_fork() -> None:
-    _KERNEL_LOCK_TOKENS_GUARD.release()
-
-
-def _discard_inherited_locks_after_fork() -> None:
-    """Close child duplicates without unlocking the parent's open descriptions."""
-    global _KERNEL_LOCK_TOKENS, _KERNEL_LOCK_TOKENS_GUARD
-    global _LOCK_HANDLES, _LOCK_HANDLES_GUARD, _OWNED_LOCK_HANDLES
-    for token in _KERNEL_LOCK_TOKENS:
-        token.discard_after_fork()
-    _KERNEL_LOCK_TOKENS = set()
-    _KERNEL_LOCK_TOKENS_GUARD = threading.Lock()
-    for handles in _LOCK_HANDLES.values():
-        for handle in handles:
-            os.close(handle.fd)
-            handle.token.close()
-    for handle in _OWNED_LOCK_HANDLES:
-        handle.discard_after_fork()
-    _LOCK_HANDLES = {}
-    _OWNED_LOCK_HANDLES = set()
-    _LOCK_HANDLES_GUARD = threading.Lock()
-
-
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(
-        before=_prepare_lock_registry_for_fork,
-        after_in_parent=_release_lock_registry_after_fork,
-        after_in_child=_discard_inherited_locks_after_fork,
-    )
 
 
 # ------------------------------------------------------------- run-state --
@@ -1237,12 +825,137 @@ def load_run_state(case_id: str) -> dict:
         "stages": [],
         "human_input_status": [],
         "medical_review_adopted": False,
+        # A run state created from here on is born under the restored gate.
+        "medical_gate_status": "enforced",
     }
 
 
-def save_run_state(case_id: str, state: dict) -> None:
-    state["updated_at"] = now_iso()
-    atomic_write_json(run_state_path(case_id), state)
+def _normalize_legacy_run_state(case_id: str, state: dict) -> dict:
+    """Give a pre-v0.3 run state the two fields the schema now requires.
+
+    `run_state.schema.json` requires `run_state_version` and
+    `medical_review_adopted`, but the run-state writer on this branch predates
+    both (merge 3569d50 kept parent1's dao.py while the schema moved on), so a
+    freshly created run state failed its own validation and no new case could
+    open a stage at all. Transplanted from 633bd7b0.
+
+    `medical_review_adopted` is derived from what is on disk rather than
+    defaulted: a case that already carries medical-review artifacts has adopted
+    the flow whether or not anything recorded the fact. The legacy Evaluation
+    stage rename is kept as written -- a wait whose draft version cannot be
+    read unambiguously raises rather than guessing which version it belonged to.
+    """
+    if "run_state_version" in state:
+        return _stamp_medical_gate_status(case_id, state)
+    state = json.loads(json.dumps(state))
+    evaluation_versions = set()
+    for entry in state.get("human_input_status", []):
+        if entry.get("stage_name") != "evaluation":
+            continue
+        match = re.search(
+            r"draft_report_v([12])(?:_reviewed)?\.md",
+            entry.get("description", ""),
+        )
+        if match is None:
+            raise ValueError(
+                "legacy Evaluation wait has no unambiguous draft version")
+        version = match.group(1)
+        evaluation_versions.add(version)
+        entry["stage_name"] = f"human_review_v{version}"
+    for entry in state.get("stages", []):
+        if entry.get("stage_name") != "evaluation":
+            continue
+        if len(evaluation_versions) != 1:
+            raise ValueError(
+                "legacy Evaluation stage has no unique human-review version")
+        entry["stage_name"] = f"human_review_v{next(iter(evaluation_versions))}"
+    state["run_state_version"] = "run_state.v0.3"
+    state["medical_review_adopted"] = _medical_artifacts_present(case_id)
+    return _stamp_medical_gate_status(case_id, state)
+
+
+def _medical_artifacts_present(case_id: str) -> bool:
+    """True when the case already carries medical-review state on disk.
+
+    A symlink counts: the question is whether the name is claimed, not whether
+    it resolves, so a dangling link cannot make an adopted case look unadopted.
+    """
+    directory = case_dir(case_id)
+    return any(
+        path.exists() or path.is_symlink()
+        for path in (
+            directory / "medical_variables.json",
+            directory / "_medical_review_ledger.json",
+            directory / "_medical_variable_revisions",
+        )
+    )
+
+
+def _medical_gate_applies(state: dict) -> bool:
+    """Whether the restored medical clearance gate governs this run.
+
+    Scoped forward on purpose (user decision, 2026-08-14). Between merge
+    3569d50 and the restore the gate did not exist, so 9 cases have
+    claim_analysis 'passed' without it. Enforcing retroactively would mark
+    finished runs -- several with recorded evaluation results -- as failed for
+    a check that was not running when they executed, which would rewrite
+    history rather than fix it.
+
+    A run state carrying no `medical_gate_status` predates the restore and is
+    NOT gated. It is stamped 'never_evaluated' on first touch so the record
+    says the question was never asked, rather than leaving
+    `medical_review_adopted: false` to be misread as 'asked and not required'.
+    """
+    return state.get("medical_gate_status") == "enforced"
+
+
+def _stamp_medical_gate_status(case_id: str, state: dict) -> dict:
+    """Stamp a pre-restore run state exactly once, without gating it."""
+    if state.get("medical_gate_status") is None:
+        state["medical_gate_status"] = "never_evaluated"
+    return state
+
+
+# --- medical-review paths and revision loading -------------------------------
+# Thin delegations to tools/medical_repository.py and
+# tools/medical_review_ledger.py, which survived merge 3569d50 intact. The
+# adjudication logic lives there and is deliberately NOT reimplemented here --
+# these restore the DAO-side entry points those modules call back into.
+
+
+def medical_variables_path(case_id: str) -> Path:
+    import medical_repository
+
+    return medical_repository.medical_variables_path(
+        sys.modules[__name__], case_id)
+
+
+def medical_variable_revisions_dir(case_id: str) -> Path:
+    import medical_repository
+
+    return medical_repository.revisions_dir(sys.modules[__name__], case_id)
+
+
+def medical_review_ledger_path(case_id: str) -> Path:
+    from medical_review_ledger import ledger_path
+
+    return ledger_path(sys.modules[__name__], case_id)
+
+
+def _load_medical_revision(
+    case_id: str, revision_sha: str | None
+) -> tuple[dict | None, str | None]:
+    import medical_repository
+
+    return medical_repository.load_revision(
+        sys.modules[__name__], case_id, revision_sha
+    )
+
+
+def load_medical_review_ledger(case_id: str) -> dict:
+    from medical_review_ledger import load_ledger
+
+    return load_ledger(sys.modules[__name__], case_id)
 
 
 def _reconciliation_request(
@@ -1274,125 +987,249 @@ def _reconciliation_receipt_sha(operation: dict) -> str:
     return hashlib.sha256(_canonical_json_bytes(fields)).hexdigest()
 
 
-def _normalize_legacy_run_state(case_id: str, state: dict) -> dict:
-    if "run_state_version" in state:
-        return state
-    state = json.loads(json.dumps(state))
-    evaluation_versions = set()
-    for entry in state.get("human_input_status", []):
-        if entry.get("stage_name") != "evaluation":
-            continue
-        match = re.search(
-            r"draft_report_v([12])(?:_reviewed)?\.md",
-            entry.get("description", ""),
-        )
-        if match is None:
-            raise ValueError(
-                "legacy Evaluation wait has no unambiguous draft version"
-            )
-        version = match.group(1)
-        evaluation_versions.add(version)
-        entry["stage_name"] = f"human_review_v{version}"
-    for entry in state.get("stages", []):
-        if entry.get("stage_name") != "evaluation":
-            continue
-        if len(evaluation_versions) != 1:
-            raise ValueError(
-                "legacy Evaluation stage has no unique human-review version"
-            )
-        entry["stage_name"] = f"human_review_v{next(iter(evaluation_versions))}"
-    directory = case_dir(case_id)
-    state["run_state_version"] = "run_state.v0.3"
-    state["medical_review_adopted"] = any(
-        path.exists() or path.is_symlink()
-        for path in (
-            directory / "medical_variables.json",
-            directory / "_medical_review_ledger.json",
-            directory / "_medical_variable_revisions",
-        )
-    )
-    for operation in state.get(
-        "medical_review_wait_reconciliation_operations", []
-    ):
-        if "receipt_sha256" not in operation:
-            operation["receipt_sha256"] = _reconciliation_receipt_sha(operation)
-    return state
+def save_run_state(case_id: str, state: dict) -> None:
+    state["updated_at"] = now_iso()
+    atomic_write_json(run_state_path(case_id), state)
 
 
-def validated_run_state(case_id: str, *, allow_missing: bool = False) -> dict:
-    path = run_state_path(case_id)
-    path_missing = not path.exists()
-    state = _normalize_legacy_run_state(case_id, load_run_state(case_id))
-    directory = case_dir(case_id)
-    if any(
-        artifact.exists() or artifact.is_symlink()
-        for artifact in (
-            directory / "medical_variables.json",
-            directory / "_medical_review_ledger.json",
-            directory / "_medical_variable_revisions",
-        )
-    ):
-        state["medical_review_adopted"] = True
-    if allow_missing and path_missing:
-        return state
-    errors = _schema_check(state, "run_state.schema.json")
-    if errors:
-        raise ValueError("run state is invalid: " + "; ".join(errors))
-    if state.get("case_id") != case_id:
-        raise ValueError("run state belongs to a different case")
-    operation_ids = [
-        operation.get("operation_id")
-        for operation in state.get(
-            "medical_review_wait_reconciliation_operations", []
-        )
-    ]
-    if len(operation_ids) != len(set(operation_ids)):
-        raise ValueError("run state has duplicate reconciliation operation_id")
-    stage_names = [entry["stage_name"] for entry in state["stages"]]
-    if len(stage_names) != len(set(stage_names)):
-        raise ValueError("run state has duplicate stage_name")
-    human_input_ids = [
-        entry["human_input_id"]
-        for entry in state.get("human_input_status", [])
-        if "human_input_id" in entry
-    ]
-    if len(human_input_ids) != len(set(human_input_ids)):
-        raise ValueError("run state has duplicate human_input_id")
-    run_id = state["run_id"]
-    for operation in state.get(
-        "medical_review_wait_reconciliation_operations", []
-    ):
-        operation_id = operation["operation_id"]
-        ledger_sha = operation["medical_review_ledger_sha256"]
-        if (
-            operation_id.startswith("medical-projection:")
-            and operation_id != f"medical-projection:{ledger_sha}"
-        ):
-            raise ValueError("automatic reconciliation operation_id is invalid")
-        expected_sha = hashlib.sha256(_canonical_json_bytes(
-            _reconciliation_request(
-                case_id, run_id, operation_id, ledger_sha
-            )
-        )).hexdigest()
-        if operation["request_sha256"] != expected_sha:
-            raise ValueError("reconciliation operation request binding is invalid")
-        if operation["receipt_sha256"] != _reconciliation_receipt_sha(operation):
-            raise ValueError("reconciliation operation receipt binding is invalid")
-    return state
+_DOCUMENT_PROCESSING_OUTPUT_PATTERNS = (
+    "ocr_result_*.json",
+    "classification_result_*.json",
+    "redaction_result_*.json",
+    "segmentation_proposal_*.json",
+    "page_chunks.json",
+)
+
+_DOCUMENT_PROCESSING_DERIVED_MANIFEST_FIELDS = frozenset({
+    "source_total_pages", "extraction_method", "downstream_disposition",
+    "non_text_verification", "segmentation_proposal_path",
+    "provisional_document_type", "provisional_type_label",
+    "source_file_name", "source_page_start", "source_page_end",
+    "document_role", "source_document_id", "page_map",
+})
 
 
-def cmd_read_run_state(args) -> int:
+def _intake_state_document(document: dict) -> dict:
+    """Return one physical intake document with Stage-2 projections cleared.
+
+    A segmented child cannot be reconstructed from intake-owned fields alone,
+    so the reset command refuses such cases before reaching this helper.
+    Unknown non-Stage-2 fields are preserved; only fields whose owner is
+    document_processing/segmentation are removed or reset.
+    """
+    reset = {
+        key: value for key, value in document.items()
+        if key not in _DOCUMENT_PROCESSING_DERIVED_MANIFEST_FIELDS
+    }
+    reset.update({
+        "pages": None,
+        "ocr_status": "pending",
+        "segmentation_status": (
+            "pending_review" if document.get("file_format") == "pdf"
+            else "not_applicable"),
+        "segmentation_reviewed_by": None,
+        "segmentation_reviewed_at": None,
+        "segmentation_review_note": None,
+        "ocr_text_path": None,
+        "ocr_quality": None,
+        "uncertain_region_count": None,
+        "cross_validation_status": None,
+        "redacted_text_path": None,
+        "document_type": None,
+        "classification_confidence": None,
+    })
+    return reset
+
+
+def reset_document_processing(case_id: str, new_run_id: str, held_by: str,
+                              confirm_case_id: str) -> dict:
+    """Recoverably reset Stage 2 after an explicit operator restart request.
+
+    Existing contracts are MOVED, not deleted, to
+    ``_stage2_reset_backups/<case>/<old>_to_<new>_<timestamp>/outputs``.
+    Processed page text is deliberately left in place: checkpoint 1 rewrites
+    every page through the DAO, while removing it here would require locking
+    an unbounded file set and would make the reset less recoverable.  The
+    authoritative OCR/classification/redaction contracts are removed, so
+    run_checkpoint1 cannot take its ``already_extracted`` short-circuit.
+    """
+    _require_safe_id("case_id", case_id)
+    _require_safe_id("run_id", new_run_id)
+    if confirm_case_id != case_id:
+        return {"status": "refused", "reason": (
+            f"--confirm-case-id must exactly equal {case_id}")}
+
+    case = case_dir(case_id)
+    manifest_target = case / "document_manifest.json"
+    state_target = run_state_path(case_id)
+    if not manifest_target.exists():
+        return {"status": "refused", "reason": "document_manifest.json is missing"}
+
+    artifact_paths: list[Path] = []
+    for pattern in _DOCUMENT_PROCESSING_OUTPUT_PATTERNS:
+        artifact_paths.extend(path for path in case.glob(pattern) if path.is_file())
+    artifact_paths = sorted(set(artifact_paths), key=lambda path: path.name)
+    lock_targets = [manifest_target, state_target, *artifact_paths]
+
+    # A restart is a run-start operation: any pre-existing lock halts
+    # immediately. It must never enter the 15-minute mid-run polling loop.
+    for target in lock_targets:
+        existing = read_lock(target)
+        if existing is not None:
+            return {"status": "refused", "reason": "pre-existing lock",
+                    "target": str(target), "lock": existing}
+
+    acquired: list[Path] = []
     try:
-        state = validated_run_state(args.case_id)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"FAIL: {exc}")
-        return 1
-    print(json.dumps(state, ensure_ascii=False, sort_keys=True))
-    return 0
+        for target in lock_targets:
+            existing = acquire_lock(
+                target, held_by, new_run_id,
+                f"cold reset document_processing for {case_id}")
+            if existing is not None:
+                return {"status": "refused", "reason": "lock race",
+                        "target": str(target), "lock": existing}
+            acquired.append(target)
+
+        # Fresh reads happen only after all reset-owned targets are locked.
+        manifest = load_json(manifest_target)
+        old_state = load_json(state_target) or load_run_state(case_id)
+        documents = (manifest or {}).get("documents", [])
+        non_physical = [
+            doc.get("document_id") for doc in documents
+            if doc.get("document_role") == "segment"
+            or doc.get("source_file_name")
+            or doc.get("downstream_disposition") == "superseded_bundle"
+        ]
+        if non_physical:
+            return {"status": "refused", "reason": (
+                "case already contains segmented/superseded documents; cold "
+                "reset cannot reconstruct intake state safely"),
+                "documents": non_physical}
+
+        reset_manifest = dict(manifest)
+        reset_manifest["created_at"] = now_iso()
+        reset_manifest["updated_at"] = now_iso()
+        reset_manifest["documents"] = [
+            _intake_state_document(doc) for doc in documents]
+        reset_state = {
+            "case_id": case_id,
+            "run_id": new_run_id,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+            "stages": [],
+            "human_input_status": [],
+        }
+
+        manifest_errors = _schema_check(
+            reset_manifest, "document_manifest.schema.json")
+        state_errors = _schema_check(reset_state, "run_state.schema.json")
+        if manifest_errors or state_errors:
+            return {"status": "refused", "reason": "reset state failed schema validation",
+                    "manifest_errors": manifest_errors,
+                    "run_state_errors": state_errors}
+
+        old_run_id = old_state.get("run_id") or "NO_RUN"
+        stamp = datetime.now(KST).strftime("%Y%m%dT%H%M%S")
+        backup = _require_within(
+            ROOT / "_stage2_reset_backups", case_id,
+            f"{old_run_id}_to_{new_run_id}_{stamp}")
+        output_backup = backup / "outputs"
+        output_backup.mkdir(parents=True, exist_ok=False)
+        shutil.copy2(manifest_target, output_backup / manifest_target.name)
+        if state_target.exists():
+            shutil.copy2(state_target, output_backup / state_target.name)
+        for artifact in artifact_paths:
+            shutil.move(str(artifact), str(output_backup / artifact.name))
+
+        stale_scratch = case / "_stage2_scratch"
+        if stale_scratch.exists():
+            shutil.move(str(stale_scratch), str(output_backup / stale_scratch.name))
+
+        atomic_write_json(manifest_target, reset_manifest)
+        atomic_write_json(state_target, reset_state)
+        return {
+            "status": "reset",
+            "case_id": case_id,
+            "old_run_id": old_run_id,
+            "new_run_id": new_run_id,
+            "backup_path": str(backup),
+            "contracts_archived": [path.name for path in artifact_paths],
+            "processed_text_retained_for_overwrite": True,
+        }
+    finally:
+        for target in reversed(acquired):
+            release_lock(target)
+
+
+def cmd_reset_document_processing(args):
+    result = reset_document_processing(
+        args.case_id, args.new_run_id, args.held_by, args.confirm_case_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("status") == "reset" else 1
 
 
 # ------------------------------------------------------------------ nouns --
 
+
+def traced_read(op: str):
+    """Instrument a read subcommand so its cost stops landing in unattributed time.
+
+    Read paths were the largest measurement hole T13 exposed. On CASE_910 the
+    `claim_analysis` attempt measured 394.96s active wall, of which instrumented
+    tool spans explained 0.034s -- and the agent had made 41 DAO calls, almost
+    all of them reads. dao.py instrumented exactly two things (`lock.acquire`,
+    `validate.schema`), both on write paths, so a stage that only reads looked
+    free while occupying the entire interval.
+
+    Two costs are recorded separately because they have different fixes:
+    `duration_s` is the work inside the command, while `startup_s` is the
+    interpreter-plus-import time paid before this function could run at all
+    (measured at ~0.30s of a ~0.38s median `read-contract` call -- with 41 calls
+    that is 12-16s of a stage's wall clock, and no amount of optimising the read
+    body touches it).
+
+    A read command that fails to record is a no-op, never an error: tracing is
+    diagnostic, and P2's read paths must not acquire a failure mode they did not
+    have before.
+    """
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(args):
+            if not trace_mod.enabled():
+                return fn(args)
+            with trace_mod.span(op, category="io",
+                                case_id=getattr(args, "case_id", None),
+                                doc_id=getattr(args, "doc_id", None)) as sp:
+                rc = fn(args)
+                try:
+                    sp.set(exit_code=int(rc or 0), startup_s=_startup_seconds())
+                except Exception:  # noqa: BLE001 -- never break a read
+                    pass
+                return rc
+        return wrapper
+    return decorate
+
+
+def _startup_seconds() -> float:
+    """Seconds from this module's import to the traced read, per process.
+
+    Deliberately NOT the full interpreter startup: the clock starts when dao.py
+    is imported, so the interpreter boot and dao's own import chain that ran
+    BEFORE that line are excluded and this is a lower bound. Measuring the true
+    process start needs psutil, which is not worth a DAO dependency for a
+    diagnostic.
+
+    The gap is not small and should not be read as noise. Externally timed, a
+    `read-contract` subprocess takes ~0.376s median while bare `import dao`
+    alone accounts for ~0.298s of it -- so a per-call figure of ~0.01s here
+    means the remaining ~0.29s was spent before this clock started. The honest
+    statement is that per-call CLI overhead is bounded below by this field and
+    measured externally at roughly 0.3s.
+    """
+    return round(max(time.time() - _PROCESS_START_WALL, 0.0), 6)
+
+
+@traced_read("dao.read_document_text")
 def cmd_read_document_text(args):
     manifest = read_contract_data(args.case_id, "document_manifest.json")
     if manifest is not None:
@@ -1431,6 +1268,307 @@ def cmd_read_document_text(args):
     print(f"NOT_EXTRACTED: {args.doc_id} has no processed text yet. "
           f"Invoke document-pipeline to produce it -- do not read the raw source directly (harness-guardrails P2).")
     return 1
+
+
+def _redacted_bundle_document(case_id: str, manifest_entry: dict) -> dict:
+    """Return one driver-safe redacted document payload.
+
+    This helper is deliberately DAO-local: downstream drivers receive content
+    and revision binding, never a processed-layer pathname they could reopen.
+    """
+    doc_id = manifest_entry["document_id"]
+    disposition = manifest_entry.get("downstream_disposition")
+    if disposition == "expert_review_only":
+        raise ValueError(
+            f"NON_TEXT_EXPERT_REVIEW_ONLY: {doc_id} has no automated text input")
+    if disposition == "superseded_bundle":
+        raise ValueError(
+            f"SUPERSEDED_BUNDLE: {doc_id} is provenance-only; read its active children")
+    redacted = processed_dir(case_id, doc_id) / "redacted_text.md"
+    if not redacted.exists():
+        raise ValueError(f"NOT_EXTRACTED: {doc_id} has no redacted text")
+    try:
+        source = redacted.read_text(encoding="utf-8")
+        pages = _cross_contract.split_pages(source)
+    except Exception as exc:
+        raise ValueError(f"UNREADABLE: {doc_id}: {exc}") from exc
+    revision = revision_entry_for(case_id, doc_id) or {}
+    return {
+        "document_id": doc_id,
+        # These are provenance fields, not paths. Denial-response uses them to
+        # join split siblings before deciding which bundle to send to a worker.
+        "source_file_name": manifest_entry.get("source_file_name") or manifest_entry.get("file_name"),
+        "source_page_start": manifest_entry.get("source_page_start"),
+        "source_page_end": manifest_entry.get("source_page_end"),
+        "document_type": manifest_entry.get("document_type"),
+        "source_text_revision_sha256": revision.get("current_revision_sha256"),
+        "redacted_text_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        "pages": [
+            {"page": page, "text": pages[page]}
+            for page in sorted(pages)
+        ],
+    }
+
+
+def read_redacted_text_bundle_data(case_id: str, doc_ids: list[str]) -> dict:
+    """DAO-owned content bundle for drivers; never returns processed paths."""
+    if not doc_ids:
+        raise ValueError("at least one --doc-id is required")
+    if len(set(doc_ids)) != len(doc_ids):
+        raise ValueError("duplicate --doc-id is not permitted")
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        raise ValueError(f"NOT_FOUND: {case_id} has no document_manifest.json")
+    by_id = {entry.get("document_id"): entry for entry in manifest.get("documents", [])}
+    documents = []
+    for doc_id in doc_ids:
+        entry = by_id.get(doc_id)
+        if not isinstance(entry, dict):
+            raise ValueError(f"UNKNOWN_DOCUMENT: {doc_id} is not in document_manifest.json")
+        documents.append(_redacted_bundle_document(case_id, entry))
+    return {"case_id": case_id, "documents": documents}
+
+
+@traced_read("dao.read_redacted_text_bundle")
+def cmd_read_redacted_text_bundle(args):
+    try:
+        print(json.dumps(
+            read_redacted_text_bundle_data(args.case_id, args.doc_id),
+            ensure_ascii=False,
+        ))
+        return 0
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+
+
+def _verify_driver_reference(case_id: str, reference: dict,
+                             bundle_by_id: dict[str, dict]) -> dict:
+    if not isinstance(reference, dict):
+        raise ValueError("reference must be an object")
+    doc_id = reference.get("document_id")
+    page = reference.get("page")
+    quote = reference.get("quote")
+    if not isinstance(doc_id, str) or not doc_id:
+        raise ValueError("reference.document_id must be a non-empty string")
+    if not isinstance(page, int) or page < 1:
+        raise ValueError(f"{doc_id}: reference.page must be a positive integer")
+    if not isinstance(quote, str) or not quote.strip():
+        raise ValueError(f"{doc_id}: reference.quote must be non-empty")
+    document = bundle_by_id.get(doc_id)
+    if document is None:
+        raise ValueError(f"{doc_id}: reference document was not included in this bundle")
+    expected_revision = reference.get("source_text_revision_sha256")
+    actual_revision = document["source_text_revision_sha256"]
+    if expected_revision is not None and expected_revision != actual_revision:
+        raise ValueError(f"{doc_id}: source_text_revision_sha256 is stale")
+    expected_digest = reference.get("redacted_text_sha256")
+    if expected_digest is not None and expected_digest != document["redacted_text_sha256"]:
+        raise ValueError(f"{doc_id}: redacted_text_sha256 is stale")
+    page_text = next((item["text"] for item in document["pages"]
+                      if item["page"] == page), None)
+    if page_text is None:
+        raise ValueError(f"{doc_id}: page {page} is not present in processed text")
+    start = reference.get("start_char")
+    end = reference.get("end_char")
+    if (start is None) != (end is None):
+        raise ValueError(f"{doc_id}: start_char and end_char must be supplied together")
+    if start is not None:
+        if not isinstance(start, int) or not isinstance(end, int) or start < 0 or start >= end:
+            raise ValueError(f"{doc_id}: invalid start_char/end_char range")
+        if end > len(page_text) or page_text[start:end] != quote:
+            raise ValueError(f"{doc_id}: quote does not exactly match the claimed page range")
+    elif _cross_contract._normalize_ws(quote) not in _cross_contract._normalize_ws(page_text):
+        raise ValueError(f"{doc_id}: quote is not present on page {page}")
+    verified = {
+        "document_id": doc_id,
+        "page": page,
+        "quote": quote,
+        "source_text_revision_sha256": actual_revision,
+        "redacted_text_sha256": document["redacted_text_sha256"],
+    }
+    if start is not None:
+        verified.update({"start_char": start, "end_char": end})
+    return verified
+
+
+@traced_read("dao.verify_evidence_references")
+def cmd_verify_evidence_references(args):
+    try:
+        payload = json.loads(Path(args.references_file).read_text(encoding="utf-8"))
+        references = payload.get("references") if isinstance(payload, dict) else None
+        if not isinstance(references, list) or not references:
+            raise ValueError("references file must be an object with a non-empty references list")
+        doc_ids = []
+        for reference in references:
+            doc_id = reference.get("document_id") if isinstance(reference, dict) else None
+            if not isinstance(doc_id, str) or not doc_id:
+                raise ValueError("every reference must name document_id")
+            if doc_id not in doc_ids:
+                doc_ids.append(doc_id)
+        bundle = read_redacted_text_bundle_data(args.case_id, doc_ids)
+        documents = {document["document_id"]: document for document in bundle["documents"]}
+        # Preserve list order: callers can pair their candidate records with
+        # responses deterministically without using a synthetic identifier.
+        verified = [
+            _verify_driver_reference(args.case_id, reference, documents)
+            for reference in references
+        ]
+        print(json.dumps({"case_id": args.case_id, "verified_references": verified},
+                         ensure_ascii=False))
+        return 0
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"FAIL: {exc}")
+        return 1
+
+
+def _driver_receipt_path(case_id: str, stage: str, unit_id: str) -> Path:
+    if not stage_dependencies.is_known(stage):
+        raise ValueError(f"unknown canonical stage: {stage}")
+    _require_safe_id("unit_id", unit_id)
+    return _require_within(case_dir(case_id), "_driver_receipts", stage,
+                           f"{unit_id}.json")
+
+
+@traced_read("dao.read_driver_receipt")
+def cmd_read_driver_receipt(args):
+    try:
+        target = _driver_receipt_path(args.case_id, args.stage, args.unit_id)
+        if not target.exists():
+            print(f"NOT_FOUND: no driver receipt for {args.stage}/{args.unit_id}")
+            return 1
+        print(target.read_text(encoding="utf-8"))
+        return 0
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+
+
+def cmd_write_driver_receipt(args):
+    try:
+        target = _driver_receipt_path(args.case_id, args.stage, args.unit_id)
+        data = json.loads(Path(args.data_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    expected = {
+        "case_id": args.case_id,
+        "run_id": args.run_id,
+        "stage": args.stage,
+        "unit_id": args.unit_id,
+    }
+    if any(data.get(key) != value for key, value in expected.items()):
+        print("FAIL: receipt identity must match case_id/run_id/stage/unit-id arguments")
+        return 1
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id,
+        f"write driver receipt {args.stage}/{args.unit_id}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        errors = _schema_check(data, "driver_receipt.schema.json")
+        if errors:
+            print("FAIL: driver receipt schema validation errors:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
+        target.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(target, data)
+        print(f"PASS: wrote driver receipt {args.stage}/{args.unit_id}")
+        return 0
+    finally:
+        release_lock(target)
+
+
+def _driver_candidate_path(case_id: str, stage: str, unit_id: str,
+                           candidate_id: str) -> Path:
+    if not stage_dependencies.is_known(stage):
+        raise ValueError(f"unknown canonical stage: {stage}")
+    _require_safe_id("unit_id", unit_id)
+    _require_safe_id("candidate_id", candidate_id)
+    return _require_within(case_dir(case_id), "_driver_receipts", stage,
+                           unit_id, f"{candidate_id}.json")
+
+
+@traced_read("dao.read_driver_candidates")
+def cmd_read_driver_candidates(args):
+    """List every completed sub-unit of one driver stage unit.
+
+    Returned as a map keyed by candidate_id so a driver can decide reuse per
+    unit without opening a case directory itself. A missing directory is an
+    empty map, not an error: no unit has completed yet is the ordinary state
+    of a first run, and making it an error would force every caller to treat
+    a cold start as a failure.
+    """
+    try:
+        base = _require_within(case_dir(args.case_id), "_driver_receipts",
+                               args.stage, args.unit_id)
+        if not stage_dependencies.is_known(args.stage):
+            raise ValueError(f"unknown canonical stage: {args.stage}")
+        _require_safe_id("unit_id", args.unit_id)
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    candidates = {}
+    if base.is_dir():
+        for path in sorted(base.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"FAIL: unreadable driver candidate {path.name}: {exc}")
+                return 1
+            if not isinstance(data, dict) or data.get("candidate_id") != path.stem:
+                print(f"FAIL: driver candidate {path.name} does not match its filename")
+                return 1
+            candidates[path.stem] = data
+    print(json.dumps({"case_id": args.case_id, "stage": args.stage,
+                      "unit_id": args.unit_id, "candidates": candidates},
+                     ensure_ascii=False))
+    return 0
+
+
+def cmd_write_driver_candidate(args):
+    """Publish one completed sub-unit result, schema-validated and locked."""
+    try:
+        target = _driver_candidate_path(args.case_id, args.stage, args.unit_id,
+                                        args.candidate_id)
+        data = json.loads(Path(args.data_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    expected = {
+        "case_id": args.case_id,
+        "run_id": args.run_id,
+        "stage": args.stage,
+        "unit_id": args.unit_id,
+        "candidate_id": args.candidate_id,
+    }
+    if any(data.get(key) != value for key, value in expected.items()):
+        print("FAIL: candidate identity must match "
+              "case_id/run_id/stage/unit-id/candidate-id arguments")
+        return 1
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id,
+        f"write driver candidate {args.stage}/{args.unit_id}/{args.candidate_id}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        errors = _schema_check(data, "driver_candidate.schema.json")
+        if errors:
+            print("FAIL: driver candidate schema validation errors:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
+        target.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(target, data)
+        print(f"PASS: wrote driver candidate {args.stage}/{args.unit_id}/{args.candidate_id}")
+        return 0
+    finally:
+        release_lock(target)
 
 
 def _normalize_for_absence(text: str) -> str:
@@ -1518,6 +1656,7 @@ def _search_one_document(case_id: str, doc_id: str, needle_norm: str,
 _SEARCH_EXCLUDED = {"expert_review_only", "superseded_bundle"}
 
 
+@traced_read("dao.search_document_text")
 def cmd_search_document_text(args):
     """Whitespace/NFKC-insensitive search over processed text -- the floor under
     a negative claim.
@@ -1676,14 +1815,63 @@ def release_page_text_capability(path: Path) -> None:
         pass
 
 
-def _page_text_capability_ok(case_id: str, doc_id: str) -> bool:
-    """Whether this process presented a live capability for THIS document."""
-    presented = os.environ.get(PAGE_TEXT_CAPABILITY_ENV)
+def _page_text_capability_ok(case_id: str, doc_id: str,
+                              capability: str | None = None) -> bool:
+    """Whether the caller presented a live capability for THIS document.
+
+    `capability` is the in-process form: checkpoint 2 calling
+    read_page_text_data() directly hands the token as an argument. The env
+    var remains the subprocess form, and neither weakens the check -- both
+    resolve to the same digest lookup, so a caller without a live token is
+    refused either way.
+
+    Passing it as an argument is strictly the safer of the two: the token
+    never enters the environment block and so cannot be read out of a process
+    listing or inherited by an unrelated grandchild.
+    """
+    presented = capability or os.environ.get(PAGE_TEXT_CAPABILITY_ENV)
     if not presented:
         return False
     return (capability_dir() / _capability_filename(presented, case_id, doc_id)).exists()
 
 
+def read_page_text_data(case_id: str, doc_id: str, page: int, *,
+                        caller_stage: str, capability: str) -> str:
+    """In-process equivalent of `read-page-text`, for checkpoint 2.
+
+    Exists so redact_document.py can stop paying ~0.38s of interpreter
+    startup per page (measured) to read text this process could read
+    directly. It enforces the SAME two gates as the CLI path, in the same
+    order: the caller-stage allowlist, then the per-document capability.
+    Being in-process is explicitly NOT a reason to skip them -- an importer
+    is not more trusted than a subprocess, and the capability is what makes
+    the stage claim verifiable rather than self-asserted.
+
+    Raises PermissionError when a gate refuses, so a caller cannot mistake a
+    denial message for page content the way a stdout-scraping subprocess
+    caller could.
+    """
+    if caller_stage not in PAGE_TEXT_ALLOWED_STAGES:
+        raise PermissionError(
+            f"page text is pre-redaction and may only be read by "
+            f"{sorted(PAGE_TEXT_ALLOWED_STAGES)} (harness-guardrails P2); "
+            f"caller_stage={caller_stage!r} is not permitted")
+    if not _page_text_capability_ok(case_id, doc_id, capability):
+        raise PermissionError(
+            "--caller-stage is self-asserted and is not sufficient on its own. "
+            "Pre-redaction page text additionally requires checkpoint 2's run "
+            "capability for this specific document.")
+    if page < 1:
+        raise ValueError(f"page must be >= 1 (got {page})")
+    page_path = processed_dir(case_id, doc_id) / f"page_{page:03d}.md"
+    if not page_path.exists():
+        raise FileNotFoundError(
+            f"NOT_EXTRACTED: {doc_id} page {page} has no validated processed "
+            "text yet. Complete document-pipeline checkpoint 1 first.")
+    return page_path.read_text(encoding="utf-8")
+
+
+@traced_read("dao.read_page_text")
 def cmd_read_page_text(args):
     """Read one validated checkpoint-1 page from the processed layer.
 
@@ -1716,6 +1904,12 @@ def cmd_read_page_text(args):
     permission question, not something the DAO can answer, and it is recorded
     honestly in known-gaps.md rather than described as sealed.
     """
+    # NOTE: this CLI path and read_page_text_data() above enforce the same two
+    # gates. They are kept as separate code because the CLI's contract is
+    # "print a message, return an exit code" while the in-process contract is
+    # "return text or raise" -- a stdout-scraping caller cannot distinguish a
+    # denial string from page content, so the in-process form must raise.
+    # tests/test_redaction_boundary.py pins that both refuse the same inputs.
     if args.caller_stage not in PAGE_TEXT_ALLOWED_STAGES:
         print(f"DENIED: page text is pre-redaction and may only be read by "
               f"{sorted(PAGE_TEXT_ALLOWED_STAGES)} (checkpoint 2's own input; harness-guardrails P2). "
@@ -1771,323 +1965,203 @@ def human_review_complete_any(case_id: str) -> bool:
     )
 
 
-def cmd_read_ground_truth(args):
-    print(
-        "DENIED: ground-truth access is unavailable in the local Units 1-7 "
-        "harness; Evaluation requires the deferred authenticated isolated service"
-    )
-    return 1
+def _transcribe_ground_truth_ephemeral(path: Path, args) -> int:
+    """Vision-read a SCANNED ground-truth PDF and return text without storing it.
 
+    A scanned answer key had no sanctioned read path at all. The OCR pipeline
+    is deliberately closed to ground truth (it writes into data/processed,
+    which non-evaluation stages can read), and the 2026-07-22 Read deny-glob
+    closed direct opening -- correct, but together they left the one stage D1
+    exempts unable to read a scan by any legitimate means. On CASE_907 that
+    forced a workaround: rendering the pages to .tmp/ and reading them there,
+    which escaped the deny-glob (it is bound to a PATH, so copying out defeats
+    it), passed no gate, and left no record.
 
-def _read_generic_contract_bytes(case_id: str, filename: str) -> bytes:
-    path = _require_within(case_dir(case_id), filename)
-    descriptor = -1
+    The cache-directory alternative was rejected for reproducing exactly that:
+    a new persistent location holding answer-key content, protected only by
+    the same path-bound convention that had already failed. Here the rendered
+    pages live in a TemporaryDirectory removed in a finally, so no persistent
+    artifact exists even if transcription raises. The value delivered is not
+    access -- the workaround already had access -- but that the access is
+    gated, attributable and logged, and leaves nothing behind to leak later.
+
+    Authorization is NOT rechecked here: the caller already enforced
+    caller_stage == evaluation and the human-review flag before any bytes were
+    touched, and this runs strictly inside that branch.
+    """
+    import tempfile
+    from llm_providers import build_provider, ProviderConfigError
+    from ocr_extract import TRANSCRIBE_PROMPT, OCR_PROMPT_VERSION, split_to_page_images
+
+    tmp_root = tempfile.mkdtemp(prefix="gt_transcribe_")
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            raise ValueError(
-                f"{filename} is owned by a purpose-built medical DAO command"
-            )
-        with os.fdopen(descriptor, "rb") as stream:
-            descriptor = -1
-            return stream.read()
+        page_images = split_to_page_images(path, Path(tmp_root))
+        if not page_images:
+            print(f"RENDER_FAILED: {path.name} produced no page images")
+            return 1
+
+        # transcribe_image confines the child's Read to the image's own parent
+        # directory, and that directory here holds nothing but this one file's
+        # rendered pages -- so the reader cannot reach the rest of
+        # data/ground_truth even if the prompt is subverted.
+        try:
+            provider = build_provider()
+        except ProviderConfigError as exc:
+            print(f"PROVIDER_ERROR: {exc}")
+            return 1
+
+        print(f"<<<GROUND_TRUTH file={path.name} pages={len(page_images)} "
+              f"method=ephemeral_vision>>>")
+        for i, image_path in enumerate(page_images, start=1):
+            result = provider.transcribe_image(image_path, TRANSCRIBE_PROMPT, OCR_PROMPT_VERSION)
+            text = (getattr(result, "text", None) or "").strip()
+            if not text:
+                # Fail loud per page rather than emitting a silent blank that
+                # an evaluator could read as "this page says nothing".
+                print(f"<<<PAGE page={i}>>>")
+                print(f"TRANSCRIPTION_FAILED: provider returned no text for page {i}")
+                continue
+            print(f"<<<PAGE page={i}>>>")
+            print(text)
+        return 0
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
 
-def read_generic_file_bytes(case_id: str, filename: str) -> bytes:
-    """Read an allowed generic file from one verified regular-file descriptor."""
-    medical_repository.require_generic_target_allowed(
-        sys.modules[__name__], case_id, filename
-    )
-    medical_repository.require_generic_read_allowed(
-        sys.modules[__name__], case_id, filename
-    )
-    return _read_generic_contract_bytes(case_id, filename)
+def cmd_read_ground_truth(args):
+    if args.caller_stage != "evaluation":
+        print(f"DENIED: ground truth may only be read by the evaluation stage (harness-guardrails-dev D1). "
+              f"caller_stage={args.caller_stage!r} is not permitted. This is logged as a potential violation.")
+        return 1
+    review_flag = human_review_flag_path(args.case_id, args.version)
+    if not review_flag.exists():
+        print(f"DENIED: human review is not yet marked complete for {args.version} of this case. "
+              f"evaluation may not read ground truth until review is confirmed (D1) -- "
+              f"see dao.py mark-human-review-complete.")
+        return 1
+    gt_dir = DATA / "ground_truth" / args.case_id
+
+    # Without --file/--list this prints the directory path and stops, which is
+    # all it ever did. That was a real hole rather than a design: the 2026-07-22
+    # fleet review added a Read deny-glob over data/ground_truth (correctly --
+    # it stops a NON-evaluation agent reading the answer key), but gave the
+    # evaluation stage no sanctioned replacement. So the one stage D1 exempts
+    # was left authorized-but-unable: the gate says yes and hands back a path
+    # it is separately forbidden to open. CASE_021 evaluated before that glob
+    # landed; CASE_907 is the first case to hit it. --file/--list close it by
+    # making this command carry CONTENT, so the authorization and the read are
+    # the same logged event instead of two mechanisms that disagree.
+    wants_content = getattr(args, "list", False) or getattr(args, "file", None)
+    if wants_content and not gt_dir.is_dir():
+        # Only the content forms need the directory to exist. The bare form
+        # answers "am I authorized, and where", which is a real answer even for
+        # a case whose ground truth has not been placed yet -- callers depend on
+        # the gate's verdict being about authorization, not about file presence.
+        print(f"NOT_FOUND: no ground-truth directory for {args.case_id} at {gt_dir}")
+        return 1
+
+    files = sorted(p for p in gt_dir.iterdir() if p.is_file()) if gt_dir.is_dir() else []
+    if getattr(args, "list", False):
+        for p in files:
+            print(f"{p.stem}\t{p.name}\t{p.stat().st_size}")
+        return 0
+
+    target = getattr(args, "file", None)
+    if not target:
+        print(str(gt_dir))
+        return 0
+
+    _require_safe_id("ground-truth file id", target)
+    matches = [p for p in files if p.stem == target]
+    if not matches:
+        print(f"NOT_FOUND: no ground-truth file with id {target!r} in {gt_dir}. "
+              f"Known ids: {[p.stem for p in files]}")
+        return 1
+    path = matches[0]
+
+    if path.suffix.lower() == ".pdf":
+        from ocr_extract import pdf_embedded_page_texts
+        pages = pdf_embedded_page_texts(path)
+        if pages is None:
+            if not getattr(args, "transcribe", False):
+                print(f"NO_TEXT_LAYER: {path.name} has no whole-document embedded text layer. "
+                      f"Ground truth is read-only reference material and is deliberately NOT "
+                      f"put through the OCR pipeline (that would write it into data/processed, "
+                      f"where non-evaluation stages can read it). Re-run with --transcribe for "
+                      f"the sanctioned ephemeral vision read, which returns text without "
+                      f"persisting the answer key anywhere on disk.")
+                return 1
+            return _transcribe_ground_truth_ephemeral(path, args)
+        for i, text in enumerate(pages, start=1):
+            print(f"<<<PAGE page={i}>>>")
+            print(text)
+        return 0
+
+    from ocr_extract import decode_text_file
+    text, _encoding = decode_text_file(path)  # returns (text, encoding_used)
+    if not (text or "").strip():
+        print(f"EMPTY: {path.name} decoded to no content")
+        return 1
+    print(text)
+    return 0
 
 
+@traced_read("dao.read_contract")
 def cmd_read_contract(args):
+    # The medical contracts are owned by purpose-built commands: the ledger and
+    # the immutable revisions are never readable through the generic path, and
+    # a target that is a symlink or carries extra hardlinks is refused rather
+    # than read. Checked BEFORE the existence probe, so a refusal cannot be
+    # turned into an oracle for whether protected state exists.
+    # Resolve the path FIRST so a traversal attempt still exits hard, the way
+    # it did before this guard existed -- a refusal that merely returns 1 would
+    # downgrade a path-safety violation into an ordinary failure.
+    p = _require_within(case_dir(args.case_id), args.filename)
     try:
-        normalized = medical_repository.normalized_case_relative_target(
-            sys.modules[__name__], args.case_id, args.filename
-        )
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
-    try:
+        import medical_repository
+
         medical_repository.require_generic_read_allowed(
             sys.modules[__name__], args.case_id, args.filename
         )
     except ValueError as exc:
         print(f"FAIL: {exc}")
         return 1
-    if normalized == "extracted_claim_fields.json":
-        data, error = medical_repository.load_projection(
-            sys.modules[__name__], args.case_id
-        )
-        if error:
-            print(f"FAIL: {error}")
-            return 1
-        print(json.dumps(data, ensure_ascii=False, indent=2))
-        return 0
-    if normalized == "medical_variables.json":
-        data, error = _load_medical_revision(args.case_id, None)
-        if error:
-            print(f"FAIL: {error}")
-            return 1
-        print(json.dumps(data, ensure_ascii=False, indent=2))
-        return 0
-    if normalized == "_medical_review_ledger.json":
-        try:
-            data = load_medical_review_ledger(args.case_id)
-        except ValueError as exc:
-            print(f"FAIL: {exc}")
-            return 1
-        print(json.dumps(data, ensure_ascii=False, indent=2))
-        return 0
-    if Path(normalized).parts[:1] == ("_medical_variable_revisions",):
-        print("FAIL: immutable medical revisions require read-medical-variables")
-        return 1
-    p = _require_within(case_dir(args.case_id), args.filename)
     if not p.exists():
         print(f"NOT_FOUND: {p}")
         return 1
-    try:
-        payload = _read_generic_contract_bytes(args.case_id, args.filename)
-        text = payload.decode("utf-8")
-    except (OSError, UnicodeDecodeError, ValueError) as exc:
-        print(f"FAIL: {exc}")
-        return 1
-    print(text)
+    print(p.read_text(encoding="utf-8"))
     return 0
 
 
 def read_contract_data(case_id: str, filename: str):
-    """DAO-owned structured contract read for in-process pipeline tools."""
-    normalized = medical_repository.normalized_case_relative_target(
+    """DAO-owned structured contract read for in-process pipeline tools.
+
+    Carries the same medical-ownership guard as the CLI path. In-process
+    callers are the ones that matter most here: a pipeline tool importing the
+    DAO would otherwise reach protected state that `read-contract` refuses,
+    which is exactly the "guard on one path, nothing on the other" shape this
+    repo has closed three times already.
+    """
+    import medical_repository
+
+    medical_repository.require_generic_read_allowed(
+        sys.modules[__name__], case_id, filename
+    )
+    p = _require_within(case_dir(case_id), filename)
+    return load_json(p)
+
+
+def read_generic_file_bytes(case_id: str, filename: str) -> bytes:
+    """Read an allowed generic file, refusing medical-owned targets."""
+    import medical_repository
+
+    medical_repository.require_generic_target_allowed(
         sys.modules[__name__], case_id, filename
     )
     medical_repository.require_generic_read_allowed(
         sys.modules[__name__], case_id, filename
     )
-    if normalized == "extracted_claim_fields.json":
-        data, error = medical_repository.load_projection(
-            sys.modules[__name__], case_id
-        )
-        if error:
-            raise ValueError(error)
-        return data
-    if normalized == "medical_variables.json":
-        data, error = _load_medical_revision(case_id, None)
-        if error:
-            raise ValueError(error)
-        return data
-    if normalized == "_medical_review_ledger.json":
-        return load_medical_review_ledger(case_id)
-    if Path(normalized).parts[:1] == ("_medical_variable_revisions",):
-        raise ValueError(
-            "immutable medical revisions require read-medical-variables"
-        )
-    try:
-        return json.loads(_read_generic_contract_bytes(case_id, filename))
-    except FileNotFoundError:
-        return None
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError(f"cannot read generic contract {filename}: {exc}") from exc
-
-
-def medical_variables_path(case_id: str) -> Path:
-    return medical_repository.medical_variables_path(sys.modules[__name__], case_id)
-
-
-def medical_variable_revisions_dir(case_id: str) -> Path:
-    return medical_repository.revisions_dir(sys.modules[__name__], case_id)
-
-
-def _canonical_json_bytes(data: dict) -> bytes:
-    return medical_repository.canonical_json_bytes(data)
-
-
-def cmd_write_medical_variables(args):
-    return medical_repository.publish(sys.modules[__name__], args)
-
-
-def _load_medical_revision(
-    case_id: str, revision_sha: str | None
-) -> tuple[dict | None, str | None]:
-    return medical_repository.load_revision(
-        sys.modules[__name__], case_id, revision_sha
-    )
-
-
-def cmd_read_medical_variables(args):
-    return medical_repository.cmd_read_variables(sys.modules[__name__], args)
-
-
-def cmd_read_medical_evidence(args):
-    return medical_repository.cmd_read_evidence(sys.modules[__name__], args)
-
-
-def medical_review_ledger_path(case_id: str) -> Path:
-    from medical_review_ledger import ledger_path
-
-    return ledger_path(sys.modules[__name__], case_id)
-
-
-def load_medical_review_ledger(case_id: str) -> dict:
-    from medical_review_ledger import load_ledger
-
-    return load_ledger(sys.modules[__name__], case_id)
-
-
-def cmd_check_medical_reviews_clear(args):
-    from medical_review_ledger import cmd_check_clear
-
-    return cmd_check_clear(sys.modules[__name__], args)
-
-
-def _run_medical_review_mutation(command, args):
-    state_path = run_state_path(args.case_id)
-    owned_lock, existing_lock = acquire_owned_lock_blocking(
-        state_path,
-        args.held_by,
-        args.run_id,
-        "authorize canonical medical-review run owner",
-    )
-    if existing_lock is not None:
-        print(
-            f"LOCKED: held_by={existing_lock['held_by']} "
-            f"run_id={existing_lock['run_id']}"
-        )
-        return 1
-    assert owned_lock is not None
-    try:
-        try:
-            state = validated_run_state(args.case_id, allow_missing=True)
-        except ValueError as exc:
-            print(f"BLOCKED: {exc}")
-            return 1
-        owner = state.get("run_id")
-        if owner is None:
-            variables, error = _load_medical_revision(args.case_id, None)
-            if (
-                error
-                or variables is None
-                or variables.get("run_id") != args.run_id
-            ):
-                print(
-                    "BLOCKED: medical-review mutation does not match the "
-                    "canonical revision run owner"
-                )
-                return 1
-            state["run_id"] = args.run_id
-            save_run_state(args.case_id, state)
-        elif owner != args.run_id:
-            print("BLOCKED: medical-review mutation does not match the canonical run owner")
-            return 1
-        result = command(sys.modules[__name__], args)
-    finally:
-        release_owned_lock(owned_lock)
-    if result == 0:
-        from medical_review_ledger import reconcile_wait_projection
-
-        projected, _, error = reconcile_wait_projection(
-            sys.modules[__name__], args, blocking=False, automatic=True
-        )
-        if not projected:
-            print(
-                "WARNING: canonical medical-review mutation succeeded but "
-                f"run-state wait projection requires reconciliation: {error}"
-            )
-    return result
-
-
-def cmd_open_medical_review_item(args):
-    from medical_review_ledger import cmd_open
-
-    return _run_medical_review_mutation(cmd_open, args)
-
-
-def cmd_record_medical_referral_decision(args):
-    from medical_review_ledger import cmd_record_decision
-
-    return _run_medical_review_mutation(cmd_record_decision, args)
-
-
-def cmd_provide_medical_review_information(args):
-    from medical_review_ledger import cmd_provide_information
-
-    return _run_medical_review_mutation(cmd_provide_information, args)
-
-
-def cmd_transition_medical_review(args):
-    from medical_review_ledger import cmd_transition
-
-    return _run_medical_review_mutation(cmd_transition, args)
-
-
-def cmd_reconcile_medical_review_waits(args):
-    from medical_review_ledger import reconcile_wait_projection
-
-    projected, changed, error = reconcile_wait_projection(
-        sys.modules[__name__], args
-    )
-    if not projected:
-        print(f"FAIL: medical-review wait reconciliation failed: {error}")
-        return 1
-    print(json.dumps({
-        "case_id": args.case_id,
-        "changed": changed,
-        "reconciled": True,
-    }))
-    return 0
-
-
-def cmd_read_medical_review_ledger(args):
-    from medical_review_ledger import cmd_read_ledger
-
-    return cmd_read_ledger(sys.modules[__name__], args)
-
-
-def cmd_read_medical_review_evidence(args):
-    from medical_review_ledger import cmd_read_evidence
-
-    return cmd_read_evidence(sys.modules[__name__], args)
-
-
-def cmd_read_medical_review_outcomes(args):
-    from medical_review_ledger import cmd_read_outcomes
-
-    allowed_consumers = {
-        "screening_report",
-        "denial_validation",
-        "draft_report_v1",
-        "draft_report_v2",
-    }
-    if args.caller_stage not in allowed_consumers:
-        print("BLOCKED: caller stage is not authorized for medical-review outcomes")
-        return 1
-    try:
-        state = validated_run_state(args.case_id)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"BLOCKED: {exc}")
-        return 1
-    if state.get("run_id") != args.run_id:
-        print("BLOCKED: outcome read does not match the canonical run owner")
-        return 1
-    stage = next(
-        (
-            item
-            for item in state.get("stages", [])
-            if item.get("stage_name") == args.caller_stage
-        ),
-        None,
-    )
-    if stage is None or stage.get("status") != "in_progress":
-        print("BLOCKED: authorized outcome consumer stage is not in progress")
-        return 1
-    return cmd_read_outcomes(sys.modules[__name__], args)
+    return _require_within(case_dir(case_id), filename).read_bytes()
 
 
 def _effective_segmentation_status(document: dict) -> str:
@@ -4048,36 +4122,20 @@ def _invalidate_stale_downstream(args, data: dict, target: Path) -> None:
 
 
 def cmd_write_contract(args):
-    try:
-        medical_repository.require_generic_target_allowed(
-            sys.modules[__name__], args.case_id, args.filename
-        )
-    except ValueError as exc:
-        print(f"FAIL: {exc}")
-        return 1
-    if Path(args.filename).name in _PROTECTED_CONTRACT_FILES:
+    normalized_filename = str(args.filename).replace("\\", "/")
+    if (Path(args.filename).name in _PROTECTED_CONTRACT_FILES
+            or normalized_filename.startswith("_driver_receipts/")):
         print(f"FAIL: {args.filename} is DAO-owned and has no write-contract "
               "path -- it is issued only by the DAO command that derives it, "
               "so that a citing contract's reference cannot be satisfied by a "
               "receipt the caller wrote for itself")
         return 1
     target = _require_within(case_dir(args.case_id), args.filename)
-    try:
-        owned_lock, existing_lock = acquire_lock_beneath_blocking(
-            case_dir(args.case_id),
-            args.filename,
-            args.held_by,
-            args.run_id,
-            args.purpose or f"write {args.filename}",
-        )
-    except (OSError, ValueError) as exc:
-        print(f"FAIL: unsafe generic lock target: {exc}")
-        return 1
+    existing_lock = acquire_lock_blocking(target, args.held_by, args.run_id, args.purpose or f"write {args.filename}")
     if existing_lock is not None:
         print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return 1
-    assert owned_lock is not None
     policy_layer_changed = None
     try:
         data = json.loads(Path(args.data_file).read_text(encoding="utf-8"))
@@ -4187,16 +4245,7 @@ def cmd_write_contract(args):
             for e in cross_errors:
                 print(f"  - {e}")
             return 1
-        try:
-            atomic_write_bytes_beneath(
-                case_dir(args.case_id),
-                args.filename,
-                json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
-                owned_lock.parent_identity,
-            )
-        except (OSError, ValueError) as exc:
-            print(f"FAIL: unsafe generic write target: {exc}")
-            return 1
+        atomic_write_json(target, data)
         print(f"PASS: wrote {target}")
         if (schema_name in _POLICY_LAYER_SCHEMAS
                 and previous_contract is not None
@@ -4218,12 +4267,13 @@ def cmd_write_contract(args):
             # so an unmet upstream dependency doesn't fail an otherwise-valid
             # contract write -- it just declines to advance the stage.
             state = _update_run_state(args.case_id, args.run_id, args.stage, "in_progress",
-                                      args.held_by, dep_check="soft")
+                                      args.held_by, dep_check="soft",
+                                      explicit_attempt=False)
             if state is None:
                 print("WARNING: contract write succeeded, but run-state could not be updated (see LOCKED above) -- "
                       "run-state may now lag behind actual progress; retry the run-state update.")
     finally:
-        release_lock_beneath(owned_lock)
+        release_lock(target)
 
     # After the contract lock is released: the cascade takes the run-state
     # lock, and a downstream stage recorded `passed` against the previous
@@ -4271,6 +4321,7 @@ _PROVENANCE_MANIFEST_FIELDS = frozenset({
 })
 
 
+@trace_mod.traced("dao.patch_manifest_document")
 def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_by: str, run_id: str,
                              stage: str | None = None, purpose: str | None = None):
     """Atomically read-modify-write a single document's fields in
@@ -4324,22 +4375,33 @@ def patch_manifest_document(case_id: str, document_id: str, fields: dict, held_b
             return False, "FAIL: segment-lineage validation errors for " + str(target) + " -- not written:\n" + \
                 "\n".join(f"  - {e}" for e in lineage_errors)
         atomic_write_json(target, manifest)
-        if stage:
-            # in_progress, not passed -- see cmd_write_contract: patching one
-            # document's manifest fields is progress within document_processing,
-            # never the whole stage finalizing. dep_check='soft' so a manifest
-            # patch never fails on run-state dependencies.
-            state = _update_run_state(case_id, run_id, stage, "in_progress", held_by, dep_check="soft")
-            if state is None:
-                result = True, f"PASS: patched {document_id} in {target}\n" \
-                    "WARNING: patch succeeded, but run-state could not be updated (lock contention) -- " \
-                    "run-state may now lag behind actual progress; retry the run-state update."
-            else:
-                result = True, f"PASS: patched {document_id} in {target}"
-        else:
-            result = True, f"PASS: patched {document_id} in {target}"
+        result = True, f"PASS: patched {document_id} in {target}"
     finally:
         release_lock(target)
+    # Run-state marker outside the manifest lock, for the same reason the
+    # cascade below is outside it -- and additionally because _update_run_state
+    # acquires a SECOND lock (_run_state.json). Holding the manifest lock while
+    # requesting that one is hold-and-wait: with document-level workers (T8),
+    # worker A holding the manifest and waiting for run-state, while worker B
+    # holds run-state and waits for the manifest, is a deadlock. P5 polls for
+    # 15 minutes before giving up, so it would surface as an intermittent long
+    # stall rather than a crash. Taking one lock at a time removes the
+    # condition outright instead of managing the ordering.
+    #
+    # Nothing is lost by moving it: the marker is in_progress, not passed (see
+    # cmd_write_contract -- patching one document's fields is progress within
+    # document_processing, never the whole stage finalizing), it runs with
+    # dep_check='soft' so it never fails the patch on run-state dependencies,
+    # and a failure here was already only a warning on an otherwise successful
+    # return. The manifest write above is durable before this runs.
+    if stage:
+        state = _update_run_state(
+            case_id, run_id, stage, "in_progress", held_by,
+            dep_check="soft", explicit_attempt=False)
+        if state is None:
+            result = True, f"PASS: patched {document_id} in {target}\n" \
+                "WARNING: patch succeeded, but run-state could not be updated (lock contention) -- " \
+                "run-state may now lag behind actual progress; retry the run-state update."
     # Cascade outside the manifest lock: a changed page_map/source identity
     # moves the ground every downstream stage's provenance was checked against.
     # The patch is durable by now, so a failed cascade cannot be rolled back --
@@ -4506,6 +4568,7 @@ def replace_manifest_documents(case_id: str, bundle_id: str, bundle_fields: dict
     if existing_lock is not None:
         return False, (f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
                         f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+    result = None
     try:
         if not target.exists():
             return False, f"FAIL: no document_manifest.json for {case_id}"
@@ -4535,20 +4598,21 @@ def replace_manifest_documents(case_id: str, bundle_id: str, bundle_fields: dict
             return False, "FAIL: schema validation errors for " + str(target) + " -- not written:\n" + \
                 "\n".join(f"  - {e}" for e in errors)
         atomic_write_json(target, manifest)
-        if stage:
-            # A passed stage must always be coupled to its P10 snapshot.
-            # Segmentation previously called _update_run_state(..., "passed")
-            # directly, which is now deliberately refused.  Finalize only
-            # after the updated manifest is durable so the snapshot captures
-            # the exact split that this stage approved.
-            state = _finalize_stage(case_id, run_id, stage, held_by)
-            if state is None:
-                return True, f"PASS: split {bundle_id} into {len(new_documents)} document(s) in {target}\n" \
-                    "WARNING: split succeeded, but the stage could not be finalized with its snapshot -- " \
-                    "run-state may now lag behind actual progress; retry finalize-stage."
-        return True, f"PASS: split {bundle_id} into {len(new_documents)} document(s) in {target}"
+        result = (True, f"PASS: split {bundle_id} into {len(new_documents)} document(s) in {target}")
     finally:
         release_lock(target)
+    if stage:
+        # Segmentation is a checkpoint inside document_processing. It cannot
+        # finalize the stage while child classification, redaction and
+        # case-wide chunking still remain. The orchestrator owns attempt
+        # boundaries and finalization.
+        state = _update_run_state(
+            case_id, run_id, stage, "in_progress", held_by,
+            dep_check="soft", explicit_attempt=False)
+        if state is None:
+            result = (True, result[1] + "\nWARNING: split succeeded, but run-state "
+                      "could not be updated -- retry the progress update.")
+    return result
 
 
 def cmd_replace_manifest_documents(args):
@@ -4978,11 +5042,19 @@ def _invalidate_dependents(case_id, upstream_stage, reason, held_by, run_id,
     try:
         state = load_run_state(case_id)
         changed = []
+        abandoned = []
         for entry in state.get("stages", []):
             if entry.get("stage_name") not in dependents:
                 continue
             if entry.get("status") not in ("passed", "in_progress"):
                 continue
+            # An in_progress stage has an OPEN attempt marker. Invalidating it
+            # without closing that marker leaves the attempt open forever, and
+            # aggregate-trace then reports the whole run as incomplete coverage
+            # for a stage that demonstrably stopped. Collect the close here and
+            # emit after the write, so a failed write emits nothing.
+            if entry.get("status") == "in_progress" and entry.get("attempt_count", 0) > 0:
+                abandoned.append((entry.get("stage_name"), entry["attempt_count"]))
             entry["status"] = "failed"
             entry["invalidated_at"] = now_iso()
             entry["invalidation_reason"] = reason
@@ -5002,6 +5074,10 @@ def _invalidate_dependents(case_id, upstream_stage, reason, held_by, run_id,
                 print(f"  - {error}")
             return []
         save_run_state(case_id, state)
+        for stage_name, attempt in abandoned:
+            _emit_stage_attempt_marker(
+                case_id, run_id, stage_name, attempt, "abandoned",
+                outcome="interrupted")
         print(f"INVALIDATED (upstream {upstream_stage} changed): "
               f"{', '.join(sorted(changed))}")
         return changed
@@ -5052,6 +5128,7 @@ def _invalidate_policy_layer(case_id, reason, held_by, run_id,
     try:
         state = load_run_state(case_id)
         changed = []
+        abandoned = []
         for entry in state.get("stages", []):
             if entry.get("stage_name") not in affected:
                 continue
@@ -5060,6 +5137,12 @@ def _invalidate_policy_layer(case_id, reason, held_by, run_id,
             # an already-invalidated case changes nothing and still succeeds.
             if entry.get("status") not in ("passed", "in_progress"):
                 continue
+            # See _invalidate_dependents: an in_progress stage's attempt marker
+            # is open, and this cascade is exactly what ends that attempt. The
+            # policy stage itself is in `affected` here, so this is the path
+            # that left CASE_142's attempt 1 open with no end marker.
+            if entry.get("status") == "in_progress" and entry.get("attempt_count", 0) > 0:
+                abandoned.append((entry.get("stage_name"), entry["attempt_count"]))
             entry["status"] = "failed"
             entry["invalidated_at"] = now_iso()
             entry["invalidation_reason"] = reason
@@ -5073,6 +5156,10 @@ def _invalidate_policy_layer(case_id, reason, held_by, run_id,
                 "policy-layer invalidation would make run-state "
                 "schema-invalid: " + "; ".join(errors))
         save_run_state(case_id, state)
+        for stage_name, attempt in abandoned:
+            _emit_stage_attempt_marker(
+                case_id, run_id, stage_name, attempt, "abandoned",
+                outcome="interrupted")
         return changed
     finally:
         if not lock_already_held:
@@ -5085,46 +5172,19 @@ def _write_text_locked(case_id, filename, text_file, held_by, run_id, purpose=No
     against. Shared by cmd_write_text and cmd_write_reviewed_draft, same
     pattern as _update_run_state being shared by cmd_update_run_state and
     cmd_snapshot_backup."""
-    try:
-        medical_repository.require_generic_target_allowed(
-            sys.modules[__name__], case_id, filename
-        )
-    except ValueError as exc:
-        print(f"FAIL: {exc}")
-        return 1
     target = _require_within(case_dir(case_id), filename)
-    try:
-        owned_lock, existing_lock = acquire_lock_beneath_blocking(
-            case_dir(case_id),
-            filename,
-            held_by,
-            run_id,
-            purpose or f"write {filename}",
-        )
-    except (OSError, ValueError) as exc:
-        print(f"FAIL: unsafe generic lock target: {exc}")
-        return 1
+    existing_lock = acquire_lock_blocking(target, held_by, run_id, purpose or f"write {filename}")
     if existing_lock is not None:
         print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return 1
-    assert owned_lock is not None
     try:
         text = Path(text_file).read_text(encoding="utf-8")
-        try:
-            atomic_write_text_beneath(
-                case_dir(case_id),
-                filename,
-                text,
-                owned_lock.parent_identity,
-            )
-        except (OSError, ValueError) as exc:
-            print(f"FAIL: unsafe generic write target: {exc}")
-            return 1
+        atomic_write_text(target, text)
         print(f"PASS: wrote {target}")
         return 0
     finally:
-        release_lock_beneath(owned_lock)
+        release_lock(target)
 
 
 def cmd_write_text(args):
@@ -5136,6 +5196,18 @@ def cmd_write_text(args):
         print(
             f"FAIL: {args.filename} is DAO-owned and cannot be replaced "
             "through write-text -- use its dedicated issuing command")
+        return 1
+    # Medical-owned contracts need a path-aware check, not a basename one: the
+    # immutable revisions live in a subdirectory, so matching on name alone
+    # would let `_medical_variable_revisions/<sha>.json` through.
+    try:
+        import medical_repository
+
+        medical_repository.require_generic_target_allowed(
+            sys.modules[__name__], args.case_id, args.filename
+        )
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
         return 1
     return _write_text_locked(args.case_id, args.filename, args.text_file, args.held_by, args.run_id, args.purpose)
 
@@ -5153,64 +5225,89 @@ def cmd_write_reviewed_draft(args):
 
 # ------------------------------------------------------------ src ledger --
 
-def source_ledger_path(case_id: str) -> Path:
-    return case_dir(case_id) / "_source_ledger.json"
+def _canonical_json_bytes(data) -> bytes:
+    """Deterministic JSON bytes -- the digest basis for every ledger binding.
+
+    Kept byte-compatible with `make_history_boundary` below, which sorts keys
+    at hash time. That is what lets this validator accept a boundary written by
+    the builder already on this branch: the stored `baseline_state` may carry a
+    different key order, but the digest is taken over the sorted form either
+    way. Verified against a real boundary before transplanting.
+    """
+    return json.dumps(
+        data, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
 
 
-def cmd_read_ledger(args):
-    try:
-        ledger = validated_source_ledger(args.case_id)
-    except ValueError as exc:
-        print(f"FAIL: {exc}")
-        return 1
-    print(json.dumps(ledger, ensure_ascii=False, sort_keys=True))
-    return 0
+def _validate_generic_ledger(ledger: dict, case_id: str, schema_name: str,
+                             *, replay_history: bool = True) -> None:
+    """Schema-check a ledger, then prove every operation binds to real state.
 
-
-def make_history_boundary(
-    baseline_state: list[dict],
-    *,
-    mode: str,
-    established_at: str | None = None,
-    absorbed_operations: list[dict] | None = None,
-    forked_operations: list[dict] | None = None,
-    predecessor_state: list[dict] | None = None,
-) -> dict:
-    baseline = json.loads(json.dumps(baseline_state))
-    boundary = {
-        "mode": mode,
-        "established_at": established_at or now_iso(),
-        "baseline_sha256": hashlib.sha256(
-            _canonical_json_bytes(baseline)
-        ).hexdigest(),
-        "baseline_state": baseline,
-    }
-    if absorbed_operations is not None:
-        absorbed = json.loads(json.dumps(absorbed_operations))
-        boundary["absorbed_operation_count"] = len(absorbed)
-        boundary["absorbed_operations_sha256"] = hashlib.sha256(
-            _canonical_json_bytes(absorbed)
-        ).hexdigest()
-    if forked_operations is not None:
-        forked = json.loads(json.dumps(forked_operations))
-        boundary["forked_operation_count"] = len(forked)
-        boundary["forked_operations_sha256"] = hashlib.sha256(
-            _canonical_json_bytes(forked)
-        ).hexdigest()
-    if predecessor_state is not None:
-        predecessor = json.loads(json.dumps(predecessor_state))
-        boundary["predecessor_state_sha256"] = hashlib.sha256(
-            _canonical_json_bytes(predecessor)
-        ).hexdigest()
-    return boundary
+    Transplanted from 633bd7b0 (see _normalize_legacy_run_state for why this
+    was missing). Three bindings are checked, and each catches a different way
+    a ledger can lie: the request digest catches a rewritten request, the
+    result/target check catches an operation that claims to have changed an
+    entry that does not exist or does not match, and the replay below catches
+    a final state that no sequence of the recorded operations could produce.
+    """
+    errors = _schema_check(ledger, schema_name)
+    if errors:
+        raise ValueError(f"{schema_name} is invalid: " + "; ".join(errors))
+    if ledger.get("case_id") != case_id:
+        raise ValueError("ledger belongs to a different case")
+    operation_ids = [op["operation_id"] for op in ledger["operations"]]
+    if len(operation_ids) != len(set(operation_ids)):
+        raise ValueError("ledger has duplicate operation_id")
+    source_names = {e["file_name"] for e in ledger.get("files", [])}
+    conflict_ids = {e["conflict_id"] for e in ledger.get("conflicts", [])}
+    for operation in ledger["operations"]:
+        request = operation["request"]
+        if (request["case_id"] != case_id
+                or request["operation_id"] != operation["operation_id"]
+                or hashlib.sha256(_canonical_json_bytes(request)).hexdigest()
+                != operation["request_sha256"]):
+            raise ValueError("ledger operation request binding is invalid")
+        payload = request["payload"]
+        result = operation["result"]
+        if schema_name == "source_ledger.schema.json":
+            expected = {"action": "set_status",
+                        "target_id": payload["file_name"],
+                        "status": payload["status"]}
+            target_exists = result["target_id"] in source_names
+        elif request["action"] == "add":
+            expected = {"action": "add", "target_id": result["target_id"],
+                        "status": "pending"}
+            target_exists = result["target_id"] in conflict_ids
+            conflict = next(
+                (e for e in ledger["conflicts"]
+                 if e["conflict_id"] == result["target_id"]), None)
+            target_exists = target_exists and conflict is not None and all((
+                conflict["raised_by_stage"] == payload["stage"],
+                conflict["field_or_topic"] == payload["topic"],
+                conflict["sources"] == payload["sources"],
+            ))
+        else:
+            expected = {"action": "set_verdict",
+                        "target_id": payload["conflict_id"],
+                        "status": payload["verdict"]}
+            target_exists = result["target_id"] in conflict_ids
+        if result != expected or not target_exists:
+            raise ValueError("ledger operation result binding is invalid")
+    if replay_history:
+        _replay_generic_ledger_history(ledger, schema_name)
 
 
 def _replay_generic_ledger_history(ledger: dict, schema_name: str) -> None:
+    """Replay the operation log onto the baseline and demand the current state.
+
+    This is the check that makes the ledger tamper-evident rather than merely
+    well-formed: an entry edited in place without a matching operation shows up
+    here as a replay mismatch, because the recorded history cannot produce it.
+    """
     boundary = ledger["history_boundary"]
     baseline = boundary["baseline_state"]
     if boundary["baseline_sha256"] != hashlib.sha256(
-        _canonical_json_bytes(baseline)
-    ).hexdigest():
+            _canonical_json_bytes(baseline)).hexdigest():
         raise ValueError("ledger history boundary digest is invalid")
     replayed = json.loads(json.dumps(baseline))
     absorbed_count = boundary.get("absorbed_operation_count", 0)
@@ -5218,8 +5315,8 @@ def _replay_generic_ledger_history(ledger: dict, schema_name: str) -> None:
         raise ValueError("ledger absorbed-operation boundary exceeds history")
     absorbed = ledger["operations"][:absorbed_count]
     if "absorbed_operations_sha256" in boundary and boundary[
-        "absorbed_operations_sha256"
-    ] != hashlib.sha256(_canonical_json_bytes(absorbed)).hexdigest():
+            "absorbed_operations_sha256"] != hashlib.sha256(
+            _canonical_json_bytes(absorbed)).hexdigest():
         raise ValueError("ledger absorbed-operation boundary digest is invalid")
     for operation in ledger["operations"][absorbed_count:]:
         request = operation["request"]
@@ -5227,21 +5324,15 @@ def _replay_generic_ledger_history(ledger: dict, schema_name: str) -> None:
         result = operation["result"]
         completed_at = operation["completed_at"]
         if schema_name == "source_ledger.schema.json":
-            entry = next(
-                (
-                    item for item in replayed
-                    if item["file_name"] == payload["file_name"]
-                ),
-                None,
-            )
+            entry = next((i for i in replayed
+                          if i["file_name"] == payload["file_name"]), None)
             if entry is None:
                 raise ValueError("ledger operation targets no baseline file")
             entry["review_status"] = payload["status"]
             entry["reviewed_by"] = payload["reviewer"]
             entry["reviewed_at"] = completed_at
             entry["rejection_reason"] = (
-                payload["reason"] if payload["status"] == "rejected" else None
-            )
+                payload["reason"] if payload["status"] == "rejected" else None)
         elif request["action"] == "add":
             replayed.append({
                 "conflict_id": result["target_id"],
@@ -5253,28 +5344,27 @@ def _replay_generic_ledger_history(ledger: dict, schema_name: str) -> None:
                 "resolved_at": None,
             })
         else:
-            entry = next(
-                (
-                    item for item in replayed
-                    if item["conflict_id"] == payload["conflict_id"]
-                ),
-                None,
-            )
+            entry = next((i for i in replayed
+                          if i["conflict_id"] == payload["conflict_id"]), None)
             if entry is None:
                 raise ValueError("ledger operation targets no replayed conflict")
             entry["verdict"] = payload["verdict"]
             entry["resolution_note"] = payload["note"]
             entry["resolved_at"] = completed_at
-    current = (
-        ledger["files"]
-        if schema_name == "source_ledger.schema.json"
-        else ledger["conflicts"]
-    )
+    current = (ledger["files"] if schema_name == "source_ledger.schema.json"
+               else ledger["conflicts"])
     if replayed != current:
         raise ValueError("ledger state does not replay from its history boundary")
 
 
 def _validate_predecessor_final_state(ledger: dict, schema_name: str) -> None:
+    """Refuse to absorb a predecessor whose state contradicts its own receipts.
+
+    Absorbing operations means trusting that the current state is what they
+    produced. If the newest receipt for an entry disagrees with that entry, the
+    ledger was edited outside its operation log, and freezing that into a new
+    baseline would make the edit permanent and invisible.
+    """
     if schema_name == "source_ledger.schema.json":
         latest = {}
         for operation in ledger["operations"]:
@@ -5282,18 +5372,17 @@ def _validate_predecessor_final_state(ledger: dict, schema_name: str) -> None:
         current = {entry["file_name"]: entry for entry in ledger["files"]}
         for file_name, operation in latest.items():
             payload = operation["request"]["payload"]
-            entry = current[file_name]
-            expected_reason = (
-                payload["reason"] if payload["status"] == "rejected" else None
-            )
-            if (
-                entry["review_status"] != payload["status"]
-                or entry.get("reviewed_by") != payload["reviewer"]
-                or entry.get("rejection_reason") != expected_reason
-            ):
+            entry = current.get(file_name)
+            if entry is None:
                 raise ValueError(
-                    "predecessor source ledger contradicts its latest receipt"
-                )
+                    "predecessor source ledger receipt targets a missing file")
+            expected_reason = (
+                payload["reason"] if payload["status"] == "rejected" else None)
+            if (entry["review_status"] != payload["status"]
+                    or entry.get("reviewed_by") != payload["reviewer"]
+                    or entry.get("rejection_reason") != expected_reason):
+                raise ValueError(
+                    "predecessor source ledger contradicts its latest receipt")
         return
     expected = {}
     for operation in ledger["operations"]:
@@ -5316,25 +5405,31 @@ def _validate_predecessor_final_state(ledger: dict, schema_name: str) -> None:
             })
     current = {entry["conflict_id"]: entry for entry in ledger["conflicts"]}
     for target_id, fields in expected.items():
-        if any(current[target_id].get(key) != value for key, value in fields.items()):
+        if target_id not in current:
             raise ValueError(
-                "predecessor conflict ledger contradicts its latest receipt"
-            )
+                "predecessor conflict ledger receipt targets a missing conflict")
+        if any(current[target_id].get(k) != v for k, v in fields.items()):
+            raise ValueError(
+                "predecessor conflict ledger contradicts its latest receipt")
 
 
 def _normalize_predecessor_timestamps(ledger: dict, schema_name: str) -> None:
+    """Align an absorbed entry's timestamp with the receipt that produced it.
+
+    The 60-second window is the tolerance for state authored just before its
+    receipt was committed. A negative or larger gap means the two were not
+    written by the same operation, so the pairing is refused rather than
+    normalized into agreement.
+    """
     latest = {}
     for operation in ledger["operations"]:
         payload = operation["request"]["payload"]
-        target_id = (
-            payload["file_name"]
-            if schema_name == "source_ledger.schema.json"
-            else operation["result"]["target_id"]
-        )
+        target_id = (payload["file_name"]
+                     if schema_name == "source_ledger.schema.json"
+                     else operation["result"]["target_id"])
         latest[target_id] = operation
-    state_key = (
-        "files" if schema_name == "source_ledger.schema.json" else "conflicts"
-    )
+    state_key = ("files" if schema_name == "source_ledger.schema.json"
+                 else "conflicts")
     id_key = "file_name" if state_key == "files" else "conflict_id"
     current = {entry[id_key]: entry for entry in ledger[state_key]}
     for target_id, operation in latest.items():
@@ -5345,8 +5440,7 @@ def _normalize_predecessor_timestamps(ledger: dict, schema_name: str) -> None:
         if state_key == "conflicts" and action == "add":
             if entry.get(timestamp_key) is not None:
                 raise ValueError(
-                    "pending predecessor conflict has a resolution timestamp"
-                )
+                    "pending predecessor conflict has a resolution timestamp")
             continue
         authored_at = entry.get(timestamp_key)
         if not isinstance(authored_at, str):
@@ -5359,87 +5453,21 @@ def _normalize_predecessor_timestamps(ledger: dict, schema_name: str) -> None:
         delay = (completed - authored).total_seconds()
         if delay < 0 or delay > 60:
             raise ValueError(
-                "predecessor state timestamp is inconsistent with its receipt"
-            )
+                "predecessor state timestamp is inconsistent with its receipt")
         entry[timestamp_key] = completed_at
 
 
-def _validate_generic_ledger(
-    ledger: dict,
-    case_id: str,
-    schema_name: str,
-    *,
-    replay_history: bool = True,
-) -> None:
-    errors = _schema_check(ledger, schema_name)
-    if errors:
-        raise ValueError(f"{schema_name} is invalid: " + "; ".join(errors))
-    if ledger.get("case_id") != case_id:
-        raise ValueError("ledger belongs to a different case")
-    operation_ids = [
-        operation["operation_id"] for operation in ledger["operations"]
-    ]
-    if len(operation_ids) != len(set(operation_ids)):
-        raise ValueError("ledger has duplicate operation_id")
-    source_names = {entry["file_name"] for entry in ledger.get("files", [])}
-    conflict_ids = {
-        entry["conflict_id"] for entry in ledger.get("conflicts", [])
-    }
-    for operation in ledger["operations"]:
-        request = operation["request"]
-        if (
-            request["case_id"] != case_id
-            or request["operation_id"] != operation["operation_id"]
-            or hashlib.sha256(_canonical_json_bytes(request)).hexdigest()
-            != operation["request_sha256"]
-        ):
-            raise ValueError("ledger operation request binding is invalid")
-        payload = request["payload"]
-        result = operation["result"]
-        if schema_name == "source_ledger.schema.json":
-            expected = {
-                "action": "set_status",
-                "target_id": payload["file_name"],
-                "status": payload["status"],
-            }
-            target_exists = result["target_id"] in source_names
-        elif request["action"] == "add":
-            expected = {
-                "action": "add",
-                "target_id": result["target_id"],
-                "status": "pending",
-            }
-            target_exists = result["target_id"] in conflict_ids
-            conflict = next(
-                entry for entry in ledger["conflicts"]
-                if entry["conflict_id"] == result["target_id"]
-            ) if target_exists else None
-            target_exists = target_exists and all((
-                conflict["raised_by_stage"] == payload["stage"],
-                conflict["field_or_topic"] == payload["topic"],
-                conflict["sources"] == payload["sources"],
-            ))
-        else:
-            expected = {
-                "action": "set_verdict",
-                "target_id": payload["conflict_id"],
-                "status": payload["verdict"],
-            }
-            target_exists = result["target_id"] in conflict_ids
-        if result != expected or not target_exists:
-            raise ValueError("ledger operation result binding is invalid")
-    if replay_history:
-        _replay_generic_ledger_history(ledger, schema_name)
+def _normalize_legacy_generic_ledger(ledger: dict, *, version: str,
+                                     state_key: str, schema_name: str,
+                                     predecessor_versions: set) -> dict:
+    """Bring a pre-history-chain ledger up to the current version.
 
-
-def _normalize_legacy_generic_ledger(
-    ledger: dict,
-    *,
-    version: str,
-    state_key: str,
-    schema_name: str,
-    predecessor_versions: set[str],
-) -> dict:
+    A ledger written before the chain existed carries no operations to replay,
+    so its current state becomes the baseline (`legacy_snapshot`) rather than
+    being rejected -- the history starts now instead of pretending to reach
+    back. A ledger that has operations but no boundary is validated WITHOUT
+    replay first, then its operations are absorbed into the new boundary.
+    """
     has_version = "ledger_version" in ledger
     has_operations = "operations" in ledger
     has_boundary = "history_boundary" in ledger
@@ -5448,88 +5476,50 @@ def _normalize_legacy_generic_ledger(
         ledger["ledger_version"] = version
         ledger["operations"] = []
         ledger["history_boundary"] = make_history_boundary(
-            ledger[state_key],
-            mode="legacy_snapshot",
-            established_at=(
-                ledger.get("updated_at")
-                or ledger.get("created_at")
-                or "1970-01-01T00:00:00+00:00"
-            ),
-        )
+            ledger[state_key], mode="legacy_snapshot",
+            established_at=(ledger.get("updated_at") or ledger.get("created_at")
+                            or "1970-01-01T00:00:00+00:00"))
         return ledger
-    if (
-        has_version
-        and has_operations
-        and not has_boundary
-        and ledger.get("ledger_version") in predecessor_versions
-    ):
+    if (has_version and has_operations and not has_boundary
+            and ledger.get("ledger_version") in predecessor_versions):
         candidate = json.loads(json.dumps(ledger))
         candidate["ledger_version"] = version
         candidate["history_boundary"] = make_history_boundary(
-            candidate[state_key], mode="legacy_snapshot"
-        )
-        _validate_generic_ledger(
-            candidate,
-            candidate.get("case_id"),
-            schema_name,
-            replay_history=False,
-        )
+            candidate[state_key], mode="legacy_snapshot")
+        _validate_generic_ledger(candidate, candidate.get("case_id"),
+                                 schema_name, replay_history=False)
         _validate_predecessor_final_state(candidate, schema_name)
         absorbed = candidate["operations"]
         predecessor_state = json.loads(json.dumps(candidate[state_key]))
         _normalize_predecessor_timestamps(candidate, schema_name)
         candidate["history_boundary"] = make_history_boundary(
-            candidate[state_key],
-            mode="legacy_snapshot",
+            candidate[state_key], mode="legacy_snapshot",
             absorbed_operations=absorbed,
-            predecessor_state=predecessor_state,
-        )
+            predecessor_state=predecessor_state)
         return candidate
     if not (has_version and has_operations and has_boundary):
         raise ValueError("ledger version/operation/history boundary is incomplete")
     return ledger
 
 
-def validated_source_ledger(case_id: str) -> dict:
-    ledger = load_json(source_ledger_path(case_id))
-    if ledger is None:
-        raise ValueError("source ledger not found")
-    ledger = _normalize_legacy_generic_ledger(
-        ledger,
-        version="source_ledger.v0.4",
-        state_key="files",
-        schema_name="source_ledger.schema.json",
-        predecessor_versions={"source_ledger.v0.3"},
-    )
-    _validate_generic_ledger(
-        ledger, case_id, "source_ledger.schema.json"
-    )
-    return ledger
+def _prepare_ledger_operation(ledger: dict, args, action: str,
+                              payload: dict) -> tuple:
+    """Build an operation envelope, or return the one already committed.
 
-
-def _prepare_ledger_operation(
-    ledger: dict,
-    args,
-    action: str,
-    payload: dict,
-) -> tuple[dict, str, dict | None]:
+    The idempotency here is the point of `--operation-id`: a retried approval
+    with the same id and the same request is a no-op that returns the original
+    result, while the same id carrying a DIFFERENT request is refused rather
+    than silently overwriting history.
+    """
     operation_id = getattr(args, "operation_id", None)
     if not isinstance(operation_id, str) or not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}", operation_id
-    ):
+            r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}", operation_id):
         raise ValueError("operation_id has an invalid format")
-    request = {
-        "case_id": args.case_id,
-        "operation_id": operation_id,
-        "action": action,
-        "payload": payload,
-    }
+    request = {"case_id": args.case_id, "operation_id": operation_id,
+               "action": action, "payload": payload}
     request_sha256 = hashlib.sha256(_canonical_json_bytes(request)).hexdigest()
-    matches = [
-        operation
-        for operation in ledger["operations"]
-        if operation.get("operation_id") == operation_id
-    ]
+    matches = [op for op in ledger["operations"]
+               if op.get("operation_id") == operation_id]
     if len(matches) > 1:
         raise ValueError("duplicate committed operation_id")
     if matches:
@@ -5544,14 +5534,9 @@ def _prepare_ledger_operation(
     return request, request_sha256, None
 
 
-def _commit_ledger_operation(
-    ledger: dict,
-    args,
-    request: dict,
-    request_sha256: str,
-    result: dict,
-    completed_at: str,
-) -> None:
+def _commit_ledger_operation(ledger: dict, args, request: dict,
+                             request_sha256: str, result: dict,
+                             completed_at: str) -> None:
     ledger["operations"].append({
         "operation_id": args.operation_id,
         "request": request,
@@ -5559,6 +5544,137 @@ def _commit_ledger_operation(
         "result": result,
         "completed_at": completed_at,
     })
+
+
+def validated_source_ledger(case_id: str) -> dict:
+    """The source ledger, proven to bind to its own recorded history.
+
+    This is what `intake_case.py --execute` calls before copying anything: a
+    ledger whose approvals cannot be replayed from its baseline is not an
+    approval record, and D2's whole point is that the copy is gated on a real
+    one.
+    """
+    ledger = load_json(source_ledger_path(case_id))
+    if ledger is None:
+        raise ValueError("source ledger not found")
+    ledger = _normalize_legacy_generic_ledger(
+        ledger, version="source_ledger.v0.4", state_key="files",
+        schema_name="source_ledger.schema.json",
+        predecessor_versions={"source_ledger.v0.3"})
+    _validate_generic_ledger(ledger, case_id, "source_ledger.schema.json")
+    return ledger
+
+
+def validated_conflict_ledger(case_id: str, *, allow_missing: bool = False) -> dict:
+    """The conflict ledger, same binding guarantee as the source ledger."""
+    existing = load_json(conflict_ledger_path(case_id))
+    if existing is not None:
+        existing = _normalize_legacy_generic_ledger(
+            existing, version="conflict_ledger.v0.3", state_key="conflicts",
+            schema_name="conflict_ledger.schema.json",
+            predecessor_versions={"conflict_ledger.v0.2"})
+        _validate_generic_ledger(existing, case_id,
+                                 "conflict_ledger.schema.json")
+        return existing
+    if not allow_missing:
+        raise ValueError("conflict ledger is missing")
+    return {
+        "ledger_version": "conflict_ledger.v0.3",
+        "case_id": case_id,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "conflicts": [],
+        "history_boundary": make_history_boundary([], mode="native"),
+        "operations": [],
+    }
+
+
+def validated_run_state(case_id: str, *, allow_missing: bool = False) -> dict:
+    """The run state, schema-valid and free of duplicate ids.
+
+    Narrower than 633bd7b0's version by design: the reconciliation-operation
+    bindings it also checked belong to the medical-review flow, which is not
+    transplanted here (see the C-scope note in the commit message). Everything
+    checked below is independent of that flow.
+    """
+    path = run_state_path(case_id)
+    path_missing = not path.exists()
+    state = load_run_state(case_id)
+    if _medical_artifacts_present(case_id):
+        state["medical_review_adopted"] = True
+    if allow_missing and path_missing:
+        return state
+    errors = _schema_check(state, "run_state.schema.json")
+    if errors:
+        raise ValueError("run state is invalid: " + "; ".join(errors))
+    if state.get("case_id") != case_id:
+        raise ValueError("run state belongs to a different case")
+    stage_names = [entry["stage_name"] for entry in state["stages"]]
+    if len(stage_names) != len(set(stage_names)):
+        raise ValueError("run state has duplicate stage_name")
+    human_input_ids = [entry["human_input_id"]
+                       for entry in state.get("human_input_status", [])
+                       if "human_input_id" in entry]
+    if len(human_input_ids) != len(set(human_input_ids)):
+        raise ValueError("run state has duplicate human_input_id")
+    return state
+
+
+def make_history_boundary(files, *, mode: str, established_at: str = None,
+                          absorbed_operations: list = None,
+                          forked_operations: list = None,
+                          predecessor_state: list = None):
+    """Make the canonical, lossless baseline binding for a ledger.
+
+    The digest is over deterministic JSON of the exact entry list.  Callers
+    receive an independent JSON-shaped copy, so later ledger mutations cannot
+    retroactively change the history baseline this boundary attests to.
+
+    `absorbed_operations` records operations that happened BEFORE this boundary
+    was established -- an upgraded ledger keeps them in `operations` for the
+    audit trail, but they are not replayed onto the new baseline, since the
+    baseline already reflects them. Counting and digesting them is what stops
+    that exemption from becoming a place to hide an extra operation.
+    """
+    if mode not in {"native", "legacy_snapshot"}:
+        raise ValueError(f"unsupported source-ledger history mode: {mode!r}")
+    baseline_state = json.loads(json.dumps(
+        files, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    boundary = {
+        "mode": mode,
+        "established_at": established_at or now_iso(),
+        "baseline_sha256": hashlib.sha256(
+            _canonical_json_bytes(baseline_state)).hexdigest(),
+        "baseline_state": baseline_state,
+    }
+    if absorbed_operations is not None:
+        absorbed = json.loads(json.dumps(absorbed_operations))
+        boundary["absorbed_operation_count"] = len(absorbed)
+        boundary["absorbed_operations_sha256"] = hashlib.sha256(
+            _canonical_json_bytes(absorbed)).hexdigest()
+    if forked_operations is not None:
+        forked = json.loads(json.dumps(forked_operations))
+        boundary["forked_operation_count"] = len(forked)
+        boundary["forked_operations_sha256"] = hashlib.sha256(
+            _canonical_json_bytes(forked)).hexdigest()
+    if predecessor_state is not None:
+        predecessor = json.loads(json.dumps(predecessor_state))
+        boundary["predecessor_state_sha256"] = hashlib.sha256(
+            _canonical_json_bytes(predecessor)).hexdigest()
+    return boundary
+
+def source_ledger_path(case_id: str) -> Path:
+    return case_dir(case_id) / "_source_ledger.json"
+
+
+@traced_read("dao.read_ledger")
+def cmd_read_ledger(args):
+    p = source_ledger_path(args.case_id)
+    if not p.exists():
+        print(f"NOT_FOUND: {p}")
+        return 1
+    print(p.read_text(encoding="utf-8"))
+    return 0
 
 
 def cmd_set_ledger_status(args):
@@ -5569,31 +5685,53 @@ def cmd_set_ledger_status(args):
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return 1
     try:
-        try:
-            ledger = validated_source_ledger(args.case_id)
-            request, request_sha256, replay = _prepare_ledger_operation(
-                ledger,
-                args,
-                "set_status",
-                {
-                    "file_name": args.file_name,
-                    "status": args.status,
-                    "reviewer": args.reviewer,
-                    "reason": args.reason,
-                },
-            )
-        except ValueError as exc:
-            print(f"FAIL: {exc}")
+        ledger = load_json(p)
+        if ledger is None:
+            print(f"NOT_FOUND: {p}")
             return 1
-        if replay is not None:
-            print(json.dumps(replay, sort_keys=True))
-            return 0
         if args.status == "approved" and not args.reviewer:
             print("ERROR: --reviewer is required to set status approved")
             return 1
         if args.status == "rejected" and not args.reason:
             print("ERROR: --reason is required to set status rejected")
             return 1
+        # A v0.4 ledger carries a replayable history, so a status change has to
+        # be RECORDED as an operation, not just written into the entry. Writing
+        # it in place leaves a ledger whose current state cannot be replayed
+        # from its own baseline -- which validated_source_ledger() rejects, and
+        # rightly: that is indistinguishable from tampering. (This is what
+        # CASE_142 hit: --init-ledger wrote v0.4 while this writer still wrote
+        # v0.3-style.) A legacy ledger is upgraded here, on first mutation.
+        #
+        # The ledger is validated BEFORE it is extended: a writer that appends
+        # to a tampered history would launder the tampering into a longer chain
+        # that still verifies from its new baseline. Read-side validation alone
+        # cannot prevent that, so the write path re-proves the chain too.
+        try:
+            ledger = _normalize_legacy_generic_ledger(
+                ledger, version="source_ledger.v0.4", state_key="files",
+                schema_name="source_ledger.schema.json",
+                predecessor_versions={"source_ledger.v0.3"})
+            _validate_generic_ledger(
+                ledger, args.case_id, "source_ledger.schema.json")
+        except ValueError as exc:
+            print(f"ERROR: source ledger is not writable: {exc}")
+            return 1
+
+        payload = {"file_name": args.file_name, "status": args.status,
+                   "reviewer": args.reviewer, "reason": args.reason}
+        try:
+            request, request_sha256, committed = _prepare_ledger_operation(
+                ledger, args, "set_status", payload)
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+        if committed is not None:
+            print(f"OK: {args.file_name} -> {args.status} (already recorded"
+                  f" under operation_id {args.operation_id})")
+            return 0
+        operation = (request, request_sha256)
+
         found = False
         completed_at = now_iso()
         for entry in ledger["files"]:
@@ -5607,15 +5745,13 @@ def cmd_set_ledger_status(args):
         if not found:
             print(f"NOT_FOUND: no entry for file {args.file_name!r} in ledger")
             return 1
+        if operation is not None:
+            request, request_sha256 = operation
+            _commit_ledger_operation(
+                ledger, args, request, request_sha256,
+                {"action": "set_status", "target_id": args.file_name,
+                 "status": args.status}, completed_at)
         ledger["updated_at"] = now_iso()
-        result = {
-            "action": "set_status",
-            "target_id": args.file_name,
-            "status": args.status,
-        }
-        _commit_ledger_operation(
-            ledger, args, request, request_sha256, result, completed_at
-        )
         errors = _schema_check(ledger, "source_ledger.schema.json")
         if errors:
             print(f"FAIL: schema validation errors for {p} -- not written:")
@@ -5623,21 +5759,40 @@ def cmd_set_ledger_status(args):
                 print(f"  - {e}")
             return 1
         atomic_write_json(p, ledger)
-        print(json.dumps(result, sort_keys=True))
+        print(f"OK: {args.file_name} -> {args.status}")
         return 0
     finally:
         release_lock(p)
 
 
 def cmd_check_source_ledger_clear(args):
+    # "Clear" has to mean the approvals are real, not merely that the strings
+    # say "approved" -- this is the gate --execute and the SLA marker both hang
+    # off, so a ledger whose history does not replay must not read as clear.
     try:
         ledger = validated_source_ledger(args.case_id)
     except ValueError as exc:
-        print(json.dumps({"clear": False, "error": str(exc)}))
+        if "not found" in str(exc):
+            print(json.dumps({"clear": False, "error": "ledger not found"}))
+        else:
+            print(json.dumps({"clear": False, "error": str(exc)},
+                             ensure_ascii=False))
         return 1
     pending = [e["file_name"] for e in ledger["files"] if e["review_status"] == "pending"]
     rejected = [e["file_name"] for e in ledger["files"] if e["review_status"] == "rejected"]
     clear = not pending and not rejected
+    if clear:
+        # SLA start (plan B10). This check is exactly the moment the plan
+        # defines as "human approval finished, automatic execution resumes",
+        # and it is a check every path already performs -- so the clock starts
+        # here rather than in the frontend, and a CLI-driven or scripted run is
+        # measured identically to a UI-driven one.
+        #
+        # It does NOT enforce who approved: D2 is PoC-only and the goal is
+        # fewer human touchpoints, so once D2 is gone this check simply always
+        # passes and the marker still fires at the same place.
+        _emit_sla_marker(args.case_id, getattr(args, "run_id", None),
+                         "sla.phase1.start")
     print(json.dumps({"clear": clear, "pending": pending, "rejected": rejected}))
     return 0 if clear else 1
 
@@ -6003,62 +6158,24 @@ def _schema_check(data: dict, schema_name: str) -> list:
     logic or a pre-existing malformed file, not bad agent output. No P4
     self-correction-retry step, just fail loud and don't persist -- same
     contract as write-contract's own validation failure path."""
-    schemas, registry = load_registry()
-    return validate_instance(data, schema_name, schemas, registry)
+    # Instrumented because load_registry() re-globs and re-parses all ~34
+    # schema files on every call, with no cache, and this runs INSIDE locks --
+    # so its cost is paid in held lock time, which bounds how well anything
+    # can parallelise. T2 proposes caching it; this span is what will show
+    # whether that was worth doing.
+    with trace_mod.span("validate.schema", category="validate",
+                        schema_name=schema_name) as sp:
+        schemas, registry = load_registry()
+        errors = validate_instance(data, schema_name, schemas, registry)
+        sp.set(error_count=len(errors))
+        return errors
 
 
 # ---------------------------------------------------------------- run state ops --
 
-POST_MEDICAL_STAGES = {
-    "denial_response",
-    "consistency_check",
-    "screening_report",
-    "draft_report_v1",
-    "critic_v1",
-    "human_review_v1",
-    "denial_validation",
-    "draft_report_v2",
-    "critic_v2",
-    "human_review_v2",
-}
-
-
-def _medical_clearance_required(
-    state: dict,
-    stage: str,
-    status: str | None = None,
-    *,
-    snapshot: bool = False,
-) -> bool:
-    if stage == "claim_analysis":
-        return snapshot or status == "passed"
-    if not state.get("medical_review_adopted", False):
-        return False
-    return stage in POST_MEDICAL_STAGES and (
-        snapshot or status in {"in_progress", "passed"}
-    )
-
-
-def _require_transition_medical_clearance(
-    case_id: str,
-    run_id: str,
-    state: dict,
-    stage: str,
-    status: str | None = None,
-    *,
-    snapshot: bool = False,
-) -> None:
-    if not _medical_clearance_required(
-        state, stage, status, snapshot=snapshot
-    ):
-        return
-    from medical_review_ledger import require_clearance
-
-    require_clearance(sys.modules[__name__], case_id, run_id)
-
-
 def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
-                       finalize=False, dep_check="hard"):
+                       finalize=False, dep_check="hard", explicit_attempt=True,
+                       attempt_outcome=None):
     """Holds the run-state lock across the whole read+modify+write, not just
     the write -- see acquire_lock_blocking. Returns the updated state on
     success, or None if the lock never cleared, a dependency is unmet, or the
@@ -6086,38 +6203,16 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
         return None
 
     target = run_state_path(case_id)
-    owned_lock, existing_lock = acquire_owned_lock_blocking(
-        target,
-        held_by,
-        run_id or "unknown",
-        f"update run-state: {stage} -> {status}",
-    )
+    existing_lock = acquire_lock_blocking(target, held_by, run_id or "unknown", f"update run-state: {stage} -> {status}")
     if existing_lock is not None:
         print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return None
-    assert owned_lock is not None
     demoted_from = None
+    emit_marker = None
+    marker_attempt = None
     try:
-        try:
-            state = validated_run_state(case_id, allow_missing=True)
-            _require_transition_medical_clearance(
-                case_id, run_id, state, stage, status
-            )
-        except ValueError as exc:
-            print(f"BLOCKED: {exc}")
-            return None
-        owner_changes = (
-            state.get("run_id") not in {None, run_id}
-            and run_id is not None
-        )
-        canonical_exists = (
-            medical_variables_path(case_id).exists()
-            or medical_variables_path(case_id).is_symlink()
-        )
-        if owner_changes and canonical_exists:
-            print("BLOCKED: run-state update does not match the canonical run owner")
-            return None
+        state = load_run_state(case_id)
         state["run_id"] = run_id or state.get("run_id")
 
         blockers = stage_dependencies.check_dependencies(
@@ -6135,12 +6230,26 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
                 print(f"  - {b}")
             return None
 
+        # Medical-appropriateness clearance. Deliberately consulted HERE, on
+        # the real transition path, rather than only defined: the flag this
+        # replaces was written by three call sites and read by none, which is
+        # why the gate went dark for 53 cases without anything failing. A test
+        # drives cmd_finalize_stage itself for the same reason.
+        try:
+            _require_transition_medical_clearance(
+                case_id, state.get("run_id"), state, stage, status)
+        except ValueError as exc:
+            print(f"REFUSED: cannot advance run-state for {target}:")
+            print(f"  - {exc}")
+            return None
+
         stages = state["stages"]
         entry = next((s for s in stages if s["stage_name"] == stage), None)
         if entry is None:
             entry = {"stage_name": stage, "status": "pending", "started_at": None,
                       "completed_at": None, "attempt_count": 0, "backup_path": None}
             stages.append(entry)
+        previous_status = entry.get("status")
         # A stage leaving `passed` un-grounds everything derived from it, so
         # note the demotion here (inside the lock, where the old status is
         # authoritative) and cascade after the lock is released -- the cascade
@@ -6149,15 +6258,41 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
                 and status in ("failed", "pending", "in_progress")):
             demoted_from = "passed"
         if status == "in_progress":
-            # started_at keeps the FIRST attempt (unchanged behaviour -- it is
-            # the stage's own origin). current_attempt_started_at tracks the
-            # latest, because with only the former a stage retried the next
-            # morning reports the entire overnight gap as its duration:
-            # CASE_907's document_processing showed 998 minutes that way.
-            now = now_iso()
-            entry["started_at"] = entry["started_at"] or now
-            entry["current_attempt_started_at"] = now
-            entry["attempt_count"] += 1
+            if explicit_attempt:
+                if previous_status == "in_progress" and entry.get("attempt_count", 0) > 0:
+                    # An orchestrator replay is not a P9 retry. A retry must
+                    # first close the prior attempt as failed/partial; treating
+                    # a duplicate begin as idempotent prevents one invocation
+                    # from becoming several attempts merely because a command
+                    # was repeated.
+                    #
+                    # attempt_count > 0 is what makes this an *explicit* attempt
+                    # rather than merely the in_progress status: an incidental
+                    # contract write advances pending->in_progress while leaving
+                    # attempt_count at 0, and treating that as an open attempt
+                    # swallowed the real dispatch that followed -- the stage then
+                    # ran, passed, and contributed no measured interval at all.
+                    return state
+                # started_at keeps the stage's first explicit origin;
+                # current_attempt_started_at tracks this dispatch only.
+                now = now_iso()
+                entry["started_at"] = entry["started_at"] or now
+                entry["current_attempt_started_at"] = now
+                entry["attempt_count"] += 1
+                marker_attempt = entry["attempt_count"]
+                emit_marker = "start"
+            elif previous_status not in ("failed", "passed", "skipped"):
+                # Contract writes are checkpoints inside an invocation, not
+                # invocation boundaries. Preserve the historical best-effort
+                # pending->in_progress projection but do not move attempt
+                # timestamps or increment the retry counter. If orchestration
+                # skipped the explicit begin, aggregate-trace reports missing
+                # coverage instead of inventing a start at the first output.
+                pass
+            else:
+                # A durable output may still land after a stage failed, but an
+                # incidental writer is not authorized to start a retry.
+                return state
         if status in ("passed", "failed", "skipped"):
             entry["completed_at"] = now_iso()
             # A stage can reach a terminal status without ever having been
@@ -6180,8 +6315,13 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
             return None
         save_run_state(case_id, state)
         updated = state
+        if (status == "failed" and previous_status == "in_progress"
+                and entry.get("attempt_count", 0) > 0):
+            marker_attempt = entry["attempt_count"]
+            emit_marker = ("abandoned" if attempt_outcome == "interrupted"
+                           else "end")
     finally:
-        release_owned_lock(owned_lock)
+        release_lock(target)
 
     if demoted_from is not None:
         # A demotion whose cascade fails leaves dependents claiming `passed`
@@ -6204,11 +6344,28 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
         # captured, and returning the pre-cascade snapshot would hand the
         # caller stages that are already invalidated.
         updated = load_run_state(case_id)
+    if emit_marker == "start":
+        _emit_stage_attempt_marker(
+            case_id, run_id, stage, marker_attempt, "start")
+    elif emit_marker == "end":
+        _emit_stage_attempt_marker(
+            case_id, run_id, stage, marker_attempt, "end",
+            outcome=attempt_outcome or "failed")
+    elif emit_marker == "abandoned":
+        _emit_stage_attempt_marker(
+            case_id, run_id, stage, marker_attempt, "abandoned",
+            outcome="interrupted")
     return updated
 
 
 def cmd_update_run_state(args):
-    state = _update_run_state(args.case_id, args.run_id, args.stage, args.status, args.held_by)
+    outcome = getattr(args, "attempt_outcome", None)
+    if outcome is not None and args.status != "failed":
+        print("REFUSED: --attempt-outcome is valid only with status 'failed'")
+        return 1
+    state = _update_run_state(
+        args.case_id, args.run_id, args.stage, args.status, args.held_by,
+        attempt_outcome=outcome)
     if state is None:
         return 1
     print(f"OK: {args.stage} -> {args.status}")
@@ -6290,34 +6447,13 @@ def _set_human_input_status(case_id, stage, status, description, held_by, run_id
     matching 'waiting' entry in place, so the full history of what was
     waited on stays visible (P7)."""
     target = run_state_path(case_id)
-    owned_lock, existing_lock = acquire_owned_lock_blocking(
-        target,
-        held_by,
-        run_id or "unknown",
-        f"set human_input_status: {stage} -> {status}",
-    )
+    existing_lock = acquire_lock_blocking(target, held_by, run_id or "unknown", f"set human_input_status: {stage} -> {status}")
     if existing_lock is not None:
         print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
               f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
         return 1
-    assert owned_lock is not None
     try:
-        try:
-            state = validated_run_state(case_id, allow_missing=True)
-        except ValueError as exc:
-            print(f"BLOCKED: {exc}")
-            return 1
-        owner_changes = (
-            state.get("run_id") not in {None, run_id}
-            and run_id is not None
-        )
-        canonical_exists = (
-            medical_variables_path(case_id).exists()
-            or medical_variables_path(case_id).is_symlink()
-        )
-        if owner_changes and canonical_exists:
-            print("BLOCKED: human-input update does not match the canonical run owner")
-            return 1
+        state = load_run_state(case_id)
         # Populate run_id from the arg (mirrors _update_run_state). Without this
         # a human-input write on a fresh case left run_id=None -> schema-invalid
         # state (fleet F2 root cause); the write is validated below regardless.
@@ -6338,6 +6474,22 @@ def _set_human_input_status(case_id, stage, status, description, held_by, run_id
                 return 1
             entry["status"] = "received"
             entry["received_at"] = now_iso()
+            # Emit the wait as a human_wait span so active_s can deduct it.
+            #
+            # active_s is DEFINED as sla_wall_clock_s minus human_wait, and
+            # trace_aggregate has computed that deduction (as an interval
+            # union, so two gates open at once are not double-counted) since
+            # the timing layer was written -- but NOTHING ever emitted a
+            # human_wait span, so the deduction always subtracted zero. A
+            # 30-minute SLA measured that way silently includes however long a
+            # person took to answer, which is exactly the number the SLA is
+            # not about.
+            #
+            # Emitted on 'received' rather than at 'waiting' because only now
+            # is the interval closed; the span is back-dated to requested_at so
+            # it lands inside the SLA window where the wait actually happened.
+            _emit_human_wait_span(case_id, run_id, stage,
+                                  entry.get("requested_at"), entry["received_at"])
         # Validate before persisting, same fail-don't-persist contract as
         # _update_run_state (fleet F2: this writer was skipping the check, so
         # e.g. request-expert-review before run_id is set wrote an invalid
@@ -6352,12 +6504,12 @@ def _set_human_input_status(case_id, stage, status, description, held_by, run_id
         print(f"OK: {stage} -> {status}")
         return 0
     finally:
-        release_owned_lock(owned_lock)
+        release_lock(target)
 
 
 def cmd_set_human_input_status(args):
     """Generic write path for P7 -- see harness-guardrails P7. Usable by any
-    stage that needs to wait on a human, not just the critic->human-review
+    stage that needs to wait on a human, not just the critic->evaluation
     handoff (that handoff has its own narrow wrapper, request-expert-review,
     built on this)."""
     return _set_human_input_status(args.case_id, args.stage, args.status, args.description, args.held_by, args.run_id)
@@ -6365,23 +6517,19 @@ def cmd_set_human_input_status(args):
 
 def cmd_request_expert_review(args):
     """Purpose-built wrapper around set-human-input-status for the
-    critic -> human review -> external handoff. The local human-review
-    stage is the stage actually blocked/pending, matching P7's
+    critic -> human review -> evaluation handoff. stage_name is
+    'evaluation' -- that's the stage actually blocked/pending, matching P7's
     'naming exactly which stage... is pending.' Keeps the description
     convention defined in one place rather than every caller constructing
     it by hand."""
     description = f"expert review of draft_report_{args.version}_reviewed.md"
-    stage = f"human_review_{args.version}"
-    return _set_human_input_status(
-        args.case_id, stage, "waiting", description, args.held_by, args.run_id
-    )
+    return _set_human_input_status(args.case_id, "evaluation", "waiting", description, args.held_by, args.run_id)
 
 
 def cmd_mark_human_review_complete(args):
-    """Record the versioned future Unit 11 handoff prerequisite.
-
-    This does not unlock local Evaluation or ground-truth access. Requires
-    expert_review_v{version}.json
+    """Creates the versioned D1 gate (_human_review_complete_v{version}.flag)
+    that read-ground-truth checks -- the actual mechanism letting evaluation
+    access ground truth for that version. Requires expert_review_v{version}.json
     to already exist and pass schema validation first: you cannot claim
     review is complete without real recorded review content backing it --
     an actor self-certifying "reviewed" without real evidence is exactly the
@@ -6416,405 +6564,364 @@ def cmd_mark_human_review_complete(args):
     finally:
         release_lock(target)
 
-    status_rc = _set_human_input_status(
-        args.case_id,
-        f"human_review_{args.version}",
-        "received",
-        None,
-        args.held_by,
-        args.run_id,
-    )
+    status_rc = _set_human_input_status(args.case_id, "evaluation", "received", None, args.held_by, args.run_id)
     if status_rc != 0:
         print("note: no matching 'waiting' human_input_status entry was found to flip to 'received' -- "
-              "the handoff-prerequisite flag was still created, but the wait-tracking history "
+              "the flag was still created (that's the actual D1 gate), but the wait-tracking history "
               "is incomplete for this version.")
-    print(f"OK: {target} created -- future Unit 11 handoff prerequisite recorded for {args.version}; "
-          "local Evaluation and ground-truth access remain unavailable.")
+    print(f"OK: {target} created -- evaluation may now read ground truth for {args.version} (D1 exception unlocked).")
     return 0
 
 
+@traced_read("dao.get_last_passed_stage")
 def cmd_get_last_passed_stage(args):
-    try:
-        state = validated_run_state(args.case_id, allow_missing=True)
-    except ValueError as exc:
-        print(f"FAIL: {exc}")
-        return 1
+    state = load_run_state(args.case_id)
     passed = [s["stage_name"] for s in state["stages"] if s["status"] == "passed"]
     print(passed[-1] if passed else "NONE")
     return 0
 
 
-SNAPSHOT_MAX_ATTEMPTS = 3
+@trace_mod.traced("dao.snapshot", category="io")
+def _build_snapshot_atomic(case_id: str, stage: str, prospective_state: dict) -> Path:
+    """Build a full cumulative snapshot of a case's outputs (P10) and place it
+    at its final _backups/step_<N>_<stage>/ path atomically.
 
-
-def _snapshot_path_excluded(relative: Path) -> bool:
-    return (
-        not relative.parts
-        or relative.parts[0] == "_backups"
-        or relative == Path("_run_state.json")
-        or relative.name.endswith(".lock")
-        or re.search(r"\.tmp\d+$", relative.name) is not None
-    )
-
-
-def _snapshot_inventory(root: Path) -> dict[str, dict[str, object]]:
-    inventory: dict[str, dict[str, object]] = {}
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
-        relative = path.relative_to(root)
-        if _snapshot_path_excluded(relative):
-            continue
-        metadata = path.lstat()
-        key = relative.as_posix()
-        if stat.S_ISDIR(metadata.st_mode):
-            inventory[key] = {"kind": "directory"}
-            continue
-        if not stat.S_ISREG(metadata.st_mode):
-            raise OSError(f"snapshot source contains an unsupported path: {relative}")
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        try:
-            opened = os.fstat(descriptor)
-            if not stat.S_ISREG(opened.st_mode):
-                raise OSError(f"snapshot source is not a regular file: {relative}")
-            digest = hashlib.sha256()
-            size = 0
-            while chunk := os.read(descriptor, 1024 * 1024):
-                digest.update(chunk)
-                size += len(chunk)
-        finally:
-            os.close(descriptor)
-        inventory[key] = {
-            "kind": "file",
-            "size": size,
-            "sha256": digest.hexdigest(),
-        }
-    return inventory
-
-
-def _snapshot_inventory_sha(inventory: dict[str, dict[str, object]]) -> str:
-    encoded = json.dumps(
-        inventory,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _copy_snapshot_file(source: Path, destination: Path) -> None:
-    source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination_fd = -1
+    The copy is assembled into a sibling temp directory first; only once every
+    file/dir has copied successfully is it moved into place with a single
+    os.replace (atomic on the same filesystem). A crash mid-copy therefore
+    leaves an orphan .tmp_snapshot_* dir -- never a half-populated real
+    backup a restore could mistake for complete. Any pre-existing orphan for
+    this exact destination is cleared first so a retry after a prior failure
+    starts clean. Returns the final destination path.
+    """
+    src = case_dir(case_id)
+    backups = src / "_backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    # Published backups are immutable. Pick the first unused sequence number;
+    # never delete or replace an existing destination.
+    n = 1
+    while (backups / f"step_{n:02d}_{stage}").exists():
+        n += 1
+    dest = backups / f"step_{n:02d}_{stage}"
+    tmp = backups / f".tmp_snapshot_{stage}_{uuid.uuid4().hex}"
+    tmp.mkdir(parents=True)
     try:
-        metadata = os.fstat(source_fd)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise OSError(f"snapshot source is not a regular file: {source}")
-        destination_fd = os.open(
-            destination,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
-            stat.S_IMODE(metadata.st_mode),
-        )
-        while chunk := os.read(source_fd, 1024 * 1024):
-            view = memoryview(chunk)
-            while view:
-                written = os.write(destination_fd, view)
-                view = view[written:]
-        os.fsync(destination_fd)
-    finally:
-        os.close(source_fd)
-        if destination_fd >= 0:
-            os.close(destination_fd)
+        for item in src.iterdir():
+            # _trace/ is diagnostic scratch, not contract data: nothing
+            # downstream reads it and there is nothing in it to restore. It
+            # also GROWS through the run, so copying it into every cumulative
+            # snapshot is precisely the O(stages x tree) cost that makes
+            # finalize a serial tail. The permanent artifact derived from it
+            # (_timing_summary.json) is a normal file and is still snapshotted.
+            if item.name in ("_backups", "_trace") or item.name.endswith(".lock"):
+                continue
+            if item.is_file():
+                shutil.copy2(item, tmp / item.name)
+            elif item.is_dir():
+                shutil.copytree(item, tmp / item.name, dirs_exist_ok=True)
+        # A restored snapshot must contain the finalized state, not the
+        # pre-finalization state that was live when copying began.
+        atomic_write_json(tmp / "_run_state.json", prospective_state)
+        if dest.exists():
+            raise FileExistsError(f"refusing to overwrite immutable backup {dest}")
+        os.replace(tmp, dest)
+    except Exception:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return dest
 
 
-def _copy_snapshot_inventory(
-    source_root: Path,
-    destination_root: Path,
-    inventory: dict[str, dict[str, object]],
-) -> None:
-    for relative_text, entry in inventory.items():
-        relative = Path(relative_text)
-        destination = destination_root / relative
-        if entry["kind"] == "directory":
-            destination.mkdir(parents=True, exist_ok=True)
-        else:
-            _copy_snapshot_file(source_root / relative, destination)
+@trace_mod.traced("dao.finalize_stage")
+def _finalize_stage(case_id, run_id, stage, held_by):
+    """Atomically pass a stage: dependency-check -> build+validate snapshot ->
+    record status=passed + backup_path + completed_at under one run-state lock.
 
-
-def _next_snapshot_destination(backups: Path, stage: str) -> Path:
-    highest = 0
-    for child in backups.iterdir():
-        match = re.fullmatch(r"step_(\d+)_.*", child.name)
-        if child.is_dir() and not child.is_symlink() and match:
-            highest = max(highest, int(match.group(1)))
-    return backups / f"step_{highest + 1:02d}_{stage}"
-
-
-def _rename_snapshot_directory_noreplace(source: Path, destination: Path) -> None:
-    """Atomically publish a snapshot only if its final name is still absent."""
-    if source.parent != destination.parent:
-        raise OSError("snapshot staging and destination must share one directory")
-    parent_fd = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    Order matters. Dependencies are checked FIRST (against current state,
+    outside the eventual finalize lock -- a dependency can't un-pass between
+    the check and the write, since nothing else passes stages concurrently in
+    this single-writer-per-run model). The snapshot is built and confirmed on
+    disk BEFORE any run-state field flips to passed, so a snapshot failure
+    leaves the stage un-passed (P10: 'if a later stage crashes ... revert to
+    the most recent intact step'). Returns the updated state, or None on any
+    failure (dependency unmet, snapshot failure, lock contention, schema
+    failure) -- in every None case the stage is NOT passed.
+    """
+    journal_blockers = dao_transaction.pending_journal_errors(
+        case_dir(case_id))
+    if journal_blockers:
+        print(f"REFUSED: cannot finalize {stage!r} while a DAO transaction "
+              "is incomplete:")
+        for blocker in journal_blockers:
+            print(f"  - {blocker}")
+        return None
+    target = run_state_path(case_id)
+    existing_lock = acquire_lock_blocking(
+        target, held_by, run_id or "unknown", f"finalize stage: {stage}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return None
+    published = None
+    finalized_attempt = None
+    finalized_state = None
     try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        renameat2 = getattr(libc, "renameat2", None)
-        if renameat2 is None:
-            raise OSError(errno.ENOSYS, "renameat2 is unavailable")
-        renameat2.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        renameat2.restype = ctypes.c_int
-        result = renameat2(
-            parent_fd,
-            os.fsencode(source.name),
-            parent_fd,
-            os.fsencode(destination.name),
-            1,  # RENAME_NOREPLACE
-        )
-        if result != 0:
-            error_number = ctypes.get_errno()
-            raise OSError(
-                error_number,
-                os.strerror(error_number),
-                destination,
-            )
-    finally:
-        os.close(parent_fd)
+        # Keep the run-state lock from dependency check through snapshot
+        # publication and the live state write, so no run-state transition can
+        # interleave with finalization.
+        state = load_run_state(case_id)
+        blockers = stage_dependencies.check_dependencies(
+            stage, "passed", state, human_review_complete_any(case_id))
+        if blockers:
+            print(f"REFUSED: cannot finalize {stage!r} -- unmet dependencies:")
+            for b in blockers:
+                print(f"  - {b}")
+            return None
 
-
-def _stage_finalization_blockers(case_id: str, stage: str, state: dict) -> list[str]:
-    blockers = [
-        "transaction is incomplete: " + blocker
-        for blocker in dao_transaction.pending_journal_errors(case_dir(case_id))
-    ]
-    blockers.extend(stage_dependencies.check_dependencies(
-        stage, "passed", state, human_review_complete_any(case_id)
-    ))
-    if stage in CONFLICT_GATED_STAGES:
+        # Medical-appropriateness clearance, enforced on the finalize path as
+        # well as on _update_run_state. These are two independent routes to
+        # 'passed' -- finalize-stage does NOT delegate to _update_run_state --
+        # so a gate wired into only one of them is a gate with a way around
+        # it. Found exactly that way: the finalize test kept passing with the
+        # _update_run_state call deleted, because it was refusing for an
+        # unrelated policy-layer reason instead.
         try:
-            pending = pending_conflict_ids(case_id)
+            _require_transition_medical_clearance(
+                case_id, state.get("run_id"), state, stage, "passed")
         except ValueError as exc:
-            blockers.append(str(exc))
-        else:
-            if pending:
-                blockers.append(
-                    "unresolved conflict ledger entries: " + ", ".join(pending)
-                )
+            print(f"REFUSED: cannot finalize {stage!r} -- medical clearance: {exc}")
+            return None
 
-    manifest = read_contract_data(case_id, "document_manifest.json")
-    if stage == "document_processing" and manifest is not None:
-        blockers.extend(segment_lineage.check_classification_manifest_consistency(
-            manifest, _classification_reader(case_id), require_complete=True
-        ))
-        blockers.extend(_validate_manifest_lineage(case_id, manifest))
-        blockers.extend(
-            "not bound to verified parent provenance: " + blocker
-            for blocker in _segment_derivation_blockers(case_id, manifest)
-        )
-        blockers.extend(
-            "PRE-REDACTION classification review is incomplete: " + blocker
-            for blocker in _classification_review_blockers(case_id, manifest)
-        )
-    elif stage == "policy_clause_processing":
-        if manifest is not None:
-            blockers.extend(
-                "not bound to verified parent provenance: " + blocker
-                for blocker in _segment_derivation_blockers(case_id, manifest)
-            )
-        blockers.extend(_policy_completion_blockers(case_id))
-    elif stage in stage_dependencies.dependents_of("policy_clause_processing"):
-        if manifest is not None:
-            blockers.extend(
-                "segment derivation provenance is no longer current: " + blocker
-                for blocker in _segment_derivation_blockers(case_id, manifest)
-            )
-        blockers.extend(_policy_layer_scheme_blockers(
-            case_id, f"finalizing {stage!r}"
-        ))
-    return blockers
+        # P6. The guardrail says a stage proceeds only once every conflict
+        # entry for the case reads resolved or false_positive, and pipeline.md
+        # calls screening_report "gated on check-conflicts-clear". Neither was
+        # true of the code: check-conflicts-clear existed only as a CLI command
+        # an agent had to remember to run, and the finalize path never consulted
+        # the ledger at all. Verified on CASE_909 -- screening_report finalized
+        # cleanly with CONFLICT_1 still pending. Nothing went wrong there only
+        # because the conflict happened to be adjudicated first.
+        #
+        # Scoped to the stages that CONSUME the case's factual picture. A
+        # conflict is raised by consistency_check, so gating that stage would
+        # make it unable to finalize the very finding it just recorded; intake
+        # and document_processing run before any comparison exists to disagree
+        # about. Everything downstream reasons FROM the contested facts, which
+        # is exactly what the guardrail protects.
+        if stage in CONFLICT_GATED_STAGES:
+            pending = pending_conflict_ids(case_id)
+            if pending:
+                print(f"REFUSED: cannot finalize {stage!r} -- P6: the case has "
+                      f"unresolved conflict ledger entries: {', '.join(pending)}")
+                print("  Every entry must read 'resolved' or 'false_positive' "
+                      "before a stage that reasons from the case's facts may "
+                      "finalize. Adjudicate with `dao.py set-conflict-verdict "
+                      "CASE_ID CONFLICT_ID {resolved|false_positive} --note ...` "
+                      "-- a value is never silently discarded to close one.")
+                return None
+
+        if stage == "document_processing":
+            manifest = read_contract_data(case_id, "document_manifest.json")
+            if manifest is not None:
+                mismatch = segment_lineage.check_classification_manifest_consistency(
+                    manifest, _classification_reader(case_id),
+                    require_complete=True)
+                if mismatch:
+                    print("REFUSED: cannot finalize 'document_processing' -- "
+                          "manifest/classification inconsistency:")
+                    for m in mismatch:
+                        print(f"  - {m}")
+                    return None
+                lineage_errors = _validate_manifest_lineage(case_id, manifest)
+                if lineage_errors:
+                    print("REFUSED: cannot finalize 'document_processing' -- "
+                          "segment-lineage errors:")
+                    for e in lineage_errors:
+                        print(f"  - {e}")
+                    return None
+                # P0-6. Lineage above only established that the segment's own
+                # declarations agree with each other. This asks the question
+                # none of them can: does the parent PDF on disk right now still
+                # confirm this mapping?
+                derivation_blockers = _segment_derivation_blockers(
+                    case_id, manifest)
+                if derivation_blockers:
+                    print("REFUSED: cannot finalize 'document_processing' -- "
+                          "segment page maps are not bound to verified parent "
+                          "provenance:")
+                    for e in derivation_blockers:
+                        print(f"  - {e}")
+                    return None
+                # This stage classifies, so this stage owns the consequence of
+                # having classified from pre-redaction text.
+                review_blockers = _classification_review_blockers(
+                    case_id, manifest)
+                if review_blockers:
+                    print("REFUSED: cannot finalize 'document_processing' -- a "
+                          "classification was produced from PRE-REDACTION page "
+                          "text and no human review clears it:")
+                    for e in review_blockers:
+                        print(f"  - {e}")
+                    print("  Review each one (does the classification's "
+                          "evidence quote survive redaction?), then record it: "
+                          "dao.py record-human-review CASE_ID --artifact-kind "
+                          "classification_review --artifact-id DOC_XXX "
+                          "--target-key classification_text_source:raw_page_text "
+                          "--decision verified --reviewer NAME --note '...' "
+                          "--held-by NAME --run-id RUN_ID, then write the "
+                          "returned review_uid into the classification's "
+                          "human_review_uid field.")
+                    return None
+
+        if stage == "policy_clause_processing":
+            # P0-6 again, and not redundantly: document_processing may have
+            # passed before a parent's raw bytes changed or a segment's text
+            # was revised. Every policy clause offset and canonical UID is
+            # keyed to the physical page this mapping names, so the policy
+            # stage re-asks rather than inheriting an earlier answer -- the
+            # same reasoning as Part 11F re-running source checks at
+            # finalization instead of trusting the write-time pass.
+            policy_manifest = read_contract_data(
+                case_id, "document_manifest.json")
+            if policy_manifest is not None:
+                derivation_blockers = _segment_derivation_blockers(
+                    case_id, policy_manifest)
+                if derivation_blockers:
+                    print("REFUSED: cannot finalize 'policy_clause_processing' "
+                          "-- segment page maps are not bound to verified "
+                          "parent provenance:")
+                    for e in derivation_blockers:
+                        print(f"  - {e}")
+                    return None
+            completion_blockers = _policy_completion_blockers(case_id)
+            if completion_blockers:
+                print("REFUSED: cannot finalize 'policy_clause_processing' -- "
+                      "policy completeness gate is not clear:")
+                for blocker in completion_blockers:
+                    print(f"  - {blocker}")
+                return None
+        elif stage in stage_dependencies.dependents_of(
+                "policy_clause_processing"):
+            # P0-6 follow-up. A recorded policy pass can predate an out-of-band
+            # parent-source change or a corrupted derivation receipt. Raw input
+            # is immutable by rule, but a live finalization gate must still
+            # refuse the representable bad state instead of relying on a
+            # cascade that no DAO operation had a chance to trigger.
+            downstream_manifest = read_contract_data(
+                case_id, "document_manifest.json")
+            if downstream_manifest is not None:
+                derivation_blockers = _segment_derivation_blockers(
+                    case_id, downstream_manifest)
+                if derivation_blockers:
+                    print(f"REFUSED: cannot finalize {stage!r} -- segment "
+                          "derivation provenance is no longer current:")
+                    for blocker in derivation_blockers:
+                        print(f"  - {blocker}")
+                    return None
+            # P0-3. The dependency check above only asks whether
+            # policy_clause_processing is RECORDED passed; that record can
+            # predate canonical verification entirely. A stage built on top of
+            # a legacy policy layer is a stage built on unverified UIDs, so the
+            # live scheme is re-checked here rather than inferred from a past
+            # status -- the same reasoning as Part 11F re-running source checks
+            # at finalization instead of trusting the write-time pass.
+            scheme_blockers = _policy_layer_scheme_blockers(
+                case_id, f"finalizing {stage!r}")
+            if scheme_blockers:
+                print(f"REFUSED: cannot finalize {stage!r} -- the policy layer "
+                      "it depends on is not canonically verified:")
+                for blocker in scheme_blockers:
+                    print(f"  - {blocker}")
+                return None
+
+        state["run_id"] = run_id or state.get("run_id")
+        entry = next(
+            (s for s in state["stages"] if s["stage_name"] == stage), None)
+        if entry is None:
+            entry = {
+                "stage_name": stage, "status": "pending",
+                "started_at": None, "completed_at": None,
+                "attempt_count": 0, "backup_path": None,
+            }
+            state["stages"].append(entry)
+        if entry.get("status") == "in_progress" and entry.get("attempt_count", 0) > 0:
+            finalized_attempt = entry["attempt_count"]
+
+        # Reserve the path while holding the run-state lock. The builder uses
+        # the same first-unused rule, so the prospective state and snapshot
+        # point at the identical immutable directory.
+        backups = case_dir(case_id) / "_backups"
+        n = 1
+        while (backups / f"step_{n:02d}_{stage}").exists():
+            n += 1
+        reserved_dest = backups / f"step_{n:02d}_{stage}"
+        entry["status"] = "passed"
+        entry["completed_at"] = now_iso()
+        entry["backup_path"] = str(reserved_dest)
+        state["updated_at"] = now_iso()
+        errors = _schema_check(state, "run_state.schema.json")
+        if errors:
+            print(f"FAIL: finalized run-state would be schema-invalid for {target} -- not written:")
+            for e in errors:
+                print(f"  - {e}")
+            return None
+
+        try:
+            published = _build_snapshot_atomic(case_id, stage, state)
+        except Exception as exc:  # noqa: BLE001
+            print(f"FAIL: snapshot for stage {stage!r} could not be built -- "
+                  f"stage NOT passed: {exc}")
+            return None
+        if not published.exists() or not published.is_dir():
+            print(f"FAIL: snapshot at {published} was not published -- "
+                  f"stage {stage!r} NOT passed")
+            return None
+        if published != reserved_dest:
+            shutil.rmtree(published, ignore_errors=True)
+            published = None
+            print("FAIL: reserved snapshot path drifted during finalize -- "
+                  "stage NOT passed")
+            return None
+        try:
+            atomic_write_json(target, state)
+        except Exception as exc:  # noqa: BLE001
+            # This newly published directory was never recorded as a backup;
+            # remove only the orphan. Existing backups are never touched.
+            shutil.rmtree(published, ignore_errors=True)
+            published = None
+            print("FAIL: snapshot published but run-state write failed -- "
+                  f"stage NOT passed: {exc}")
+            return None
+        finalized_state = state
+    finally:
+        release_lock(target)
+    if finalized_attempt is not None:
+        _emit_stage_attempt_marker(
+            case_id, run_id, stage, finalized_attempt, "end",
+            outcome="passed")
+    return finalized_state
 
 
 def cmd_snapshot_backup(args):
-    src = case_dir(args.case_id)
-    src.mkdir(parents=True, exist_ok=True)
-    backups = src / "_backups"
-    backups.mkdir(parents=True, exist_ok=True)
-    if backups.is_symlink() or not backups.is_dir():
-        print("FAIL: snapshot backup namespace is not a safe directory")
+    """Backward-compatible alias for finalize-stage: snapshot + passed, atomic.
+    Kept so existing callers/tests using 'snapshot-backup' keep working; new
+    code should read this as 'finalize this stage'."""
+    state = _finalize_stage(args.case_id, args.run_id, args.stage, args.held_by)
+    if state is None:
         return 1
-    state_target = run_state_path(args.case_id)
-    owned_lock, existing_lock = acquire_owned_lock_blocking(
-        state_target,
-        args.held_by,
-        args.run_id,
-        f"publish coherent snapshot for {args.stage}",
-    )
-    if existing_lock is not None:
-        print(
-            f"LOCKED: held_by={existing_lock['held_by']} "
-            f"run_id={existing_lock['run_id']}"
-        )
-        return 1
-    assert owned_lock is not None
-    dest: Path | None = None
-    staging: Path | None = None
-    promoted = False
-    try:
-        try:
-            state = validated_run_state(args.case_id, allow_missing=True)
-        except ValueError as exc:
-            print(f"BLOCKED: {exc}")
-            return 1
-        owner = state.get("run_id")
-        if owner not in {None, args.run_id}:
-            print("BLOCKED: snapshot does not match the canonical run owner")
-            return 1
-        try:
-            _require_transition_medical_clearance(
-                args.case_id,
-                args.run_id,
-                state,
-                args.stage,
-                snapshot=True,
-            )
-        except ValueError as exc:
-            print(f"BLOCKED: {exc}")
-            return 1
-        blockers = _stage_finalization_blockers(
-            args.case_id, args.stage, state
-        )
-        if blockers:
-            print(f"REFUSED: cannot finalize {args.stage!r}:")
-            for blocker in blockers:
-                print(f"  - {blocker}")
-            return 1
-        dest = _next_snapshot_destination(backups, args.stage)
-        if dest.exists() or dest.is_symlink():
-            print(f"FAIL: snapshot destination already exists: {dest}")
-            return 1
-
-        final_state = json.loads(json.dumps(state))
-        final_state["run_id"] = args.run_id
-        stages = final_state["stages"]
-        entry = next(
-            (item for item in stages if item["stage_name"] == args.stage),
-            None,
-        )
-        if entry is None:
-            entry = {
-                "stage_name": args.stage,
-                "status": "pending",
-                "started_at": None,
-                "completed_at": None,
-                "attempt_count": 0,
-                "backup_path": None,
-            }
-            stages.append(entry)
-        completed_at = now_iso()
-        entry["status"] = "passed"
-        entry["completed_at"] = completed_at
-        entry["backup_path"] = str(dest)
-        final_state["updated_at"] = completed_at
-        errors = _schema_check(final_state, "run_state.schema.json")
-        if errors:
-            print("FAIL: schema validation errors for final snapshot run state:")
-            for error in errors:
-                print(f"  - {error}")
-            return 1
-
-        source_inventory = None
-        for attempt in range(1, SNAPSHOT_MAX_ATTEMPTS + 1):
-            staging = backups / (
-                f".{dest.name}.incomplete-{os.getpid()}-"
-                f"{threading.get_ident()}-{attempt}"
-            )
-            shutil.rmtree(staging, ignore_errors=True)
-            try:
-                before = _snapshot_inventory(src)
-                staging.mkdir(parents=False, exist_ok=False)
-                _copy_snapshot_inventory(src, staging, before)
-                after = _snapshot_inventory(src)
-                copied = _snapshot_inventory(staging)
-                if before == after == copied:
-                    source_inventory = after
-                    break
-            except OSError:
-                if attempt == SNAPSHOT_MAX_ATTEMPTS:
-                    raise
-            shutil.rmtree(staging, ignore_errors=True)
-        if source_inventory is None:
-            print(
-                "FAIL: case artifacts changed during every bounded snapshot attempt"
-            )
-            return 1
-        assert staging is not None
-
-        atomic_write_json(staging / "_run_state.json", final_state)
-        atomic_write_json(staging / "_snapshot_manifest.json", {
-            "schema_version": "snapshot_manifest.v0.1",
-            "complete": True,
-            "case_id": args.case_id,
-            "run_id": args.run_id,
-            "stage": args.stage,
-            "completed_at": completed_at,
-            "source_inventory_sha256": _snapshot_inventory_sha(source_inventory),
-            "entry_count": len(source_inventory),
-        })
-        _rename_snapshot_directory_noreplace(staging, dest)
-        promoted = True
-        directory_fd = os.open(backups, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-        try:
-            atomic_write_json(state_target, final_state)
-        except AtomicWriteCommittedError as exc:
-            print(
-                f"PARTIAL: coherent snapshot and run state were published, but "
-                f"run-state directory durability was not confirmed: {exc}"
-            )
-            return 1
-        except OSError as exc:
-            print(
-                f"PARTIAL: coherent snapshot was published at {dest}, but "
-                f"run state was not updated; retry snapshot registration: {exc}"
-            )
-            return 1
-        print(f"OK: snapshot at {dest}")
-        return 0
-    except OSError as exc:
-        if staging is not None:
-            shutil.rmtree(staging, ignore_errors=True)
-        if promoted and dest is not None:
-            print(
-                f"PARTIAL: coherent snapshot was published at {dest}, but "
-                f"post-publication durability failed: {exc}"
-            )
-            return 1
-        print(f"FAIL: coherent snapshot was not published: {exc}")
-        return 1
-    finally:
-        release_owned_lock(owned_lock)
+    entry = next(s for s in state["stages"] if s["stage_name"] == args.stage)
+    print(f"OK: finalized {args.stage} -> passed, snapshot at {entry['backup_path']}")
+    # SLA end -- only on the success path, and only for the terminal stage. A
+    # failed finalize returned above, so the window never closes on a stage
+    # that did not actually pass.
+    if args.stage == SLA_END_STAGE and _emit_sla_marker(
+            args.case_id, args.run_id, "sla.phase1.end"):
+        print(f"  sla.phase1.end recorded -- run `dao.py aggregate-trace "
+              f"{args.case_id} --run-id {args.run_id} --held-by <name>` for timings")
+    return 0
 
 
 def cmd_finalize_stage(args):
     return cmd_snapshot_backup(args)
-
-
-def _finalize_stage(case_id, run_id, stage, held_by):
-    """In-process compatibility wrapper for the authoritative snapshot path."""
-    from types import SimpleNamespace
-
-    rc = cmd_snapshot_backup(SimpleNamespace(
-        case_id=case_id,
-        run_id=run_id,
-        stage=stage,
-        held_by=held_by,
-    ))
-    return validated_run_state(case_id) if rc == 0 else None
 
 
 # ------------------------------------------------------------ conflict ledger --
@@ -6823,40 +6930,10 @@ def conflict_ledger_path(case_id: str) -> Path:
     return case_dir(case_id) / "_conflict_ledger.json"
 
 
-def validated_conflict_ledger(
-    case_id: str, *, allow_missing: bool = False
-) -> dict:
-    existing = load_json(conflict_ledger_path(case_id))
-    if existing is not None:
-        existing = _normalize_legacy_generic_ledger(
-            existing,
-            version="conflict_ledger.v0.3",
-            state_key="conflicts",
-            schema_name="conflict_ledger.schema.json",
-            predecessor_versions={"conflict_ledger.v0.2"},
-        )
-        _validate_generic_ledger(
-            existing, case_id, "conflict_ledger.schema.json"
-        )
-        return existing
-    if not allow_missing:
-        raise ValueError("conflict ledger is missing")
-    return {
-        "ledger_version": "conflict_ledger.v0.3",
-        "case_id": case_id,
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-        "conflicts": [],
-        "history_boundary": make_history_boundary([], mode="native"),
-        "operations": [],
-    }
-
-
-def load_conflict_ledger(case_id: str) -> dict:
-    return validated_conflict_ledger(case_id, allow_missing=True)
-
-
 def ensure_conflict_ledger(case_id: str, held_by: str, run_id: str) -> dict:
+    """Initialize a zero-conflict ledger under DAO control, or return the
+    existing one. Restored for the medical publication path, which requires a
+    valid canonical conflict ledger before it will publish."""
     target = conflict_ledger_path(case_id)
     existing_lock = acquire_lock_blocking(
         target, held_by, run_id, "initialize canonical conflict ledger"
@@ -6869,20 +6946,40 @@ def ensure_conflict_ledger(case_id: str, held_by: str, run_id: str) -> dict:
         ledger = validated_conflict_ledger(case_id, allow_missing=True)
         errors = _schema_check(ledger, "conflict_ledger.schema.json")
         if errors:
-            raise ValueError("generated conflict ledger is invalid: " + "; ".join(errors))
+            raise ValueError(
+                "generated conflict ledger is invalid: " + "; ".join(errors))
         atomic_write_json(target, ledger)
         return ledger
     finally:
         release_lock(target)
 
 
+def load_conflict_ledger(case_id: str) -> dict:
+    """The conflict ledger, upgraded to the history-tracked shape if needed.
+
+    Unlike validated_conflict_ledger this does not replay -- callers that are
+    about to WRITE validate explicitly first, and read-only callers should not
+    acquire a new failure mode on a ledger they only count entries in.
+    """
+    existing = load_json(conflict_ledger_path(case_id))
+    if existing is not None:
+        return _normalize_legacy_generic_ledger(
+            existing, version="conflict_ledger.v0.3", state_key="conflicts",
+            schema_name="conflict_ledger.schema.json",
+            predecessor_versions={"conflict_ledger.v0.2"})
+    return {
+        "ledger_version": "conflict_ledger.v0.3",
+        "case_id": case_id,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "conflicts": [],
+        "history_boundary": make_history_boundary([], mode="native"),
+        "operations": [],
+    }
+
+
 def cmd_read_conflict_ledger(args):
-    try:
-        ledger = load_conflict_ledger(args.case_id)
-    except ValueError as exc:
-        print(f"FAIL: {exc}")
-        return 1
-    print(json.dumps(ledger, ensure_ascii=False, indent=2))
+    print(json.dumps(load_conflict_ledger(args.case_id), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -6901,31 +6998,28 @@ def cmd_add_conflict_entry(args):
     try:
         try:
             ledger = load_conflict_ledger(args.case_id)
+            _validate_generic_ledger(ledger, args.case_id,
+                                     "conflict_ledger.schema.json")
         except ValueError as exc:
-            print(f"FAIL: {exc}")
+            print(f"ERROR: conflict ledger is not writable: {exc}")
             return 1
         sources = json.loads(Path(args.sources_file).read_text(encoding="utf-8"))
-        try:
-            request, request_sha256, replay = _prepare_ledger_operation(
-                ledger,
-                args,
-                "add",
-                {
-                    "stage": args.stage,
-                    "topic": args.topic,
-                    "sources": sources,
-                },
-            )
-        except ValueError as exc:
-            print(f"FAIL: {exc}")
-            return 1
-        if replay is not None:
-            print(json.dumps(replay, sort_keys=True))
-            return 0
         n = len(ledger["conflicts"]) + 1
+        conflict_id = f"CONFLICT_{n}"
+        payload = {"stage": args.stage, "topic": args.topic, "sources": sources}
+        try:
+            request, request_sha256, committed = _prepare_ledger_operation(
+                ledger, args, "add", payload)
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+        if committed is not None:
+            print(f"OK: added {committed['target_id']} (already recorded under"
+                  f" operation_id {args.operation_id})")
+            return 0
         completed_at = now_iso()
         ledger["conflicts"].append({
-            "conflict_id": f"CONFLICT_{n}",
+            "conflict_id": conflict_id,
             "raised_by_stage": args.stage,
             "field_or_topic": args.topic,
             "sources": sources,
@@ -6933,15 +7027,11 @@ def cmd_add_conflict_entry(args):
             "resolution_note": None,
             "resolved_at": None,
         })
-        ledger["updated_at"] = now_iso()
-        result = {
-            "action": "add",
-            "target_id": f"CONFLICT_{n}",
-            "status": "pending",
-        }
         _commit_ledger_operation(
-            ledger, args, request, request_sha256, result, completed_at
-        )
+            ledger, args, request, request_sha256,
+            {"action": "add", "target_id": conflict_id, "status": "pending"},
+            completed_at)
+        ledger["updated_at"] = now_iso()
         errors = _schema_check(ledger, "conflict_ledger.schema.json")
         if errors:
             print(f"FAIL: schema validation errors for {target} -- not written:")
@@ -6949,7 +7039,7 @@ def cmd_add_conflict_entry(args):
                 print(f"  - {e}")
             return 1
         atomic_write_json(target, ledger)
-        print(json.dumps(result, sort_keys=True))
+        print(f"OK: added CONFLICT_{n}")
         return 0
     finally:
         release_lock(target)
@@ -6965,43 +7055,36 @@ def cmd_set_conflict_verdict(args):
     try:
         try:
             ledger = load_conflict_ledger(args.case_id)
+            _validate_generic_ledger(ledger, args.case_id,
+                                     "conflict_ledger.schema.json")
         except ValueError as exc:
-            print(f"FAIL: {exc}")
+            print(f"ERROR: conflict ledger is not writable: {exc}")
             return 1
-        try:
-            request, request_sha256, replay = _prepare_ledger_operation(
-                ledger,
-                args,
-                "set_verdict",
-                {
-                    "conflict_id": args.conflict_id,
-                    "verdict": args.verdict,
-                    "note": args.note,
-                },
-            )
-        except ValueError as exc:
-            print(f"FAIL: {exc}")
-            return 1
-        if replay is not None:
-            print(json.dumps(replay, sort_keys=True))
-            return 0
         entry = next((c for c in ledger["conflicts"] if c["conflict_id"] == args.conflict_id), None)
         if entry is None:
             print(f"NOT_FOUND: {args.conflict_id}")
             return 1
+        payload = {"conflict_id": args.conflict_id, "verdict": args.verdict,
+                   "note": args.note}
+        try:
+            request, request_sha256, committed = _prepare_ledger_operation(
+                ledger, args, "set_verdict", payload)
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+        if committed is not None:
+            print(f"OK: {args.conflict_id} -> {args.verdict} (already recorded"
+                  f" under operation_id {args.operation_id})")
+            return 0
         completed_at = now_iso()
         entry["verdict"] = args.verdict
         entry["resolution_note"] = args.note
         entry["resolved_at"] = completed_at
-        ledger["updated_at"] = now_iso()
-        result = {
-            "action": "set_verdict",
-            "target_id": args.conflict_id,
-            "status": args.verdict,
-        }
         _commit_ledger_operation(
-            ledger, args, request, request_sha256, result, completed_at
-        )
+            ledger, args, request, request_sha256,
+            {"action": "set_verdict", "target_id": args.conflict_id,
+             "status": args.verdict}, completed_at)
+        ledger["updated_at"] = now_iso()
         errors = _schema_check(ledger, "conflict_ledger.schema.json")
         if errors:
             print(f"FAIL: schema validation errors for {target} -- not written:")
@@ -7009,7 +7092,7 @@ def cmd_set_conflict_verdict(args):
                 print(f"  - {e}")
             return 1
         atomic_write_json(target, ledger)
-        print(json.dumps(result, sort_keys=True))
+        print(f"OK: {args.conflict_id} -> {args.verdict}")
         return 0
     finally:
         release_lock(target)
@@ -7021,8 +7104,13 @@ def pending_conflict_ids(case_id: str) -> list[str]:
     Shared by the CLI check and the finalize gate so the two cannot drift into
     disagreeing about what "clear" means -- the drift that let a documented
     gate be enforced in prose only.
+
+    Validated, not merely read: "no pending verdicts" is only meaningful if the
+    verdicts are the ones the ledger's own history records. A ledger that fails
+    its chain raises rather than reporting clear, so P6 fails closed.
     """
     ledger = load_conflict_ledger(case_id)
+    _validate_generic_ledger(ledger, case_id, "conflict_ledger.schema.json")
     return [c["conflict_id"] for c in ledger["conflicts"]
             if c.get("verdict") == "pending"]
 
@@ -7042,20 +7130,255 @@ CONFLICT_GATED_STAGES = frozenset({
     "critic_v1",
     "critic_v2",
     "denial_validation",
-    "human_review_v1",
-    "human_review_v2",
+    "evaluation",
 })
 
 
+@traced_read("dao.check_conflicts_clear")
 def cmd_check_conflicts_clear(args):
     try:
         pending = pending_conflict_ids(args.case_id)
     except ValueError as exc:
-        print(json.dumps({"clear": False, "error": str(exc)}))
+        print(json.dumps({"clear": False, "error": str(exc)}, ensure_ascii=False))
         return 1
     clear = not pending
     print(json.dumps({"clear": clear, "pending": pending}))
     return 0 if clear else 1
+
+
+# ------------------------------------------------- medical review (T48) --
+# Restored after merge 3569d50 discarded parent2's dao.py wholesale. The
+# adjudication logic was never lost -- it lives in tools/medical_repository.py
+# and tools/medical_review_ledger.py, which the merge kept. What went missing
+# was every DAO-side entry point those modules are called through, which left
+# them dead code: 53 cases on disk, zero medical artifacts, and a clearance
+# gate that no longer ran.
+
+POST_MEDICAL_STAGES = {
+    "denial_response",
+    "consistency_check",
+    "screening_report",
+    "draft_report_v1",
+    "critic_v1",
+    "human_review_v1",
+    "denial_validation",
+    "draft_report_v2",
+    "critic_v2",
+    "human_review_v2",
+}
+
+
+def _medical_clearance_required(
+    state: dict,
+    stage: str,
+    status: str | None = None,
+    *,
+    snapshot: bool = False,
+) -> bool:
+    """Whether this transition must prove medical clearance first.
+
+    `claim_analysis` is gated regardless of `medical_review_adopted`: the
+    medical variables are an INPUT to that stage, so "this case has no medical
+    review yet" is exactly the condition the gate exists to catch, not an
+    exemption from it. Every later stage is gated only once the case has
+    adopted the flow.
+    """
+    if not _medical_gate_applies(state):
+        return False
+    if stage == "claim_analysis":
+        return snapshot or status == "passed"
+    if not state.get("medical_review_adopted", False):
+        return False
+    return stage in POST_MEDICAL_STAGES and (
+        snapshot or status in {"in_progress", "passed"}
+    )
+
+
+def _require_transition_medical_clearance(
+    case_id: str,
+    run_id: str,
+    state: dict,
+    stage: str,
+    status: str | None = None,
+    *,
+    snapshot: bool = False,
+) -> None:
+    if not _medical_clearance_required(state, stage, status, snapshot=snapshot):
+        return
+    from medical_review_ledger import require_clearance
+
+    require_clearance(sys.modules[__name__], case_id, run_id)
+
+
+def cmd_write_medical_variables(args):
+    import medical_repository
+
+    return medical_repository.publish(sys.modules[__name__], args)
+
+
+def cmd_read_medical_variables(args):
+    import medical_repository
+
+    return medical_repository.cmd_read_variables(sys.modules[__name__], args)
+
+
+def cmd_read_medical_evidence(args):
+    import medical_repository
+
+    return medical_repository.cmd_read_evidence(sys.modules[__name__], args)
+
+
+def cmd_check_medical_reviews_clear(args):
+    from medical_review_ledger import cmd_check_clear
+
+    return cmd_check_clear(sys.modules[__name__], args)
+
+
+def _run_medical_review_mutation(command, args):
+    """Fence every ledger mutation to the canonical run owner, then project
+    the resulting waits back into run state."""
+    state_path = run_state_path(args.case_id)
+    owned_lock, existing_lock = acquire_owned_lock_blocking(
+        state_path,
+        args.held_by,
+        args.run_id,
+        "authorize canonical medical-review run owner",
+    )
+    if existing_lock is not None:
+        print(
+            f"LOCKED: held_by={existing_lock['held_by']} "
+            f"run_id={existing_lock['run_id']}"
+        )
+        return 1
+    assert owned_lock is not None
+    try:
+        try:
+            state = validated_run_state(args.case_id, allow_missing=True)
+        except ValueError as exc:
+            print(f"BLOCKED: {exc}")
+            return 1
+        owner = state.get("run_id")
+        if owner is None:
+            variables, error = _load_medical_revision(args.case_id, None)
+            if (
+                error
+                or variables is None
+                or variables.get("run_id") != args.run_id
+            ):
+                print(
+                    "BLOCKED: medical-review mutation does not match the "
+                    "canonical revision run owner"
+                )
+                return 1
+            state["run_id"] = args.run_id
+            save_run_state(args.case_id, state)
+        elif owner != args.run_id:
+            print(
+                "BLOCKED: medical-review mutation does not match the "
+                "canonical run owner")
+            return 1
+        result = command(sys.modules[__name__], args)
+    finally:
+        release_owned_lock(owned_lock)
+    if result == 0:
+        from medical_review_ledger import reconcile_wait_projection
+
+        projected, _, error = reconcile_wait_projection(
+            sys.modules[__name__], args, blocking=False, automatic=True
+        )
+        if not projected:
+            print(
+                "WARNING: canonical medical-review mutation succeeded but "
+                f"run-state wait projection requires reconciliation: {error}"
+            )
+    return result
+
+
+def cmd_open_medical_review_item(args):
+    from medical_review_ledger import cmd_open
+
+    return _run_medical_review_mutation(cmd_open, args)
+
+
+def cmd_record_medical_referral_decision(args):
+    from medical_review_ledger import cmd_record_decision
+
+    return _run_medical_review_mutation(cmd_record_decision, args)
+
+
+def cmd_provide_medical_review_information(args):
+    from medical_review_ledger import cmd_provide_information
+
+    return _run_medical_review_mutation(cmd_provide_information, args)
+
+
+def cmd_transition_medical_review(args):
+    from medical_review_ledger import cmd_transition
+
+    return _run_medical_review_mutation(cmd_transition, args)
+
+
+def cmd_reconcile_medical_review_waits(args):
+    from medical_review_ledger import reconcile_wait_projection
+
+    projected, changed, error = reconcile_wait_projection(
+        sys.modules[__name__], args
+    )
+    if not projected:
+        print(f"FAIL: medical-review wait reconciliation failed: {error}")
+        return 1
+    print(json.dumps({
+        "case_id": args.case_id,
+        "changed": changed,
+        "reconciled": True,
+    }))
+    return 0
+
+
+def cmd_read_medical_review_ledger(args):
+    from medical_review_ledger import cmd_read_ledger
+
+    return cmd_read_ledger(sys.modules[__name__], args)
+
+
+def cmd_read_medical_review_evidence(args):
+    from medical_review_ledger import cmd_read_evidence
+
+    return cmd_read_evidence(sys.modules[__name__], args)
+
+
+def cmd_read_medical_review_outcomes(args):
+    from medical_review_ledger import cmd_read_outcomes
+
+    allowed_consumers = {
+        "screening_report",
+        "denial_validation",
+        "draft_report_v1",
+        "draft_report_v2",
+    }
+    if args.caller_stage not in allowed_consumers:
+        print("BLOCKED: caller stage is not authorized for medical-review outcomes")
+        return 1
+    try:
+        state = validated_run_state(args.case_id)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"BLOCKED: {exc}")
+        return 1
+    if state.get("run_id") != args.run_id:
+        print("BLOCKED: outcome read does not match the canonical run owner")
+        return 1
+    stage = next(
+        (
+            item
+            for item in state.get("stages", [])
+            if item.get("stage_name") == args.caller_stage
+        ),
+        None,
+    )
+    if stage is None or stage.get("status") != "in_progress":
+        print("BLOCKED: authorized outcome consumer stage is not in progress")
+        return 1
+    return cmd_read_outcomes(sys.modules[__name__], args)
 
 
 # --------------------------------------------------- human-review ledger --
@@ -7071,6 +7394,56 @@ def load_human_review_ledger(case_id: str) -> dict | None:
     return load_json(human_review_ledger_path(case_id))
 
 
+def record_source_digest(case_id, doc_id, held_by, run_id, expect=None):
+    """Record a registered source's digest and return a structured outcome.
+
+    This is an in-process DAO capability for transaction drivers.  The CLI
+    wrapper below remains the public interface and owns its existing output.
+    """
+    def outcome(success, *messages):
+        return {"success": success, "messages": list(messages),
+                "document_id": doc_id}
+
+    actual = registered_source_pdf_sha256(case_id, doc_id)
+    if actual is None:
+        return outcome(False, f"BLOCKED: no readable registered raw source for {doc_id} "
+                       "-- source_pdf_sha256 is derived from the file itself and cannot "
+                       "be recorded without it")
+    if expect and expect != actual:
+        return outcome(False, f"REFUSED: submitted digest {expect!r} does not match the "
+                       f"registered raw source ({actual!r}) -- the file this document "
+                       "was extracted from is not the file the case registered")
+
+    target = case_dir(case_id) / "document_manifest.json"
+    existing_lock = acquire_lock_blocking(
+        target, held_by, run_id, f"record source digest for {doc_id}")
+    if existing_lock is not None:
+        return outcome(False, f"LOCKED: held_by={existing_lock['held_by']} "
+                       f"run_id={existing_lock['run_id']}")
+    try:
+        manifest = json.loads(target.read_text(encoding="utf-8"))
+        entry = next((d for d in manifest["documents"]
+                      if d["document_id"] == doc_id), None)
+        if entry is None:
+            return outcome(False, f"FAIL: {doc_id} is not in document_manifest.json")
+        recorded = entry.get("source_pdf_sha256")
+        if recorded is not None and recorded != actual:
+            return outcome(False, f"REFUSED: {doc_id} already records "
+                           f"{recorded!r}; the registered file now hashes to {actual!r} "
+                           "-- an immutable raw source changed, which is a case-integrity "
+                           "problem, not a field to overwrite")
+        entry["source_pdf_sha256"] = actual
+        manifest["updated_at"] = now_iso()
+        errors = _schema_check(manifest, "document_manifest.schema.json")
+        if errors:
+            return outcome(False, "FAIL: manifest would be schema-invalid -- not written:",
+                           *(f"  - {error}" for error in errors))
+        atomic_write_json(target, manifest)
+        return outcome(True, f"PASS: {doc_id} source_pdf_sha256 = {actual}")
+    finally:
+        release_lock(target)
+
+
 def cmd_record_source_digest(args):
     """Record source_pdf_sha256 by hashing the registered raw file itself.
 
@@ -7080,56 +7453,15 @@ def cmd_record_source_digest(args):
     that disagrees with the file on disk is refused rather than recorded,
     since the disagreement is the finding.
     """
-    actual = registered_source_pdf_sha256(args.case_id, args.doc_id)
-    if actual is None:
-        print(f"BLOCKED: no readable registered raw source for {args.doc_id} "
-              "-- source_pdf_sha256 is derived from the file itself and cannot "
-              "be recorded without it")
-        return 1
-    if args.expect and args.expect != actual:
-        print(f"REFUSED: submitted digest {args.expect!r} does not match the "
-              f"registered raw source ({actual!r}) -- the file this document "
-              "was extracted from is not the file the case registered")
-        return 1
-
-    target = case_dir(args.case_id) / "document_manifest.json"
-    existing_lock = acquire_lock_blocking(
-        target, args.held_by, args.run_id,
-        f"record source digest for {args.doc_id}")
-    if existing_lock is not None:
-        print(f"LOCKED: held_by={existing_lock['held_by']} "
-              f"run_id={existing_lock['run_id']}")
-        return 1
-    try:
-        manifest = json.loads(target.read_text(encoding="utf-8"))
-        entry = next((d for d in manifest["documents"]
-                      if d["document_id"] == args.doc_id), None)
-        if entry is None:
-            print(f"FAIL: {args.doc_id} is not in document_manifest.json")
-            return 1
-        recorded = entry.get("source_pdf_sha256")
-        if recorded is not None and recorded != actual:
-            print(f"REFUSED: {args.doc_id} already records "
-                  f"{recorded!r}; the registered file now hashes to {actual!r} "
-                  "-- an immutable raw source changed, which is a case-integrity "
-                  "problem, not a field to overwrite")
-            return 1
-        entry["source_pdf_sha256"] = actual
-        manifest["updated_at"] = now_iso()
-        errors = _schema_check(manifest, "document_manifest.schema.json")
-        if errors:
-            print(f"FAIL: manifest would be schema-invalid -- not written:")
-            for error in errors:
-                print(f"  - {error}")
-            return 1
-        atomic_write_json(target, manifest)
-        print(f"PASS: {args.doc_id} source_pdf_sha256 = {actual}")
-        return 0
-    finally:
-        release_lock(target)
+    result = record_source_digest(args.case_id, args.doc_id, args.held_by,
+                                  args.run_id, args.expect)
+    for message in result["messages"]:
+        print(message)
+    return 0 if result["success"] else 1
 
 
-def cmd_enable_canonical_uids(args):
+def enable_canonical_uids(case_id, doc_id, held_by, run_id, *,
+                          run_state_lock_already_held=False):
     """Activate canonical_v1 UID verification for one document.
 
     A dedicated, verified command rather than a writable field. Everything it
@@ -7147,19 +7479,20 @@ def cmd_enable_canonical_uids(args):
     not a guarantee -- writing an arbitrary UID would only require turning it
     off first.
     """
-    doc_id = args.doc_id
-    manifest = read_contract_data(args.case_id, "document_manifest.json")
+    def outcome(success, *messages, invalidated=None):
+        return {"success": success, "messages": list(messages),
+                "document_id": doc_id, "invalidated_stages": invalidated or []}
+
+    manifest = read_contract_data(case_id, "document_manifest.json")
     if manifest is None:
-        print("BLOCKED: document_manifest.json does not exist")
-        return 1
+        return outcome(False, "BLOCKED: document_manifest.json does not exist")
     entry = next((d for d in manifest.get("documents", [])
                   if d.get("document_id") == doc_id), None)
     if entry is None:
-        print(f"BLOCKED: {doc_id} is not a registered document")
-        return 1
+        return outcome(False, f"BLOCKED: {doc_id} is not a registered document")
 
     blockers = []
-    actual = registered_source_pdf_sha256(args.case_id, doc_id)
+    actual = registered_source_pdf_sha256(case_id, doc_id)
     recorded = entry.get("source_pdf_sha256")
     if actual is None:
         blockers.append(
@@ -7175,7 +7508,7 @@ def cmd_enable_canonical_uids(args):
             f"recorded source_pdf_sha256 {recorded!r} does not match the "
             f"registered raw source ({actual!r})")
 
-    revision_entry = revision_entry_for(args.case_id, doc_id)
+    revision_entry = revision_entry_for(case_id, doc_id)
     if revision_entry is None:
         blockers.append(
             "no source-text revision is registered -- a canonical UID is "
@@ -7189,29 +7522,51 @@ def cmd_enable_canonical_uids(args):
             "cannot resolve without one")
 
     if blockers:
-        print(f"BLOCKED: cannot enable canonical_v1 for {doc_id}:")
-        for blocker in blockers:
-            print(f"  - {blocker}")
-        return 1
+        return outcome(False, f"BLOCKED: cannot enable canonical_v1 for {doc_id}:",
+                       *(f"  - {blocker}" for blocker in blockers))
 
-    target = revision_index_path(args.case_id)
+    # Every activation transaction takes run-state before revision-index.  The
+    # preflight already owns run-state for its whole attempt-open boundary;
+    # standalone CLI calls acquire it here.  A reverse order would let a CLI
+    # activation hold revision-index while waiting for preflight's run-state
+    # lock, while preflight waited for that revision-index lock.
+    run_state_target = run_state_path(case_id)
+    acquired_run_state_lock = False
+    if not run_state_lock_already_held:
+        existing_run_state_lock = acquire_lock_blocking(
+            run_state_target, held_by, run_id,
+            f"canonical UID activation transaction ({doc_id})")
+        if existing_run_state_lock is not None:
+            return outcome(False,
+                f"FAIL: {doc_id} was NOT switched to canonical_v1 -- the "
+                f"policy stage and its downstream could not be invalidated: "
+                "could not acquire the run-state lock for canonical UID activation -- "
+                f"held_by={existing_run_state_lock['held_by']} "
+                f"run_id={existing_run_state_lock['run_id']}",
+                "  activating canonical UIDs while a stage still claims "
+                "'passed' against unverified artifacts would be exactly "
+                "the fail-open state this gate exists to prevent; "
+                "resolve the run-state lock and retry")
+        acquired_run_state_lock = True
+
+    target = revision_index_path(case_id)
     existing_lock = acquire_lock_blocking(
-        target, args.held_by, args.run_id, f"enable canonical UIDs ({doc_id})")
+        target, held_by, run_id, f"enable canonical UIDs ({doc_id})")
     if existing_lock is not None:
-        print(f"LOCKED: held_by={existing_lock['held_by']} "
-              f"run_id={existing_lock['run_id']}")
-        return 1
+        if acquired_run_state_lock:
+            release_lock(run_state_target)
+        return outcome(False, f"LOCKED: held_by={existing_lock['held_by']} "
+                       f"run_id={existing_lock['run_id']}")
     try:
-        index = load_revision_index(args.case_id)
+        index = load_revision_index(case_id)
         doc_entry = next((d for d in index.get("documents", [])
                           if d.get("document_id") == doc_id), None)
         if doc_entry is None:
             # Re-read under the lock: the precondition pass above ran before
             # acquiring it, so the entry could have gone between the two.
-            print(f"REFUSED: {doc_id} has no revision entry -- there is no "
-                  "recorded state to transition, and activation may not "
-                  "create one")
-            return 1
+            return outcome(False, f"REFUSED: {doc_id} has no revision entry -- there is no "
+                           "recorded state to transition, and activation may not "
+                           "create one")
         # Activation ALWAYS mutates a record that already exists, so a missing
         # uid_scheme here is damage rather than a fresh document. Passing that
         # distinction explicitly is what stops a corrupt entry being repaired
@@ -7220,16 +7575,12 @@ def cmd_enable_canonical_uids(args):
         errors = source_provenance.scheme_transition_errors(
             previous_scheme, "canonical_v1", entry_exists=True)
         if errors:
-            for error in errors:
-                print(f"REFUSED: {error}")
-            return 1
+            return outcome(False, *(f"REFUSED: {error}" for error in errors))
         doc_entry["uid_scheme"] = "canonical_v1"
         schema_errors = _schema_check(index, "revision_index.schema.json")
         if schema_errors:
-            print("FAIL: revision index would be schema-invalid -- not written:")
-            for error in schema_errors:
-                print(f"  - {error}")
-            return 1
+            return outcome(False, "FAIL: revision index would be schema-invalid -- not written:",
+                           *(f"  - {error}" for error in schema_errors))
 
         # P0-3's stale cascade, run BEFORE the scheme flip so a failure leaves
         # nothing half-transitioned. Every artifact this document's policy
@@ -7242,34 +7593,50 @@ def cmd_enable_canonical_uids(args):
         if previous_scheme != "canonical_v1":
             try:
                 invalidated = _invalidate_policy_layer(
-                    args.case_id,
+                    case_id,
                     f"canonical_v1 UID verification enabled for {doc_id}: "
                     "policy artifacts written under the legacy scheme were "
                     "never UID-verified and must be rewritten canonically",
-                    args.held_by, args.run_id)
+                    held_by, run_id,
+                    lock_already_held=True)
             except CascadeFailed as exc:
-                print(f"FAIL: {doc_id} was NOT switched to canonical_v1 -- the "
-                      f"policy stage and its downstream could not be "
-                      f"invalidated: {exc}")
-                print("  activating canonical UIDs while a stage still claims "
-                      "'passed' against unverified artifacts would be exactly "
-                      "the fail-open state this gate exists to prevent; "
-                      "resolve the run-state lock and retry")
-                return 1
+                return outcome(False,
+                    f"FAIL: {doc_id} was NOT switched to canonical_v1 -- the "
+                    f"policy stage and its downstream could not be invalidated: {exc}",
+                    "  activating canonical UIDs while a stage still claims "
+                    "'passed' against unverified artifacts would be exactly "
+                    "the fail-open state this gate exists to prevent; "
+                    "resolve the run-state lock and retry")
         else:
             invalidated = []
 
         atomic_write_json(target, index)
-        print(f"PASS: {doc_id} is now canonical_v1 -- every policy UID on this "
-              "document is recomputed and must match. This cannot be undone.")
+        messages = [f"PASS: {doc_id} is now canonical_v1 -- every policy UID on this "
+                    "document is recomputed and must match. This cannot be undone."]
         if invalidated:
-            print("INVALIDATED (legacy policy artifacts are no longer "
-                  f"citable): {', '.join(sorted(invalidated))}")
-            print("  rewrite this document's policy contracts with canonically "
-                  "derived UIDs, then re-finalize policy_clause_processing.")
-        return 0
+            messages.extend([
+                "INVALIDATED (legacy policy artifacts are no longer "
+                f"citable): {', '.join(sorted(invalidated))}",
+                "  rewrite this document's policy contracts with canonically "
+                "derived UIDs, then re-finalize policy_clause_processing."])
+        return outcome(True, *messages, invalidated=invalidated)
     finally:
         release_lock(target)
+        if acquired_run_state_lock:
+            release_lock(run_state_target)
+
+
+def cmd_enable_canonical_uids(args):
+    """CLI wrapper for canonical UID activation.
+
+    The CLI never exposes the in-process lock-ownership capability; it always
+    takes and releases the run-state lock through the normal cascade path.
+    """
+    result = enable_canonical_uids(args.case_id, args.doc_id, args.held_by,
+                                   args.run_id)
+    for message in result["messages"]:
+        print(message)
+    return 0 if result["success"] else 1
 
 
 # ------------------------------------------- segment derivation receipts --
@@ -10083,6 +10450,7 @@ def cmd_read_revision_index(args):
     return 0
 
 
+@traced_read("dao.policy_snapshot")
 def cmd_policy_snapshot(args):
     """Print the upstream_policy_snapshot value for the given documents.
 
@@ -10295,6 +10663,236 @@ def cmd_record_human_review(args):
     return 0
 
 
+# ------------------------------------------------------------ trace rollup --
+
+TIMING_SUMMARY_FILENAME = "_timing_summary.json"
+TIMING_SUMMARY_SCHEMA = "timing_summary.schema.json"
+
+# The stage whose successful finalize closes the SLA window. draft_report_v1,
+# not critic_v1: what the practice actually delivers is the report, and critic
+# is review rather than production (plan section 2.1, user decision
+# 2026-08-10). critic_v1 still RUNS -- evaluation depends on it -- it is simply
+# outside the measured window.
+SLA_END_STAGE = "draft_report_v1"
+
+
+def _emit_stage_attempt_marker(case_id: str, run_id: str | None, stage: str,
+                               attempt: int | None, kind: str,
+                               outcome: str | None = None) -> bool:
+    """Emit one idempotent stage-attempt lifecycle event.
+
+    The governed run-state transition is committed first. This trace event is
+    diagnostic and may be missing after a crash; it never repairs itself from
+    run-state timestamps, because those are marker-movement times rather than
+    measured work boundaries. A per-attempt O_EXCL stamp prevents a replayed
+    command from emitting a second marker for the same lifecycle edge.
+    """
+    if not run_id or not isinstance(attempt, int) or attempt < 1:
+        return False
+    if kind not in {"start", "end", "abandoned"}:
+        return False
+    try:
+        trace_mod.configure(case_id, run_id, root=OUTPUTS)
+        if not trace_mod.enabled():
+            return False
+        marker_dir = trace_spans_dir(case_id, run_id).parent / "markers"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        stamp = marker_dir / f"stage.attempt.{kind}.{stage}.{attempt}.json"
+        try:
+            fd = os.open(stamp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        op = f"stage.attempt.{kind}"
+        marker_kind = f"stage_attempt_{kind}"
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({
+                "op": op, "case_id": case_id, "run_id": run_id,
+                "stage_name": stage, "attempt": attempt,
+                "attempt_outcome": outcome, "emitted_at": now_iso(),
+            }, fh, ensure_ascii=False)
+        attrs = {"marker_kind": marker_kind, "stage_name": stage}
+        if outcome is not None:
+            attrs["attempt_outcome"] = outcome
+        trace_mod.event(
+            op, category="marker", case_id=case_id, attempt=attempt,
+            status="ok" if outcome in (None, "passed") else "error",
+            **attrs)
+        return True
+    except Exception:  # noqa: BLE001 -- diagnostics must never break a run
+        return False
+
+
+def _emit_human_wait_span(case_id: str, run_id: str | None, stage: str,
+                          requested_at: str | None, received_at: str | None) -> bool:
+    """Record a closed human-input wait so active_s can deduct it.
+
+    P7 already stores requested_at/received_at in _run_state.json, so the
+    interval is known exactly -- this only carries it into the trace, where
+    compute_sla subtracts human_wait from the SLA wall clock. Without it the
+    subtraction is real but always zero, and a "30 minute" figure quietly
+    includes however long a person took to answer.
+
+    Never raises, for the same reason as _emit_sla_marker: a failure to record
+    a measurement must not fail the pipeline operation that triggered it.
+    """
+    if not (run_id and requested_at and received_at):
+        return False
+    try:
+        start = datetime.fromisoformat(requested_at)
+        end = datetime.fromisoformat(received_at)
+        waited = (end - start).total_seconds()
+        if waited < 0:
+            return False
+        trace_mod.configure(case_id, run_id)
+        if not trace_mod.enabled():
+            return False
+        trace_mod.closed_interval(
+            "human.gate", category="human_wait", t_start_wall=requested_at,
+            duration_s=waited, case_id=case_id,
+            gate_kind=stage, waited_s=round(waited, 3))
+        return True
+    except Exception:  # noqa: BLE001 -- diagnostics must never break a run
+        return False
+
+
+def _emit_sla_marker(case_id: str, run_id: str | None, op: str) -> bool:
+    """Emit an SLA boundary marker exactly once per (case, run).
+
+    Idempotence is the whole contract here. `check-source-ledger-clear` is a
+    query an agent may legitimately call several times, and a stage can be
+    finalized again after a rerun -- but a window with two starts has no
+    defined width. The marker file is the record of "already emitted"; it sits
+    beside the shards under _trace/ because it describes the trace, not the
+    case, and like the shards it is excluded from P10 snapshots.
+
+    Returns True if this call emitted the marker. Never raises: a failure to
+    record a measurement must not fail the pipeline operation that triggered
+    it, so every error path here degrades to "no marker" and the run proceeds.
+    """
+    if not run_id:
+        # Nothing to scope the marker to. A run without an id cannot be
+        # aggregated anyway -- aggregate-trace is keyed by run_id.
+        return False
+    try:
+        trace_mod.configure(case_id, run_id)
+        if not trace_mod.enabled():
+            return False
+        marker_dir = trace_spans_dir(case_id, run_id).parent / "markers"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        stamp = marker_dir / f"{op}.json"
+        # O_EXCL, not exists()-then-write: two concurrent callers must not both
+        # conclude they were first. Same atomic-create reasoning as the lock
+        # primitive, for the same reason.
+        try:
+            fd = os.open(stamp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"op": op, "case_id": case_id, "run_id": run_id,
+                       "emitted_at": now_iso()}, fh, ensure_ascii=False)
+        trace_mod.event(op, category="marker", case_id=case_id,
+                        marker_kind="sla_start" if op.endswith("start") else "sla_end")
+        return True
+    except Exception:  # noqa: BLE001 -- diagnostics must never break a run
+        return False
+
+
+def trace_spans_dir(case_id: str, run_id: str) -> Path:
+    """Where tools/trace.py's shards land for one run.
+
+    Built through _require_within like every other DAO path, so a crafted
+    run_id cannot walk out of the case directory -- the shard tree is written
+    outside the lock discipline, which makes its path the one part of it that
+    still has to be checked here.
+    """
+    _require_safe_id("run_id", run_id)
+    return _require_within(case_dir(case_id), "_trace", run_id, "spans")
+
+
+def cmd_aggregate_trace(args):
+    """Roll the run's span shards up into _timing_summary.json.
+
+    Runs exactly once, after the run's SLA end marker, so it contends with
+    nothing -- which is what lets the shards themselves be written lock-free
+    (see tools/trace.py). The write itself is an ordinary governed DAO write:
+    locked, schema-validated, atomic, refusing to persist on a validation
+    failure exactly like write-contract.
+    """
+    spans_dir = trace_spans_dir(args.case_id, args.run_id)
+    if not spans_dir.exists():
+        print(f"NO_TRACE: {spans_dir} does not exist -- nothing was recorded "
+              f"for {args.case_id}/{args.run_id}. Was HARNESS_TRACE=0?")
+        return 1
+
+    spans, dropped_lines, shard_count = trace_aggregate.read_shards(spans_dir)
+    if not spans:
+        print(f"NO_TRACE: {spans_dir} holds no parseable spans "
+              f"({dropped_lines} unparseable line(s) discarded)")
+        return 1
+
+    run_state = load_run_state(args.case_id)
+    run_state_stages = (run_state.get("stages")
+                        if run_state.get("run_id") == args.run_id else None)
+    summary = trace_aggregate.summarize(
+        spans, case_id=args.case_id, run_id=args.run_id,
+        generated_at=now_iso(), dropped_span_lines=dropped_lines,
+        shard_count=shard_count, input_class=args.input_class,
+        cold_or_warm=args.cold_or_warm,
+        run_state_stages=run_state_stages)
+
+    target = _require_within(case_dir(args.case_id), TIMING_SUMMARY_FILENAME)
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id, f"aggregate trace for {args.run_id}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        errors = _schema_check(summary, TIMING_SUMMARY_SCHEMA)
+        if errors:
+            print(f"FAIL: schema validation errors for {target} -- not written:")
+            for e in errors:
+                print(f"  - {e}")
+            return 1
+        atomic_write_json(target, summary)
+    finally:
+        release_lock(target)
+
+    print(f"PASS: wrote {target}")
+    print(f"  spans={summary['span_count']} shards={shard_count} "
+          f"dropped_lines={dropped_lines}")
+    if summary.get("active_s") is None:
+        # Without both markers there is no SLA window, so every duration below
+        # is still a real measurement but none of them is an SLA verdict. Say
+        # so rather than printing a number that reads like one.
+        print("  active_s=n/a -- sla.phase1.start / sla.phase1.end markers not "
+              "both present in this trace")
+    else:
+        print(f"  sla_wall_clock_s={summary['sla_wall_clock_s']} "
+              f"human_wait_s={summary['human_wait_s']} "
+              f"active_s={summary['active_s']}")
+    coverage = summary.get("stage_coverage") or {}
+    print(f"  stage_coverage={'complete' if coverage.get('coverage_complete') else 'incomplete'} "
+          f"closed={coverage.get('complete_attempts', 0)} "
+          f"open={coverage.get('open_attempts', 0)} "
+          f"missing={coverage.get('missing_marker_attempts', 0)}")
+    top = sorted(summary["by_category"].items(),
+                 key=lambda kv: kv[1]["self_time_s"], reverse=True)[:5]
+    for name, entry in top:
+        print(f"  {name}: {entry['self_time_s']}s "
+              f"({entry['share_of_total'] * 100:.1f}%, n={entry['count']})")
+    return 0
+
+
+def cmd_read_timing_summary(args):
+    p = _require_within(case_dir(args.case_id), TIMING_SUMMARY_FILENAME)
+    if not p.exists():
+        print(f"NOT_FOUND: {p}")
+        return 1
+    print(p.read_text(encoding="utf-8"))
+    return 0
+
+
 # ------------------------------------------------------------------- main --
 
 def build_parser():
@@ -10304,7 +10902,63 @@ def build_parser():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("read-document-text"); p.add_argument("case_id"); p.add_argument("doc_id")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_read_document_text)
+
+    p = sub.add_parser(
+        "read-redacted-text-bundle",
+        help="Return selected active documents' page-labelled redacted text and revision bindings as JSON. Never returns processed-layer paths.")
+    p.add_argument("case_id")
+    p.add_argument("--doc-id", required=True, action="append",
+                   help="active processed document to include; repeat for each document")
+    p.add_argument("--run-id", help="Optional trace attribution for this read.")
+    p.set_defaults(fn=cmd_read_redacted_text_bundle)
+
+    p = sub.add_parser(
+        "verify-evidence-references",
+        help="Verify candidate page/quote/range references against the current redacted text revision.")
+    p.add_argument("case_id")
+    p.add_argument("--references-file", required=True,
+                   help="JSON object containing a non-empty references list")
+    p.add_argument("--run-id", help="Optional trace attribution for this read.")
+    p.set_defaults(fn=cmd_verify_evidence_references)
+
+    p = sub.add_parser("read-driver-receipt",
+                       help="Read one DAO-owned driver resume receipt.")
+    p.add_argument("case_id")
+    p.add_argument("--stage", required=True)
+    p.add_argument("--unit-id", required=True)
+    p.add_argument("--run-id", help="Optional trace attribution for this read.")
+    p.set_defaults(fn=cmd_read_driver_receipt)
+
+    p = sub.add_parser("write-driver-receipt",
+                       help="Schema-validate and publish one DAO-owned driver resume receipt.")
+    p.add_argument("case_id")
+    p.add_argument("--stage", required=True)
+    p.add_argument("--unit-id", required=True)
+    p.add_argument("--data-file", required=True)
+    p.add_argument("--held-by", required=True)
+    p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_write_driver_receipt)
+
+    p = sub.add_parser("read-driver-candidates",
+                       help="Read every DAO-owned completed sub-unit of one driver stage unit.")
+    p.add_argument("case_id")
+    p.add_argument("--stage", required=True)
+    p.add_argument("--unit-id", required=True)
+    p.add_argument("--run-id", help="Optional trace attribution for this read.")
+    p.set_defaults(fn=cmd_read_driver_candidates)
+
+    p = sub.add_parser("write-driver-candidate",
+                       help="Schema-validate and publish one DAO-owned driver sub-unit result.")
+    p.add_argument("case_id")
+    p.add_argument("--stage", required=True)
+    p.add_argument("--unit-id", required=True)
+    p.add_argument("--candidate-id", required=True)
+    p.add_argument("--data-file", required=True)
+    p.add_argument("--held-by", required=True)
+    p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_write_driver_candidate)
 
     p = sub.add_parser("split-core-field-accuracy",
                        help="Recompute an evaluation_result's fact-extraction vs discretionary "
@@ -10332,6 +10986,7 @@ def build_parser():
                    help="Search every processed document in the case instead of one.")
     p.add_argument("--context", type=int, default=60,
                    help="Characters of surrounding source text per hit (default 60).")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_search_document_text)
 
     p = sub.add_parser("read-page-text"); p.add_argument("case_id"); p.add_argument("doc_id")
@@ -10339,6 +10994,7 @@ def build_parser():
     p.add_argument("--caller-stage", required=True,
                    help="Stage making the call. Pre-redaction text is restricted to "
                         f"{sorted(PAGE_TEXT_ALLOWED_STAGES)}; anything else is DENIED.")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_read_page_text)
 
     p = sub.add_parser("read-ground-truth"); p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)
@@ -10357,94 +11013,8 @@ def build_parser():
     p.set_defaults(fn=cmd_read_ground_truth)
 
     p = sub.add_parser("read-contract"); p.add_argument("case_id"); p.add_argument("filename")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_read_contract)
-
-    p = sub.add_parser("write-medical-variables")
-    p.add_argument("case_id"); p.add_argument("data_file")
-    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
-    p.add_argument("--purpose")
-    p.set_defaults(fn=cmd_write_medical_variables)
-
-    p = sub.add_parser("read-medical-variables")
-    p.add_argument("case_id"); p.add_argument("--revision-sha")
-    p.set_defaults(fn=cmd_read_medical_variables)
-
-    p = sub.add_parser("read-run-state")
-    p.add_argument("case_id")
-    p.set_defaults(fn=cmd_read_run_state)
-
-    p = sub.add_parser("check-medical-reviews-clear")
-    p.add_argument("case_id")
-    p.set_defaults(fn=cmd_check_medical_reviews_clear)
-
-    p = sub.add_parser("reconcile-medical-review-waits")
-    p.add_argument("case_id")
-    p.add_argument("--operation-id", required=True)
-    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
-    p.set_defaults(fn=cmd_reconcile_medical_review_waits)
-
-    p = sub.add_parser("open-medical-review-item")
-    p.add_argument("case_id"); p.add_argument("--issue-id", required=True)
-    p.add_argument("--decision-owner", required=True, choices=["policy", "human"])
-    p.add_argument("--operation-id", required=True)
-    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
-    p.set_defaults(fn=cmd_open_medical_review_item)
-
-    p = sub.add_parser("record-medical-referral-decision")
-    p.add_argument("case_id"); p.add_argument("review_item_id")
-    p.add_argument("decision_file")
-    p.add_argument("--operation-id", required=True)
-    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
-    p.set_defaults(fn=cmd_record_medical_referral_decision)
-
-    p = sub.add_parser("provide-medical-review-information")
-    p.add_argument("case_id"); p.add_argument("review_item_id")
-    p.add_argument("--reason", required=True)
-    p.add_argument("--operation-id", required=True)
-    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
-    p.set_defaults(fn=cmd_provide_medical_review_information)
-
-    p = sub.add_parser("transition-medical-review")
-    p.add_argument("case_id"); p.add_argument("review_item_id")
-    p.add_argument(
-        "--action",
-        required=True,
-        choices=[
-            "provide_information",
-            "assign",
-            "request_information",
-            "supplement_package",
-            "reassign",
-            "submit_response",
-            "amend_response",
-            "withdraw_response",
-            "flag_conflict",
-            "adjudicate",
-            "cancel",
-            "close",
-            "reopen",
-        ],
-    )
-    p.add_argument("--data-file")
-    p.add_argument("--reason")
-    p.add_argument("--operation-id", required=True)
-    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
-    p.set_defaults(fn=cmd_transition_medical_review)
-
-    p = sub.add_parser("read-medical-review-ledger")
-    p.add_argument("case_id")
-    p.set_defaults(fn=cmd_read_medical_review_ledger)
-
-    p = sub.add_parser("read-medical-review-evidence")
-    p.add_argument("case_id"); p.add_argument("review_item_id")
-    p.add_argument("request_id"); p.add_argument("request_version", type=int)
-    p.add_argument("locator_id")
-    p.set_defaults(fn=cmd_read_medical_review_evidence)
-
-    p = sub.add_parser("read-medical-review-outcomes")
-    p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)
-    p.add_argument("--run-id", required=True)
-    p.set_defaults(fn=cmd_read_medical_review_outcomes)
 
     p = sub.add_parser("check-segmentation-ready")
     p.add_argument("case_id"); p.add_argument("--doc-id")
@@ -10518,16 +11088,30 @@ def build_parser():
     p.set_defaults(fn=cmd_check_lock)
 
     p = sub.add_parser("read-ledger"); p.add_argument("case_id")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_read_ledger)
 
     p = sub.add_parser("set-ledger-status")
     p.add_argument("case_id"); p.add_argument("file_name"); p.add_argument("status", choices=["pending", "approved", "rejected"])
     p.add_argument("--reviewer"); p.add_argument("--reason")
-    p.add_argument("--operation-id", required=True)
+    # Optional so a pre-v0.4 ledger still works without one; a v0.4 ledger
+    # refuses the write without it, because that is the id its history binds
+    # the operation to. intake_case.py's own instructions already tell the
+    # reviewer to pass this.
+    p.add_argument("--operation-id", default=None,
+                   help="Unique id for this approval, required for a v0.4 "
+                        "(history-tracked) ledger. Re-running with the same id "
+                        "and the same request is an idempotent no-op.")
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_set_ledger_status)
 
     p = sub.add_parser("check-source-ledger-clear"); p.add_argument("case_id")
+    # Optional on purpose: this is a read-only query with existing callers, and
+    # making it required would break them for the sake of a measurement. With a
+    # run-id the clear result also opens the SLA window (plan B10); without
+    # one, the check behaves exactly as before.
+    p.add_argument("--run-id", default=None,
+                   help="Records sla.phase1.start for this run when the ledger is clear.")
     p.set_defaults(fn=cmd_check_source_ledger_clear)
 
     p = sub.add_parser("read-evidence-tags"); p.add_argument("doc_path")
@@ -10544,12 +11128,28 @@ def build_parser():
     # validator rejects it for any non-skippable stage.
     p.add_argument("status", choices=["pending", "in_progress", "failed", "skipped"])
     p.add_argument("--held-by", required=True)
+    p.add_argument(
+        "--attempt-outcome",
+        choices=["failed", "partial", "schema_failed", "finalize_refused",
+                 "interrupted"],
+        help="Closed diagnostic outcome for status=failed. interrupted leaves the attempt duration open.")
     p.set_defaults(fn=cmd_update_run_state)
 
     p = sub.add_parser("migrate-run-state-v03")
     p.add_argument("case_id"); p.add_argument("run_id")
     p.add_argument("--held-by", required=True)
     p.set_defaults(fn=cmd_migrate_run_state_v03)
+
+    p = sub.add_parser(
+        "reset-document-processing",
+        help="Recoverably reset Stage 2 contracts/manifest/run-state for an operator-requested cold rerun.")
+    p.add_argument("case_id")
+    p.add_argument("new_run_id")
+    p.add_argument("--held-by", required=True)
+    p.add_argument(
+        "--confirm-case-id", required=True,
+        help="Destructive-scope confirmation; must exactly equal case_id.")
+    p.set_defaults(fn=cmd_reset_document_processing)
 
     p = sub.add_parser("set-human-input-status")
     p.add_argument("case_id"); p.add_argument("stage")
@@ -10570,6 +11170,7 @@ def build_parser():
     p.set_defaults(fn=cmd_mark_human_review_complete)
 
     p = sub.add_parser("get-last-passed-stage"); p.add_argument("case_id")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_get_last_passed_stage)
 
     p = sub.add_parser("snapshot-backup")
@@ -10588,19 +11189,112 @@ def build_parser():
     p = sub.add_parser("add-conflict-entry")
     p.add_argument("case_id"); p.add_argument("--stage", required=True)
     p.add_argument("--topic", required=True); p.add_argument("--sources-file", required=True)
-    p.add_argument("--operation-id", required=True)
+    p.add_argument("--operation-id", default=None,
+                   help="Unique id binding this entry into the ledger history. "
+                        "Re-running with the same id is an idempotent no-op.")
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_add_conflict_entry)
 
     p = sub.add_parser("set-conflict-verdict")
     p.add_argument("case_id"); p.add_argument("conflict_id")
     p.add_argument("verdict", choices=["resolved", "false_positive"]); p.add_argument("--note", required=True)
-    p.add_argument("--operation-id", required=True)
+    p.add_argument("--operation-id", default=None,
+                   help="Unique id binding this verdict into the ledger history. "
+                        "Re-running with the same id is an idempotent no-op.")
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_set_conflict_verdict)
 
     p = sub.add_parser("check-conflicts-clear"); p.add_argument("case_id")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_check_conflicts_clear)
+
+    # --- medical review (restored after merge 3569d50; see known-gaps 48) ---
+    p = sub.add_parser("write-medical-variables")
+    p.add_argument("case_id"); p.add_argument("data_file")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.add_argument("--purpose")
+    p.set_defaults(fn=cmd_write_medical_variables)
+
+    p = sub.add_parser("read-medical-variables")
+    p.add_argument("case_id"); p.add_argument("--revision-sha")
+    p.set_defaults(fn=cmd_read_medical_variables)
+
+    p = sub.add_parser("read-medical-evidence")
+    p.add_argument("case_id"); p.add_argument("locator_id")
+    p.set_defaults(fn=cmd_read_medical_evidence)
+
+    p = sub.add_parser("check-medical-reviews-clear")
+    p.add_argument("case_id")
+    p.set_defaults(fn=cmd_check_medical_reviews_clear)
+
+    p = sub.add_parser("reconcile-medical-review-waits")
+    p.add_argument("case_id")
+    p.add_argument("--operation-id", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_reconcile_medical_review_waits)
+
+    p = sub.add_parser("open-medical-review-item")
+    p.add_argument("case_id"); p.add_argument("--issue-id", required=True)
+    p.add_argument("--decision-owner", required=True, choices=["policy", "human"])
+    p.add_argument("--operation-id", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_open_medical_review_item)
+
+    p = sub.add_parser("record-medical-referral-decision")
+    p.add_argument("case_id"); p.add_argument("review_item_id")
+    p.add_argument("decision_file")
+    p.add_argument("--operation-id", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_record_medical_referral_decision)
+
+    p = sub.add_parser("provide-medical-review-information")
+    p.add_argument("case_id"); p.add_argument("review_item_id")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--operation-id", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_provide_medical_review_information)
+
+    p = sub.add_parser("transition-medical-review")
+    p.add_argument("case_id"); p.add_argument("review_item_id")
+    p.add_argument(
+        "--action",
+        required=True,
+        choices=[
+            "provide_information",
+            "assign",
+            "request_information",
+            "supplement_package",
+            "reassign",
+            "submit_response",
+            "amend_response",
+            "withdraw_response",
+            "flag_conflict",
+            "adjudicate",
+            "cancel",
+            "close",
+            "reopen",
+        ],
+    )
+    p.add_argument("--data-file")
+    p.add_argument("--reason")
+    p.add_argument("--operation-id", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_transition_medical_review)
+
+    p = sub.add_parser("read-medical-review-ledger")
+    p.add_argument("case_id")
+    p.set_defaults(fn=cmd_read_medical_review_ledger)
+
+    p = sub.add_parser("read-medical-review-evidence")
+    p.add_argument("case_id"); p.add_argument("review_item_id")
+    p.add_argument("request_id"); p.add_argument("request_version", type=int)
+    p.add_argument("locator_id")
+    p.set_defaults(fn=cmd_read_medical_review_evidence)
+
+    p = sub.add_parser("read-medical-review-outcomes")
+    p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)
+    p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_read_medical_review_outcomes)
 
     p = sub.add_parser("read-human-review-ledger"); p.add_argument("case_id")
     p.set_defaults(fn=cmd_read_human_review_ledger)
@@ -10766,7 +11460,27 @@ def build_parser():
     p.add_argument("case_id")
     p.add_argument("--document-id", required=True, action="append",
                    help="referenced policy document; repeat for each one")
+    p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_policy_snapshot)
+
+    p = sub.add_parser("aggregate-trace",
+                       help="Roll this run's span shards up into _timing_summary.json. "
+                            "Run once, after the SLA end marker.")
+    p.add_argument("case_id")
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--held-by", required=True)
+    p.add_argument("--input-class", default=None,
+                   choices=["S-min", "S", "M", "L", "XL", "embedded"],
+                   help="Case size class, for comparing runs of like inputs.")
+    p.add_argument("--cold-or-warm", default=None, choices=["cold", "warm"],
+                   help="Whether resume caches were cleared first. Only cold "
+                        "numbers are SLA-judgable.")
+    p.set_defaults(fn=cmd_aggregate_trace)
+
+    p = sub.add_parser("read-timing-summary",
+                       help="Read _timing_summary.json (read-contract's symmetric reader).")
+    p.add_argument("case_id")
+    p.set_defaults(fn=cmd_read_timing_summary)
 
     p = sub.add_parser("record-human-review")
     p.add_argument("case_id")
@@ -10789,6 +11503,14 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    # Switch tracing on for the CLI process too. dao.py already called
+    # configure() deep inside _emit_sla_marker, which was enough for the SLA
+    # markers and hid the fact that every OTHER dao subcommand ran untraced:
+    # `finalize-stage` emitted no dao.snapshot span at all, so the P10 snapshot
+    # cost -- the plan's B5 -- stayed unmeasured while looking instrumented.
+    # In-process callers (run_checkpoint1, redact_document) configure for
+    # themselves and are unaffected; this covers the subprocess path.
+    trace_mod.configure_from_args(args)
     sys.exit(args.fn(args))
 
 

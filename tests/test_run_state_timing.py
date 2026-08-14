@@ -45,6 +45,7 @@ def test_retry_moves_current_attempt_but_not_started_at(isolated_dao):
     dao._update_run_state("CASE_009", RUN, "intake", "in_progress", "tester")
     first = _stage("CASE_009", "intake")
 
+    dao._update_run_state("CASE_009", RUN, "intake", "failed", "tester")
     dao._update_run_state("CASE_009", RUN, "intake", "in_progress", "tester")
     second = _stage("CASE_009", "intake")
 

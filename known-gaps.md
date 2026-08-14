@@ -29,6 +29,9 @@ the same pass.
 | 43 | OPEN | Policy reference-table reading order |
 | 44 | OPEN | Stage 4 validators defined but never called |
 | 45 | PARTIAL | Medical appropriateness technical baseline is not operationally activated |
+| 46 | PARTIAL | P8 billing-table disagreements: dpi rejected by measurement; reader stability still open |
+| 47 | OPEN | P8 correlated error observed live: both readers invented the same caption |
+| 48 | PARTIAL | Merge 3569d50 discarded parent2's dao.py wholesale; halves still inconsistent |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
@@ -3230,3 +3233,328 @@ Stage 4 refuses, and this branch's scope was Stage 1/2 -- doing it blind
 would risk breaking a stage on evidence I did not gather. What this item
 records is that the audit found them and what each one's status actually
 is, so the next Stage 4 pass starts from a list rather than a suspicion.
+
+## 46. P8 disagreements concentrate on billing tables; the 200dpi hypothesis is rejected -- PARTIAL 2026-08-11
+
+Measured while running S-class cases for the runtime-optimization work
+(CASE_940/942/950/952, real OCR, no mocks). Every P8 disagreement observed
+across four runs -- 17 of them -- fell in the same place:
+
+| Where the disagreement was | Count |
+|---|---|
+| 진료비 세부산정내역 (procedure codes, drug names, amounts) | 15 |
+| 처방/접수내역 (one character in a drug name) | 1 |
+| 경과기록지 image caption (one reader invented a radiology finding) | 1 |
+| **Adjudication fields (상병코드 / diagnosis / dates / accident circumstances)** | **0** |
+
+Not one landed on a field the loss-adjustment judgment depends on. S52530,
+diagnosis names, and treatment dates agreed in all 17.
+
+**User decision (2026-08-10): amount calculation is out of PoC scope, so
+these are skipped for now** -- not resolved, and not counted as a
+regression signal while the PoC's scope excludes them.
+
+**What is NOT established, and is the actual open question:** whether these
+are a limit of the scans or an artifact of render resolution. `ocr_extract.py`
+renders pages at **200dpi** (`page.get_pixmap(dpi=200)`, verified in code this
+session). When the same disputed page was rendered at **400dpi** and read by a
+human, the character was unambiguous: CASE_942 p10's code is plainly `AA800`
+(reading_a correct, reading_b's `AA600` a misread), with no room for doubt.
+
+### 2026-08-11: the experiment was run. The dpi hypothesis is REJECTED.
+
+Run on CASE_953 (a fork of CASE_952 made for this and deleted afterwards, so
+the real case was never mutated), DOC_001 pages 10-18 at 200/300/400dpi. Real
+claude-cli calls throughout, `resume=False` so no verdict could come from
+cache. Scope deliberately included the three pages that AGREED at 200dpi
+(p11/13/15), not just the six that disagreed: a resolution that fixes six
+pages by breaking three has not helped.
+
+| dpi | elapsed | disagreed | count |
+|---|---|---|---|
+| 200 | 177.0s | p10, p11, p13, p14, p16, p17, p18 | 7/9 |
+| 300 | 182.9s | p10, p12, p13, p16, p17, p18 | 6/9 |
+| 400 | 188.2s | p10, p11, p12, p14, p16, p17 | 6/9 |
+
+**Raising the resolution does not reduce disagreements** (7 -> 6 -> 6, i.e.
+within noise of each other), and the per-page pattern shows why:
+
+| page | 200 | 300 | 400 | original 200dpi run |
+|---|---|---|---|---|
+| p10 | X | X | X | X |
+| p11 | X | ok | X | ok |
+| p12 | ok | X | X | X |
+| p13 | X | X | ok | ok |
+| p14 | X | ok | X | X |
+| p15 | ok | ok | ok | ok |
+| p16 | X | X | X | X |
+| p17 | X | X | X | X |
+| p18 | X | X | ok | X |
+
+Verdicts flip with no relation to resolution.
+
+**The decisive control is the 200dpi column against the original 200dpi run:
+identical settings, identical document, no code change between them, and 3 of
+9 pages (33%) flipped** -- p11 and p13 agreed originally and disagreed on
+re-read; p12 did the reverse. **The dpi signal is smaller than the run-to-run
+noise**, so a single run per resolution cannot measure a dpi effect at all,
+and the two higher resolutions differing from 200 by one page means nothing.
+
+The 400dpi disagreements are also not shaped like resolution problems:
+`808,780 vs 908,780` (8 vs 9), `아세틸로페낙 vs 아세클로페낙`,
+`병원야간전담간호사1:1 vs 1:12`. These are dense-table reading errors, not
+illegible glyphs.
+
+**Cost: 400dpi costs 6% more wall-clock, not 4x** (177.0 -> 188.2s). The
+earlier assumption in point 3 below was wrong. Provider time is 98%+ of Stage
+2, but that time is dominated by model INFERENCE, not image transfer or
+handling; local rendering is milliseconds. The 400dpi PNGs were in fact
+SMALLER than the 300dpi ones (1169 vs 1783 KB) -- PNG compresses sparse scan
+content well. So cost is not the reason to leave dpi at 200; lack of benefit
+is.
+
+**Conclusion, and what to say about these disagreements from now on:**
+
+* **Not a resolution problem.** Rejected by measurement above.
+* **Not "scan quality limits" either.** A human read the same pages
+  unambiguously at 400dpi, and the model still disagreed with itself at
+  400dpi. The limitation is **reader stability on dense billing tables**, not
+  input fidelity. Do not attribute these to the scans.
+* **Adjudication fields remain untouched.** Across all 27 page-reads at three
+  resolutions, zero disagreements landed on 상병코드 / diagnosis / dates /
+  accident circumstances -- the same result as the original four-case
+  observation. What moves is procedure codes, drug names and amounts.
+
+`DEFAULT_RENDER_DPI` stays **200**; `--dpi` / `HARNESS_OCR_DPI` exist for
+future measurement, and nothing in the pipeline sets them.
+
+**Still open (a different question than this item asked):** reader stability
+itself. A P8 verdict that flips 33% of the time on identical input means the
+disagreement rate is not a usable quality signal for these documents, which is
+why the Go/No-Go criterion had to be revised (see below). Reducing that
+variance -- majority-of-N reads, a genuinely different reader technology
+(`open-decisions.md` #4), or excluding billing tables from P8 while the PoC
+scope excludes amount calculation -- is unaddressed.
+
+The original point 4 (per-document-type dpi) is moot: there is no gain to
+allocate.
+
+**2026-08-11 -- a blocker found while setting the experiment up, now fixed
+(commit `ae9c21b`).** Step 1 above could not have produced a valid result as
+written. `ocr_extract.py`'s resume cache was keyed on `case_id`/`doc_id`/`page`
+alone, with nothing recording what settings produced an entry, so re-reading
+the same pages at 400dpi would have been served the **cached 200dpi verdicts
+as hits** -- zero provider calls, identical output, and the experiment would
+have concluded "resolution makes no difference" without a single page having
+been re-read. 33 unfingerprinted entries were on disk across 3 documents when
+this was found.
+
+The blast radius is wider than this experiment: the cached value is a **P8
+agreement verdict**, so a stale hit asserts that two readers agreed under
+settings they were never run at -- and P8 is the gate every downstream stage
+trusts. Any re-run after a provider change, a model change, or a prompt
+revision was exposed to the same thing. The cache now fingerprints the page
+image bytes (which subsumes dpi and render backend), `OCR_PROMPT_VERSION`, and
+both readers' plus the comparator's provider+model; pre-fingerprint entries
+carry no fingerprint key and are treated as misses.
+
+Render dpi was also hardcoded at two separate sites (pymupdf and pdftoppm), so
+it could not be varied at all and the two backends could have silently drifted
+apart -- the dpi is a property of the image the READER sees, so letting it
+depend on which backend is installed would make P8 agreement depend on the
+host. Both now resolve through one `--dpi` / `HARNESS_OCR_DPI` path, default
+200 unchanged.
+
+Related: the P8 Go/No-Go criterion had to be revised in the same session.
+"P8 disagreement rate unchanged" is not a satisfiable gate -- running the
+identical file twice with zero code changes produced 0/11 then 1/11, and
+1/17 then 0/17. LLM-backed P8 is nondeterministic, so that criterion would
+have produced false hard-No-Go verdicts on any parallelism change. The gate
+is now the *character* of the disagreement (adjudication field vs amount
+field), not its count.
+
+
+## 47. P8 correlated error, observed live: both readers invented the same caption -- OPEN 2026-08-10
+
+`harness-guardrails` P8 and `harness-guardrails-dev` both warn that two
+LLM-vision readers share one extraction technology class and "can make a
+correlated confident error" (`cross_validation_mode:
+single_technology_weak_p8_poc`). That has now been observed on real data
+rather than reasoned about.
+
+The same source page, OCR'd twice in two runs:
+
+| Run | reader_a | reader_b | P8 verdict | What reached the processed layer |
+|---|---|---|---|---|
+| CASE_940 | `[영상: 관상동맥 CT 곡면 재구성 영상]` | `[영상 이미지]` | **disagreed** -> blocked | `[영상 이미지]` (human picked reader_b after reviewing the page at 400dpi) |
+| CASE_951 | `[관상동맥 CT 영상]` | `[관상동맥 CT 영상]` | **agreed** | `[관상동맥 CT 영상]` |
+
+**The page has no caption text at all.** The 10:18 row contains a coronary
+angiography IMAGE and nothing else -- verified by rendering the raw PDF at
+400dpi and looking at it. Both strings are radiological interpretations the
+transcriber produced from the picture.
+
+In CASE_940 the two readers disagreed about *how* to describe the image, and
+P8 did its job: it blocked, a human looked at the source, and the neutral
+placeholder was chosen. In CASE_951 both readers happened to invent the
+*same* description, so there was nothing for `compare()` to catch, and a
+sentence that does not exist on the page is now in
+`data/processed/CASE_951/DOC_001/page_002.md` as validated text.
+
+**Why this is not fixed by the 2026-07-13 compare() work.** That fix (item 11)
+taught `compare()` to treat one-sided extra content as a disagreement. It
+cannot help here: the addition is not one-sided. This is the failure mode
+`compare()` structurally cannot see, because both inputs agree.
+
+**Blast radius is narrow but real.** The invented text is a description of an
+image, in an IMG row that already announces itself as an image, so a
+downstream reader is unlikely to mistake it for a clinical finding stated by
+the physician. It is still fabricated content in the layer P2 tells every
+analysis stage to trust, and P1 forbids exactly this.
+
+**Not fixed here, and deliberately not papered over with a prompt tweak.**
+"Do not describe images" in TRANSCRIBE_PROMPT is the obvious reflex, but the
+2026-07-14 CASE_004 experience is that defensive prompt framing on this path
+caused the very refusal it was meant to prevent, and prompt changes to the P8
+readers alter the thing being cross-validated. Options worth weighing
+separately:
+
+* record IMG-row content as a typed placeholder rather than free text, so an
+  image cell cannot carry a transcription at all
+* a genuinely technology-independent second reader (`open-decisions.md` #4) --
+  the standing answer to correlated LLM error, still unavailable
+* accept and document, since the affected cell is self-labelling
+
+What this item establishes is that the risk is **live and reproducible**, not
+theoretical: one run caught it, the next one did not, on the same page.
+
+---
+
+## 49. Lock-poll policy (T7): measured under real document parallelism, and dropped -- RESOLVED 2026-08-11
+
+P5 polls a held lock every **30 seconds** for up to 15 minutes. That cadence
+suits what P5 was written for -- a lock held by a person or a long stage,
+where polling faster only burns cycles -- and is badly wrong for a parallel
+batch of short commits, where a waiter can sleep out most of a 30s interval
+after the lock has already been released.
+
+`dao.py`'s own comment records the counter-example: `analyze-policy-polarity`
+held the index lock for milliseconds to append one receipt, and ten concurrent
+workers with nine cache hits spent **4.5 minutes in pure polling** on CASE_907.
+
+The runtime plan deferred this deliberately ("measure first, then decide"),
+and the first measurements said zero: lock wait 0ms and 0 polls across
+CASE_950/951/952. But those three runs had **no document-level parallelism at
+all**, so the honest reading was "not painful yet because nothing contends,"
+not "the policy is fine" -- and the plan said so, making the item
+**deferred until T8 rather than closed**.
+
+**T8 landed on 2026-08-11, so the deferral condition was met and this was
+measured under the intended conditions**: `run_document_stage.py`, 3 documents
+processed by 3 concurrent workers, 44 pages, real claude-cli calls, 2m26s.
+
+| | |
+|---|---|
+| `lock.acquire` spans | 41 |
+| total lock wait | **0.0000s** |
+| total poll count | **0** |
+| acquisitions that waited at all | **0 / 41** |
+| `document_manifest.json` acquisitions | 5, all immediate |
+
+**Why there is no contention, and why the counter-example does not transfer.**
+A document worker touches the manifest once or twice, for milliseconds, and
+spends the rest of its life inside provider calls (a single
+`provider.transcribe_image` span in this run measured 27.0s). Three workers
+arriving at the same lock in the same millisecond is vanishingly unlikely --
+the provider calls scatter their arrival times. `analyze-policy-polarity` was
+the opposite shape: ten workers, nine of them cache hits, so they did *no*
+work between lock acquisitions and therefore met at the lock every time.
+
+Two further points make this a close rather than another deferral:
+
+* **The code that produced the counter-example no longer exists.** The LLM
+  polarity layer was deleted on 2026-08-04 (813 provider calls per bundle,
+  never once completed on any case, nothing downstream consumed it).
+* **T3, the same day, shortened lock hold time further** by removing the
+  hold-and-wait in `patch_manifest_document`, so the manifest lock is now held
+  across strictly less work than when the 4.5-minute figure was recorded.
+
+**Decision: dropped.** Neither candidate is implemented -- not the two-phase
+wait (fast 50ms+jitter polling for the first ~2s, then the existing 30s), nor
+the benchmark-only env override. Changing the cadence would require syncing
+the `harness-guardrails` P5 text under D4, and there is no measured gain to
+pay for that.
+
+`HARNESS_LOCK_POLL_INTERVAL_SECONDS` already exists for a future batch driver
+whose workers genuinely do no work between acquisitions. If such a driver is
+ever added, re-measure with its `lock.acquire` spans rather than assuming
+either result -- both the 4.5-minute figure and this 0-poll figure are true,
+of different workloads.
+
+## 48. Merge 3569d50 discarded parent2's `dao.py` wholesale -- PARTIAL 2026-08-14
+
+Found by trying to intake a fresh case (CASE_142) for a Stage 2 timing run.
+`intake_case.py --execute` died on `AttributeError: module 'dao' has no
+attribute 'validated_source_ledger'`, and the cause was not a missing
+function but a merge that dropped half a file.
+
+**What happened.** Merge `3569d50` ("Merge main with PR #21 medical
+appropriateness pipeline") has two parents:
+
+```
+parent1  378515fe   dao.py  9,328 lines
+parent2  7c2e72e4   dao.py 10,796 lines
+result   3569d50    dao.py  9,328 lines  -- byte-identical to parent1
+```
+
+`git diff 378515fe 3569d50 -- tools/dao.py` is empty: parent2's `dao.py` was
+discarded entirely, not merged. But the merge kept parent2's versions of
+`intake_case.py`, `run_scenario_matrix.py`, `medical_repository.py`,
+`medical_review_ledger.py`, the schemas, and 11 test modules -- so those
+files call an API that no longer exists. **The two halves of the repository
+come from different merge parents.**
+
+`git` considers this fully merged (`merge-base --is-ancestor 7c2e72e4 HEAD`
+is true, and re-running `git merge` reports "Already up to date"), because
+"take parent1's version" is a valid conflict resolution as far as git is
+concerned. **Re-merging cannot recover it**; the content has to be
+transplanted by hand.
+
+**Why nobody noticed.** The dead paths are all *new-case* paths. No case has
+been intaken since the merge -- every run reused an existing case or a fork.
+The first fresh intake hit it immediately, in two places:
+
+- `intake_case.py --execute` -> `validated_source_ledger` missing
+- `dao.py update-run-state` on a new case -> `run_state.schema.json` requires
+  `run_state_version` and `medical_review_adopted`, and `grep` for either in
+  `dao.py` returned nothing. **No new case could open a stage at all.**
+
+**Fixed (commit `c9f8e92`, "C scope").** The ledger history chain and the two
+run-state fields, transplanted from `633bd7b0` and adapted to this branch's
+lock model. Scope was chosen by computing the transitive closure of the three
+`validated_*` entry points: 12 functions, none lock-bound, none medical --
+so the chain could be restored without touching either contested subsystem.
+Writers were the half that mattered: validators alone would have made every
+approved ledger unreadable, since the writers still mutated entries in place
+without recording an operation, which is indistinguishable from tampering.
+All 56 source ledgers on disk now pass; suite went 156 failures -> 79.
+
+**Still open.** ~58 of parent2's 70 missing functions, and the divergence in
+47 functions the two versions both define:
+
+| Area | State |
+|---|---|
+| Kernel-lock primitives (19 fns) | **Deliberately not taken.** This branch keeps its `O_EXCL` + dead-owner-reclaim model (`8d818ff`, fleet-review TOCTOU fix). Decision recorded by the user 2026-08-14. |
+| Medical-review flow (20 fns) | Missing. `tools/medical_repository.py` and `tools/medical_review_ledger.py` are present but call a DAO API that is not there. 8 test modules cannot import. |
+| `fork_case.py` D1 hardening | Missing. Parent2 **removed** `--include-ground-truth` and rejects a ground-truth data namespace; this branch still offers both. 6 failing tests, 2 of them D1 guards. Worth prioritising -- it is a live answer-key exposure surface. |
+| Snapshot inventory (7 fns) | Missing. |
+| `atomic_*_beneath` write layer (9 fns) | Missing. |
+| 47 diverged common functions | Unreconciled; includes `_finalize_stage`, `_update_run_state`, `atomic_write_json`, `build_parser`, `main`. |
+
+The remaining transplant needs whoever owns the medical-appropriateness work,
+because "the tests pass" would only show the code runs, not that the
+adjudication logic is right.
+
+*(Numbering note: two pre-existing items both claim 47 -- the P8 correlated-error
+item and the lock-poll item. Not renumbered here to avoid breaking citations to
+either; this item takes 48.)*

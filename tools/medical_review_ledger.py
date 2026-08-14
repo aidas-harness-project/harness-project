@@ -8,22 +8,30 @@ paths independently.
 from __future__ import annotations
 
 from collections import Counter
+import getpass
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import stat
+import tempfile
 
 from _validation import load_registry, validate_instance
 from medical_contracts import transition_allowed
 import operator_auth
 
 
+_EFFECTIVE_UID = os.geteuid() if hasattr(os, "geteuid") else None
+_INGRESS_OWNER_TOKEN = (
+    str(_EFFECTIVE_UID)
+    if _EFFECTIVE_UID is not None
+    else hashlib.sha256(getpass.getuser().encode("utf-8")).hexdigest()[:16]
+)
 MEDICAL_REVIEW_INGRESS_ROOT = Path(
     os.environ.get(
         "AIDAS_MEDICAL_REVIEW_INGRESS_ROOT",
-        f"/tmp/aidas-medical-review-ingress-{os.geteuid()}",
+        str(Path(tempfile.gettempdir()) / f"aidas-medical-review-ingress-{_INGRESS_OWNER_TOKEN}"),
     )
 )
 MAX_SUBMISSION_BYTES = 256 * 1024
@@ -2025,7 +2033,7 @@ def _private_ingress_root() -> Path:
         raise ValueError("private medical-review ingress is unavailable") from exc
     if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
         raise ValueError("private medical-review ingress is not a real directory")
-    if metadata.st_uid != os.geteuid():
+    if _EFFECTIVE_UID is not None and metadata.st_uid != _EFFECTIVE_UID:
         raise ValueError("private medical-review ingress has the wrong owner")
     permissions = stat.S_IMODE(metadata.st_mode)
     if permissions & 0o077 or permissions & 0o700 != 0o700:
@@ -2048,7 +2056,8 @@ def _load_submission(path_value: str, label: str) -> dict:
             if not stat.S_ISREG(metadata.st_mode):
                 raise ValueError(f"{label} is not a regular file")
             if (
-                metadata.st_uid != os.geteuid()
+                _EFFECTIVE_UID is not None
+                and metadata.st_uid != _EFFECTIVE_UID
                 or metadata.st_nlink != 0
                 or stat.S_IMODE(metadata.st_mode) != 0o600
             ):
@@ -2095,7 +2104,7 @@ def _load_submission(path_value: str, label: str) -> dict:
         root_metadata = os.fstat(root_descriptor)
         if (
             not stat.S_ISDIR(root_metadata.st_mode)
-            or root_metadata.st_uid != os.geteuid()
+            or (_EFFECTIVE_UID is not None and root_metadata.st_uid != _EFFECTIVE_UID)
             or stat.S_IMODE(root_metadata.st_mode) & 0o077
         ):
             raise OSError("unsafe private ingress root")
@@ -2110,7 +2119,7 @@ def _load_submission(path_value: str, label: str) -> dict:
             metadata = os.fstat(current_descriptor)
             if (
                 not stat.S_ISDIR(metadata.st_mode)
-                or metadata.st_uid != os.geteuid()
+                or (_EFFECTIVE_UID is not None and metadata.st_uid != _EFFECTIVE_UID)
             ):
                 raise OSError("unsafe private ingress ancestor")
         descriptor = os.open(
@@ -2127,7 +2136,10 @@ def _load_submission(path_value: str, label: str) -> dict:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise ValueError(f"{label} is not a regular file")
-        if metadata.st_uid != os.geteuid() or metadata.st_nlink != 1:
+        if (
+            (_EFFECTIVE_UID is not None and metadata.st_uid != _EFFECTIVE_UID)
+            or metadata.st_nlink != 1
+        ):
             raise ValueError(f"{label} has unsafe file ownership")
         payload = bytearray()
         while len(payload) <= MAX_SUBMISSION_BYTES:

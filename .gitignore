@@ -27,6 +27,7 @@ data/
 CASE_112_pipeline_walkthrough/
 docs/
 .tmp/
+plans/
 
 # Workspace Data with each run's report written by agent
 _workspace/
@@ -49,6 +50,8 @@ tmp/
 
 # ocr_extract.py's project-local scratch (page images) -- transient, cleaned up on exit
 _ocr_scratch/
+_stage2_scratch/
+_stage2_reset_backups/
 
 # Checkpoint 2's short-lived page-text capabilities. Minted per document and
 # revoked when the run ends; never source, never worth committing.
@@ -89,3 +92,4 @@ frontend/backend/venv/
 frontend/backend/_uploads/
 frontend/backend/_runs.json
 frontend/backend/_run_logs/
+*.stackdump

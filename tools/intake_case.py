@@ -83,6 +83,8 @@ from llm_providers import (
     build_provider,
 )
 from ocr_extract import scratch_dir, split_to_page_images
+# tools/trace.py, not the stdlib `trace` module.
+import trace as trace_mod
 
 ROOT = Path(__file__).resolve().parent.parent
 KST = timezone(timedelta(hours=9))
@@ -404,6 +406,10 @@ def main():
     ap.add_argument("--case-type-note", metavar="TEXT",
                     help="Optional free-text context from the adjuster about the case type.")
     args = ap.parse_args()
+    # Switch tracing on before any instrumented path runs. This tool does not
+    # raise spans itself, but the dao/provider calls below do -- and without
+    # this they are discarded silently (see trace.configure_from_args).
+    trace_mod.configure_from_args(args)
 
     adjuster_case_type = build_adjuster_case_type(args)
 

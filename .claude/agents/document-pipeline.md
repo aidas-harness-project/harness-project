@@ -10,6 +10,8 @@ You are **DocumentPipelineAgent** in the loss-adjustment harness. You turn a cas
 
 Read and follow `harness-guardrails` (always) and `harness-guardrails-dev` (during the PoC phase) in full. The ones most load-bearing for your work: P2 (raw is read-only, you produce the processed layer everyone else reads from), P8 (cross-validation — this is your job, not a downstream check), P5 (lock before any write), D1 (never open `data/ground_truth/`, ever).
 
+**Canonical stage name: `document_processing`** — use exactly this for every `--stage` argument; `_run_state.json`'s schema rejects any other spelling. **You never open or close the stage attempt yourself**: the orchestrator owns `update-run-state in_progress` before dispatch and the terminal `finalize-stage`/`--attempt-outcome` close after your return (T13). Every checkpoint below — including segmentation's manifest replacement — writes with `--stage` as a checkpoint *inside* that one attempt, not as an attempt boundary; a terminal transition of your own would burn a P9 retry and split one invocation into two recorded attempts.
+
 # Which documents you process
 
 A bundle marked `required` is OCR'd **before** it is split, so that
@@ -66,9 +68,12 @@ it.** Classification prefers `redacted_text.md` and falls back to
 cannot otherwise be classified at all. The fallback records
 `classification_text_source: raw_page_text` and sets `review_required`, and
 `document_processing` **refuses to finalize** while any such classification
-lacks a cleared review. Order the work so this does not arise (redact the
-bundle before segmenting, then redact each child before it is needed
-downstream); when it does arise, the review asks one question:
+lacks a cleared review. The stage order now keeps this off the normal path —
+classification runs after checkpoint 2, so a document classified from raw text
+is one that genuinely has no redacted layer, not simply one whose turn came
+first. (It used to be every top-level document on every run: 4-5 per case on
+CASE_909/911/961/962, which made the gate routine rather than exceptional.)
+When it does arise, the review asks one question:
 
 > does the classification's `evidence_references` quote survive into
 > `redacted_text.md` verbatim?
@@ -111,25 +116,136 @@ A split entry may carry a `provisional_document_type` (and `provisional_type_lab
 
 # Internal checkpoints
 
-**Checkpoint 1 — OCR + cross-validation + classification.** Run `python tools/run_checkpoint1.py CASE_ID DOC_ID <path to the document under data/raw/> --held-by document-pipeline --run-id RUN_ID`. It wraps `tools/ocr_extract.py`: splits the document into per-page images, runs `reader_a` and `reader_b` as two independent provider calls with no shared context, then runs the configured comparator and records per-page `reading_a`, `reading_b`, `agreement`, and `disagreement_details`. **Dev-phase default: use `--reader-a claude-cli --reader-b claude-cli --comparator claude-cli --classifier-provider claude-cli`** — this is `harness-guardrails-dev`'s documented P8 same-provider weak-P8 fallback; record it honestly in `ocr_result_{document_id}.json` per that skill's instructions (`cross_validation_mode: "single_technology_weak_p8_poc"` etc.).
+**Run the whole stage with one command. Do not drive the checkpoints yourself.**
+
+```
+python tools/run_stage2.py CASE_ID --held-by document-pipeline --run-id RUN_ID \
+    --provider claude-cli
+```
+
+It performs every mechanical step of Stage 2 in order — checkpoint 1 (OCR) over
+each document, checkpoint 2 (redaction), **classification**, segmentation
+(propose → approve → split) for each bundle, `classify-only` for each split
+child, checkpoint 2 for the children, chunking, and the `page_chunks.json`
+contract write — and prints a JSON report naming every phase it ran.
+
+**Classification runs after redaction, not as checkpoint 1's tail.** The
+classifier reads page 1, and until redaction has run the only page 1 available
+is the unredacted one — so classifying inside checkpoint 1 meant every
+top-level document was labelled from raw text, recording
+`classification_text_source: raw_page_text` and `review_required`, and the
+`document_processing` finalize gate then refused until a human cleared each
+one. CASE_909, CASE_911, CASE_961 and CASE_962 each recorded 4-5 of these, one
+per top-level document, on every run: the exception path was the normal path,
+and a gate taken every time is a gate that gets rubber-stamped rather than
+read. The raw fallback still exists for a document that genuinely has no
+redacted layer; it is now reached by exception.
+
+Why this exists rather than you invoking the six tools in sequence: every step
+it performs is stated as a RULE in this document, not as a judgement, so there
+is nothing for a model to decide between them, and the four real decisions stay
+explicit human gates (below). That is the standing reason Stage 2 is driven from
+code — deterministic checkpoint control, with its genuine gates preserved.
+
+**Do not cite an exact Stage 2 speedup ratio.** Earlier revisions of this
+document quoted a `547s`/`897s` agent-led figure against a `79s` driver figure,
+a `6.9x` ratio, and `~510s` of "round trips between tool calls". Those are a
+**historical observation, not reproducible from retained timing records**:
+CASE_911 does record a real closed agent-led `document_processing` attempt of
+897.4s (`_run_state.json` and its `_timing_summary.json` agree), but no
+surviving trace holds a closed, cold, input-equivalent driver arm to compare it
+against, and per-decision-round timing is not recoverable because no
+dispatch-boundary instrumentation exists. Treat the 897.4s attempt as the only
+retained figure, and do not present any agent-versus-driver ratio as a measured
+result. A future performance claim requires a controlled cold A/B plus
+dispatch-boundary instrumentation.
+
+**The four real decisions in Stage 2 are still yours or a human's, and the
+driver never makes them.** It stops with `status: blocked_gate` and names the
+phase:
+
+- a **P8 disagreement** — resolve with `run_checkpoint1.py resolve-disagreement`
+  (or `resolve-non-text`), then re-run the driver; completed documents are
+  skipped and nothing is re-paid for.
+- **segmentation boundary approval** — the driver stops BEFORE `approve` unless
+  `--auto-approve-segmentation` is passed. That flag is for timing and plumbing
+  runs only, and is orchestrator-owned exactly like `--single-reader`; a
+  reviewer normally sees the proposed ranges and the title line each cut is made
+  on. Approve with `segment_case.py approve` and re-run.
+- **a `raw_page_text` classification** — record the review as described below,
+  then re-run.
+- **a possible PII leak** — a privacy event. Never worked around.
+
+The driver **never moves a run-state marker**: `update-run-state` and
+`finalize-stage` remain the orchestrator's (T13). It also accepts
+`--single-reader` / `--dual-read`, `--doc-workers`, and `--page-workers`, which
+it forwards unchanged.
+
+The per-checkpoint sections below remain the reference for what each phase
+does, for the flags, and for every single-document and special-mode invocation
+(`--bundle-ocr`, `classify-only`, `resolve-disagreement`, `resolve-non-text`) —
+which is what you reach for when clearing a gate, not for driving the stage.
+
+**Checkpoint 1 — OCR + cross-validation.** Run `python tools/run_checkpoint1.py CASE_ID DOC_ID <path to the document under data/raw/> --held-by document-pipeline --run-id RUN_ID`. Driven case-wide (the driver, and `run_document_stage.py` below), checkpoint 1 **extracts only** — classification is its own pass after redaction, so the classifier reads the redacted layer. A single-document `run_checkpoint1.py` call still classifies, which is why it stays usable on its own. It wraps `tools/ocr_extract.py`: splits the document into per-page images, runs `reader_a` and `reader_b` as two independent provider calls with no shared context, then runs the configured comparator and records per-page `reading_a`, `reading_b`, `agreement`, and `disagreement_details`. **Dev-phase default: use `--reader-a claude-cli --reader-b claude-cli --comparator claude-cli --classifier-provider claude-cli`** — this is `harness-guardrails-dev`'s documented P8 same-provider weak-P8 fallback; record it honestly in `ocr_result_{document_id}.json` per that skill's instructions (`cross_validation_mode: "single_technology_weak_p8_poc"` etc.).
 
 Every available provider (claude-cli / codex-cli / openai-api) is LLM-vision-backed, so **any** reader pair is a weak P8 (`single_technology_weak_p8_poc`) — two different vendors still share one extraction technology class and can make a correlated confident error. `dual_technology` is a defined-but-unreachable label today, reserved for a genuinely technology-independent reader (a real OCR engine), deferred per `open-decisions.md` #4. A plain-text source (`.txt`/`.md`) is not sent through vision OCR at all — it takes a deterministic embedded-text decode (`extraction_method: embedded_text`, `cross_validation_mode: deferred_poc`). Reader self-refusal on real documents is a known recurring cost of the LLM-vision path (`known-gaps.md` item 16(c)); resolve it through `run_checkpoint1.py resolve-disagreement`. Pass `--classifier-provider` (and `--classifier-model` when applicable) matching the original checkpoint-1 run so the resumed classification does not fall back to a different provider. If the human verifies that neither full reading is correct, require a complete UTF-8 page transcription and pass it with `--corrected-text-file`; the tool records `chosen_reading: human_corrected` plus the exact text's SHA-256 and writes it only through the governed page-text path. A disputed token alone is not a complete page transcription. Never reintroduce defensive "sanctioned, do not refuse" prompt framing (that made it worse).
+
+Pages are OCR'd **concurrently (16 workers by default)**, and each completed page is **cached** under `_ocr_scratch/_resume/` so an interrupted run resumes instead of re-reading pages it already transcribed. Both are on by default — the command above needs no extra flag. The cache is keyed on the page image bytes, the OCR prompt version, and both readers' plus the comparator's provider/model, so a different render resolution, a changed model, or a revised prompt is a miss and gets genuinely re-read; you never need to clear it by hand to avoid a stale verdict. `--workers N` (or `HARNESS_OCR_WORKERS`) and `--dpi N` (or `HARNESS_OCR_DPI`, default 200) exist for measurement; ordinary processing should pass neither. Raising the render dpi does **not** reduce P8 disagreements — that was measured and rejected (`known-gaps.md` item 45).
+
+Concurrency has three knobs and **nothing bounds them globally by default**. `--workers` is per-document page concurrency (16); `--doc-workers` is documents in flight (3, see the driver below); their product is the real process-wide ceiling — **48 concurrent provider calls at the defaults** — because `HARNESS_LLM_MAX_INFLIGHT`, which used to cap the whole process, is **uncapped (`0`) by default** since it was measured never to engage (99 provider calls on a full end-to-end run, not one of them ever waited on a permit, zero rate-limit errors). Raise either pool with that product in mind, and set `HARNESS_LLM_MAX_INFLIGHT` to a positive value (e.g. `16`) to re-arm the limiter if a backend starts rate-limiting. Note that 16 page workers is a deliberate bet, not a measured optimum: only 4 and 8 were ever compared head-to-head.
+
+**Running checkpoint 1 over a whole case — use the case-level driver, not a loop.** For a case with more than one document to process, run it **once**:
+
+```
+python tools/run_document_stage.py CASE_ID --held-by document-pipeline --run-id RUN_ID \
+    --reader-a claude-cli --reader-b claude-cli --comparator claude-cli --classifier-provider claude-cli
+```
+
+It reads `document_manifest.json`, selects the documents that still need checkpoint 1 (skipping the retained superseded bundle and anything already `ocr_status: completed`), and processes **3 documents concurrently** (`--doc-workers N` / `HARNESS_DOC_WORKERS`; `1` restores the sequential loop). Measured on a real 5-document case: **2.50x** faster than invoking `run_checkpoint1.py` once per document, which is what this replaces. Do not write your own loop over documents — that is exactly the sequential pattern this exists to remove, and it also gives up the per-document failure isolation below.
+
+**A blocked document does not stop the others, and does not make the step pass.** If one document hits a P8 disagreement, that document alone is blocked (`blocked_disagreement`, no page text written, per P8 unchanged) while its siblings finish; the driver reports every result, lists the blocked documents, and **exits non-zero**. Resolve each blocked document through `run_checkpoint1.py resolve-disagreement` as usual, then re-run the driver — completed documents are skipped, so nothing is re-paid for. Note this is deliberately the opposite of checkpoint 2's leak-halt: a possible PII leak is a privacy event that must stop everything, while a P8 disagreement is a per-document extraction failure.
+
+`run_checkpoint1.py` stays the tool for a **single** document and for every special mode — `--bundle-ocr`, `classify-only`, `resolve-disagreement`, `resolve-non-text`.
+
+**Two P8 policy flags exist, and neither is yours to choose.** Both are on `run_document_stage.py` and `run_checkpoint1.py`; use one only when the orchestrator's briefing explicitly names it, and never to get past a document that blocked on you.
+
+- `--on-disagreement assume-reading-a` takes reading_a on a disagreed page and continues instead of blocking. It is a **deferral of the human judgement, not a finding that reading_a was right**: on CASE_911/DOC_005 the source was scanned 90° rotated and BOTH reads were wrong on 8 of 19 pages. Affected pages record `agreement: assume_reading_a` with an `auto_resolution` block, and the document stays `review_required`.
+- `--single-reader` turns P8 **off** — one read per page, no comparison, about half the calls and wall time. Every page records `agreement: single_reader` (never `agreed` — nothing agreed), and the document gets `cross_validation_status: single_reader_no_cross_validation`, `ocr_quality: low`, `review_required: true`. It is for timing and plumbing runs only. Text produced this way is **not admissible for PoC evaluation**: the four real extraction faults P8 caught on this corpus (CASE_012's fabricated appendix, CASE_021's second fabricated addition and its KCD I678 misread, CASE_022's context contamination) were each visible only as a disagreement between two reads.
+
+`HARNESS_SINGLE_READER=1` in the environment makes `--single-reader` the default without the flag appearing on the command line, so **check it before reporting** — read `cross_validation_mode` on the documents you produced rather than inferring the mode from the command you ran. `--dual-read` forces P8 back on.
+
+The two are mutually exclusive and rejected together at parse. When either is in effect, say so in your stage summary along with the affected document/page counts — a downstream reader must never have to infer from a passing stage that P8 was reduced or skipped.
 
 For each page that reads `agreed`, checkpoint 1 writes the page text via the DAO. For any page that reads `disagreed`, do not write it manually, do not pick one reading over the other, and do not override the tool's blocked result — that page's document is extraction-failed, per P8, immediately, no tolerance threshold.
 
 If a genuine human verifies that the **entire blocked document** is photographs/visual evidence with no faithful text transcription, use `python tools/run_checkpoint1.py resolve-non-text CASE_ID DOC_ID --verified-by NAME --reviewer-role {손해사정사|의사|법률전문가} --note TEXT --held-by document-pipeline --run-id RUN_ID`. This is not OCR success and does not select either reader. It preserves the disagreement, writes no page text, records `extraction_method: non_text_image`, `ocr_status: not_applicable`, `cross_validation_status: non_text_verified`, and routes the document `expert_review_only`. Never invoke this from agent judgment alone, and never use it for a mixed document with any validated text page.
 
-Once per document — reasoning over its first page's content — checkpoint 1 also produces the document-type classification, unless the document arrived pre-flagged (`document_manifest.json`'s `pre_flagged_type`), in which case it trusts the flag and skips inference. The tool writes via the DAO: `ocr_result_{document_id}.json` (`ocr_engine` and `vision_model_name` should record actual provider/model labels and should not imply a dedicated OCR engine unless one was used) and `classification_result_{document_id}.json` — **both one file per document, not a shared file across documents**: `write_contract` overwrites whatever it's given, so if two documents' checkpoint-1 runs both targeted the same flat filename, the second write would silently destroy the first document's record. It then updates this document's `ocr_status`/`ocr_quality`/`cross_validation_status`/`document_type` fields in `document_manifest.json` via `python tools/dao.py patch-manifest-document CASE_ID DOC_ID --fields-file <path to a JSON object of just the fields you're setting> --held-by document-pipeline --run-id RUN_ID` — not `read-contract` + `write-contract`: `document_manifest.json` is a shared file multiple stages update in sequence, and `patch-manifest-document` reads it fresh under the same lock it writes with, instead of assembling a full replacement from a read that happened before the lock was acquired.
+Once per document — reasoning over its first page's content — the classification pass produces the document-type classification, unless the document arrived pre-flagged (`document_manifest.json`'s `pre_flagged_type`), in which case it trusts the flag and skips inference. Case-wide this is `python tools/run_document_stage.py CASE_ID --checkpoint classify --held-by document-pipeline --run-id RUN_ID --classifier-provider claude-cli`, which the Stage 2 driver runs for you **after** checkpoint 2; it selects the documents that still owe a `document_type`, and skips a bundle still awaiting its split (`segmentation_status: required`) — one label cannot be right for a bundle, which is exactly how CASE_907's 19-page DOC_005 came to be a single `diagnosis_certificate`. The tool writes via the DAO: `ocr_result_{document_id}.json` (`ocr_engine` and `vision_model_name` should record actual provider/model labels and should not imply a dedicated OCR engine unless one was used) and `classification_result_{document_id}.json` — **both one file per document, not a shared file across documents**: `write_contract` overwrites whatever it's given, so if two documents' checkpoint-1 runs both targeted the same flat filename, the second write would silently destroy the first document's record. It then updates this document's `ocr_status`/`ocr_quality`/`cross_validation_status`/`document_type` fields in `document_manifest.json` via `python tools/dao.py patch-manifest-document CASE_ID DOC_ID --fields-file <path to a JSON object of just the fields you're setting> --held-by document-pipeline --run-id RUN_ID` — not `read-contract` + `write-contract`: `document_manifest.json` is a shared file multiple stages update in sequence, and `patch-manifest-document` reads it fresh under the same lock it writes with, instead of assembling a full replacement from a read that happened before the lock was acquired.
 
-Checkpoint 1 also sets `downstream_disposition` from the classified type. A document classified `insurance_policy` starts at **`text_only_no_normalization`**; everything else starts at `automated_text_pipeline`. Both are fully processed — redacted, chunked, citable as evidence — and differ only in whether the document owes a normalized clause contract before `policy_clause_processing` may finalize. Normalizing is opt-IN because it is the expensive obligation (a single 145-page 약관 bundle carries 800+ conditions) and nothing downstream consumes its output: `denial-response` and `claim-analysis` address clauses by `document_id`, page and quoted text, verified verbatim against the processed source, never by which normalized bucket a condition was filed under. Promote a specific policy document to `automated_text_pipeline` only when the case actually disputes it. Do not confuse either value with `expert_review_only`, which excludes the document from text extraction entirely.
+The classification pass also sets `downstream_disposition` from the classified type. A document classified `insurance_policy` starts at **`text_only_no_normalization`**; everything else starts at `automated_text_pipeline`. Both are fully processed — redacted, chunked, citable as evidence — and differ only in whether the document owes a normalized clause contract before `policy_clause_processing` may finalize. Normalizing is opt-IN because it is the expensive obligation (a single 145-page 약관 bundle carries 800+ conditions) and nothing downstream consumes its output: `denial-response` and `claim-analysis` address clauses by `document_id`, page and quoted text, verified verbatim against the processed source, never by which normalized bucket a condition was filed under. Promote a specific policy document to `automated_text_pipeline` only when the case actually disputes it. Do not confuse either value with `expert_review_only`, which excludes the document from text extraction entirely.
 
-**Checkpoint 2 — Redaction.** Run `python tools/redact_document.py CASE_ID DOC_ID --held-by document-pipeline --run-id RUN_ID --provider PROVIDER --model MODEL`. **Dev-phase default: `--provider codex-cli`.** Redaction goes through the `tools/redaction.py` Redactor abstraction (today an `LlmRedactor` over the chosen provider; a dedicated de-identification model such as OpenMed NER can drop in without changing the tool — `open-decisions.md` #1). The model ONLY identifies PII spans; the redacted text is built deterministically by substituting those spans in the source, so non-PII is preserved by construction. A **possible PII leak** — structured PII surviving the output, or a model-named value not present verbatim in the source — **hard-fails the document** (nothing written, blocked like a P8 disagreement); **over-redaction risk** (a span left un-redacted to avoid corrupting kept text) sets `review_required: true` on `redaction_result_{document_id}.json`, a floor you can raise but not lower. On a clean page it writes the combined `<<<PAGE page=N>>>`-marked text through `dao.py write-redacted-text`, schema-validates the contract, and patches `document_manifest.json` through the DAO. Content redaction alone does not fix a PII-bearing filename — intake already renames raw files to `DOC_XXX`/`GT_XXX` before this checkpoint.
+**Checkpoint 2 — Redaction.** Run `python tools/redact_document.py CASE_ID DOC_ID --held-by document-pipeline --run-id RUN_ID --provider PROVIDER --model MODEL`. **Dev-phase default: `--provider claude-cli`.** Redaction goes through the `tools/redaction.py` Redactor abstraction (today an `LlmRedactor` over the chosen provider; a dedicated de-identification model such as OpenMed NER can drop in without changing the tool — `open-decisions.md` #1). The model ONLY identifies PII spans; the redacted text is built deterministically by substituting those spans in the source, so non-PII is preserved by construction. A **possible PII leak** — structured PII surviving the output, or a model-named value not present verbatim in the source — **hard-fails the document** (nothing written, blocked like a P8 disagreement); **over-redaction risk** (a span left un-redacted to avoid corrupting kept text) sets `review_required: true` on `redaction_result_{document_id}.json`, a floor you can raise but not lower. On a clean page it writes the combined `<<<PAGE page=N>>>`-marked text through `dao.py write-redacted-text`, schema-validates the contract, and patches `document_manifest.json` through the DAO. Content redaction alone does not fix a PII-bearing filename — intake already renames raw files to `DOC_XXX`/`GT_XXX` before this checkpoint.
+
+**For a case with more than one document, drive checkpoint 2 case-wide** with `python tools/run_document_stage.py CASE_ID --checkpoint 2 --held-by document-pipeline --run-id RUN_ID --provider claude-cli` instead of calling `redact_document.py` once per document — the same reason checkpoint 1 has a driver. It processes **documents concurrently** (`--doc-workers`, default 3) on top of the page concurrency below, skips what redaction would refuse anyway (the superseded bundle, `expert_review_only`, anything already carrying a `redacted_text_path`), and isolates failures per document: a leak-blocked or gate-refused document reports itself, its siblings finish, and the step exits non-zero. Total in-flight calls are `--doc-workers × --page-workers`, so raise them together with that product in mind. `redact_document.py` stays the tool for a single document.
+
+Pages are redacted **concurrently (4 workers by default)** and each completed page is **cached** under `_redaction_scratch/_resume/`. Both are on by default — the command above needs no extra flag to get them. What that changes for you: a rerun of a document you already redacted costs no provider calls, and a document blocked by a leak keeps its completed pages in the cache (the document still fails and still writes nothing, so a rerun re-attempts only the pages that did not finish). The cache is keyed on the redaction prompt version, the provider/model, and a hash of the page text, so a changed prompt, a different model, or a re-transcribed page is a miss and gets genuinely re-redacted — you never need to clear it by hand to avoid a stale result. `--workers N` (or `HARNESS_REDACT_WORKERS`) and `--no-resume` exist for measurement and for forcing a cold run; ordinary processing should pass neither.
 
 Checkpoint 2 is **not applicable** to a manifest entry with `downstream_disposition: expert_review_only`. Do not feed the raw image to the text redactor and do not create an empty `redacted_text.md`. Visual PII remains confined to controlled human review; automated downstream agents receive only the non-text contract metadata.
 
 Redaction scope convention (settled after CASE_012 and CASE_021 redacted the same content differently — 0 items vs 4): **redact every natural person's name regardless of capacity** — claimant, patient, physician, adjuster, insurer staff, and corporate signatories like a 대표이사 (a CEO's name in an official document is still a natural person's name; over-redaction here is harmless downstream, under-redaction is not). Redact all phone/fax numbers, street addresses, and policy/certificate/license numbers, **including published corporate contact info** (complaint-desk hotlines, published office addresses) — downstream stages need denial reasons and policy clauses, never a phone number, so the safe default costs nothing. Do NOT redact corporate entity names themselves (보험사명, 병원명 as institutions) — downstream stages key on them.
 
 **Checkpoint 3 — Chunking.** Once every text document in the case has a `redacted_text.md`, run `python tools/chunk_text.py CASE_ID TEXT_DOC_ID [TEXT_DOC_ID ...] --exclude-non-text NON_TEXT_DOC_ID` — one call covering the case, not one call per document (`page_chunks.json` is a single combined file). Pass one `--exclude-non-text` for every manifest entry whose `downstream_disposition` is `expert_review_only`; the output records those documents under `excluded_documents` and creates no fake chunk for them. The tool parses the `<<<PAGE page=N>>>` markers checkpoint 2 embedded and slices exact verbatim text per page — one chunk per page (`page_start == page_end` always), sequential `chunk_id`s across every text document. Write the tool's output via `python tools/dao.py write-contract CASE_ID page_chunks.json --data-file <path> --schema-name page_chunks.schema.json --held-by document-pipeline --run-id RUN_ID`.
+
+**`chunk_text.py`'s output is not by itself a valid contract.** It emits the
+payload only (`chunks`, `excluded_documents`), while `page_chunks.schema.json`
+also requires the common envelope — `case_id`, `component`, `status`, `run_id`,
+`created_at` — so writing its stdout straight through `write-contract` fails
+validation. Whoever ran this by hand was filling those five fields in from
+memory: an undocumented step between two documented commands. `run_stage2.py`
+adds them, which is another reason to drive the stage with it rather than by
+hand. The fields belong there and not in `chunk_text.py`, which is deliberately
+a pure deterministic slicer that takes no `--held-by` and writes nothing
+through the DAO.
 
 Each checkpoint is a real DAO `write_contract` call — locked, schema-validated, run-state updated, backed up. Do not treat these as internal scratch state; they are the actual resumability mechanism.
 
@@ -147,4 +263,4 @@ Each checkpoint is a real DAO `write_contract` call — locked, schema-validated
 
 # Collaboration
 
-Downstream: `policy-pipeline` (policy documents), `claim-analysis` (diagnosis/medical-record documents), `denial-response` (if a flagged insurer-response document exists — reads your checkpoint-1 output for that document, not a separate pipeline).
+Downstream: `policy-pipeline` (policy documents), `claim-analysis` (diagnosis/medical-record documents), `denial-response` (if a flagged insurer-response document exists — reads the checkpoint-2 redacted text for that document, not a separate pipeline).

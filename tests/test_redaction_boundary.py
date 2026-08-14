@@ -22,6 +22,7 @@ import sys
 import pytest
 
 import dao
+import redaction as rd
 
 
 PRE_REDACTION_PAGE = """\
@@ -329,3 +330,164 @@ def test_expert_review_only_document_is_refused_before_any_path_is_emitted(
     assert rc == 1
     assert "NON_TEXT_EXPERT_REVIEW_ONLY" in out
     assert "redacted_text.md" not in out
+
+
+# ------------------------------- T4a: in-process page-text read keeps gates --
+
+def _cap_env(monkeypatch, tmp_path):
+    monkeypatch.setattr(dao, "OUTPUTS", tmp_path / "outputs")
+    monkeypatch.setattr(dao, "DATA", tmp_path / "data")
+    page = dao.processed_dir("CASE_009", "DOC_001") / "page_001.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("환자 홍길동 010-1234-5678", encoding="utf-8")
+    return page
+
+
+def test_in_process_read_returns_text_with_a_live_capability(monkeypatch, tmp_path):
+    _cap_env(monkeypatch, tmp_path)
+    cap, path = dao._issue_page_text_capability("CASE_009", "DOC_001")
+    try:
+        text = dao.read_page_text_data("CASE_009", "DOC_001", 1,
+                                       caller_stage="document-pipeline",
+                                       capability=cap)
+        assert "홍길동" in text
+    finally:
+        dao.release_page_text_capability(path)
+
+
+def test_in_process_read_refuses_without_a_capability(monkeypatch, tmp_path):
+    """Being in-process is not a reason to trust the caller. An importer is
+    not more privileged than a subprocess."""
+    _cap_env(monkeypatch, tmp_path)
+    with pytest.raises(PermissionError) as exc:
+        dao.read_page_text_data("CASE_009", "DOC_001", 1,
+                                caller_stage="document-pipeline", capability="")
+    assert "capability" in str(exc.value).lower()
+
+
+def test_in_process_read_refuses_a_capability_minted_for_another_document(monkeypatch, tmp_path):
+    _cap_env(monkeypatch, tmp_path)
+    cap, path = dao._issue_page_text_capability("CASE_009", "DOC_002")
+    try:
+        with pytest.raises(PermissionError):
+            dao.read_page_text_data("CASE_009", "DOC_001", 1,
+                                    caller_stage="document-pipeline",
+                                    capability=cap)
+    finally:
+        dao.release_page_text_capability(path)
+
+
+def test_in_process_read_refuses_a_disallowed_caller_stage(monkeypatch, tmp_path):
+    _cap_env(monkeypatch, tmp_path)
+    cap, path = dao._issue_page_text_capability("CASE_009", "DOC_001")
+    try:
+        with pytest.raises(PermissionError) as exc:
+            dao.read_page_text_data("CASE_009", "DOC_001", 1,
+                                    caller_stage="denial-response",
+                                    capability=cap)
+        assert "not permitted" in str(exc.value)
+    finally:
+        dao.release_page_text_capability(path)
+
+
+def test_in_process_read_refuses_after_the_capability_is_released(monkeypatch, tmp_path):
+    """The window closes when checkpoint 2's finally runs."""
+    _cap_env(monkeypatch, tmp_path)
+    cap, path = dao._issue_page_text_capability("CASE_009", "DOC_001")
+    dao.release_page_text_capability(path)
+    with pytest.raises(PermissionError):
+        dao.read_page_text_data("CASE_009", "DOC_001", 1,
+                                caller_stage="document-pipeline", capability=cap)
+
+
+def test_in_process_read_raises_rather_than_returning_a_denial_string(monkeypatch, tmp_path):
+    """The CLI prints a denial and returns 1; a stdout-scraping caller could
+    mistake that text for page content. The in-process form must raise."""
+    _cap_env(monkeypatch, tmp_path)
+    try:
+        result = dao.read_page_text_data("CASE_009", "DOC_001", 1,
+                                         caller_stage="evaluation", capability="x")
+    except PermissionError:
+        return
+    pytest.fail(f"expected PermissionError, got a value: {result!r}")
+
+
+# ------------------ institutional contacts in a PII-free class (2026-08-11) --
+
+class TestInstitutionalContactExemption:
+    """A published policy booklet carries its publisher's and the statutory
+    notice's switchboards by construction. Blocking on those made every real
+    policy document unprocessable while protecting nobody, and redacting them
+    would corrupt the clause text a citation quotes.
+
+    The exemption is narrow on purpose: it applies only when the caller has
+    established a PII-free document class, it never runs on claim documents,
+    and every other pattern still blocks. The tests that matter most are the
+    ones proving a personal contact is NOT rescued by a nearby institution.
+    """
+
+    def test_statutory_credit_bureau_numbers_pass(self):
+        # Real text from CASE_902 DOC_001 p4, wrapped exactly as the extractor
+        # produces it -- the number spans newlines and its owner sits above.
+        text = ("NICE \n신용정보\n( 주) : \n☎\n02\n- 2122\n- 4000  \n인터넷 www.nice.co.kr")
+        assert rd.scan_residual_pii(text, allow_institutional_contacts=False),             "the strict scan must still see it"
+        assert rd.scan_residual_pii(text) == []
+
+    def test_publisher_mailbox_passes(self):
+        text = "다이렉트 고객센터 Tel : 1577-3339 E-mail : mailmaster@samsungfire.com"
+        assert rd.scan_residual_pii(text, allow_institutional_contacts=True) == []
+
+    def test_representative_number_passes_without_a_named_institution(self):
+        assert rd.scan_residual_pii("1588-5114", allow_institutional_contacts=True) == []
+
+    # -- the disqualifiers: a nearby institution must not rescue a person ----
+
+    def test_a_personal_mobile_is_not_rescued_by_a_nearby_institution(self):
+        hits = rd.scan_residual_pii("서울대학교병원 담당 010-9876-5432",
+                                    allow_institutional_contacts=True)
+        assert any(h["kind"].startswith("phone_number") for h in hits), (
+            "a claimant mobile beside a hospital name must still block")
+
+    def test_a_consumer_email_is_not_rescued_by_a_nearby_institution(self):
+        for addr in ("hong.gildong@gmail.com", "hong@naver.com", "x@daum.net"):
+            hits = rd.scan_residual_pii(f"삼성화재 담당자 {addr}",
+                                        allow_institutional_contacts=True)
+            assert any(h["kind"] == "email" for h in hits), addr
+
+    def test_a_bare_landline_with_no_institution_still_blocks(self):
+        assert rd.scan_residual_pii("02-1234-5678", allow_institutional_contacts=True)
+
+    @pytest.mark.parametrize("text,kind", [
+        ("피보험자 800101-1234567", "resident_registration_number"),
+        ("환급계좌 110-234-567890 신한은행", "account_number_dashed"),
+        ("차량번호 12가3456", "vehicle_number"),
+        ("일련 12345678901234", "long_digit_run"),
+    ])
+    def test_every_other_pattern_still_blocks_in_a_policy(self, text, kind):
+        """The exemption must not become a blanket skip: a booklet that really
+        did carry a claimant's RRN still fails closed."""
+        hits = rd.scan_residual_pii(text, allow_institutional_contacts=True)
+        assert any(h["kind"] == kind for h in hits)
+
+    def test_exemptions_are_on_by_default_but_can_be_turned_off(self):
+        """Default-on since 2026-08-11: an insurer's own footer appears in
+        claim documents too (CASE_902 DOC_003, a 가입설계서, carried
+        mailmaster@samsungfire.com on all 21 pages), so scoping the exemption
+        to the policy class alone left every other document blocked on the same
+        published contact. The strict scan stays reachable for a caller that
+        wants it."""
+        text = "고객센터 mailmaster@samsungfire.com"
+        assert rd.scan_residual_pii(text) == []
+        assert rd.scan_residual_pii(text, allow_institutional_contacts=False)
+
+    def test_passthrough_redactor_uses_the_exemption(self):
+        """The wiring, not just the helper: NoPiiClassRedactor is the only
+        caller that may pass the flag."""
+        text = "NICE 신용정보 (주) : 02 - 2122 - 4000"
+        outcome = rd.NoPiiClassRedactor().redact_page(text)
+        assert outcome.redacted_text == text
+        assert outcome.items_redacted == 0
+
+    def test_passthrough_redactor_still_blocks_real_pii(self):
+        with pytest.raises(rd.RedactionLeakError):
+            rd.NoPiiClassRedactor().redact_page("피보험자 홍길동 800101-1234567")

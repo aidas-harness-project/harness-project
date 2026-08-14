@@ -175,8 +175,10 @@ def _write_inventory(isolated_dao, make_args, data, doc_id="DOC_005",
 
 def _run_state(stages):
     return {
+        "run_state_version": "run_state.v0.3",
         "case_id": "CASE_030",
         "run_id": "RUN_20260728_001",
+        "medical_review_adopted": False,
         "stages": [
             {"stage_name": name, "status": status, "attempt_count": 1,
              "backup_path": f"outputs/CASE_030/_backups/step_01_{name}"}

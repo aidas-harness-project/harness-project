@@ -4,11 +4,15 @@
   "title": "ocr_result_{document_id}.json -- extraction quality + cross-validation log, one file per document v0.8",
   "description": "Per-page text extraction results, uncertain regions, and the P8 dual-path cross-validation outcome for ONE document. Produced by document-pipeline's checkpoint 1 -- one file per document (ocr_result_{document_id}.json), since checkpoint 1 runs once per document and a single shared file across documents would get silently overwritten by each subsequent document's write (write-contract replaces the whole file; see known-gaps.md's audit of this exact failure mode). v0.2 nested everything under a documents: [] array to cover multiple documents in one file -- v0.3 flattens that away since each file now covers exactly one document; document_id is a top-level field here, matching the filename. v0.8 adds the cross-field constraints tying the document-level rollup (cross_validation_status / review_required) to the per-page cross_validation verdicts below: before this, every field was individually legal while the combination lied -- a page recording agreement 'disagreed' with no resolution alongside a top-level 'agreed' + review_required false validated cleanly, which is precisely a document that P8 should have blocked passing downstream unnoticed. Nothing had ever written such a file (run_checkpoint1.py derives the rollup from the pages), so the corpus was consistent; the gap was that only the tool's good behaviour enforced it, not the contract. Propagation rule: if a later stage's evidence_reference quote overlaps an uncertain_region, that field is routed review_required: true. Only a per-document summary (ocr_quality, uncertain_region_count, cross_validation_status) is copied into document_manifest.json.",
   "allOf": [
-    { "$ref": "common_component_output.schema.json" },
+    {
+      "$ref": "common_component_output.schema.json"
+    },
     {
       "type": "object",
       "properties": {
-        "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+        "document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id"
+        },
         "ocr_engine": {
           "type": "string",
           "description": "Primary extraction provider/path used for this document. In the current provider-based P8 flow this is usually reader_a's provider:model label (for example 'openai-api:gpt-...' or 'claude-cli:claude-cli'); a future dedicated OCR engine should be recorded here when one is added. If the selected provider is LLM vision rather than a traditional OCR engine, record that honestly rather than implying engine-level OCR confidence exists."
@@ -22,162 +26,399 @@
           "description": "Blocks below this confidence are recorded as uncertain_region. Not fixed in the schema since confidence distributions vary by engine -- record whatever value was actually used for this run. Current LLM-vision provider paths such as claude-cli/openai-api do not produce a real per-block OCR confidence signal; when no real confidence signal exists, set this to 1.0 and leave uncertain_regions empty per page rather than fabricating a number. P8's actual failure signal in that path is the agreed/disagreed cross-validation outcome, not a confidence threshold."
         },
         "extraction_method": {
-          "enum": ["embedded_text", "ocr", "mixed", "non_text_image"],
+          "enum": [
+            "embedded_text",
+            "ocr",
+            "mixed",
+            "non_text_image"
+          ],
           "description": "How this document entered the processed layer. non_text_image means a human verified that the document consists of visual evidence with no faithful text transcription; it is never converted into invented descriptive text and is routed to expert review only."
         },
         "encoding_detected": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Detected encoding for text-file inputs. Some source-cases files use CP949 -- record it."
         },
         "ocr_status": {
-          "enum": ["completed", "failed", "not_applicable"],
+          "enum": [
+            "completed",
+            "failed",
+            "not_applicable"
+          ],
           "description": "Kept in sync with document_manifest.json's ocr_status for this document."
         },
         "pages": {
           "type": "array",
           "description": "Per-page results. May be empty if ocr_status is failed.",
-          "items": { "$ref": "#/$defs/page_result" }
+          "items": {
+            "$ref": "#/$defs/page_result"
+          }
         },
         "source_total_pages": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
           "description": "Physical page count of the original PDF before any page-range extraction. Copied to document_manifest and used to bind parent coverage to document-processing metadata."
         },
         "document_mean_confidence": {
           "anyOf": [
-            { "$ref": "common_component_output.schema.json#/$defs/confidence" },
-            { "type": "null" }
+            {
+              "$ref": "common_component_output.schema.json#/$defs/confidence"
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "Mean of per-page mean_confidence. null for embedded_text documents."
         },
         "ocr_quality": {
           "anyOf": [
-            { "enum": ["high", "medium", "low"] },
-            { "type": "null" }
+            {
+              "enum": [
+                "high",
+                "medium",
+                "low"
+              ]
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "Document-level quality summary, mirrored in document_manifest.json. Derivation (e.g. uncertain-region ratio, presence of failed pages) is an implementation detail but must stay consistent across runs; a majority of 'low' documents is a No-Go signal to check."
         },
         "cross_validation_status": {
-          "enum": ["agreed", "disagreed_pending_review", "disagreed_resolved", "non_text_verified", "not_run"],
-          "description": "Document-level rollup of the per-page cross_validation results below. 'disagreed_pending_review' on any page means the whole document is blocked from downstream use per harness-guardrails P8 until a human resolves it. 'disagreed_resolved' is distinct from 'agreed' -- the two independent reads did NOT actually agree, a human resolved which reading was correct (see each resolved page's cross_validation.resolution) -- collapsing this into 'agreed' would misrepresent what P8 actually found. Found by actually resolving a real disagreement (CASE_012/DOC_001 page 4, I67 vs I67.8) -- there was no way to represent 'resolved' at all before this."
+          "enum": [
+            "agreed",
+            "disagreed_pending_review",
+            "disagreed_resolved",
+            "assume_reading_a_unreviewed",
+            "single_reader_no_cross_validation",
+            "non_text_verified",
+            "not_run"
+          ],
+          "description": "Document-level rollup of the per-page cross_validation results below. 'disagreed_pending_review' on any page means the whole document is blocked from downstream use per harness-guardrails P8 until a human resolves it. 'disagreed_resolved' is distinct from 'agreed' -- the two independent reads did NOT actually agree, a human resolved which reading was correct (see each resolved page's cross_validation.resolution) -- collapsing this into 'agreed' would misrepresent what P8 actually found. Found by actually resolving a real disagreement (CASE_012/DOC_001 page 4, I67 vs I67.8) -- there was no way to represent 'resolved' at all before this. 'assume_reading_a_unreviewed' means one or more pages disagreed and were auto-taken as reading_a under the assume-reading-a throughput policy: the document is usable and NOT blocked, but its text on those pages has had no human adjudication, so it is not 'agreed' and not 'disagreed_resolved' either -- nobody resolved anything."
         },
         "cross_validation_mode": {
-          "enum": ["dual_technology", "single_technology_weak_p8_poc", "deferred_poc"],
+          "enum": [
+            "dual_technology",
+            "single_technology_weak_p8_poc",
+            "single_reader_no_cross_validation",
+            "deferred_poc"
+          ],
           "description": "How independent P8's two reads actually were, computed from the configured readers (not asserted). 'dual_technology' = reader_a and reader_b use genuinely different extraction technologies (e.g. a real OCR engine vs. an LLM vision model) -- real P8 independence; currently UNREACHABLE, reserved for a future dedicated OCR engine (no such reader ships today, see open-decisions.md #4). 'single_technology_weak_p8_poc' = both reads came from LLM-vision providers (claude-cli / codex-cli / openai-api), which share one extraction technology class even across vendors; a documented WEAK P8 that cannot catch a correlated confident error shared by both reads -- must never be presented as genuine dual-technology P8. 'deferred_poc' = cross-validation was intentionally not run (single-reader PoC, or a deterministic embedded-text decode where no second reading exists). This label describes reader independence only; the hard-halt on a genuine content disagreement is unchanged regardless of its value."
         },
         "cross_validation_note": {
           "type": "string",
           "description": "Human-readable justification for cross_validation_mode -- e.g. which providers/models both readers used and why the run is (or isn't) genuinely independent. Empty string when cross_validation_mode is 'dual_technology'."
         },
-        "review_required": { "type": "boolean" },
-        "review_reason": { "type": "string" }
+        "review_required": {
+          "type": "boolean"
+        },
+        "review_reason": {
+          "type": "string"
+        }
       },
-      "required": ["document_id", "ocr_engine", "vision_model_name", "uncertain_confidence_threshold", "extraction_method", "ocr_status", "pages", "ocr_quality", "cross_validation_status", "cross_validation_mode", "cross_validation_note"],
+      "required": [
+        "document_id",
+        "ocr_engine",
+        "vision_model_name",
+        "uncertain_confidence_threshold",
+        "extraction_method",
+        "ocr_status",
+        "pages",
+        "ocr_quality",
+        "cross_validation_status",
+        "cross_validation_mode",
+        "cross_validation_note"
+      ],
       "allOf": [
         {
           "if": {
-            "properties": { "extraction_method": { "const": "non_text_image" } },
-            "required": ["extraction_method"]
+            "properties": {
+              "extraction_method": {
+                "const": "non_text_image"
+              }
+            },
+            "required": [
+              "extraction_method"
+            ]
           },
           "then": {
             "properties": {
-              "ocr_status": { "const": "not_applicable" },
-              "ocr_quality": { "type": "null" },
-              "cross_validation_status": { "const": "non_text_verified" },
-              "review_required": { "const": true },
+              "ocr_status": {
+                "const": "not_applicable"
+              },
+              "ocr_quality": {
+                "type": "null"
+              },
+              "cross_validation_status": {
+                "const": "non_text_verified"
+              },
+              "review_required": {
+                "const": true
+              },
               "pages": {
                 "items": {
                   "allOf": [
-                    { "$ref": "#/$defs/page_result" },
+                    {
+                      "$ref": "#/$defs/page_result"
+                    },
                     {
                       "properties": {
-                        "content_kind": { "const": "non_text_image" },
-                        "text_path": { "type": "null" }
+                        "content_kind": {
+                          "const": "non_text_image"
+                        },
+                        "text_path": {
+                          "type": "null"
+                        }
                       },
-                      "required": ["content_kind", "non_text_verification"]
+                      "required": [
+                        "content_kind",
+                        "non_text_verification"
+                      ]
                     }
                   ]
                 }
               }
             },
-            "required": ["review_required", "reviewer_role", "review_reason"]
+            "required": [
+              "review_required",
+              "reviewer_role",
+              "review_reason"
+            ]
           }
         },
         {
           "$comment": "P8 rollup rule 1: any page whose two reads disagreed and that no human has resolved yet blocks the WHOLE document -- so the document-level rollup must say so. Exempts non_text_image, whose disagreement is closed by the non_text_verification human decision above (cross_validation_status 'non_text_verified'), not by choosing a reading -- see CASE_003/DOC_010, a real document with two unresolved disagreed pages that is legitimately not pending review. 'Unresolved' means resolution is null OR absent, per the resolution description ('null/absent while still pending') and run_checkpoint1.py's own test (.get('resolution') is None) -- keying on key-presence alone would count an explicit null as resolved and wrongly force this rule off, which is exactly what the partial-resolution path writes.",
           "if": {
             "properties": {
-              "extraction_method": { "not": { "const": "non_text_image" } },
+              "extraction_method": {
+                "not": {
+                  "const": "non_text_image"
+                }
+              },
               "pages": {
                 "contains": {
                   "properties": {
                     "cross_validation": {
-                      "properties": { "agreement": { "const": "disagreed" } },
-                      "required": ["agreement"],
+                      "properties": {
+                        "agreement": {
+                          "const": "disagreed"
+                        }
+                      },
+                      "required": [
+                        "agreement"
+                      ],
                       "not": {
-                        "properties": { "resolution": { "type": "object" } },
-                        "required": ["resolution"]
+                        "properties": {
+                          "resolution": {
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "resolution"
+                        ]
                       }
                     }
                   },
-                  "required": ["cross_validation"]
+                  "required": [
+                    "cross_validation"
+                  ]
                 }
               }
             },
-            "required": ["pages", "extraction_method"]
+            "required": [
+              "pages",
+              "extraction_method"
+            ]
           },
           "then": {
             "properties": {
-              "cross_validation_status": { "const": "disagreed_pending_review" },
-              "review_required": { "const": true }
+              "cross_validation_status": {
+                "const": "disagreed_pending_review"
+              },
+              "review_required": {
+                "const": true
+              }
             },
-            "required": ["review_required"]
+            "required": [
+              "review_required"
+            ]
           }
         },
         {
           "$comment": "P8 rollup rule 2: at least one page disagreed and EVERY disagreed page now carries a human resolution -- the document is resolved, never plain 'agreed'. Collapsing it to 'agreed' would erase the fact that the two reads did not actually agree (the same never-rewrite-history discipline the agreement field itself documents). The 'not' is what distinguishes this from rule 1: it asserts no unresolved disagreed page remains. Note it is a SIBLING of 'properties'/'required', not nested inside 'properties' -- a 'not' placed inside 'properties' is read as a property literally named 'not' and silently never constrains anything, which made this rule fire on partially-resolved documents until it was caught by run_checkpoint1.py's partial-resolution test.",
           "if": {
             "properties": {
-              "extraction_method": { "not": { "const": "non_text_image" } },
+              "extraction_method": {
+                "not": {
+                  "const": "non_text_image"
+                }
+              },
               "pages": {
                 "contains": {
                   "properties": {
                     "cross_validation": {
                       "properties": {
-                        "agreement": { "const": "disagreed" },
-                        "resolution": { "type": "object" }
+                        "agreement": {
+                          "const": "disagreed"
+                        },
+                        "resolution": {
+                          "type": "object"
+                        }
                       },
-                      "required": ["agreement", "resolution"]
+                      "required": [
+                        "agreement",
+                        "resolution"
+                      ]
                     }
                   },
-                  "required": ["cross_validation"]
+                  "required": [
+                    "cross_validation"
+                  ]
                 }
               }
             },
-            "required": ["pages", "extraction_method"],
+            "required": [
+              "pages",
+              "extraction_method"
+            ],
             "not": {
               "properties": {
                 "pages": {
                   "contains": {
                     "properties": {
                       "cross_validation": {
-                        "properties": { "agreement": { "const": "disagreed" } },
-                        "required": ["agreement"],
+                        "properties": {
+                          "agreement": {
+                            "const": "disagreed"
+                          }
+                        },
+                        "required": [
+                          "agreement"
+                        ],
                         "not": {
-                          "properties": { "resolution": { "type": "object" } },
-                          "required": ["resolution"]
+                          "properties": {
+                            "resolution": {
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "resolution"
+                          ]
                         }
                       }
                     },
-                    "required": ["cross_validation"]
+                    "required": [
+                      "cross_validation"
+                    ]
                   }
                 }
               },
-              "required": ["pages"]
+              "required": [
+                "pages"
+              ]
             }
           },
           "then": {
-            "properties": { "cross_validation_status": { "const": "disagreed_resolved" } }
+            "properties": {
+              "cross_validation_status": {
+                "const": "disagreed_resolved"
+              }
+            }
+          }
+        },
+        {
+          "$comment": "P8 rollup rule 3: a page auto-taken as reading_a under the assume-reading-a throughput policy did NOT have its readers agree and did NOT have a human resolve it, so the document must say exactly that and must keep review_required true. Without this the policy could masquerade as a clean document -- the same 'every field individually legal while the combination lies' hole rules 1 and 2 close for the blocked and human-resolved paths. Verified by negative control: before this rule an assume_reading_a page under cross_validation_status 'agreed' with review_required false validated cleanly.",
+          "if": {
+            "properties": {
+              "pages": {
+                "contains": {
+                  "properties": {
+                    "cross_validation": {
+                      "properties": {
+                        "agreement": {
+                          "const": "assume_reading_a"
+                        }
+                      },
+                      "required": [
+                        "agreement"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "cross_validation"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "pages"
+            ]
+          },
+          "then": {
+            "properties": {
+              "cross_validation_status": {
+                "const": "assume_reading_a_unreviewed"
+              },
+              "review_required": {
+                "const": true
+              }
+            },
+            "required": [
+              "review_required"
+            ]
+          }
+        },
+        {
+          "$comment": "P8 rollup rule 4: a single_reader page had NO second read and NO comparison, so the document must say P8 did not run rather than reporting an agreement it never obtained. Mirrors rule 3 exactly, for the same reason: without it a --single-reader document whose fields are each individually legal could present as cross_validation_status 'agreed' with review_required false -- a document that was never cross-validated claiming the strongest verdict the schema offers. Verified by negative control, as rule 3 was.",
+          "if": {
+            "properties": {
+              "pages": {
+                "contains": {
+                  "properties": {
+                    "cross_validation": {
+                      "properties": {
+                        "agreement": {
+                          "const": "single_reader"
+                        }
+                      },
+                      "required": [
+                        "agreement"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "cross_validation"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "pages"
+            ]
+          },
+          "then": {
+            "properties": {
+              "cross_validation_status": {
+                "const": "single_reader_no_cross_validation"
+              },
+              "cross_validation_mode": {
+                "const": "single_reader_no_cross_validation"
+              },
+              "review_required": {
+                "const": true
+              }
+            },
+            "required": [
+              "review_required",
+              "reviewer_role",
+              "review_reason"
+            ]
           }
         }
       ]
@@ -187,42 +428,80 @@
     "page_result": {
       "type": "object",
       "properties": {
-        "page": { "type": "integer", "minimum": 1 },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
         "content_kind": {
-          "enum": ["text", "non_text_image"],
+          "enum": [
+            "text",
+            "non_text_image"
+          ],
           "description": "Material kind verified for this page. non_text_image is a human decision that the page is visual evidence, not a model-generated description."
         },
         "text_path": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "pattern": "^data/processed/",
           "description": "Path to this page's extracted text. data/processed/CASE_XXX/DOC_XXX/page_NNN.md -- null when cross_validation.agreement is 'disagreed': per P8, a disagreed page is never written (no tolerance threshold, no picking one reading over the other), so there is no text_path yet. Found by actually running a real document through checkpoint 1 -- a real 4-page document with 3 agreed + 1 disagreed page has no other way to represent the disagreed page's entry."
         },
         "mean_confidence": {
           "anyOf": [
-            { "$ref": "common_component_output.schema.json#/$defs/confidence" },
-            { "type": "null" }
+            {
+              "$ref": "common_component_output.schema.json#/$defs/confidence"
+            },
+            {
+              "type": "null"
+            }
           ],
           "description": "Mean confidence for this page. null if embedded_text."
         },
         "uncertain_regions": {
           "type": "array",
           "description": "Blocks below threshold. Required -- omission is not allowed; an empty array means 'checked, none found', distinct from 'not checked'.",
-          "items": { "$ref": "#/$defs/uncertain_region" }
+          "items": {
+            "$ref": "#/$defs/uncertain_region"
+          }
         },
-        "cross_validation": { "$ref": "#/$defs/cross_validation_result" },
+        "cross_validation": {
+          "$ref": "#/$defs/cross_validation_result"
+        },
         "non_text_verification": {
           "type": "object",
           "description": "Required only when content_kind is non_text_image. This is the genuine human decision that closes the text-extraction question without choosing or fabricating a transcription.",
           "properties": {
-            "verified_by": { "type": "string", "minLength": 1 },
-            "verified_at": { "type": "string", "format": "date-time" },
-            "note": { "type": "string", "minLength": 1 },
-            "downstream_disposition": { "const": "expert_review_only" }
+            "verified_by": {
+              "type": "string",
+              "minLength": 1
+            },
+            "verified_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "note": {
+              "type": "string",
+              "minLength": 1
+            },
+            "downstream_disposition": {
+              "const": "expert_review_only"
+            }
           },
-          "required": ["verified_by", "verified_at", "note", "downstream_disposition"]
+          "required": [
+            "verified_by",
+            "verified_at",
+            "note",
+            "downstream_disposition"
+          ]
         }
       },
-      "required": ["page", "text_path", "uncertain_regions", "cross_validation"]
+      "required": [
+        "page",
+        "text_path",
+        "uncertain_regions",
+        "cross_validation"
+      ]
     },
     "uncertain_region": {
       "type": "object",
@@ -232,39 +511,69 @@
           "type": "string",
           "description": "The engine's raw reading, verbatim (may be a misread)."
         },
-        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" },
-        "char_offset_start": { "type": "integer", "minimum": 0 },
-        "char_offset_end": { "type": "integer", "minimum": 1 },
+        "confidence": {
+          "$ref": "common_component_output.schema.json#/$defs/confidence"
+        },
+        "char_offset_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "char_offset_end": {
+          "type": "integer",
+          "minimum": 1
+        },
         "note": {
           "type": "string",
           "description": "Optional. e.g. stamp/handwriting overlap, table boundary cut off."
         }
       },
-      "required": ["text_as_read", "confidence", "char_offset_start", "char_offset_end"]
+      "required": [
+        "text_as_read",
+        "confidence",
+        "char_offset_start",
+        "char_offset_end"
+      ]
     },
     "cross_validation_result": {
       "type": "object",
       "description": "P8's dual-path cross-validation for this page: reader_a and reader_b both read the same raw page blind, without seeing each other's output, then a comparator checks material-content agreement (same names/dates/numbers/diagnoses present) rather than verbatim formatting. The two reads may be separate calls to the same provider/model or different providers; do not claim genuinely independent technologies unless the configured paths actually are independent.",
       "properties": {
         "vision_model_reading": {
-          "type": "string",
-          "description": "Historical field name for reader_b's independent transcription/content summary of this page, produced before it ever saw reader_a's text."
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Historical field name for reader_b's independent transcription/content summary of this page, produced before it ever saw reader_a's text. null ONLY when agreement is 'single_reader' -- no reader_b ran, so there is no second reading. It is deliberately null rather than a copy of reader_a's text, which would read as two independent reads that happened to match."
         },
         "agreement": {
-          "enum": ["agreed", "disagreed"],
-          "description": "This is a historical record of what the automated dual-path check found -- never rewritten to 'agreed' after a human resolution. If a human later resolves a 'disagreed' page, that fact and outcome go in 'resolution' below, not by silently changing this field (same 'never delete conflicting data' discipline as the conflict ledger, P6)."
+          "enum": [
+            "agreed",
+            "disagreed",
+            "assume_reading_a",
+            "single_reader"
+          ],
+          "description": "This is a historical record of what the automated dual-path check found -- never rewritten to 'agreed' after a human resolution. If a human later resolves a 'disagreed' page, that fact and outcome go in 'resolution' below, not by silently changing this field (same 'never delete conflicting data' discipline as the conflict ledger, P6). 'assume_reading_a' records that the two reads DID disagree and reading_a was taken automatically under run_checkpoint1.py's --on-disagreement assume-reading-a policy, with no human comparison and no image re-examination. It is deliberately a third value rather than 'agreed': the readers did not agree, and a policy default must never be readable as a reader concurrence. See auto_resolution for the policy record; the page still owes human adjudication (review_required stays true). 'single_reader' records that P8 did not run on this page at all: only reader_a read it, there was no second read and no comparison (run_checkpoint1.py --single-reader, a development throughput mode). Like 'assume_reading_a' it is deliberately not 'agreed' -- nothing agreed, because nothing was compared. vision_model_reading is null and disagreement_details is empty because no comparison happened, NOT because no differences existed."
         },
         "disagreement_details": {
           "type": "array",
           "description": "Populated only when agreement is 'disagreed' -- what specifically differs between the two readings. Required and non-empty in that case (enforced below): a disagreed page whose details are missing or empty records that P8 failed without recording what failed, leaving nothing for the human resolver to act on and nothing for a later audit to reconstruct.",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "resolution": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "description": "Set when agreement is 'disagreed' and a human has since verified one original reading or supplied a complete corrected page transcription because neither reading was correct (P8: this page's document is blocked from downstream use until this happens). null/absent while still pending. Once set, this page's text_path is written using the selected or human-corrected content. Also legitimately used when agreement is 'agreed' but a human found a problem compare() missed -- e.g. one reading contained fabricated content the other didn't have, which compare() (checking only for conflicting core facts, not extraneous content) can pass as 'agreed' -- found for real running CASE_012/DOC_001 page 3.",
           "properties": {
             "chosen_reading": {
-              "enum": ["reading_a", "reading_b", "human_corrected"],
+              "enum": [
+                "reading_a",
+                "reading_b",
+                "human_corrected"
+              ],
               "description": "Which original dual-path reading was verified correct, or human_corrected when neither was correct and a human supplied the complete page transcription."
             },
             "corrected_text_sha256": {
@@ -272,41 +581,103 @@
               "pattern": "^[a-f0-9]{64}$",
               "description": "SHA-256 of the exact governed processed page text. Required only for chosen_reading=human_corrected; proves which complete human-verified transcription was written without duplicating its potentially sensitive contents in this contract."
             },
-            "resolved_by": { "type": "string" },
-            "resolved_at": { "type": "string", "format": "date-time" },
+            "resolved_by": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string",
+              "format": "date-time"
+            },
             "note": {
               "type": "string",
               "description": "Why -- e.g. what was checked against the raw page image, or corroborating evidence from elsewhere in the case."
             }
           },
-          "required": ["chosen_reading", "resolved_by", "resolved_at", "note"],
+          "required": [
+            "chosen_reading",
+            "resolved_by",
+            "resolved_at",
+            "note"
+          ],
           "allOf": [
             {
               "if": {
-                "properties": { "chosen_reading": { "const": "human_corrected" } },
-                "required": ["chosen_reading"]
+                "properties": {
+                  "chosen_reading": {
+                    "const": "human_corrected"
+                  }
+                },
+                "required": [
+                  "chosen_reading"
+                ]
               },
-              "then": { "required": ["corrected_text_sha256"] },
+              "then": {
+                "required": [
+                  "corrected_text_sha256"
+                ]
+              },
               "else": {
-                "not": { "required": ["corrected_text_sha256"] }
+                "not": {
+                  "required": [
+                    "corrected_text_sha256"
+                  ]
+                }
               }
             }
           ]
+        },
+        "auto_resolution": {
+          "type": "object",
+          "description": "Present only on an assume_reading_a page. Records that a POLICY, not a person, selected the reading -- the judgement is deferred, not made.",
+          "properties": {
+            "policy": {
+              "const": "assume_reading_a"
+            },
+            "chosen_reading": {
+              "const": "reading_a"
+            },
+            "resolved_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy",
+            "chosen_reading",
+            "resolved_at"
+          ]
         }
       },
-      "required": ["vision_model_reading", "agreement"],
+      "required": [
+        "vision_model_reading",
+        "agreement"
+      ],
       "allOf": [
         {
           "$comment": "A disagreed page must say what disagreed. Note the converse is deliberately NOT enforced: 'resolution' is legitimate on an agreed page too, for the case where a human catches something compare() passed (CASE_012/DOC_001 page 3) -- see the resolution description above.",
           "if": {
-            "properties": { "agreement": { "const": "disagreed" } },
-            "required": ["agreement"]
+            "properties": {
+              "agreement": {
+                "const": "disagreed"
+              }
+            },
+            "required": [
+              "agreement"
+            ]
           },
           "then": {
             "properties": {
-              "disagreement_details": { "type": "array", "minItems": 1 }
+              "disagreement_details": {
+                "type": "array",
+                "minItems": 1
+              }
             },
-            "required": ["disagreement_details"]
+            "required": [
+              "disagreement_details"
+            ]
           }
         }
       ]

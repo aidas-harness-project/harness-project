@@ -857,9 +857,16 @@ def run_case(case_id: str):
     if not staging.is_dir() or not any(staging.iterdir()):
         raise HTTPException(400, f"no uploaded documents staged for {case_id} -- call /api/upload first")
 
+    # Pinned here rather than left to the agent: both SLA markers must land
+    # under the SAME _trace/<run_id>/, and an agent inventing its own id at
+    # each step cannot guarantee that. This is also the id the UI reports and
+    # the one `aggregate-trace --run-id` will need afterwards.
+    run_id = _frontend_run_id()
+
     prompt = (
         f"Process case {case_id} through the loss-adjustment-pipeline.\n"
         f"Source documents are at: {staging}\n"
+        f"Use exactly this run id for every DAO call that takes one: {run_id}\n"
         "Steps:\n"
         "1. If no intake ledger exists, run tools/intake_case.py with --init-ledger. "
         "Never approve, reject, or otherwise decide a pending intake entry.\n"
@@ -867,9 +874,14 @@ def run_case(case_id: str):
         "UI/DAO surface. Call check-source-ledger-clear; if it is not clear, record the "
         "intake human-input wait and stop. If it is clear from a prior human review, "
         "run intake with --execute.\n"
-        "3. Proceed through Phase 1 of the pipeline (document processing through the "
-        "draft report v1), following harness-guardrails and harness-guardrails-dev throughout.\n"
-        "4. If you hit a hard guardrail halt (a conflict, an extraction mismatch, retries "
+        f"3. Run: python tools/dao.py check-source-ledger-clear {case_id} --run-id {run_id}\n"
+        "   This confirms intake review is finished and starts the SLA measurement clock. "
+        "Do not skip it, and pass --run-id exactly as given.\n"
+        "4. Proceed through Phase 1 of the pipeline (document processing through the "
+        "draft report v1), following harness-guardrails and harness-guardrails-dev throughout. "
+        "Finalizing draft_report_v1 closes the measured window; critic_v1 may still run "
+        "afterwards and is deliberately outside it.\n"
+        "5. If you hit a hard guardrail halt (a conflict, an extraction mismatch, retries "
         "exhausted, or anything else) stop cleanly and do not fabricate a resolution -- "
         "the halt state will already be visible in the run-state/ledgers for a human to "
         "review later. You are working autonomously; there is no human available to answer "
@@ -890,9 +902,15 @@ def run_case(case_id: str):
     _PROCS[case_id] = proc
 
     runs = _load_runs()
-    runs[case_id] = {"pid": proc.pid, "log_path": str(log_path), "started_at": time.time(), "status": "running"}
+    # run_id is recorded so the UI (and a later aggregate-trace call) can name
+    # the run's trace. started_at/ended_at stay UI-only: ended_at is written
+    # lazily when /run-status happens to be polled, so it is not a duration and
+    # is never used for SLA (plan B9). The SLA numbers come from the two
+    # markers via _timing_summary.json.
+    runs[case_id] = {"pid": proc.pid, "log_path": str(log_path), "started_at": time.time(),
+                     "status": "running", "run_id": run_id}
     _save_runs(runs)
-    return {"case_id": case_id, "pid": proc.pid, "status": "launched"}
+    return {"case_id": case_id, "pid": proc.pid, "status": "launched", "run_id": run_id}
 
 
 # Live Popen handles for runs launched by THIS backend process -- the only

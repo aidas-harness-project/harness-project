@@ -18,17 +18,27 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
+import functools
 import json
 import mimetypes
 import os
+import random
+import re
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+# Local tools/trace.py, not the stdlib `trace` -- tools/ precedes stdlib on
+# sys.path for every entry point in this repo. Aliased so the shadowing is
+# visible at each use site rather than only here.
+import trace as trace_mod
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -39,11 +49,101 @@ SUPPORTED_PROVIDERS = (
 DEFAULT_PROVIDER = "claude-cli"
 DEFAULT_ENV_PREFIX = "HARNESS_LLM"
 
-# claude-cli transient-failure retry: total attempts and fixed sleep between
-# them. Applies only to subprocess-level failures (non-zero exit / timeout),
-# never to content agreement -- see ClaudeCliProvider._run.
+# claude-cli transient-failure retry. Applies only to subprocess-level failures
+# (non-zero exit / timeout), never to content agreement -- see
+# ClaudeCliProvider._run.
+#
+# The wait is exponential with FULL JITTER: attempt n sleeps a uniform random
+# value in [0, min(cap, base * 2**(n-1))]. Both halves are load-bearing and
+# neither works alone.
+#
+#   * Exponential: a rate limit is a "wait and it clears" condition, so a
+#     failing call must back off rather than re-knock at a constant rate. The
+#     previous fixed 2.0s gave a total of 4s of waiting across the two gaps,
+#     which is shorter than a typical limit window -- all three attempts could
+#     burn inside one window and the page would die.
+#   * Jitter: page-level concurrency means N calls are in flight at once, so a
+#     shared limit fails them at nearly the same instant. With a fixed (or
+#     un-jittered exponential) wait, all N re-arrive TOGETHER -- a thundering
+#     herd against the exact limit that just rejected them. Randomizing spreads
+#     the retries out; measured on 8 simulated workers, arrival spread goes
+#     from 0.00s to ~1-3s.
+#
+# The herd cost grows with worker count, which is why DEFAULT_OCR_WORKERS could
+# not safely be raised before this existed (see
+# docs/run-notes/OCR_PARALLEL_20260810_001.md).
+# NOTE (2026-08-10, T4d): these three are no longer claude-only --
+# CodexCliProvider._run now uses the identical curve. The names are kept
+# because tests/test_llm_provider_backoff.py and tests/test_llm_providers.py
+# reference them, and renaming a shared constant to fix a naming nit is a
+# wider change than the retry work itself warrants. Read them as "the CLI
+# provider retry policy".
 _CLAUDE_CLI_MAX_ATTEMPTS = 3
-_CLAUDE_CLI_RETRY_SLEEP_SECONDS = 2.0
+_CLAUDE_CLI_RETRY_BASE_SECONDS = 2.0
+_CLAUDE_CLI_RETRY_CAP_SECONDS = 30.0
+
+# A server that says WHEN to come back is more authoritative than any local
+# backoff curve, so a parsed Retry-After wins -- but it is still clamped to the
+# cap, since the value arrives from outside and an absurd one must not hang a
+# 12-page document behind a single call.
+_RETRY_AFTER_PATTERN = re.compile(
+    r"retry[-\s_]?after[\"'\s:=]+(\d+(?:\.\d+)?)", re.IGNORECASE
+)
+# Rate-limit / overload signatures. Matched against the CLI's own diagnostic
+# text because a subprocess gives us no status code -- the child prints the
+# server's complaint and exits non-zero.
+_RATE_LIMIT_PATTERN = re.compile(
+    r"\b429\b|rate[-\s_]?limit|too many requests|overloaded|"
+    r"\b529\b|quota exceeded|capacity",
+    re.IGNORECASE,
+)
+
+
+def _parse_retry_after(text: str) -> float | None:
+    """Seconds the server asked us to wait, if it said so at all.
+
+    Only the delta-seconds form is read. HTTP also allows an absolute date, but
+    the CLI surfaces server errors as free text rather than headers, so a date
+    would be both rare and ambiguous to parse out of prose -- returning None
+    falls back to the ordinary backoff, which is the safe direction.
+    """
+    if not text:
+        return None
+    match = _RETRY_AFTER_PATTERN.search(text)
+    if match is None:
+        return None
+    try:
+        value = float(match.group(1))
+    except ValueError:  # pragma: no cover -- regex guarantees a number
+        return None
+    if value < 0:
+        return None
+    return min(value, _CLAUDE_CLI_RETRY_CAP_SECONDS)
+
+
+def _is_rate_limited(text: str) -> bool:
+    """Whether a failure diagnostic looks like a rate limit / overload."""
+    return bool(text) and _RATE_LIMIT_PATTERN.search(text) is not None
+
+
+def _retry_delay(attempt: int, detail: str = "") -> float:
+    """Seconds to wait before retrying, after `attempt` failed attempts (1-based).
+
+    Full jitter over an exponentially growing ceiling; a server-supplied
+    Retry-After replaces the ceiling when present. The floor is deliberately 0
+    rather than some minimum -- spreading arrivals is the point, and a call that
+    happens to retry immediately is exactly one call, not a herd.
+    """
+    ceiling = min(
+        _CLAUDE_CLI_RETRY_CAP_SECONDS,
+        _CLAUDE_CLI_RETRY_BASE_SECONDS * (2 ** max(0, attempt - 1)),
+    )
+    asked = _parse_retry_after(detail)
+    if asked is not None:
+        # Honour the server's number as a floor on the wait -- jitter still
+        # applies ON TOP so N held-back callers do not resume in lockstep.
+        return asked + random.uniform(0, min(_CLAUDE_CLI_RETRY_BASE_SECONDS, ceiling))
+    return random.uniform(0, ceiling)
 
 # `compare_text` default. 60s was tuned for the short OCR agreement verdict
 # (ocr_extract.compare); the policy-polarity path reuses this same method for a
@@ -71,7 +171,200 @@ def compare_text_timeout(env: Mapping[str, str] | None = None) -> int:
     except ValueError:
         return _COMPARE_TEXT_DEFAULT_TIMEOUT_SECONDS
     return value if value > 0 else _COMPARE_TEXT_DEFAULT_TIMEOUT_SECONDS
+
+
+# analyze_text_structured is NOT compare_text, and sharing compare's 60s budget
+# was a real defect: V4a's claim-analysis checkpoint-1 driver timed out on 3 of
+# 17 documents because extracting facts from a full document is a longer job
+# than deciding whether two OCR transcriptions agree. 180s matches the budget
+# the image-analysis paths already use for comparable per-document work.
+# Deliberately a SEPARATE resolver and env var: raising the OCR comparison
+# timeout to fix fact extraction would slow every P8 disagreement path too.
+_STRUCTURED_TEXT_DEFAULT_TIMEOUT_SECONDS = 180
+_STRUCTURED_TEXT_TIMEOUT_ENV = "HARNESS_STRUCTURED_TEXT_TIMEOUT"
+# An upper bound on the accepted override. Without it a fat-fingered value
+# (a millisecond figure pasted into a seconds field) becomes a child that
+# effectively never times out, which is indistinguishable from a hang.
+_STRUCTURED_TEXT_MAX_TIMEOUT_SECONDS = 3600
+
+
+def structured_text_timeout(env: Mapping[str, str] | None = None) -> int:
+    """Resolve analyze_text_structured's subprocess timeout.
+
+    Same fail-safe contract as compare_text_timeout -- malformed, zero, and
+    negative values fall back to the default rather than raising, so a bad
+    config value cannot turn every structured analysis into a hard failure.
+    Values above _STRUCTURED_TEXT_MAX_TIMEOUT_SECONDS also fall back, since an
+    implausibly large timeout hides a hang instead of surfacing it.
+    """
+    source = os.environ if env is None else env
+    raw = str(source.get(_STRUCTURED_TEXT_TIMEOUT_ENV, "")).strip()
+    if not raw:
+        return _STRUCTURED_TEXT_DEFAULT_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _STRUCTURED_TEXT_DEFAULT_TIMEOUT_SECONDS
+    if value <= 0 or value > _STRUCTURED_TEXT_MAX_TIMEOUT_SECONDS:
+        return _STRUCTURED_TEXT_DEFAULT_TIMEOUT_SECONDS
+    return value
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+# ---------------------------------------------------------------- T6: in-flight cap --
+#
+# A process-wide ceiling on concurrent provider calls. It exists because the
+# pools nest: page workers already run 4-8 wide, and document-level workers
+# (T8) multiply that -- 2 documents x 8 pages is 16 concurrent CLI children,
+# each a full node process, against a shared rate limit.
+#
+# PROCESS-wide is sufficient, and only became sufficient once T4a removed
+# redaction's per-page dao subprocess: a cross-PROCESS ceiling would need a
+# file lock, which is exactly the 30s-poll cost this layer exists to avoid.
+#
+# Acquired around the LEAF call only -- the single subprocess.run/urlopen --
+# never around a whole P8 chain. reader_a -> reader_b -> compare runs inside
+# one page worker: if that worker held a permit for the whole chain while its
+# own leaf calls waited for permits, it would deadlock against itself. The
+# permit is also released across a retry backoff sleep, so a retrying call
+# does not hold capacity it is not using.
+#
+# Raised 6 -> 16 on 2026-08-11, on measurement rather than on headroom. 6 was
+# a guess made before anything nested; measured on CASE_953 (5 documents, 6
+# pages each, 8 page workers, 2 document workers) it was the binding
+# constraint and it was eating the gain it was meant to protect:
+#
+#   cap  wall     per-document time SUM   observed peak
+#    6   125.9s   214.4s  (+59.8s)        6/6   <- pinned
+#   16    98.1s   156.4s  (+1.8s)         12/16 <- slack
+#
+# With the cap at 6, running documents concurrently made each document
+# individually slower (DOC_003: 53.5s -> 87.9s) because 16 requests were
+# squeezed through 6 slots -- the parallel win was handed straight back as
+# queueing. At 16 that overhead is essentially gone (60s -> 1.8s).
+#
+# UNCAPPED between 2026-08-11 and 2026-08-12, then RE-ARMED at 12 on
+# measurement. The uncapping was reasoned from the full CASE_953 run: 99
+# provider calls, ZERO `provider.queue` spans, zero rate-limit errors, so "a
+# limiter that never engages is not protecting anything". Both observations
+# were true and still are -- CASE_911 reproduced them exactly (97 calls, 0
+# queue spans, 0 errors).
+#
+# What that reasoning missed is that it only ever watched for ONE failure
+# mode. It concluded the backend was not rate-limiting -- correct -- and from
+# there that no ceiling was needed, which does not follow. Concurrency on a
+# CLI provider is also bounded LOCALLY: every call is a full node child
+# process, and past a point the machine spends more on spawning them than the
+# added parallelism returns. That shows up as slowness, never as an error, so
+# the "zero rate-limit failures" evidence is blind to it by construction.
+#
+# Measured 2026-08-12 on TWO workloads, which do not have the same optimum.
+#
+# (a) 24 trivial `claude -p` calls (no image, no reasoning) -- the spawn
+# curve, model work held near zero:
+#
+#   workers   wall     throughput   mean latency
+#      4      28.7s     0.84/s         4.5s
+#      8      23.0s     1.04/s         6.9s
+#     12      19.9s     1.21/s         9.5s   <- knee
+#     16      23.6s     1.02/s        11.6s
+#     24      32.1s     0.75/s        16.9s   <- slower than 4 workers
+#
+# Throughput peaks at 12 and DEGRADES above it, with zero rate-limit errors
+# at every width -- precisely why the earlier "no errors, so no cap needed"
+# evidence could not see this. A single trivial call costs 4.34s of pure
+# process overhead, so the short-call ops (redact_text, classify_document,
+# segment.judge -- all ~4.1-6.4s each, minima at ~4.1s) are mostly spawn
+# cost rather than inference, and 12 is right for them.
+#
+# (b) 34 REAL scanned OCR pages -- the long-call workload:
+#
+#   workers   wall     per page   mean latency
+#     12      75.2s     2.21s       23.5s
+#     24      54.6s     1.61s       23.4s   <- knee
+#     34      53.0s     1.56s       28.6s
+#
+# 27% faster at 24 than at 12 with per-call latency FLAT, so contention has
+# not started; at 34 latency jumps +5.2s for a 1.6s wall gain, which is
+# saturation. A real OCR call waits ~23s on the model with the local CPU
+# idle, so spawn cost is a small share of it -- the same machine tolerates
+# roughly twice the width when calls are long.
+#
+# This cap is set to 24, the HIGHER of the two, on purpose. It is a ceiling,
+# not a target: each op still runs at its own measured width (OCR 24,
+# redaction 12), and this exists to stop the pools from MULTIPLYING -- page
+# workers x document workers is the demand (24 x 3 = 72 for OCR), which
+# would otherwise put a multi-document case deep into saturation. Setting it
+# to 12 would silently clamp OCR back to the width just measured 27% slower.
+# HARNESS_LLM_MAX_INFLIGHT overrides it; 0 restores uncapped behaviour.
+DEFAULT_LLM_MAX_INFLIGHT = 24  # measured OCR knee; see both curves above
+LLM_MAX_INFLIGHT_ENV = "HARNESS_LLM_MAX_INFLIGHT"
+
+_inflight_semaphore: threading.BoundedSemaphore | None = None
+_inflight_limit: int | None = None
+_inflight_lock = threading.Lock()
+
+
+def _resolve_max_inflight(env: Mapping[str, str] | None = None) -> int:
+    """Explicit env wins, then the default. 0 (or a negative/unparseable
+    value) disables the cap entirely -- the documented rollback."""
+    source = os.environ if env is None else env
+    raw = str(source.get(LLM_MAX_INFLIGHT_ENV, "")).strip()
+    if not raw:
+        return DEFAULT_LLM_MAX_INFLIGHT
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_LLM_MAX_INFLIGHT
+    return value if value > 0 else 0
+
+
+def _get_inflight_semaphore():
+    """The process-wide semaphore, built once. Returns None when disabled.
+
+    Rebuilt if the resolved limit changes, so a test (or a caller that sets
+    the env after import) is not stuck with the first value ever seen.
+    """
+    global _inflight_semaphore, _inflight_limit
+    limit = _resolve_max_inflight()
+    if limit <= 0:
+        return None
+    with _inflight_lock:
+        if _inflight_semaphore is None or _inflight_limit != limit:
+            _inflight_semaphore = threading.BoundedSemaphore(limit)
+            _inflight_limit = limit
+        return _inflight_semaphore
+
+
+def reset_inflight_semaphore() -> None:
+    """Drop the cached semaphore so the next call re-reads the env."""
+    global _inflight_semaphore, _inflight_limit
+    with _inflight_lock:
+        _inflight_semaphore = None
+        _inflight_limit = None
+
+
+@contextlib.contextmanager
+def provider_slot(op: str = "provider.call"):
+    """Hold one in-flight permit for the duration of a single leaf call.
+
+    The wait is traced as `provider.queue`, which is the only way queue time
+    becomes visible at all -- without the semaphore there is no queue and the
+    measurement does not exist.
+    """
+    sem = _get_inflight_semaphore()
+    if sem is None:
+        yield
+        return
+    acquired = sem.acquire(blocking=False)
+    if not acquired:
+        # Only pay for a span when the call actually waits; the uncontended
+        # path stays free.
+        with trace_mod.span("provider.queue", category="wait", op_name=op):
+            sem.acquire()
+    try:
+        yield
+    finally:
+        sem.release()
 
 # A child subprocess that reads untrusted claim-document images has no reason
 # to hold other providers' credentials. Any env var whose name ends in one of
@@ -97,6 +390,56 @@ def _require_scan_images(image_paths) -> None:
             "scan_intake_content requires page images -- the D2 content check is a "
             "vision scan and cannot run blind (got no image_paths)"
         )
+
+
+# Keywords claude-cli's --json-schema validator (ajv, strict mode) refuses.
+# Verified against CLI 2.1.231: each one aborts argv construction with
+# `--json-schema is not a valid JSON Schema`, before any provider call.
+#   $schema          -- `no schema with key or ref ".../draft/2020-12/schema"`
+#   dependentRequired -- `strict mode: unknown keyword`
+# These are valid 2020-12 and MUST stay in the on-disk schema files, which are
+# what validate_instance() enforces. This set is only about what that one CLI
+# flag will parse.
+_CLI_SCHEMA_UNSUPPORTED_KEYWORDS = frozenset({"$schema", "dependentRequired"})
+
+# Claude CLI accepts its JSON Schema only as an inline argv value. Keep a
+# deliberately conservative cap well below Windows CreateProcess's 32,767
+# character command-line limit: the command path, flags, quoting, and future
+# flags also consume that budget. Drivers with richer public contracts must
+# send a compact transport schema and retain their full local validation gate.
+CLAUDE_CLI_SCHEMA_MAX_CHARS = 8_000
+
+
+def _cli_json_schema(output_schema: Mapping[str, Any]) -> dict[str, Any]:
+    """The schema as claude-cli's --json-schema validator will accept it.
+
+    Strips, recursively, the keywords in _CLI_SCHEMA_UNSUPPORTED_KEYWORDS. Two
+    different losses, worth keeping distinct:
+
+    `$schema` is a meta-schema declaration -- removing it changes nothing about
+    what instances are valid.
+
+    `dependentRequired` is a REAL constraint, and dropping it genuinely weakens
+    the provider-side pre-check: the CLI will no longer reject a response that
+    violates it. That is deliberate and bounded -- the authoritative gate is our
+    own validate_instance() against the UNMODIFIED on-disk schema, which every
+    candidate still passes through before any contract write. So a violating
+    response is still caught, just by us rather than by the CLI (later, not
+    never). Nothing reaches a governed file on the strength of this relaxation.
+
+    Prefer expressing a constraint in an ajv-strict-compatible form over adding
+    to the strip set: anything added here stops being enforced at the provider
+    boundary for every caller.
+    """
+    def prune(node: Any) -> Any:
+        if isinstance(node, Mapping):
+            return {k: prune(v) for k, v in node.items()
+                    if k not in _CLI_SCHEMA_UNSUPPORTED_KEYWORDS}
+        if isinstance(node, list):
+            return [prune(v) for v in node]
+        return node
+
+    return prune(dict(output_schema))
 
 
 def _child_safe_env(*, keep_prefixes: Sequence[str]) -> dict[str, str]:
@@ -169,9 +512,81 @@ class ProviderResult:
         }
 
 
+# The provider call surface, instrumented uniformly. Wrapping happens in
+# BaseProvider.__init_subclass__ rather than by decorating each method,
+# because every provider OVERRIDES these -- a decorator on the base class
+# would be shadowed by the subclass and silently measure nothing. Hooking
+# subclass creation catches every provider, present and future, including
+# ones added later by someone who has never read this file.
+_TRACED_PROVIDER_METHODS = (
+    "transcribe_image",
+    "analyze_image_structured",
+    "compare_text",
+    "classify_document",
+    "scan_intake_content",
+    "redact_text",
+)
+
+
+def _traced_provider_call(method_name, fn):
+    """Wrap one provider method in a `provider.<method>` span.
+
+    Records only sizes and identifiers -- never the prompt, never the returned
+    page text. `input_chars`/`output_chars` stand in for tokens deliberately
+    (tokens are out of scope for this instrumentation); they are already in
+    hand, cost nothing to record, and carry no content.
+    """
+    op = f"provider.{method_name}"
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        if not trace_mod.enabled():
+            return fn(self, *args, **kwargs)
+        prompt = next((a for a in args if isinstance(a, str)), None)
+        if prompt is None:
+            prompt = kwargs.get("prompt")
+        images = kwargs.get("image_paths")
+        if images is None and method_name == "scan_intake_content":
+            images = next((a for a in args if isinstance(a, (list, tuple))), None)
+        image_count = len(images) if images else (
+            1 if method_name in ("transcribe_image", "analyze_image_structured") else 0)
+        with trace_mod.span(
+            op, category="provider",
+            provider_name=getattr(self, "provider_name", None),
+            model_name=getattr(self, "model_name", None),
+            input_chars=len(prompt) if isinstance(prompt, str) else None,
+            input_images=image_count or None,
+            structured=bool(kwargs.get("output_schema")) or None,
+        ) as sp:
+            result = fn(self, *args, **kwargs)
+            text = getattr(result, "text", None)
+            if isinstance(text, str):
+                sp.set(output_chars=len(text))
+            version = getattr(result, "prompt_version", None)
+            if isinstance(version, str):
+                sp.set(prompt_version=version)
+            return result
+
+    return wrapper
+
+
 class BaseProvider:
     provider_name: str
     model_name: str
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        for name in _TRACED_PROVIDER_METHODS:
+            fn = cls.__dict__.get(name)
+            # Only wrap a method this class actually defines, and only once --
+            # an intermediate subclass (_ApiProviderStub) would otherwise have
+            # its already-wrapped method re-wrapped by its own children, double
+            # counting the same call as two nested spans.
+            if fn is None or getattr(fn, "_harness_traced", False):
+                continue
+            wrapped = _traced_provider_call(name, fn)
+            wrapped._harness_traced = True
+            setattr(cls, name, wrapped)
 
     def _result(
         self,
@@ -217,6 +632,22 @@ class BaseProvider:
     ) -> ProviderResult:
         raise NotImplementedError
 
+    def analyze_text_structured(
+        self,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        """Return one native schema-constrained text-analysis result.
+
+        This is distinct from ``compare_text``: drivers use it for candidate
+        extraction, while comparison keeps its domain-specific prompts and
+        timeout history. Implementations return the parsed mapping in
+        ``structured_output`` and a stable JSON representation in ``text``.
+        Domain correction remains the driver's one P4 correction attempt.
+        """
+        raise NotImplementedError
+
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         raise NotImplementedError
 
@@ -257,16 +688,33 @@ class ClaudeCliProvider(BaseProvider):
         # fabricated text in the trusted processed layer. This applies to every
         # claude-cli call through this provider (transcribe/compare/classify/scan),
         # not just OCR -- the same context-inheritance risk exists for all of them.
-        cmd = [self.command, "-p", prompt, "--safe-mode"]
+        # The prompt goes over STDIN, never argv. Windows CreateProcess caps a
+        # command line at 32,767 chars, and V4a's consolidation call built a
+        # 94,063-char argv (61,911 prompt + 32,152 schema) -- CreateProcess
+        # failed with ERROR_FILE_NOT_FOUND, which Python raises as
+        # FileNotFoundError, which this provider reported as "claude-cli
+        # command not found" for a binary that plainly existed. Bare `-p` with
+        # the prompt on stdin is the CLI's own documented form, so this costs
+        # nothing and removes the prompt from the size budget entirely.
+        cmd = [self.command, "-p", "--safe-mode"]
         if output_schema is not None:
             # --output-format json alone only wraps arbitrary assistant prose in
             # a JSON envelope. --json-schema is the part that requires a
             # validated value in the envelope's structured_output field.
+            cli_schema = json.dumps(
+                _cli_json_schema(output_schema), ensure_ascii=False, separators=(",", ":"),
+            )
+            if len(cli_schema) > CLAUDE_CLI_SCHEMA_MAX_CHARS:
+                raise ProviderExecutionError(
+                    "claude-cli structured-output schema is too large for inline argv "
+                    f"({len(cli_schema)} chars; limit {CLAUDE_CLI_SCHEMA_MAX_CHARS}). "
+                    "Use a compact transport schema and keep the full schema for local validation."
+                )
             cmd.extend([
                 "--output-format",
                 "json",
                 "--json-schema",
-                json.dumps(output_schema, ensure_ascii=False, separators=(",", ":")),
+                cli_schema,
             ])
         # Pass the configured model through. Without this the model recorded in
         # provenance metadata is a lie (the CLI silently uses its own default),
@@ -300,40 +748,50 @@ class ClaudeCliProvider(BaseProvider):
         # touch P8 -- content agreement/disagreement is judged by compare(),
         # not here, so no disagreement tolerance is affected.
         last_exc: ProviderExecutionError | None = None
+        # Diagnostic text from the most recent failure, fed to _retry_delay so a
+        # server-supplied Retry-After can override the local backoff curve.
+        last_detail = ""
         # Structured-output correction belongs to the caller (P4: exactly one
         # correction after validation failure). Do not hide extra whole-model
         # retries here. Ordinary subprocess calls retain their transient retry.
         max_attempts = 1 if output_schema is not None else _CLAUDE_CLI_MAX_ATTEMPTS
         for attempt in range(max_attempts):
             try:
-                # stdin=DEVNULL: without it the child inherits the parent's
-                # stdin and blocks ~3s waiting for input it will never get
-                # ("Warning: no stdin data received in 3s..."), which both
-                # slows every call and, on a live pipe (PowerShell background),
-                # intermittently returns non-zero. Closing stdin is exactly
-                # what the CLI's own warning recommends ("< /dev/null").
+                # input=prompt: the prompt is DELIVERED here, not in argv (see
+                # the cmd construction above for the CreateProcess limit that
+                # forces this). This also supersedes the former stdin=DEVNULL:
+                # that existed to stop the child blocking ~3s on stdin it would
+                # never get, and a child that receives its prompt on stdin --
+                # then sees EOF as subprocess closes the pipe -- never waits at
+                # all. The two are mutually exclusive; passing both raises.
                 #
                 # encoding/errors are set explicitly: the child CLI emits
                 # UTF-8, but on a cp949-locale host bare text=True decodes with
                 # the ANSI code page and crashes on Korean output
                 # (UnicodeDecodeError -> stdout None). Same treatment
                 # CodexCliProvider already applies.
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=timeout,
-                    cwd=cwd,
-                    stdin=subprocess.DEVNULL,
-                    env=run_env,
-                )
+                # The permit is held around this call ONLY -- not around the
+                # retry backoff below, and never around a whole P8 chain.
+                with provider_slot("claude-cli"):
+                    result = subprocess.run(
+                        cmd,
+                        input=prompt,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=timeout,
+                        cwd=cwd,
+                        env=run_env,
+                    )
             except FileNotFoundError as exc:
                 raise ProviderExecutionError(f"claude-cli command not found: {self.command}") from exc
             except subprocess.TimeoutExpired as exc:
                 last_exc = ProviderExecutionError(f"claude-cli call timed out after {timeout}s")
                 last_exc.__cause__ = exc
+                # A timeout carries no server diagnostic, so there is no
+                # Retry-After to honour -- plain exponential backoff applies.
+                last_detail = ""
             else:
                 out = result.stdout.strip()
                 # Fail closed on empty output even at exit 0. A blank string is
@@ -382,9 +840,12 @@ class ClaudeCliProvider(BaseProvider):
                 # last-resort exit-code note so the message is never empty.
                 detail = result.stderr.strip() or out or f"exit {result.returncode}, no output"
                 last_exc = ProviderExecutionError(f"claude-cli call failed: {detail}")
+                last_detail = detail
 
             if attempt < max_attempts - 1:
-                time.sleep(_CLAUDE_CLI_RETRY_SLEEP_SECONDS)
+                # attempt is 0-based; _retry_delay takes the 1-based count of
+                # attempts already burned.
+                time.sleep(_retry_delay(attempt + 1, last_detail))
 
         assert last_exc is not None
         raise last_exc
@@ -437,6 +898,20 @@ class ClaudeCliProvider(BaseProvider):
                          timeout=compare_text_timeout(),
                          output_schema=output_schema)
 
+    def analyze_text_structured(
+        self,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        return self._run(
+            prompt,
+            prompt_version=prompt_version,
+            allowed_read=False,
+            timeout=structured_text_timeout(),
+            output_schema=output_schema,
+        )
+
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, allowed_read=False, timeout=120)
 
@@ -485,10 +960,12 @@ class CodexCliProvider(BaseProvider):
         prompt_version: str,
         timeout: int,
         image_paths: Sequence[Path] | None = None,
+        output_schema: Mapping[str, Any] | None = None,
     ) -> ProviderResult:
         scratch_dir = self.root / "_ocr_scratch"
         scratch_dir.mkdir(parents=True, exist_ok=True)
         output_path: Path | None = None
+        schema_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
                 prefix="codex-last-message-",
@@ -498,11 +975,30 @@ class CodexCliProvider(BaseProvider):
             ) as output_file:
                 output_path = Path(output_file.name)
 
+            if output_schema is not None:
+                # Codex takes a schema FILE, unlike Claude's inline
+                # --json-schema value. Closing this file before child launch
+                # is required on Windows. The tool-owned scratch directory is
+                # outside governed case data and neither path is persisted.
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    prefix="codex-output-schema-",
+                    suffix=".json",
+                    dir=scratch_dir,
+                    delete=False,
+                ) as schema_file:
+                    json.dump(output_schema, schema_file, ensure_ascii=False,
+                              separators=(",", ":"))
+                    schema_path = Path(schema_file.name)
+
             cmd = [self.command, "exec", prompt, "--skip-git-repo-check", "--sandbox", "read-only"]
             if self.model_name != "codex-cli":
                 cmd.extend(["--model", self.model_name])
             for image_path in image_paths or ():
                 cmd.extend(["--image", str(image_path)])
+            if schema_path is not None:
+                cmd.extend(["--output-schema", str(schema_path)])
             cmd.extend(["--output-last-message", str(output_path)])
 
             # Start from a secret-scrubbed environment, then re-add only Codex's
@@ -511,37 +1007,107 @@ class CodexCliProvider(BaseProvider):
             run_env = _child_safe_env(keep_prefixes=("CODEX",))
             if self.env.get("CODEX_API_KEY"):
                 run_env["CODEX_API_KEY"] = self.env["CODEX_API_KEY"]
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=timeout,
-                    cwd=str(self.root),
-                    env=run_env,
-                )
-            except FileNotFoundError as exc:
-                raise ProviderExecutionError(f"codex-cli command not found: {self.command}") from exc
 
-            raw_metadata = {
-                "command": cmd[0],
-                "returncode": result.returncode,
-                "stderr": result.stderr.strip(),
-            }
-            if result.returncode != 0:
-                detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}, no output"
-                raise ProviderExecutionError(f"codex-cli call failed: {detail}")
-            text = output_path.read_text(encoding="utf-8").strip()
-            # Fail closed on empty output (same reason as the claude path): a
-            # blank result is never valid content, so never write it downstream.
-            if not text:
-                raise ProviderExecutionError("codex-cli returned empty output")
-            return self._result(text, prompt_version, raw_metadata)
+            # Bounded retry on transient subprocess-level failures, mirroring
+            # ClaudeCliProvider._run. This provider had NO retry path at all,
+            # which mattered because it is checkpoint 2's dev-phase default:
+            # the redaction loop was the least resilient path in the pipeline
+            # (see the plan's B1) and page-level parallelism (T4c) makes a
+            # transient failure more likely, not less, since N calls now hit
+            # the backend at once.
+            #
+            # Scope is deliberately identical to the claude path: only the
+            # subprocess CALL is retried. FileNotFoundError is not transient
+            # (a missing binary stays missing) and is raised immediately.
+            # Nothing here touches content judgment -- P8 agreement is decided
+            # by compare(), and a redaction leak is decided by
+            # redaction.py's own checks, so no tolerance is introduced.
+            last_exc: ProviderExecutionError | None = None
+            last_detail = ""
+            # A native schema call is either transport-valid or the driver's
+            # one correction case. Retrying a malformed semantic response here
+            # would silently exceed P4's correction boundary.
+            max_attempts = 1 if output_schema is not None else _CLAUDE_CLI_MAX_ATTEMPTS
+            for attempt in range(max_attempts):
+                try:
+                    with provider_slot("codex-cli"):
+                        result = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=timeout,
+                            cwd=str(self.root),
+                            env=run_env,
+                        )
+                except FileNotFoundError as exc:
+                    raise ProviderExecutionError(f"codex-cli command not found: {self.command}") from exc
+                except subprocess.TimeoutExpired as exc:
+                    # Previously unhandled here: a timeout escaped as a raw
+                    # subprocess exception rather than a ProviderExecutionError,
+                    # so callers that catch the provider error type saw an
+                    # unexpected exception class instead of a normal failure.
+                    last_exc = ProviderExecutionError(
+                        f"codex-cli call timed out after {timeout}s")
+                    last_exc.__cause__ = exc
+                    last_detail = ""  # a timeout carries no server Retry-After
+                else:
+                    raw_metadata = {
+                        "command": cmd[0],
+                        "returncode": result.returncode,
+                        "stderr": result.stderr.strip(),
+                        "attempts": attempt + 1,
+                    }
+                    if result.returncode == 0:
+                        text = output_path.read_text(encoding="utf-8").strip()
+                        # Fail closed on empty output (same reason as the claude
+                        # path): a blank result is never valid content, so never
+                        # write it downstream. Retried rather than raised
+                        # immediately, since an empty last-message file is the
+                        # shape a truncated/aborted run takes.
+                        if text:
+                            if output_schema is None:
+                                return self._result(text, prompt_version, raw_metadata)
+                            try:
+                                structured = json.loads(text)
+                            except json.JSONDecodeError as exc:
+                                raise ProviderExecutionError(
+                                    "codex-cli structured-output mode returned non-JSON output"
+                                ) from exc
+                            if not isinstance(structured, dict):
+                                raise ProviderExecutionError(
+                                    "codex-cli structured-output mode returned a non-object value"
+                                )
+                            raw_metadata["structured_output_native"] = True
+                            return self._result(
+                                json.dumps(structured, ensure_ascii=False),
+                                prompt_version,
+                                raw_metadata,
+                                structured_output=structured,
+                            )
+                        last_exc = ProviderExecutionError("codex-cli returned empty output")
+                        last_detail = ""
+                    else:
+                        detail = (result.stderr.strip() or result.stdout.strip()
+                                  or f"exit {result.returncode}, no output")
+                        last_exc = ProviderExecutionError(f"codex-cli call failed: {detail}")
+                        last_detail = detail
+
+                if attempt < max_attempts - 1:
+                    # Same full-jitter exponential curve as claude-cli, and for
+                    # the same reason: page-level concurrency means several
+                    # calls fail against a shared limit at nearly the same
+                    # instant, so an un-jittered wait re-arrives as a herd.
+                    time.sleep(_retry_delay(attempt + 1, last_detail))
+
+            raise last_exc if last_exc is not None else ProviderExecutionError(
+                "codex-cli call failed with no diagnostic")
         finally:
             if output_path is not None:
                 output_path.unlink(missing_ok=True)
+            if schema_path is not None:
+                schema_path.unlink(missing_ok=True)
 
     def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(
@@ -555,14 +1121,21 @@ class CodexCliProvider(BaseProvider):
         self, prompt: str, prompt_version: str,
         output_schema: Mapping[str, Any] | None = None,
     ) -> ProviderResult:
-        # codex-cli has no native structured-output flag (unlike claude-cli's
-        # --json-schema) -- output_schema is accepted for interface parity
-        # with the other providers but cannot be enforced here. A caller
-        # relying on strict-JSON parsing over this provider still needs its
-        # own parse-with-one-correction handling; this is not silently
-        # equivalent to a provider that actually enforces the schema.
         return self._run(prompt, prompt_version=prompt_version,
-                         timeout=compare_text_timeout())
+                         timeout=compare_text_timeout(), output_schema=output_schema)
+
+    def analyze_text_structured(
+        self,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        return self._run(
+            prompt,
+            prompt_version=prompt_version,
+            timeout=compare_text_timeout(),
+            output_schema=output_schema,
+        )
 
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._run(prompt, prompt_version=prompt_version, timeout=120)
@@ -669,7 +1242,8 @@ class OpenAIApiProvider(_ApiProviderStub):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with provider_slot("openai-api"), \
+                    urllib.request.urlopen(request, timeout=timeout) as response:
                 response_body = response.read().decode("utf-8")
                 status_code = getattr(response, "status", None)
         except urllib.error.HTTPError as exc:
@@ -789,6 +1363,32 @@ class FixtureProvider(BaseProvider):
         output_schema: Mapping[str, Any] | None = None,
     ) -> ProviderResult:
         return self._response("compare_text", prompt_version)
+
+    def analyze_text_structured(
+        self,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        """Return fixture JSON through the same structured-result seam.
+
+        Fixture is used by driver tests and must exercise the native-output
+        consumer path rather than silently falling back to BaseProvider's
+        NotImplementedError.  The fixture deliberately does not validate the
+        schema: production providers enforce that boundary, while tests can
+        supply malformed JSON to cover driver refusal behaviour.
+        """
+        result = self._response("analyze_text_structured", prompt_version)
+        try:
+            parsed = json.loads(result.text)
+        except json.JSONDecodeError as exc:
+            raise ProviderExecutionError("fixture structured response is not JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ProviderExecutionError("fixture structured response must be a JSON object")
+        return self._result(
+            json.dumps(parsed, ensure_ascii=False), prompt_version,
+            result.raw_metadata, structured_output=parsed,
+        )
 
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
         return self._response("classify_document", prompt_version)

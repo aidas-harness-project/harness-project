@@ -33,6 +33,10 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# tools/trace.py, not the stdlib `trace` module.
+import trace as trace_mod  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 
@@ -78,6 +82,7 @@ def split_pages(redacted_text: str) -> list[tuple[int, str]]:
     return pages
 
 
+@trace_mod.traced("chunk.document", category="io")
 def chunk_document(case_id: str, doc_id: str, chunk_id_start: int) -> tuple[list[dict], int]:
     redacted_path = DATA / "processed" / case_id / doc_id / "redacted_text.md"
     if not redacted_path.exists():
@@ -96,6 +101,7 @@ def chunk_document(case_id: str, doc_id: str, chunk_id_start: int) -> tuple[list
     return chunks, n
 
 
+@trace_mod.traced("chunk.assemble", category="io")
 def assemble_chunks(case_id: str, doc_ids: list[str], excluded_non_text: list[str]) -> dict:
     """Build checkpoint 3 without fabricating text for visual evidence."""
     overlap = sorted(set(doc_ids) & set(excluded_non_text))
@@ -128,7 +134,18 @@ def main():
         "--exclude-non-text", action="append", default=[], metavar="DOC_ID",
         help="Human-verified non-text document omitted from chunks and routed to expert review only",
     )
+    # Optional, unlike every other pipeline tool's --run-id, because chunking
+    # is deterministic and takes no held_by lock -- requiring it would break
+    # existing callers for a measurement. Without it the spans below are
+    # discarded (configure_from_args returns False rather than inventing an
+    # id, since shards under a made-up run_id are unreachable by
+    # aggregate-trace). Chunking was a 50s hole in the CASE_911 trace for
+    # exactly this reason: no trace import at all, so it recorded nothing and
+    # still exited 0.
+    ap.add_argument("--run-id", default=None,
+                    help="Run id for trace attribution; omitted means untraced")
     args = ap.parse_args()
+    trace_mod.configure_from_args(args)
     print(json.dumps(assemble_chunks(args.case_id, args.doc_ids, args.exclude_non_text), ensure_ascii=False))
 
 

@@ -147,16 +147,181 @@ def _normalize_widths(text: str) -> str:
     return text.translate(_WIDTH_FOLD)
 
 
-def scan_residual_pii(redacted_text: str) -> list[dict[str, str]]:
+# Contact details a published policy booklet carries BY LAW or by publisher
+# boilerplate. These identify an institution, never a natural person, and they
+# are part of the clause text the pipeline quotes -- redacting them corrupts
+# the very evidence a clause citation rests on.
+#
+# Measured on CASE_902: a 249-page 삼성화재 policy blocked on three credit-bureau
+# switchboards printed in the statutory 신용정보법 제39조 notice
+# (NICE신용정보 02-2122-4000, 서울신용평가정보 02-3445-5000, 코리아크레딧뷰로
+# 02-708-6000), and a 3-page policy blocked on the publisher's own
+# mailmaster@samsungfire.com footer. Neither is a claimant's contact detail.
+#
+# SCOPE, deliberately narrow: this applies ONLY when the caller has already
+# established the document is a PII-free class (a published booklet issued
+# identically to every policyholder). It never runs on claim documents, and it
+# never widens what the LLM path accepts. Everything else the scanner looks
+# for -- RRNs, account numbers, vehicle plates, personal mobile numbers,
+# arbitrary long digit runs -- still blocks a policy document, so a booklet
+# that really did carry a claimant's RRN still fails closed.
+_INSTITUTIONAL_CONTACT_KINDS = {"phone_number_separated", "phone_number_contiguous", "email"}
+
+# Insurer-assigned document/contract identifiers. These name a POLICY, not a
+# person: they carry no birth date, no contact route, and no way to reach or
+# identify the holder without the insurer's own systems -- unlike an RRN or an
+# account number, which are the reason `long_digit_run` exists.
+#
+# Exempted only when the number appears immediately after one of these printed
+# labels, so the label -- not the digit count -- is what authorises it. A bare
+# 14-digit run with no label still blocks, which is the case that matters:
+# `long_digit_run` is the net that catches an unformatted RRN or card number.
+#
+# Measured on CASE_902 DOC_003 (가입설계서, 21 pages): the only 11+ digit run in
+# the entire document was 3D26060000447262, printed as "설계번호 : ..." in the
+# footer of all 21 pages. Redacting it would strip the one field that says which
+# contract the 상품설명서 describes, while protecting nothing.
+_DOCUMENT_IDENTIFIER_LABELS = (
+    "설계번호", "증권번호", "계약번호", "관리번호", "접수번호", "청약번호",
+    "보험증권번호", "신청번호", "문서번호",
+)
+# The label sits immediately before the value; keep the window tight so an
+# unrelated long number further down the page is never covered by a label above.
+_IDENTIFIER_LABEL_WINDOW = 40
+
+# Korean corporate/service number prefixes: nationwide representative numbers
+# (15xx/16xx/18xx), toll-free (080), and the short consumer hotlines that appear
+# in these notices. Geographic area codes are NOT listed -- 02-2122-4000 is a
+# switchboard only because of the institution named beside it, which is why the
+# check below is anchored on that name rather than on the number's shape.
+_CORPORATE_NUMBER_PREFIXES = ("15", "16", "18", "080")
+
+# Mobile prefixes are never an institutional switchboard. Without this, a
+# claimant's mobile printed anywhere near an institution name -- "서울대학교병원
+# 담당 홍길동 010-9876-5432" -- would be waved through on the institution's
+# name alone. (It happens to be caught today by the account-number pattern,
+# which is luck, not a defence.)
+_PERSONAL_NUMBER_PREFIXES = ("010", "011", "016", "017", "018", "019")
+
+# Consumer mailbox providers: an address here identifies a person, whatever
+# institution is named beside it. A policy booklet's own contact is always on
+# the publisher's domain, so excluding these costs nothing real.
+_PERSONAL_EMAIL_DOMAINS = (
+    "gmail.com", "naver.com", "daum.net", "hanmail.net", "nate.com",
+    "kakao.com", "outlook.com", "hotmail.com", "yahoo.com", "yahoo.co.kr",
+    "icloud.com", "me.com", "protonmail.com", "korea.com", "empas.com",
+)
+
+# An institution named on the same line as the number is what makes it a
+# switchboard. Reuses the suffix vocabulary already maintained for name
+# protection, plus the notice-specific 신용정보/신용평가 publishers.
+_INSTITUTIONAL_LINE_MARKERS = (
+    "병원", "의원", "약국", "의료원", "한의원", "치과", "센터", "보험", "화재",
+    "은행", "증권", "대학교", "대학", "학교", "회사", "그룹", "상사", "공사",
+    "재단", "협회", "조합", "지점", "연구소", "클리닉", "법인",
+    "신용정보", "신용평가", "크레딧뷰로", "고객센터", "콜센터", "상담센터",
+    "영업부", "금융감독원", "소비자원",
+)
+
+
+# How far around a hit to look for the institution that owns it. A line is the
+# wrong unit here: extracted PDF text wraps mid-value, so a switchboard arrives
+# as '02\n- 2122\n- 4000' and its owner's name sits several lines up. Measured
+# on CASE_902's real pages, the naming institution was always within this many
+# characters before the number ("NICE 신용정보 (주) : ☎ 02 - 2122 - 4000").
+_CONTACT_CONTEXT_CHARS = 120
+
+
+def _context_around(text: str, start: int, end: int) -> str:
+    """Text surrounding a hit, spanning line breaks deliberately."""
+    return text[max(0, start - _CONTACT_CONTEXT_CHARS):end + _CONTACT_CONTEXT_CHARS]
+
+
+def _is_labelled_document_identifier(kind: str, text: str, start: int) -> bool:
+    """Is this long digit run an insurer-assigned contract/document number?
+
+    Anchored on the printed label immediately before it, not on the number's
+    shape, so an unlabelled long run -- the unformatted RRN or card number
+    `long_digit_run` exists to catch -- is unaffected.
+    """
+    if kind != "long_digit_run":
+        return False
+    before = text[max(0, start - _IDENTIFIER_LABEL_WINDOW):start]
+    # The label must be the LAST thing before the number -- only separators,
+    # an optional alphanumeric prefix (설계번호 "3D26060000447262"), and
+    # whitespace may sit between. A label merely present somewhere in the
+    # window would let an unrelated long number a few lines below inherit it.
+    return any(
+        re.search(rf"{re.escape(label)}\s*[:：]?\s*[0-9A-Za-z]*$", before)
+        for label in _DOCUMENT_IDENTIFIER_LABELS
+    )
+
+
+def _is_institutional_contact(kind: str, sample: str, context: str) -> bool:
+    """Is this hit a published institutional contact rather than a person's?
+
+    Requires POSITIVE evidence nearby -- an institution named around it, or a
+    corporate number prefix. A bare number with nothing around it stays a hit,
+    because a claimant's phone number in a policy booklet would look exactly
+    like that, and that is the case this must never wave through.
+    """
+    if kind not in _INSTITUTIONAL_CONTACT_KINDS:
+        return False
+
+    # Disqualifiers first: these identify a person no matter what is printed
+    # around them, so a nearby institution name must not rescue them.
+    if kind == "email":
+        domain = sample.rsplit("@", 1)[-1].lower()
+        if domain in _PERSONAL_EMAIL_DOMAINS:
+            return False
+    else:
+        digits = re.sub(r"\D", "", sample)
+        if digits.startswith(_PERSONAL_NUMBER_PREFIXES):
+            return False
+        if digits.startswith(_CORPORATE_NUMBER_PREFIXES):
+            return True
+
+    return any(marker in context for marker in _INSTITUTIONAL_LINE_MARKERS)
+
+
+def scan_residual_pii(
+    redacted_text: str,
+    *,
+    allow_institutional_contacts: bool = True,
+    allow_document_identifiers: bool = True,
+) -> list[dict[str, str]]:
     """Regex-scan finished redacted text for structured PII that survived.
 
     Returns a list of {kind, sample} hits (empty == clean). Only structured
     formats are detectable this way; unstructured PII (bare names) is out of
-    scope. A non-empty result is treated as a possible leak by the caller."""
+    scope. A non-empty result is treated as a possible leak by the caller.
+
+    Two categories are exempt by default, because both identify an
+    INSTITUTION or a CONTRACT rather than a person, and every insurer document
+    carries them in its boilerplate:
+
+    * `allow_institutional_contacts` -- a switchboard or corporate mailbox
+      named beside an institution (삼성화재's mailmaster@, the credit bureaus
+      in the 신용정보법 제39조 notice, 금융감독원's number). A personal mobile
+      or a consumer mail domain is explicitly disqualified and still blocks,
+      even when an institution is named right beside it.
+    * `allow_document_identifiers` -- a long digit run printed immediately
+      after a label like 설계번호/증권번호. The LABEL authorises it, not the
+      digit count, so an unlabelled long run still blocks.
+
+    Everything else -- RRNs, account numbers, vehicle plates, personal
+    numbers, unlabelled long runs -- still blocks, so this narrows the scan
+    rather than turning it off. Pass either flag False to scan strictly."""
     scanned = _normalize_widths(redacted_text)
     hits: list[dict[str, str]] = []
     for kind, pattern in _RESIDUAL_PII_PATTERNS.items():
         for m in pattern.finditer(scanned):
+            if allow_institutional_contacts and _is_institutional_contact(
+                    kind, m.group(0), _context_around(scanned, m.start(), m.end())):
+                continue
+            if allow_document_identifiers and _is_labelled_document_identifier(
+                    kind, scanned, m.start()):
+                continue
             hits.append({"kind": kind, "sample": m.group(0)})
     return hits
 
@@ -412,6 +577,12 @@ class NoPiiClassRedactor:
     label = "no_pii_class_passthrough:deterministic"
 
     def redact_page(self, text: str) -> RedactionOutcome:
+        # The scan's institutional-contact and document-identifier exemptions
+        # are on by default (see scan_residual_pii), so this call gets them
+        # without asking. What matters here is what it does NOT relax: a real
+        # RRN, account number, plate, or personal contact in a booklet still
+        # raises below, so the "this class has no PII" claim stays verified per
+        # page rather than trusted.
         residual = scan_residual_pii(text)
         if residual:
             raise RedactionLeakError(
@@ -424,6 +595,60 @@ class NoPiiClassRedactor:
             categories=[],
             provider_metadata=None,
             review_warnings=[],
+        )
+
+
+class DevNoLlmRedactor:
+    """Development switch: skip the redaction MODEL for every document class.
+
+    Why this is a legitimate switch and not a hole:
+
+      * The PoC corpus is already de-identified at source -- the material
+        supplied for this project had PII removed before it arrived, so the
+        model is being paid to re-derive "nothing here" on every page.
+      * The production target is a local de-identification model
+        (`open-decisions.md` #1), so the LLM span-redaction path is scaffolding
+        for a component that will be replaced, not the eventual design.
+      * It measurably dominates Stage 2 once it runs on everything. On
+        CASE_964, 367 of 367 pages took the model path (5644s of accumulated
+        provider time, 245s of wall) because classification had moved AFTER
+        redaction and `NoPiiClassRedactor`'s `document_type` test could not
+        see a type yet.
+
+    What it does NOT relax: `scan_residual_pii` still runs on every page and
+    still raises `RedactionLeakError`, exactly as on the LLM path and exactly
+    as `NoPiiClassRedactor` does. A structured RRN, account number, phone,
+    address or plate surviving in the text still BLOCKS the document. So this
+    is "do not pay a model to look for unstructured PII", not "stop checking".
+
+    What is genuinely given up is the same thing `NoPiiClassRedactor` gives up
+    -- unstructured PII such as a bare personal name, which no regex can see --
+    but here for every document class rather than for published boilerplate.
+    That is why it is a DEV switch, recorded per document, and why the label
+    says so: a run that used it is not admissible as a privacy-preserving run.
+    """
+
+    method = "dev_no_llm_redaction"
+    label = "dev_no_llm_redaction:deterministic"
+
+    def redact_page(self, text: str) -> RedactionOutcome:
+        residual = scan_residual_pii(text)
+        if residual:
+            raise RedactionLeakError(
+                "redaction model disabled (HARNESS_SKIP_REDACTION) but structured "
+                "PII is present, so the page cannot pass through unmodified: "
+                + ", ".join(f"{h['kind']}={h['sample']!r}" for h in residual)
+            )
+        return RedactionOutcome(
+            redacted_text=text,
+            items_redacted=0,
+            categories=[],
+            provider_metadata=None,
+            review_warnings=[
+                "redaction model skipped (HARNESS_SKIP_REDACTION): structured-PII "
+                "scan passed, but unstructured PII (e.g. a bare personal name) "
+                "was not checked by any model on this page"
+            ],
         )
 
 

@@ -37,6 +37,9 @@ import re
 import sys
 from pathlib import Path
 
+# tools/trace.py, not the stdlib `trace` module.
+import trace as trace_mod
+
 sys.stdout.reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -648,6 +651,7 @@ def _is_toc_page(lines: list[str]) -> bool:
     return titles == len(lines)
 
 
+@trace_mod.traced("segment.text_anchor", category="compute")
 def text_anchor_boundaries(pdf_path, page_count: int) -> dict[int, str | None] | None:
     """Document-start pages derived from the PDF's own text layer. No model call.
 
@@ -700,6 +704,7 @@ def text_anchor_boundaries(pdf_path, page_count: int) -> dict[int, str | None] |
 
 def boundaries_from_page_texts(
     page_texts: list[str], *, medical: bool = False, judge=None,
+    undecided: list[int] | None = None,
 ) -> dict[int, str | None] | None:
     """The same boundary rule over page text a caller already has.
 
@@ -745,20 +750,174 @@ def boundaries_from_page_texts(
     # 5-line header window into policy text, where the strict first-line rule is
     # what measured precision 1.0000 across 173 boundaries.
     policy = _boundaries_from_page_lines(lines, page_texts=page_texts)
+
+    # A 약관 bundle is settled HERE, before the medical pass runs at all.
+    #
+    # Two reasons, and the first is a correctness bug rather than a saving.
+    # (a) The medical pass consults the judge, and a judge that declines a page
+    #     splits it (the deliberate fail-safe direction). On a 145-page policy
+    #     bundle that yields ONE BOUNDARY PER PAGE -- measured on CASE_134
+    #     DOC_003: policy 84, medical-with-judge 145. `len(medical) > len(policy)`
+    #     is then true, the medical result is returned, and a collapse placed
+    #     after that comparison never runs. That is exactly how the first version
+    #     of this fix passed a judge=None check and still split the bundle 85
+    #     ways in the real run.
+    # (b) Even when the policy result would have won, running the medical pass
+    #     first pays its whole judge cost for a boundary set that is then
+    #     discarded.
+    #
+    # This does NOT union the two rules -- the reason they are kept apart is
+    # unchanged (the medical 5-line header window would cost the policy rule the
+    # precision 1.0000 it measures across 173 boundaries). It only stops asking
+    # the medical question about a document the policy rule has already
+    # identified by the publisher's own 약관 titles.
+    if policy is not None and _is_policy_bundle(policy):
+        # A POLICY bundle is deliberately NOT split (pipeline.md / the
+        # loss-adjustment-pipeline skill). Korean policy clauses print their
+        # owning 약관 in the clause body, so downstream identification runs off
+        # `clause_id` text, not the PDF a clause sits in -- CASE_021's four
+        # policy matches distinguished 삼성화재/KB/한화 while all citing one
+        # `document_id`. Splitting is pure cost, and `chunk_text` re-splits to
+        # page granularity either way, so both arms deliver identical
+        # downstream input.
+        #
+        # Measured, CASE_133 (RUN_20260812_133): the title rule found every
+        # 약관 heading in two bundles -- 85 segments from 145p and 91 from 178p
+        # -- which is the rule working exactly as designed, at precision
+        # 1.0000. The defect was that nothing turned that correct boundary set
+        # into the correct DOCUMENT decision. The split produced 174 policy
+        # children (median 1 page, 98 of them single-page), cost 381
+        # classification calls (1,819s) plus 344 judge calls (1,633s), and
+        # `page_chunks.json` still held 367 chunks -- exactly the pre-split page
+        # count. It also left every child unregistered in
+        # `_revision_index.json` (children inherit their redacted text through
+        # `_redistribute_parent_redaction`, which bypasses the
+        # `write-redacted-text` path that registers a revision), which blocked
+        # `policy_clause_processing` with 174 unregistered-revision errors.
+        #
+        # Collapsing in code rather than at the approval gate is deliberate: the
+        # gate is a HUMAN, and `--auto-approve-segmentation` (documented for
+        # timing/plumbing runs) skips exactly that judgement, so a rule enforced
+        # only there silently fails on every automated run.
+        if undecided is not None:
+            undecided.clear()
+        return {1: None}
+
+    # Only the medical pass consults the judge, so only it can leave a page
+    # undecided; `undecided` is threaded here rather than collected by a second
+    # call so the flags describe the very pass that produced these boundaries.
     medical_result = _boundaries_from_page_lines(
-        lines, medical=True, judge=judge, page_texts=page_texts)
+        lines, medical=True, judge=judge, page_texts=page_texts,
+        undecided=undecided)
     if policy is None or medical_result is None:
         # None is "no verdict, fall through to vision" and is not comparable to
         # a boundary count; if either reader declined, so does this.
-        return policy if medical_result is None else medical_result
-    return medical_result if len(medical_result) > len(policy) else policy
+        chosen = policy if medical_result is None else medical_result
+        if chosen is policy and undecided is not None:
+            undecided.clear()
+        return chosen
+    if len(medical_result) > len(policy):
+        return medical_result
+    # The POLICY result won, and it never consulted the judge -- so any pages
+    # the medical pass could not settle describe boundaries that were then
+    # discarded. Reporting them would flag pages for review that the returned
+    # boundary set did not actually leave undecided.
+    if undecided is not None:
+        undecided.clear()
+    return policy
+
+
+# A policy bundle is recognised by ITS OWN boundary titles: the title rule
+# already matched `...보통약관` / `...특별약관` / `...특약` on the pages it cut.
+# Deriving the verdict from the boundaries this pass produced -- rather than
+# from `document_type`, which does not exist yet -- is what makes this decidable
+# at propose time. `propose` runs BEFORE classification (document_type is
+# per-document and cannot be known until after the split), which is the
+# chicken-and-egg that left this rule enforceable only by a human until now.
+#
+# Two boundaries, not two TITLES. Page 1 always opens a document and carries a
+# null title on the policy path (line 1 IS the title, so recording it there
+# would be redundant), so counting distinct title STRINGS undercounts every
+# bundle by exactly one -- and a real 2-document bundle
+# (보통약관 on p1 + 특별약관 on p3) would score 1 and never collapse. Caught by
+# `test_a_policy_bundle_is_read_by_the_policy_rule`, which asserts {1, 3} on
+# exactly that shape.
+_POLICY_BUNDLE_MIN_BOUNDARIES = 2
+
+
+def _is_policy_bundle(boundaries: dict[int, str | None]) -> bool:
+    """Whether this boundary set describes a 약관 bundle that must stay whole.
+
+    True when the policy rule cut beyond page 1 and at least one of those cuts
+    is a 약관 title. A lone page-1 boundary is a single document, not a bundle,
+    and collapsing it would change nothing anyway.
+
+    Deliberately does NOT require every non-page-1 boundary to be a 약관 title.
+    The policy path also opens a document on the first real page after a
+    contents block (`_boundaries_from_page_lines`, the `toc[index - 1]` branch),
+    and that page's line 1 is a cover title rather than a 약관 name. Measured on
+    CASE_133/DOC_004: 89 boundaries, 88 of them 약관 titles and one -- p7,
+    `영업배상책임보험` -- from exactly that TOC branch. Demanding unanimity scored
+    that real bundle False and left it split.
+    """
+    if len(boundaries) < _POLICY_BUNDLE_MIN_BOUNDARIES:
+        return False
+    return any(
+        title and DOCUMENT_TITLE_RE.search(title.strip())
+        for page, title in boundaries.items() if page != 1
+    )
+
+
+def processed_boundaries_with_undecided(
+    case_id: str, doc_id: str, page_count: int, judge=None
+) -> tuple[dict[int, str | None] | None, list[int]]:
+    """Boundaries AND the pages the judge could not settle, from ONE pass.
+
+    These must come from the same pass. They used to be two independent calls
+    (`processed_text_boundaries` then `processed_undecided_pages`), each
+    re-asking the LLM tier about the same page pairs with no memo between them,
+    which was wrong twice over:
+
+      * it paid for every judged page TWICE, and
+      * the two passes could disagree. A page judged in the first pass and
+        failed in the second (or vice versa) produced boundaries from one set
+        of verdicts and flags from the other, so `undecided_pages` did not
+        describe the boundaries actually used.
+
+    That is not hypothetical. On CASE_961 (cold Stage 2 run, 2026-08-12) nine
+    consecutive judge calls failed inside ~0.05s each. The bundle split into 13
+    segments instead of 11 -- p4/p5 and p18/p19 each over-split -- and the
+    proposal recorded `undecided_pages: []`, so a boundary set produced by
+    failed calls looked fully decided at the human approval gate. Over-splitting
+    is the deliberately safe direction, but only because the gate can see it;
+    silently, it just propagates a wrong document_type downstream.
+    """
+    if judge is None:
+        return processed_text_boundaries(case_id, doc_id, page_count), []
+    texts = _processed_page_texts(case_id, doc_id, page_count)
+    if texts is None:
+        return None, []
+    collected: list[int] = []
+    # Same entry point processed_text_boundaries uses, so this stays one
+    # implementation of the boundary rules rather than a second copy that can
+    # drift; `undecided` is threaded through to collect the flags from the very
+    # pass that produced these boundaries.
+    boundaries = boundaries_from_page_texts(
+        texts, medical="auto", judge=judge, undecided=collected)
+    return boundaries, sorted(set(collected))
 
 
 def processed_undecided_pages(
     case_id: str, doc_id: str, page_count: int, judge=None
 ) -> list[int]:
     """Pages the LLM tier could not settle, for the same text the boundaries came
-    from. Empty when no judge ran or no processed text exists."""
+    from. Empty when no judge ran or no processed text exists.
+
+    Kept for callers that want only the flags. Anything that also needs the
+    boundaries must use `processed_boundaries_with_undecided` instead -- asking
+    for both through two calls re-judges every page and lets the two answers
+    disagree.
+    """
     if judge is None:
         return []
     texts = _processed_page_texts(case_id, doc_id, page_count)
@@ -767,6 +926,7 @@ def processed_undecided_pages(
     return undecided_pages(texts, medical="auto", judge=judge)
 
 
+@trace_mod.traced("segment.read_processed_text", category="io")
 def _processed_page_texts(case_id: str, doc_id: str, page_count: int) -> list[str] | None:
     """A document's processed page text, redacted layer preferred. None if the
     text does not cover the whole document."""
@@ -1008,6 +1168,35 @@ Reply with ONLY a JSON object, no other text, in exactly this shape:
 """
 
 
+_JUDGE_FAILURE_ATTR = "_harness_judge_failures"
+
+
+def _record_judge_failure(judge, exc: BaseException) -> None:
+    """Attach a provider failure to the judge object itself.
+
+    On the judge rather than in a module global because the failures belong to
+    ONE proposal run: a module-level list would accumulate across runs in a
+    long-lived process and would need clearing at exactly the right moment,
+    which is a second thing to get wrong. Best-effort -- a judge that rejects
+    attribute assignment must not turn a swallowed provider error into a
+    crash, since the caller's fail-toward-splitting behaviour is still correct
+    without the diagnostic.
+    """
+    try:
+        failures = getattr(judge, _JUDGE_FAILURE_ATTR, None)
+        if failures is None:
+            failures = []
+            setattr(judge, _JUDGE_FAILURE_ATTR, failures)
+        failures.append(f"{type(exc).__name__}: {str(exc)[:200]}")
+    except Exception:
+        pass
+
+
+def judge_failures(judge) -> list[str]:
+    """Provider failures recorded against this judge, newest last."""
+    return list(getattr(judge, _JUDGE_FAILURE_ATTR, ()) or ())
+
+
 def _judge_boundary(previous_text: str, current_text: str, judge) -> dict | None:
     """Ask the model whether `current_text` starts a document. None if unusable.
 
@@ -1020,9 +1209,24 @@ def _judge_boundary(previous_text: str, current_text: str, judge) -> dict | None
         previous=previous_text[:_JUDGE_TEXT_LIMIT],
         current=current_text[:_JUDGE_TEXT_LIMIT],
     )
+    # Spanned because the LLM tier judges the SAME page pair twice today
+    # (processed_text_boundaries then processed_undecided_pages both reach
+    # here, with no memo between them). That is exactly 2x its cost, and this
+    # span is what turns that reading of the code into a measured number.
+    # Scoped to the call alone -- the parsing below is free, and widening the
+    # span would only blur where the time actually goes.
     try:
-        result = judge.classify_document(prompt, BOUNDARY_JUDGE_PROMPT_VERSION)
-    except Exception:
+        with trace_mod.span("segment.judge", category="compute"):
+            result = judge.classify_document(prompt, BOUNDARY_JUDGE_PROMPT_VERSION)
+    except Exception as exc:
+        # A provider failure is NOT the same as "the model considered it and
+        # could not say". Both split and both get flagged -- the caller treats
+        # them identically, which is correct -- but a run where the CLI failed
+        # 9 times in a row inside 0.05s each is a broken run, not an ambiguous
+        # bundle, and nothing said so: CASE_961 recorded 13 segments instead of
+        # 11 with no visible sign the calls had failed at all. Recording it on
+        # the judge lets `propose` report the difference.
+        _record_judge_failure(judge, exc)
         return None
     raw = (getattr(result, "text", "") or "").strip()
     if raw.startswith("```"):
@@ -1925,11 +2129,8 @@ def propose_boundaries(
         # The provider doubles as the LLM tier's judge: it decides the pages
         # the title rules cannot settle (a generic heading like REPORT, or no
         # title at all), reading the page text rather than a contact sheet.
-        anchored = processed_text_boundaries(
+        anchored, anchored_undecided = processed_boundaries_with_undecided(
             case_id, doc_id, page_count, judge=provider)
-        anchored_undecided = (
-            processed_undecided_pages(case_id, doc_id, page_count, judge=provider)
-            if anchored is not None and provider is not None else [])
         if anchored is not None and progress:
             progress(
                 f"processed text covers all {page_count} page(s): deriving "
@@ -3048,9 +3249,85 @@ def _case_id_from_text_path(text_path: str | None) -> str:
     return parts[2] if len(parts) > 2 else "UNKNOWN_CASE"
 
 
+def _count_redacted_items(text: str) -> int:
+    """Count PII placeholders in a split child's inherited redacted text.
+
+    The redactor substitutes each identified value with a placeholder from
+    `redaction.CATEGORY_TO_PLACEHOLDER`, so counting them recovers exactly what
+    `items_redacted` means for THIS document -- unlike copying the parent's
+    count, which describes the whole bundle. Import is local because
+    `redaction` pulls in the provider stack, which segmentation otherwise never
+    needs; a failure falls back to 0 rather than writing an invalid contract.
+    """
+    try:
+        from redaction import _PLACEHOLDER_RE
+    except Exception:  # noqa: BLE001 -- a count must never break a valid split
+        return 0
+    return len(_PLACEHOLDER_RE.findall(text))
+
+
+def _register_child_revision(*, case_id: str, doc_id: str, text: str,
+                             bundle_id: str, run_id: str,
+                             progress=None) -> bool:
+    """Register a split child's inherited redacted text as a source revision.
+
+    WHY THIS IS NEEDED. `_revision_index.json` is populated as a SIDE EFFECT of
+    `dao.write-redacted-text` (dao.py `_register_revision`), and that is the only
+    automatic path. A split child never takes it: its text is inherited from the
+    bundle and written directly above, so the child ends up with real processed
+    text and NO registered revision. Nothing in the pipeline notices, because
+    nothing calls `record-source-digest` either -- it exists only as an operator
+    CLI subcommand.
+
+    The cost is not theoretical. `policy_clause_processing` gates on
+    canonical_v1 UID verification, which cannot be switched on for a document
+    whose source bytes were never registered, so on CASE_133 the stage halted
+    with 174 unregistered-revision blockers -- one per policy child -- and no
+    in-pipeline way to clear them. Keeping the 약관 bundles whole (the collapse
+    above) cut that to 2, which proves the two defects are INDEPENDENT: even a
+    bundle that collapses to a single segment is still `split` into a 1:1 child
+    (CASE_135: DOC_003 145p -> DOC_010 145p), and that child inherits its text
+    the same way.
+
+    Deliberately calls `_register_revision` rather than the full
+    `write-redacted-text` command: that command also INVALIDATES downstream
+    stages, which is right when replacing text under work already recorded as
+    passed, but wrong here -- these bytes are new, not a replacement, and the
+    split is running inside `document_processing` itself.
+
+    Never fatal. Registration is what makes a later policy stage possible; it is
+    not what makes this split correct. A failure is reported and the split
+    continues, so a registration problem cannot destroy a completed split.
+    """
+    try:
+        import dao as _dao
+        # Same derivation dao.cmd_write_redacted_text uses (dao.py:3954), so a
+        # child's revision hash is computed exactly as a normally-written one.
+        revision_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        _dao._register_revision(
+            case_id, doc_id, text, revision_sha,
+            held_by="segment_case.split",
+            # A REAL run id, never None. `_register_revision` writes
+            # `"run_id": run_id` unconditionally and the schema types the field
+            # `string`, so a None lands as an explicit null and the WHOLE index
+            # fails validation -- which is how the first version of this failed
+            # on all 18 of CASE_135's children at once. The split always knows
+            # its run (`split_bundle` takes `run_id` as a required argument), so
+            # there is no case here that legitimately has nothing to name.
+            run_id=run_id,
+            supersedes=None)
+        return True
+    except Exception as exc:  # noqa: BLE001 -- diagnostic, never fatal
+        if progress:
+            progress(f"WARNING: could not register a source revision for "
+                     f"{doc_id} (inherited from {bundle_id}): {exc}")
+        return False
+
+
+@trace_mod.traced("segment.redistribute_redaction", category="io")
 def _redistribute_parent_redaction(
     *, case_id: str, bundle_id: str, segments: list[dict],
-    document_ids: list[str], progress=None,
+    document_ids: list[str], run_id: str, progress=None,
 ) -> bool:
     """Cut the bundle's redacted text into per-child files. Returns whether it ran.
 
@@ -3088,6 +3365,9 @@ def _redistribute_parent_redaction(
         child_dir = ROOT / "data" / "processed" / case_id / doc_id
         child_dir.mkdir(parents=True, exist_ok=True)
         (child_dir / "redacted_text.md").write_text(body, encoding="utf-8")
+        _register_child_revision(case_id=case_id, doc_id=doc_id, text=body,
+                                 bundle_id=bundle_id, run_id=run_id,
+                                 progress=progress)
         if parent_contract is not None:
             # Downstream stages find a document's redacted text through the
             # manifest's redacted_text_path, and chunking reads that field, so
@@ -3097,8 +3377,14 @@ def _redistribute_parent_redaction(
             child_contract["redacted_text_path"] = (
                 f"data/processed/{case_id}/{doc_id}/redacted_text.md")
             # The parent's count describes the parent. Attributing it to each
-            # child would multiply one redaction into twelve.
-            child_contract["items_redacted"] = None
+            # child would multiply one redaction into twelve -- but `None` is
+            # not the answer either: `items_redacted` is a REQUIRED non-negative
+            # integer, so nulling it made every split child's contract
+            # schema-invalid (18 of 18 on CASE_135, caught only by validating
+            # the case's contracts after the run rather than by any gate).
+            # The child's real count is recoverable from the child's own bytes,
+            # which is exactly what the field is supposed to describe.
+            child_contract["items_redacted"] = _count_redacted_items(body)
             child_contract["redistributed_from_document_id"] = bundle_id
             (ROOT / "outputs" / case_id / f"redaction_result_{doc_id}.json").write_text(
                 json.dumps(child_contract, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3107,6 +3393,7 @@ def _redistribute_parent_redaction(
     return True
 
 
+@trace_mod.traced("segment.redistribute_ocr", category="io")
 def _redistribute_parent_ocr(
     *, case_id: str, bundle_id: str, segments: list[dict],
     document_ids: list[str], progress=None,
@@ -3165,6 +3452,7 @@ def _redistribute_parent_ocr(
     return True
 
 
+@trace_mod.traced("segment.split_bundle", category="io")
 def split_bundle(
     proposal: dict,
     *,
@@ -3300,6 +3588,7 @@ def split_bundle(
         bundle_id=bundle_id,
         segments=segments,
         document_ids=document_ids,
+        run_id=run_id,
         progress=progress,
     )
 
@@ -3472,17 +3761,40 @@ def _cmd_propose(args):
         # one -- so a bundle the title rules fully answer still constructs no
         # provider and renders no sheet.
         cli_judge = _LazyJudge(lambda: build_provider(parse_provider_config(args)))
-        anchored = processed_text_boundaries(
+        anchored, anchored_undecided = processed_boundaries_with_undecided(
             args.case_id, args.doc_id, page_count, judge=cli_judge)
-        anchored_undecided = (
-            processed_undecided_pages(args.case_id, args.doc_id, page_count,
-                                       judge=cli_judge)
-            if anchored is not None else [])
         source = "processed text"
         if anchored is None:
             anchored = text_anchor_boundaries(pdf_path, page_count)
             anchored_undecided = []
             source = "text layer"
+
+        # A boundary set built on FAILED judge calls is not a proposal. Every
+        # failure splits, so the result looks like a decisive answer and reads
+        # as one at the approval gate; on CASE_961 nine consecutive failures
+        # turned an 11-segment bundle into 13 with `undecided_pages: []`.
+        # Refuse rather than write it: the pages are still flagged, but a
+        # reviewer would be approving boundaries no model ever judged.
+        failures = judge_failures(cli_judge)
+        if failures:
+            _stderr(f"error: {len(failures)} boundary-judge call(s) failed")
+            print(json.dumps({
+                "status": "judge_failed",
+                "case_id": args.case_id,
+                "document_id": args.doc_id,
+                "judge_failure_count": len(failures),
+                "judge_failures": failures[:10],
+                "undecided_pages": anchored_undecided,
+                "note": (
+                    "Boundaries were NOT written. Every failed judge call splits, "
+                    "so the proposal would look decided while resting on calls "
+                    "that never returned a verdict. Re-run `propose`; the "
+                    "deterministic title rules are unaffected and only the "
+                    "genuinely ambiguous pages are re-judged."
+                ),
+            }, ensure_ascii=False, indent=2))
+            return 1
+
         if anchored is not None:
             _stderr(
                 f"{source} covers all {page_count} page(s): deriving "
@@ -3726,6 +4038,15 @@ def main(argv=None):
     p.set_defaults(fn=_cmd_split)
 
     args = parser.parse_args(argv)
+    # Same gap redact_document.py had: the segment.judge spans below are
+    # no-ops until a case/run is configured. Subcommands vary in whether they
+    # carry a run id (propose/show do not), so this is best-effort -- a
+    # subcommand without one is simply not traced rather than misfiled under
+    # someone else's run.
+    _case_id = getattr(args, "case_id", None)
+    _run_id = getattr(args, "run_id", None)
+    if _case_id and _run_id:
+        trace_mod.configure(_case_id, _run_id)
     try:
         return args.fn(args)
     except SegmentationError as exc:
