@@ -151,6 +151,21 @@ _state: dict[str, Any] = {
     "run_id": None,
     "spans_dir": None,
 }
+
+# Stage ownership is resolved from the marker directory the DAO already
+# writes, NOT from an environment variable. A stage spans processes the
+# orchestrator does not fork -- a subagent's tool call is a fresh session, and
+# each shell invocation starts a fresh environment -- so an exported variable
+# provably never reaches the tools whose spans need attributing. The marker
+# files are the one channel every process can see.
+#
+# Resolution is cached per (mtime, size) of the marker directory rather than
+# read once at configure(): a long-lived process (run_stage2) outlives several
+# stage transitions, and a value frozen at startup would mislabel every span
+# after the first one.
+_stage_cache_lock = threading.Lock()
+_stage_cache: dict[str, Any] = {"signature": None, "stages": ()}
+_STAGE_CACHE_TTL_S = 2.0
 # One open file handle per (pid, thread) shard. Keyed by shard id so a thread
 # that outlives many spans pays the open cost once.
 _handles: dict[str, Any] = {}
@@ -199,6 +214,10 @@ def configure(case_id: str, run_id: str, root: Path | str | None = None) -> None
             "run_id": run_id,
             "spans_dir": spans_dir,
         })
+    # Switching case/run points at a different marker directory; a cached
+    # resolution from the previous run would label the new run's spans.
+    with _stage_cache_lock:
+        _stage_cache.update({"signature": None, "stages": ()})
 
 
 def reset() -> None:
@@ -208,6 +227,8 @@ def reset() -> None:
         _close_handles()
         _state.update({"configured": False, "case_id": None, "run_id": None,
                        "spans_dir": None})
+    with _stage_cache_lock:
+        _stage_cache.update({"signature": None, "stages": ()})
 
 
 def _close_handles() -> None:
@@ -222,6 +243,75 @@ def current_span_id() -> str | None:
     """The innermost open span in THIS context. Propagates into a thread only
     when the caller copies the context -- see run_in_context()."""
     return _current_span_id.get()
+
+
+def _read_open_stages() -> tuple[tuple[str, int], ...]:
+    """Stage attempts with a start marker and no terminal marker, from disk.
+
+    Returns ((stage_name, attempt), ...) sorted, or () when nothing can be
+    determined. Never raises: an unreadable marker directory means spans go out
+    unattributed, which is the pre-existing behaviour, not a failure.
+
+    Filenames are the source of truth here rather than file contents. The DAO
+    writes them as `stage.attempt.<kind>.<stage>.<attempt>.json` under O_EXCL,
+    so the name alone answers the question and a torn or half-written body
+    cannot make a stage look open when it is not.
+    """
+    spans_dir = _state["spans_dir"]
+    if spans_dir is None:
+        return ()
+    marker_dir = Path(spans_dir).parent / "markers"
+    try:
+        names = [p.name for p in marker_dir.iterdir() if p.is_file()]
+    except OSError:
+        return ()
+
+    started: dict[tuple[str, int], None] = {}
+    terminal: set[tuple[str, int]] = set()
+    for name in names:
+        if not name.startswith("stage.attempt.") or not name.endswith(".json"):
+            continue
+        body = name[len("stage.attempt."):-len(".json")]
+        kind, _, rest = body.partition(".")
+        if kind not in ("start", "end", "abandoned") or not rest:
+            continue
+        stage, _, attempt_text = rest.rpartition(".")
+        if not stage or not attempt_text.isdigit():
+            continue
+        key = (stage, int(attempt_text))
+        if kind == "start":
+            started[key] = None
+        else:
+            terminal.add(key)
+    return tuple(sorted(k for k in started if k not in terminal))
+
+
+def _open_stages() -> tuple[tuple[str, int], ...]:
+    """_read_open_stages() behind a short cache keyed on directory state.
+
+    Every span would otherwise stat the marker directory. The signature is
+    (mtime_ns, entry count) plus a short TTL: a marker landing inside the TTL
+    without changing either is only possible if one appeared and another was
+    removed in the same window, and markers are never removed.
+    """
+    spans_dir = _state["spans_dir"]
+    if spans_dir is None:
+        return ()
+    marker_dir = Path(spans_dir).parent / "markers"
+    try:
+        stat = marker_dir.stat()
+        signature = (str(marker_dir), stat.st_mtime_ns,
+                     int(time.monotonic() / _STAGE_CACHE_TTL_S))
+    except OSError:
+        signature = (str(marker_dir), None,
+                     int(time.monotonic() / _STAGE_CACHE_TTL_S))
+    with _stage_cache_lock:
+        if _stage_cache["signature"] == signature:
+            return _stage_cache["stages"]
+    stages = _read_open_stages()
+    with _stage_cache_lock:
+        _stage_cache.update({"signature": signature, "stages": stages})
+    return stages
 
 
 def _shard_id() -> str:
@@ -330,6 +420,24 @@ def _build_record(op: str, category: str, *, case_id, doc_id, page, parent,
     }
     if dropped:
         record["dropped_attrs"] = dropped
+    # Explicit stage ownership, so the aggregator does not have to infer it
+    # from overlapping wall-clock windows (which it cannot do, and correctly
+    # refuses to guess at). A stage marker is excluded: it already names its
+    # own stage, and reading the marker set to label a marker is circular.
+    if category != "marker" and not op.startswith("stage.attempt."):
+        open_stages = _open_stages()
+        if len(open_stages) == 1:
+            record["stage_name"] = open_stages[0][0]
+            record["stage_attempt"] = open_stages[0][1]
+        elif len(open_stages) > 1:
+            # Concurrent stages: this span belongs to exactly one of them and
+            # nothing on disk says which. Recording the candidate set keeps the
+            # ambiguity visible and bounded instead of discarding the span's
+            # attribution entirely or picking one and being silently wrong.
+            record["stage_candidates"] = [
+                {"stage_name": name, "attempt": attempt}
+                for name, attempt in open_stages
+            ]
     return record
 
 

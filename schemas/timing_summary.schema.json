@@ -199,8 +199,19 @@
           "minimum": 0,
           "description": "active_wall_s minus observed tool overlap. This is NOT model reasoning time; it may contain any work absent from current tool spans."
         },
+        "owned_tool_overlap_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "The subset of observed_tool_overlap_s from spans that NAMED this stage and attempt at write time, rather than being attributed by falling inside the window. Under concurrency this is the trustworthy figure: the remainder was inferred from a timestamp."
+        },
+        "ambiguous_tool_overlap_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Union of intervals from spans written while SEVERAL stage attempts were open, which named all of them as candidates and none as owner. Reported separately and never added to observed_tool_overlap_s: this time is real and belongs to exactly one of the concurrent stages, but nothing on disk says which."
+        },
         "attribution_status": {
-          "enum": ["complete", "overlapping_stage_attempts", "open", "abandoned", "orphan_end", "duplicate_marker", "invalid_order"]
+          "description": "complete_explicit_ownership: this attempt's window overlaps another stage's, but every tool span inside it named its owning stage at write time, so the numbers are attributable anyway. overlapping_stage_attempts remains the verdict when unowned spans sit in a contested window -- a timestamp cannot say which stage they belong to, and charging them to both would double-count.",
+          "enum": ["complete", "complete_explicit_ownership", "overlapping_stage_attempts", "open", "abandoned", "orphan_end", "duplicate_marker", "invalid_order"]
         },
         "in_sla_window": { "type": "boolean" }
       },

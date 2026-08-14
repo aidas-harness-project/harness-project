@@ -345,10 +345,30 @@ def summarize_stage_attempts(spans: list[dict],
     human_intervals = [interval for span in spans
                        if span.get("category") == "human_wait"
                        for interval in [_wall_interval(span)] if interval is not None]
-    tool_intervals = [interval for span in spans
-                      if span.get("category") not in ("marker", "human_wait")
-                      and span.get("op") not in STAGE_ATTEMPT_OPS
-                      for interval in [_wall_interval(span)] if interval is not None]
+    tool_spans = [span for span in spans
+                  if span.get("category") not in ("marker", "human_wait")
+                  and span.get("op") not in STAGE_ATTEMPT_OPS
+                  and _wall_interval(span) is not None]
+    tool_intervals = [_wall_interval(span) for span in tool_spans]
+
+    # Spans that NAME their owning stage (trace.py resolves it from the marker
+    # directory at write time). These are attributable even when stage windows
+    # overlap, because ownership is recorded rather than inferred from a
+    # timestamp. A span carrying `stage_candidates` instead names several and
+    # is deliberately not claimed by any of them.
+    owned_intervals: dict[tuple[str, int], list[tuple[float, float]]] = {}
+    ambiguous_intervals: list[tuple[float, float]] = []
+    unowned_intervals: list[tuple[float, float]] = []
+    for span in tool_spans:
+        interval = _wall_interval(span)
+        stage_name = span.get("stage_name")
+        stage_attempt = span.get("stage_attempt")
+        if isinstance(stage_name, str) and isinstance(stage_attempt, int):
+            owned_intervals.setdefault((stage_name, stage_attempt), []).append(interval)
+        elif span.get("stage_candidates"):
+            ambiguous_intervals.append(interval)
+        else:
+            unowned_intervals.append(interval)
     sla_window = _sla_window(spans)
 
     attempts: list[dict] = []
@@ -406,10 +426,16 @@ def summarize_stage_attempts(spans: list[dict],
             human_s = _union_length(clipped_human)
             raw_s = end_ts - start_ts
             active_parts = _subtract_intervals((start_ts, end_ts), clipped_human)
-            observed_parts = []
+            owned = owned_intervals.get((stage, attempt), [])
+            owned_parts, inferred_parts, ambiguous_parts = [], [], []
             for active_start, active_end in active_parts:
-                observed_parts.extend(_clip(tool_intervals, active_start, active_end))
-            observed_s = _union_length(observed_parts)
+                owned_parts.extend(_clip(owned, active_start, active_end))
+                inferred_parts.extend(
+                    _clip(unowned_intervals, active_start, active_end))
+                ambiguous_parts.extend(
+                    _clip(ambiguous_intervals, active_start, active_end))
+            owned_s = _union_length(owned_parts)
+            observed_s = _union_length(owned_parts + inferred_parts)
             active_s = max(raw_s - human_s, 0.0)
             item.update({
                 "raw_wall_s": round(raw_s, 6),
@@ -417,13 +443,23 @@ def summarize_stage_attempts(spans: list[dict],
                 "active_wall_s": round(active_s, 6),
                 "observed_tool_overlap_s": round(min(observed_s, active_s), 6),
                 "unattributed_active_s": round(max(active_s - observed_s, 0.0), 6),
+                "owned_tool_overlap_s": round(min(owned_s, active_s), 6),
+                "ambiguous_tool_overlap_s": round(
+                    min(_union_length(ambiguous_parts), active_s), 6),
                 "in_sla_window": bool(sla_window and end_ts > sla_window[0]
                                       and start_ts < sla_window[1]),
             })
         attempts.append(item)
 
-    # Timestamp-only attribution cannot decide ownership where stage windows
-    # overlap. Fail closed instead of charging one tool span to both stages.
+    # Where stage windows overlap, a TIMESTAMP cannot decide which stage a tool
+    # span belongs to. Spans that name their own stage can: ownership was
+    # recorded at write time, so overlap does not make them ambiguous.
+    #
+    # Two different verdicts follow. An attempt whose overlapping window
+    # contains only owned spans is fully attributable and keeps its numbers. An
+    # attempt that also overlaps spans nothing claims falls back to the
+    # original fail-closed behaviour for the inferred part -- charging one
+    # unowned span to both stages would double-count it.
     overlapping: set[tuple[str, int]] = set()
     valid_items = list(valid_windows.items())
     for idx, (left_key, (left_start, left_end)) in enumerate(valid_items):
@@ -431,10 +467,26 @@ def summarize_stage_attempts(spans: list[dict],
             if min(left_end, right_end) > max(left_start, right_start):
                 overlapping.update((left_key, right_key))
     for item in attempts:
-        if (item["stage_name"], item["attempt"]) in overlapping:
-            item["attribution_status"] = "overlapping_stage_attempts"
-            item["observed_tool_overlap_s"] = None
-            item["unattributed_active_s"] = None
+        key = (item["stage_name"], item["attempt"])
+        if key not in overlapping:
+            continue
+        window = valid_windows.get(key)
+        contested = []
+        if window is not None:
+            contested = list(_clip(unowned_intervals + ambiguous_intervals,
+                                   window[0], window[1]))
+        if not contested:
+            # Every tool span inside this window declared its owner.
+            item["attribution_status"] = "complete_explicit_ownership"
+            continue
+        # Contested window: the inferred part cannot be split between stages,
+        # so the blended figures fall back to null exactly as before. What was
+        # measured explicitly is kept -- owned_tool_overlap_s remains a valid
+        # lower bound on this attempt's tool time, and discarding it would
+        # throw away the only unambiguous observation in the window.
+        item["attribution_status"] = "overlapping_stage_attempts"
+        item["observed_tool_overlap_s"] = None
+        item["unattributed_active_s"] = None
 
     by_stage: dict[str, dict] = {}
     for state in run_state_stages or []:
@@ -474,7 +526,8 @@ def summarize_stage_attempts(spans: list[dict],
             stage["open_attempt_count"] += 1
         elif item["pairing_status"] == "abandoned":
             stage["abandoned_attempt_count"] += 1
-        if item["attribution_status"] != "complete":
+        if item["attribution_status"] not in (
+                "complete", "complete_explicit_ownership"):
             stage["attribution_complete"] = False
         elif item["observed_tool_overlap_s"] is not None:
             stage["observed_tool_overlap_s"] += item["observed_tool_overlap_s"]
