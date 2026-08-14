@@ -371,3 +371,114 @@ def test_main_refuses_when_source_locked(tmp_path):
 def test_main_rejects_malformed_source_case_id(tmp_path):
     with pytest.raises(SystemExit):
         _run_main(["not-a-real-id", "--label", "x", "--held-by", "tester", "--run-id", "RUN_X"])
+
+
+# ------------------------------------------------- case-root path rewriting --
+
+def test_fork_rewrites_paths_under_every_case_root(tmp_path):
+    """Only the `case_id` FIELD was rewritten until 2026-08-14, so a fork's
+    manifest kept pointing at the source case's raw PDFs -- and the DAO read
+    them, giving a branch that shared input files with its parent while its own
+    copies sat unused on disk. Measured on a real fork: 773 processed paths, 22
+    outputs paths, 10 raw paths.
+    """
+    _seed_source_case(tmp_path)
+    manifest_path = tmp_path / "outputs" / "CASE_005" / "document_manifest.json"
+    manifest_path.write_text(json.dumps({
+        "case_id": "CASE_005",
+        "documents": [{
+            "document_id": "DOC_001", "file_name": "DOC_001.pdf",
+            "file_path": "data/raw/CASE_005/DOC_001.pdf", "file_format": "pdf",
+            "file_size_bytes": 10, "ocr_status": "completed",
+            "redacted_text_path": "data/processed/CASE_005/DOC_001/redacted_text.md",
+            "backup_path": "outputs/CASE_005/_backups/step_01_intake",
+        }],
+    }), encoding="utf-8")
+
+    fc.copy_outputs_and_rewrite_case_id(
+        dao.case_dir("CASE_005"), "CASE_006", "CASE_005")
+
+    entry = json.loads(
+        (tmp_path / "outputs" / "CASE_006" / "document_manifest.json")
+        .read_text(encoding="utf-8"))["documents"][0]
+    assert entry["file_path"] == "data/raw/CASE_006/DOC_001.pdf"
+    assert entry["redacted_text_path"] == "data/processed/CASE_006/DOC_001/redacted_text.md"
+    assert entry["backup_path"] == "outputs/CASE_006/_backups/step_01_intake"
+
+
+def test_fork_leaves_the_fork_record_pointing_at_its_source(tmp_path):
+    """`_fork_record.json` exists to say where the fork came from. Rewriting
+    the id there would erase the one record of the lineage."""
+    _seed_source_case(tmp_path)
+    (tmp_path / "outputs" / "CASE_005" / "_fork_record.json").write_text(
+        json.dumps({"case_id": "CASE_005", "forked_from": "CASE_004"}),
+        encoding="utf-8")
+
+    fc.copy_outputs_and_rewrite_case_id(
+        dao.case_dir("CASE_005"), "CASE_006", "CASE_005")
+
+    record = json.loads(
+        (tmp_path / "outputs" / "CASE_006" / "_fork_record.json")
+        .read_text(encoding="utf-8"))
+    assert record["forked_from"] == "CASE_004"
+
+
+def test_fork_does_not_rewrite_a_bare_case_id_inside_prose(tmp_path):
+    """The rewrite is anchored on `<root>/<CASE_ID>/`. A reviewer's note that
+    mentions the source case is a historical statement, not a path."""
+    _seed_source_case(tmp_path)
+    note = "compared against CASE_005 before approving"
+    (tmp_path / "outputs" / "CASE_005" / "_conflict_ledger.json").write_text(
+        json.dumps({"case_id": "CASE_005", "conflicts": [
+            {"conflict_id": "CONFLICT_1", "resolution_note": note}]}),
+        encoding="utf-8")
+
+    fc.copy_outputs_and_rewrite_case_id(
+        dao.case_dir("CASE_005"), "CASE_006", "CASE_005")
+
+    ledger = json.loads(
+        (tmp_path / "outputs" / "CASE_006" / "_conflict_ledger.json")
+        .read_text(encoding="utf-8"))
+    assert ledger["conflicts"][0]["resolution_note"] == note
+    assert ledger["case_id"] == "CASE_006"
+
+
+def test_fork_rewrites_windows_separator_paths(tmp_path):
+    """backup_path is recorded by tools using os.path, so it arrives with
+    backslashes on this platform."""
+    _seed_source_case(tmp_path)
+    (tmp_path / "outputs" / "CASE_005" / "_run_state.json").write_text(
+        json.dumps({"case_id": "CASE_005", "stages": [
+            {"stage_name": "intake", "status": "passed",
+             "backup_path": r"outputs\CASE_005\_backups\step_01_intake\x.json"}]}),
+        encoding="utf-8")
+
+    fc.copy_outputs_and_rewrite_case_id(
+        dao.case_dir("CASE_005"), "CASE_006", "CASE_005")
+
+    state = json.loads(
+        (tmp_path / "outputs" / "CASE_006" / "_run_state.json")
+        .read_text(encoding="utf-8"))
+    assert state["stages"][0]["backup_path"] == \
+        r"outputs\CASE_006\_backups\step_01_intake\x.json"
+
+
+def test_fork_without_a_source_id_keeps_the_old_field_only_behaviour(tmp_path):
+    """The parameter is optional so existing callers keep working; they just
+    do not get path rewriting."""
+    _seed_source_case(tmp_path)
+    manifest_path = tmp_path / "outputs" / "CASE_005" / "document_manifest.json"
+    manifest_path.write_text(json.dumps({
+        "case_id": "CASE_005",
+        "documents": [{
+            "document_id": "DOC_001", "file_name": "DOC_001.pdf",
+            "file_path": "data/raw/CASE_005/DOC_001.pdf", "file_format": "pdf",
+            "file_size_bytes": 10, "ocr_status": "completed"}],
+    }), encoding="utf-8")
+
+    fc.copy_outputs_and_rewrite_case_id(dao.case_dir("CASE_005"), "CASE_006")
+
+    entry = json.loads(
+        (tmp_path / "outputs" / "CASE_006" / "document_manifest.json")
+        .read_text(encoding="utf-8"))["documents"][0]
+    assert entry["file_path"] == "data/raw/CASE_005/DOC_001.pdf"

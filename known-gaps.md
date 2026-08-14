@@ -1228,23 +1228,29 @@ DEFERRED, with why:
   an injected "CLEAR" in the page image. It is explicitly a human-review signal,
   not a structural gate; a `.hwp`/`.docx` answer key or a report with its
   conclusion on page 6+ gets no content check. Deferred (needs format coverage).
-- **`fork_case` rewrites only top-level `case_id`.** Embedded case-id-derived
-  paths (backup_path, file_path, redacted_text_path) still point at the source
-  case after a fork. Deferred.
+- **`fork_case` rewrote only top-level `case_id`** -- RESOLVED 2026-08-14.
+  Embedded case-id-derived paths (backup_path, file_path, redacted_text_path)
+  pointed at the source case after a fork.
 
-  *Re-measured 2026-08-14, forking CASE_142 and again CASE_144.* This is not a
-  cosmetic staleness: the fork READS the source case's files. CASE_143 (forked
-  from CASE_142) had all 22 documents pointing at `data/raw/CASE_142/...`
-  despite its own copies existing, so the branch was not isolated at all and
-  had to be discarded and re-intaken from `_source-cases/` instead. After child
-  PDFs stopped being materialized the exposure shrank to the 5 bundle entries
-  (CASE_145 forked from CASE_144) -- smaller, not fixed, and the bundles are
-  exactly the files OCR reads. Provenance itself survives a fork intact
-  (`source_file_name`, page ranges and `source_pdf_sha256` compared field by
-  field across CASE_144 -> CASE_145: zero differences), so what breaks is
-  WHICH case's bytes get read, not the record of where a document came from.
-  Worth raising above "deferred": any A/B whose two arms both fork the same
-  parent will silently share raw inputs.
+  Not cosmetic staleness: the fork READ the source case's files. CASE_143
+  (forked from CASE_142) had all 22 documents pointing at
+  `data/raw/CASE_142/...` despite its own copies existing, so the branch was
+  not isolated and had to be discarded and re-intaken from `_source-cases/`.
+  Any A/B whose two arms both forked one parent silently shared raw inputs.
+
+  Fixed by rewriting every path under a case root (`data/processed`,
+  `data/raw`, `outputs`, both separator styles) rather than the `case_id` field
+  alone. Anchored on `<root>/<CASE_ID>/`, so a bare id in a reviewer's note
+  stays a historical statement and `_fork_record.json` keeps naming its source
+  -- erasing that would destroy the only record of the lineage. Verified on a
+  real fork: 805 stale references -> 1, the survivor being `_fork_record.json`
+  itself, with every `file_path` resolving to an existing file in the fork's
+  own tree.
+
+  Provenance always survived a fork intact (`source_file_name`, page ranges and
+  `source_pdf_sha256` compared field by field across CASE_144 -> CASE_145: zero
+  differences). What was broken was WHICH case's bytes got read, never the
+  record of where a document came from.
 - **Frontend has no auth / CSRF / rate limits.** ACCEPTED, not fixed: per review
   decision the pipeline viewer is a localhost-only dev tool. The one D1-relevant
   frontend hole (serving ground-truth files) WAS fixed. If the frontend is ever

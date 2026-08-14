@@ -158,8 +158,33 @@ def _stage_status(state: dict, stage: str) -> str | None:
     return None
 
 
+# The three roots a case owns. A fork copies all three, so a path under any of
+# them must follow the copy -- a fork that keeps pointing at the source is not
+# a branch, it is an alias. Measured 2026-08-14 on a real fork: 773 processed
+# paths, 22 outputs paths and 10 raw paths carried the source case id, and the
+# raw ones are what OCR opens, so the two arms of an A/B silently shared input
+# files while each had its own untouched copy on disk.
+#
+# Anchored on `<root>/<CASE_ID>/` rather than a bare case-id replace: the id
+# also appears as a value (`"case_id": "CASE_142"`), inside prose in review
+# notes, and in `_fork_record.json`'s own lineage fields, where rewriting it
+# would erase the record of where the fork came from.
+_CASE_PATH_ROOTS = ("data/processed", "data/raw", "outputs")
+
+
+def _rewrite_case_paths(text: str, source_case_id: str, new_case_id: str) -> str:
+    for root in _CASE_PATH_ROOTS:
+        text = text.replace(f"{root}/{source_case_id}/",
+                            f"{root}/{new_case_id}/")
+        # Windows-style separators appear in absolute paths recorded by tools
+        # that used os.path (backup_path is the common one).
+        text = text.replace(f"{root}\\{source_case_id}\\",
+                            f"{root}\\{new_case_id}\\")
+    return text
+
+
 def _rewrite_reconstructed_value(value, source_case_id: str, new_case_id: str):
-    """Rewrite fork-owned identity and processed-path fields in memory."""
+    """Rewrite fork-owned identity and case-root path fields in memory."""
     if isinstance(value, dict):
         return {
             key: (new_case_id if key == "case_id" and child == source_case_id
@@ -170,8 +195,7 @@ def _rewrite_reconstructed_value(value, source_case_id: str, new_case_id: str):
         return [_rewrite_reconstructed_value(item, source_case_id, new_case_id)
                 for item in value]
     if isinstance(value, str):
-        return value.replace(f"data/processed/{source_case_id}/",
-                             f"data/processed/{new_case_id}/")
+        return _rewrite_case_paths(value, source_case_id, new_case_id)
     return value
 
 
@@ -670,9 +694,18 @@ def check_no_active_locks(source_root: Path) -> None:
                   f"a write may be in progress or was interrupted: {[str(p) for p in locks]}")
 
 
-def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str) -> list[str]:
+def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str,
+                                     source_case_id: str | None = None) -> list[str]:
     """Returns the list of validation warnings (empty if everything that has
-    a schema still validates after the case_id rewrite)."""
+    a schema still validates after the case_id rewrite).
+
+    Rewrites BOTH the `case_id` field and every path under a case root
+    (`data/processed`, `data/raw`, `outputs`). Only the field was rewritten
+    until 2026-08-14, so a fork's manifest kept pointing at the source case's
+    raw PDFs -- and the DAO dutifully read them, giving a "branch" that shared
+    input files with its parent while its own copies sat unused. `_fork_record`
+    is excluded because its whole job is to record the source id.
+    """
     dest = case_dir(new_case_id)
     for item in source_root.iterdir():
         if item.name == "_backups" or item.name.endswith(".lock"):
@@ -689,15 +722,18 @@ def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str) -> lis
             data = json.loads(json_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-        if isinstance(data, dict) and "case_id" in data:
-            data["case_id"] = new_case_id
-            atomic_write_json(json_path, data)
-            schema_name = schema_name_for(json_path)
-            if schema_name:
-                errors = validate_instance(data, schema_name, schemas, registry)
-                if errors:
-                    warnings.append(f"{json_path.name}: fails {schema_name} after case_id rewrite -- "
-                                     + "; ".join(errors))
+        if not isinstance(data, dict) or "case_id" not in data:
+            continue
+        if source_case_id and json_path.name != "_fork_record.json":
+            data = _rewrite_reconstructed_value(data, source_case_id, new_case_id)
+        data["case_id"] = new_case_id
+        atomic_write_json(json_path, data)
+        schema_name = schema_name_for(json_path)
+        if schema_name:
+            errors = validate_instance(data, schema_name, schemas, registry)
+            if errors:
+                warnings.append(f"{json_path.name}: fails {schema_name} after case_id rewrite -- "
+                                 + "; ".join(errors))
     return warnings
 
 
@@ -809,7 +845,8 @@ def main():
             source_root, new_case_id, args.run_id, args.through_stage,
             probe["source_state"])
     else:
-        warnings = copy_outputs_and_rewrite_case_id(source_root, new_case_id)
+        warnings = copy_outputs_and_rewrite_case_id(
+            source_root, new_case_id, args.source_case_id)
 
     copy_data_tree("processed", args.source_case_id, new_case_id)
     raw_copied = args.include_raw and copy_data_tree("raw", args.source_case_id, new_case_id) is not None
