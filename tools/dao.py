@@ -10809,6 +10809,85 @@ def trace_spans_dir(case_id: str, run_id: str) -> Path:
     return _require_within(case_dir(case_id), "_trace", run_id, "spans")
 
 
+def cmd_record_dispatch(args):
+    """Record one closed subagent-dispatch interval into the run's trace.
+
+    Closes the largest measurement hole this project has: a stage's marker
+    window minus the agent's own reported duration left a residual that nothing
+    explained. On CASE_142 that residual was 578.3s across nine stages, of
+    which finalize and snapshot -- the obvious suspects -- accounted for 2.79s.
+    The other 575.5s was split between dispatch round-trip (asking for the work
+    and receiving the result) and operator-side work done while the marker
+    happened to be open, and NOTHING on disk could tell the two apart.
+
+    That distinction decides what a timing number means. Round-trip is a cost
+    the pipeline pays structurally and can be engineered against; operator-side
+    work is one person's working style and changes with the next person. Until
+    they are separable, a per-stage figure cannot honestly be called a stage
+    cost -- which is why this is recorded rather than estimated.
+
+    Deliberately caller-declared, not inferred. The orchestrator is the only
+    party that knows when it asked for work: the dispatch crosses a session
+    boundary the DAO cannot observe, and a subagent's tool calls arrive in a
+    process this one never forked. `--agent-reported-s` carries what the
+    harness says the agent itself took, so the round trip is
+    `duration_s - agent_reported_s` and stays visible instead of being folded
+    into a single opaque number.
+
+    A dispatch that is never recorded leaves the residual exactly as it is
+    today: reported, unexplained, and honestly labelled. Missing data is not
+    fabricated from marker times.
+    """
+    if args.duration_s < 0:
+        print("REFUSED: --duration-s cannot be negative")
+        return 1
+    if args.agent_reported_s is not None:
+        if args.agent_reported_s < 0:
+            print("REFUSED: --agent-reported-s cannot be negative")
+            return 1
+        if args.agent_reported_s > args.duration_s:
+            # The agent cannot have run longer than the dispatch that contains
+            # it. Accepting this would produce a negative round trip, which
+            # reads as a measurement rather than the mistake it is.
+            print(f"REFUSED: --agent-reported-s ({args.agent_reported_s}) exceeds "
+                  f"--duration-s ({args.duration_s}) -- the agent cannot outlast "
+                  "the dispatch that contains it")
+            return 1
+    try:
+        datetime.fromisoformat(args.started_at)
+    except ValueError:
+        print(f"REFUSED: --started-at is not an ISO-8601 timestamp: {args.started_at!r}")
+        return 1
+
+    trace_mod.configure(args.case_id, args.run_id, root=OUTPUTS)
+    if not trace_mod.enabled():
+        print("NOTE: tracing is off (HARNESS_TRACE=0) -- nothing recorded")
+        return 0
+
+    attrs = {"stage_name": args.stage}
+    if args.agent_kind:
+        attrs["agent_kind"] = args.agent_kind
+    if args.agent_reported_s is not None:
+        attrs["agent_reported_s"] = args.agent_reported_s
+    if args.attempt is not None:
+        attrs["attempt"] = args.attempt
+
+    span_id = trace_mod.closed_interval(
+        "dispatch.subagent", category="dispatch",
+        t_start_wall=args.started_at, duration_s=args.duration_s,
+        case_id=args.case_id,
+        status="ok" if args.outcome == "completed" else "error",
+        **attrs)
+    if span_id is None:
+        print("NOTE: tracing produced no span -- nothing recorded")
+        return 0
+    round_trip = (args.duration_s - args.agent_reported_s
+                  if args.agent_reported_s is not None else None)
+    print(f"OK: recorded dispatch for {args.stage} ({args.duration_s:.1f}s"
+          + (f", round trip {round_trip:.1f}s)" if round_trip is not None else ")"))
+    return 0
+
+
 def cmd_aggregate_trace(args):
     """Roll the run's span shards up into _timing_summary.json.
 
@@ -11476,6 +11555,29 @@ def build_parser():
                    help="Whether resume caches were cleared first. Only cold "
                         "numbers are SLA-judgable.")
     p.set_defaults(fn=cmd_aggregate_trace)
+
+    p = sub.add_parser("record-dispatch",
+                       help="Record one closed subagent-dispatch interval, so a "
+                            "stage's residual separates round-trip cost from "
+                            "operator-side work.")
+    p.add_argument("case_id")
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--stage", required=True,
+                   help="the stage this dispatch belongs to")
+    p.add_argument("--started-at", required=True,
+                   help="ISO-8601 wall time the dispatch was issued")
+    p.add_argument("--duration-s", type=float, required=True,
+                   help="whole dispatch, from asking for the work to holding "
+                        "its result")
+    p.add_argument("--agent-reported-s", type=float, default=None,
+                   help="what the harness says the subagent itself took; the "
+                        "difference from --duration-s is the round trip")
+    p.add_argument("--agent-kind", default=None,
+                   help="which agent identity was dispatched")
+    p.add_argument("--attempt", type=int, default=None)
+    p.add_argument("--outcome", default="completed",
+                   choices=["completed", "failed", "interrupted"])
+    p.set_defaults(fn=cmd_record_dispatch)
 
     p = sub.add_parser("read-timing-summary",
                        help="Read _timing_summary.json (read-contract's symmetric reader).")

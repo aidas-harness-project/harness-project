@@ -226,6 +226,21 @@
         "failed_attempt_count": { "type": "integer", "minimum": 0 },
         "open_attempt_count": { "type": "integer", "minimum": 0 },
         "abandoned_attempt_count": { "type": "integer", "minimum": 0 },
+        "dispatch_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Subagent dispatches recorded for this stage via `dao.py record-dispatch`. Zero means none were recorded, which is not a claim that none happened."
+        },
+        "dispatch_wall_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Sum of recorded dispatch intervals: asking for the work through holding its result. Deliberately excluded from observed_tool_overlap_s, because a dispatch CONTAINS the subagent's own work and folding it in would report model thinking time as observed tool time."
+        },
+        "dispatch_round_trip_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Sum of (dispatch wall - agent-reported duration): the orchestration cost of asking and receiving, excluding the agent's work. This is the half of a stage's residual that is structural and engineerable; the rest is operator-side work that happened while the marker was open. null when no dispatch carried an agent-reported duration -- never 0, which would claim the round trip was measured at nothing."
+        },
         "total_attempt_active_wall_s": { "type": "number", "minimum": 0 },
         "passed_attempt_active_wall_s": { "type": "number", "minimum": 0 },
         "human_wait_s": { "type": "number", "minimum": 0 },

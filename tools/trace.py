@@ -75,6 +75,12 @@ CATEGORIES = frozenset({
     "compute",
     "human_wait",
     "marker",
+    # An orchestrator's subagent dispatch: the interval from asking for the
+    # work to holding its result. Its own category because it is neither the
+    # agent's work (which the harness reports separately) nor a tool span, and
+    # because the residual it explains is otherwise indistinguishable from
+    # operator-side work done while a stage marker happened to be open.
+    "dispatch",
 })
 
 # Per-category allowed attr keys (plan section 3.3). Anything not listed here
@@ -106,6 +112,12 @@ _ALLOWED_ATTRS: dict[str, frozenset[str]] = {
     "human_wait": frozenset({
         "gate_kind", "waited_s",
     }),
+    # agent_reported_s is what the harness says the subagent itself took; the
+    # span's own duration is the whole dispatch. The difference is round-trip
+    # cost, which is the only thing this category exists to expose.
+    "dispatch": frozenset({
+        "stage_name", "agent_kind", "agent_reported_s", "attempt",
+    }),
     "marker": frozenset({
         "marker_kind", "stage_name", "attempt_outcome",
     }),
@@ -126,7 +138,7 @@ _ENUM_ATTRS = frozenset({
     "provider_name", "model_name", "prompt_version", "retry_reason_code",
     "lock_kind", "schema_name", "argv0", "subcommand", "gate_kind",
     "marker_kind", "stage_name", "attempt_outcome",
-    "unit_hash",
+    "unit_hash", "agent_kind",
 })
 _ENUM_MAX_LEN = 64
 _ENUM_EXTRA_CHARS = frozenset("._-:/")

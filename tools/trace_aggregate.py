@@ -345,11 +345,21 @@ def summarize_stage_attempts(spans: list[dict],
     human_intervals = [interval for span in spans
                        if span.get("category") == "human_wait"
                        for interval in [_wall_interval(span)] if interval is not None]
+    # `dispatch` is excluded from tool intervals on purpose: it CONTAINS the
+    # subagent's own work, so folding it in would report the agent's thinking
+    # time as observed tool time and drive unattributed_active_s to ~0 -- the
+    # exact false precision the T13 naming exists to avoid. It is summarised
+    # separately below, where the round trip stays distinguishable from the
+    # work it wraps.
     tool_spans = [span for span in spans
-                  if span.get("category") not in ("marker", "human_wait")
+                  if span.get("category") not in ("marker", "human_wait", "dispatch")
                   and span.get("op") not in STAGE_ATTEMPT_OPS
                   and _wall_interval(span) is not None]
     tool_intervals = [_wall_interval(span) for span in tool_spans]
+
+    dispatch_spans = [span for span in spans
+                      if span.get("category") == "dispatch"
+                      and _wall_interval(span) is not None]
 
     # Spans that NAME their owning stage (trace.py resolves it from the marker
     # directory at write time). These are attributable even when stage windows
@@ -567,6 +577,40 @@ def summarize_stage_attempts(spans: list[dict],
     # that it did. Counting it as incomplete coverage would mean a run can
     # never report complete coverage merely because an invalidation happened,
     # which is a normal event. It still contributes no duration.
+    # Per-stage dispatch accounting. Recorded dispatches split a stage's
+    # residual into the round trip (structural, engineerable) and whatever else
+    # sat inside the marker window (operator-side work, one person's habits).
+    # A stage with no recorded dispatch keeps nulls rather than zeros: zero
+    # would claim the round trip was measured and found to be nothing.
+    for stage_name, entry in by_stage.items():
+        entry.setdefault("dispatch_count", 0)
+        entry.setdefault("dispatch_wall_s", None)
+        entry.setdefault("dispatch_round_trip_s", None)
+    for span in dispatch_spans:
+        stage_name = (span.get("attrs") or {}).get("stage_name")
+        if not isinstance(stage_name, str):
+            continue
+        entry = by_stage.setdefault(stage_name, {
+            "attempt_count_observed": 0, "closed_attempt_count": 0,
+            "failed_attempt_count": 0, "open_attempt_count": 0,
+            "abandoned_attempt_count": 0,
+            "total_attempt_active_wall_s": 0.0,
+            "passed_attempt_active_wall_s": 0.0, "human_wait_s": 0.0,
+            "observed_tool_overlap_s": 0.0, "unattributed_active_s": 0.0,
+            "attribution_complete": True, "skipped": False,
+            "dispatch_count": 0, "dispatch_wall_s": None,
+            "dispatch_round_trip_s": None,
+        })
+        duration = float(span.get("duration_s") or 0.0)
+        entry["dispatch_count"] += 1
+        entry["dispatch_wall_s"] = round(
+            (entry["dispatch_wall_s"] or 0.0) + duration, 6)
+        reported = (span.get("attrs") or {}).get("agent_reported_s")
+        if isinstance(reported, (int, float)):
+            entry["dispatch_round_trip_s"] = round(
+                (entry["dispatch_round_trip_s"] or 0.0)
+                + max(duration - float(reported), 0.0), 6)
+
     settled = {"complete", "abandoned"}
     coverage = {
         "run_state_attempts_expected": len(expected_keys),
