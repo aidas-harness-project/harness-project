@@ -1231,6 +1231,20 @@ DEFERRED, with why:
 - **`fork_case` rewrites only top-level `case_id`.** Embedded case-id-derived
   paths (backup_path, file_path, redacted_text_path) still point at the source
   case after a fork. Deferred.
+
+  *Re-measured 2026-08-14, forking CASE_142 and again CASE_144.* This is not a
+  cosmetic staleness: the fork READS the source case's files. CASE_143 (forked
+  from CASE_142) had all 22 documents pointing at `data/raw/CASE_142/...`
+  despite its own copies existing, so the branch was not isolated at all and
+  had to be discarded and re-intaken from `_source-cases/` instead. After child
+  PDFs stopped being materialized the exposure shrank to the 5 bundle entries
+  (CASE_145 forked from CASE_144) -- smaller, not fixed, and the bundles are
+  exactly the files OCR reads. Provenance itself survives a fork intact
+  (`source_file_name`, page ranges and `source_pdf_sha256` compared field by
+  field across CASE_144 -> CASE_145: zero differences), so what breaks is
+  WHICH case's bytes get read, not the record of where a document came from.
+  Worth raising above "deferred": any A/B whose two arms both fork the same
+  parent will silently share raw inputs.
 - **Frontend has no auth / CSRF / rate limits.** ACCEPTED, not fixed: per review
   decision the pipeline viewer is a localhost-only dev tool. The one D1-relevant
   frontend hole (serving ground-truth files) WAS fixed. If the frontend is ever
