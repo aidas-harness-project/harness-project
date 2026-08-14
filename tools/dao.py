@@ -4622,11 +4622,19 @@ def _invalidate_dependents(case_id, upstream_stage, reason, held_by, run_id,
     try:
         state = load_run_state(case_id)
         changed = []
+        abandoned = []
         for entry in state.get("stages", []):
             if entry.get("stage_name") not in dependents:
                 continue
             if entry.get("status") not in ("passed", "in_progress"):
                 continue
+            # An in_progress stage has an OPEN attempt marker. Invalidating it
+            # without closing that marker leaves the attempt open forever, and
+            # aggregate-trace then reports the whole run as incomplete coverage
+            # for a stage that demonstrably stopped. Collect the close here and
+            # emit after the write, so a failed write emits nothing.
+            if entry.get("status") == "in_progress" and entry.get("attempt_count", 0) > 0:
+                abandoned.append((entry.get("stage_name"), entry["attempt_count"]))
             entry["status"] = "failed"
             entry["invalidated_at"] = now_iso()
             entry["invalidation_reason"] = reason
@@ -4646,6 +4654,10 @@ def _invalidate_dependents(case_id, upstream_stage, reason, held_by, run_id,
                 print(f"  - {error}")
             return []
         save_run_state(case_id, state)
+        for stage_name, attempt in abandoned:
+            _emit_stage_attempt_marker(
+                case_id, run_id, stage_name, attempt, "abandoned",
+                outcome="interrupted")
         print(f"INVALIDATED (upstream {upstream_stage} changed): "
               f"{', '.join(sorted(changed))}")
         return changed
@@ -4696,6 +4708,7 @@ def _invalidate_policy_layer(case_id, reason, held_by, run_id,
     try:
         state = load_run_state(case_id)
         changed = []
+        abandoned = []
         for entry in state.get("stages", []):
             if entry.get("stage_name") not in affected:
                 continue
@@ -4704,6 +4717,12 @@ def _invalidate_policy_layer(case_id, reason, held_by, run_id,
             # an already-invalidated case changes nothing and still succeeds.
             if entry.get("status") not in ("passed", "in_progress"):
                 continue
+            # See _invalidate_dependents: an in_progress stage's attempt marker
+            # is open, and this cascade is exactly what ends that attempt. The
+            # policy stage itself is in `affected` here, so this is the path
+            # that left CASE_142's attempt 1 open with no end marker.
+            if entry.get("status") == "in_progress" and entry.get("attempt_count", 0) > 0:
+                abandoned.append((entry.get("stage_name"), entry["attempt_count"]))
             entry["status"] = "failed"
             entry["invalidated_at"] = now_iso()
             entry["invalidation_reason"] = reason
@@ -4717,6 +4736,10 @@ def _invalidate_policy_layer(case_id, reason, held_by, run_id,
                 "policy-layer invalidation would make run-state "
                 "schema-invalid: " + "; ".join(errors))
         save_run_state(case_id, state)
+        for stage_name, attempt in abandoned:
+            _emit_stage_attempt_marker(
+                case_id, run_id, stage_name, attempt, "abandoned",
+                outcome="interrupted")
         return changed
     finally:
         if not lock_already_held:

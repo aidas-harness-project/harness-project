@@ -327,5 +327,13 @@ def test_interrupted_close_leaves_duration_open(
     summary = _summary(spans, run_state_stages=dao.load_run_state("CASE_009")["stages"])
     attempt = summary["stage_attempts"][0]
     assert attempt["outcome"] == "interrupted"
-    assert attempt["pairing_status"] == "open"
+    # An abandoned attempt is settled, not still-running: its fate is recorded
+    # and no further marker is owed. It was classified `open` until
+    # 2026-08-14, which made a normal invalidation indistinguishable from a
+    # crash and kept whole runs at incomplete coverage (CASE_142).
+    assert attempt["pairing_status"] == "abandoned"
+    # The invariant this test exists for, unchanged: an interrupted attempt
+    # yields NO duration. The abandon timestamp is when the close was
+    # recorded, not when work stopped.
     assert attempt["raw_wall_s"] is None
+    assert attempt["active_wall_s"] is None

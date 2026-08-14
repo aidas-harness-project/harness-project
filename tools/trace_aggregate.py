@@ -362,9 +362,15 @@ def summarize_stage_attempts(spans: list[dict],
         elif not starts and ends:
             pairing = "orphan_end"
         elif starts and not ends:
-            pairing = "open"
+            # An abandoned marker says the attempt demonstrably stopped (a
+            # cascade invalidated it). That is not the same as an attempt still
+            # running or lost to a crash: it has a known terminal fate and owes
+            # no further marker. T13 keeps its duration null either way -- the
+            # abandon time is when the cascade ran, not when work stopped -- so
+            # this distinction is about coverage honesty, not about a duration.
+            pairing = "abandoned" if markers["abandoned"] else "open"
         elif not starts and not ends:
-            pairing = "open"  # abandoned-only diagnostic
+            pairing = "abandoned" if markers["abandoned"] else "open"
         else:
             start_wall = _parse_wall(starts[0].get("t_start_wall"))
             end_wall = _parse_wall(ends[0].get("t_start_wall"))
@@ -437,6 +443,7 @@ def summarize_stage_attempts(spans: list[dict],
             by_stage.setdefault(stage, {
                 "attempt_count_observed": 0, "closed_attempt_count": 0,
                 "failed_attempt_count": 0, "open_attempt_count": 0,
+                "abandoned_attempt_count": 0,
                 "total_attempt_active_wall_s": 0.0,
                 "passed_attempt_active_wall_s": 0.0, "human_wait_s": 0.0,
                 "observed_tool_overlap_s": 0.0, "unattributed_active_s": 0.0,
@@ -447,6 +454,7 @@ def summarize_stage_attempts(spans: list[dict],
         stage = by_stage.setdefault(item["stage_name"], {
             "attempt_count_observed": 0, "closed_attempt_count": 0,
             "failed_attempt_count": 0, "open_attempt_count": 0,
+            "abandoned_attempt_count": 0,
             "total_attempt_active_wall_s": 0.0,
             "passed_attempt_active_wall_s": 0.0, "human_wait_s": 0.0,
             "observed_tool_overlap_s": 0.0, "unattributed_active_s": 0.0,
@@ -464,6 +472,8 @@ def summarize_stage_attempts(spans: list[dict],
                 stage["failed_attempt_count"] += 1
         elif item["pairing_status"] == "open":
             stage["open_attempt_count"] += 1
+        elif item["pairing_status"] == "abandoned":
+            stage["abandoned_attempt_count"] += 1
         if item["attribution_status"] != "complete":
             stage["attribution_complete"] = False
         elif item["observed_tool_overlap_s"] is not None:
@@ -498,22 +508,29 @@ def summarize_stage_attempts(spans: list[dict],
     missing = expected_keys - observed_keys
     pairing_counts = {name: sum(1 for item in attempts if item["pairing_status"] == name)
                       for name in ("complete", "open", "orphan_end",
-                                   "duplicate_marker", "invalid_order")}
+                                   "duplicate_marker", "invalid_order",
+                                   "abandoned")}
+    # An abandoned attempt is ACCOUNTED FOR: a cascade ended it and recorded
+    # that it did. Counting it as incomplete coverage would mean a run can
+    # never report complete coverage merely because an invalidation happened,
+    # which is a normal event. It still contributes no duration.
+    settled = {"complete", "abandoned"}
     coverage = {
         "run_state_attempts_expected": len(expected_keys),
         "trace_attempts_started": sum(len(v["start"]) for v in grouped.values()),
         "trace_attempts_closed": sum(len(v["end"]) for v in grouped.values()),
         "complete_attempts": pairing_counts["complete"],
         "open_attempts": pairing_counts["open"],
+        "abandoned_attempts": pairing_counts["abandoned"],
         "orphan_end_attempts": pairing_counts["orphan_end"],
         "duplicate_marker_attempts": pairing_counts["duplicate_marker"],
         "invalid_order_attempts": pairing_counts["invalid_order"],
         "missing_marker_attempts": len(missing),
         "coverage_complete": (not missing and not (observed_keys - expected_keys)
-                              and all(item["pairing_status"] == "complete"
+                              and all(item["pairing_status"] in settled
                                       for item in attempts))
                              if run_state_stages is not None
-                             else all(item["pairing_status"] == "complete"
+                             else all(item["pairing_status"] in settled
                                       for item in attempts),
     }
     return attempts, by_stage, coverage

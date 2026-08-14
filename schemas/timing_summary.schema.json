@@ -181,7 +181,8 @@
           "enum": ["passed", "failed", "partial", "schema_failed", "finalize_refused", "interrupted", "open", "unknown"]
         },
         "pairing_status": {
-          "enum": ["complete", "open", "orphan_end", "duplicate_marker", "invalid_order"]
+          "description": "abandoned: a start marker exists and a cascade recorded that it ended this attempt. Distinct from open (still running, or lost to a crash) because the fate is known and no further marker is owed. Duration stays null either way -- the abandon timestamp is when the cascade ran, not when work stopped.",
+          "enum": ["complete", "open", "abandoned", "orphan_end", "duplicate_marker", "invalid_order"]
         },
         "started_at": { "type": ["string", "null"], "format": "date-time" },
         "ended_at": { "type": ["string", "null"], "format": "date-time" },
@@ -199,7 +200,7 @@
           "description": "active_wall_s minus observed tool overlap. This is NOT model reasoning time; it may contain any work absent from current tool spans."
         },
         "attribution_status": {
-          "enum": ["complete", "overlapping_stage_attempts", "open", "orphan_end", "duplicate_marker", "invalid_order"]
+          "enum": ["complete", "overlapping_stage_attempts", "open", "abandoned", "orphan_end", "duplicate_marker", "invalid_order"]
         },
         "in_sla_window": { "type": "boolean" }
       },
@@ -213,6 +214,7 @@
         "closed_attempt_count": { "type": "integer", "minimum": 0 },
         "failed_attempt_count": { "type": "integer", "minimum": 0 },
         "open_attempt_count": { "type": "integer", "minimum": 0 },
+        "abandoned_attempt_count": { "type": "integer", "minimum": 0 },
         "total_attempt_active_wall_s": { "type": "number", "minimum": 0 },
         "passed_attempt_active_wall_s": { "type": "number", "minimum": 0 },
         "human_wait_s": { "type": "number", "minimum": 0 },
@@ -232,6 +234,7 @@
         "trace_attempts_closed": { "type": "integer", "minimum": 0 },
         "complete_attempts": { "type": "integer", "minimum": 0 },
         "open_attempts": { "type": "integer", "minimum": 0 },
+        "abandoned_attempts": { "type": "integer", "minimum": 0 },
         "orphan_end_attempts": { "type": "integer", "minimum": 0 },
         "duplicate_marker_attempts": { "type": "integer", "minimum": 0 },
         "invalid_order_attempts": { "type": "integer", "minimum": 0 },
