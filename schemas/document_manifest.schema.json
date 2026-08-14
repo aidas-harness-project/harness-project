@@ -578,23 +578,36 @@
           }
         },
         {
-          "description": "A physical document (document_role physical or absent) must have a real raw file_path -- it may not be null the way a segment's is.",
+          "description": "A physical document (document_role physical or absent) must have a real raw file_path -- it may not be null the way a segment's is. EXCEPT a split child that declares its parent and page range: source_file_name + source_page_start/end identify it completely inside the parent, and its processed text is handed down from the parent's own OCR/redaction rather than extracted from a file of its own. Materializing a child PDF for such a document produced 44MB from an 11.4MB intake on CASE_142 -- each single-page child of a 19-page scan weighed the same 1.34MB as the whole parent, because page selection keeps the parent's unreferenced resources -- and nothing in the pipeline ever opened one: run_document_stage skips any entry whose ocr_status is already completed, which a child inheriting its parent's pages always is. This exception does NOT extend to document_role 'segment', which carries a DAO-issued page_map verified against the parent PDF itself; that check exists because a segment's text is newly extracted and its claimed page mapping has no other witness.",
           "if": {
-            "anyOf": [
+            "allOf": [
               {
-                "properties": {
-                  "document_role": {
-                    "const": "physical"
+                "anyOf": [
+                  {
+                    "properties": {
+                      "document_role": {
+                        "const": "physical"
+                      }
+                    },
+                    "required": [
+                      "document_role"
+                    ]
+                  },
+                  {
+                    "not": {
+                      "required": [
+                        "document_role"
+                      ]
+                    }
                   }
-                },
-                "required": [
-                  "document_role"
                 ]
               },
               {
                 "not": {
                   "required": [
-                    "document_role"
+                    "source_file_name",
+                    "source_page_start",
+                    "source_page_end"
                   ]
                 }
               }

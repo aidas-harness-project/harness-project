@@ -1571,6 +1571,7 @@ def build_manifest_entries(
     start_index: int,
     file_sizes: dict[int, int] | None = None,
     redaction_redistributed: bool = False,
+    child_files_written: bool = True,
 ) -> list[dict]:
     """Builds document_manifest.json entries for approved segments.
 
@@ -1582,6 +1583,18 @@ def build_manifest_entries(
     must classify against real OCR'd text, not a cropped thumbnail. That
     separation is why `provisional_document_type` is a distinct field rather than
     an early write to the real one.
+
+    `child_files_written=False` records a child that has no PDF of its own
+    because it inherited the parent's already-processed pages. It stays
+    `document_role: physical` -- it IS a range of a real physical file, named by
+    source_file_name + source_page_start/end -- and only file_path/
+    file_size_bytes go null. It is deliberately NOT modelled as
+    `document_role: segment`, whose contract is a DAO-issued page_map verified
+    against the parent PDF page by page; that verification exists for text
+    newly extracted from a parent, whose claimed page mapping has no other
+    witness, and it cannot be satisfied by a scan at all (see
+    segment_derivation.py: an ocr_segment gets no receipt because UID
+    verification may not re-run OCR).
     """
     entries = []
     for offset, segment in enumerate(segments):
@@ -1590,19 +1603,19 @@ def build_manifest_entries(
         entries.append({
             "document_id": doc_id,
             "file_name": file_name,
-            # Stage 1 writes a real child PDF into data/raw below.  That makes
-            # this a physical document in the manifest model, even though the
-            # immutable source bundle and approved source-page range remain
-            # recorded separately.  Do not model this as a processed-text
-            # segment: those have no raw file of their own and acquire a
-            # source_document_id/page_map only through the DAO's derivation
-            # receipt path after document processing.
+            # A range of a real physical file either way. When a child PDF was
+            # written this points at it; when the child inherited the parent's
+            # pages there is no file to point at, and the page range below is
+            # what identifies it. Not a processed-text `segment` -- see the
+            # docstring for why that contract does not apply here.
             "document_role": "physical",
             # Forward slashes regardless of host OS: the schema pattern requires
             # them and the value is compared against paths built elsewhere.
-            "file_path": f"data/raw/{case_id}/{file_name}",
+            "file_path": (f"data/raw/{case_id}/{file_name}"
+                          if child_files_written else None),
             "file_format": "pdf",
-            "file_size_bytes": (file_sizes or {}).get(segment["page_start"], 0),
+            "file_size_bytes": ((file_sizes or {}).get(segment["page_start"], 0)
+                                if child_files_written else None),
             "pre_flagged_type": None,
             "provisional_document_type": segment.get("provisional_document_type"),
             "source_file_name": source_file_name,
@@ -3393,6 +3406,30 @@ def _redistribute_parent_redaction(
     return True
 
 
+def _parent_ocr_available(case_id: str, bundle_id: str) -> bool:
+    """Whether this bundle was OCR'd before segmentation.
+
+    True means the children will inherit the parent's pages and no child file
+    is ever read, so writing child PDFs is pure cost. Deliberately the SAME
+    condition `_redistribute_parent_ocr` keys off -- if the two ever disagreed,
+    a case would either lose its child text or keep paying for files nothing
+    opens, and the disagreement would be invisible until a later stage failed.
+
+    An unreadable record returns False here rather than raising: the raise
+    belongs to `_redistribute_parent_ocr`, which is the call that actually needs
+    the contents, and duplicating it would report the same fault twice from
+    different places.
+    """
+    parent_record_path = ROOT / "outputs" / case_id / f"ocr_result_{bundle_id}.json"
+    if not parent_record_path.exists():
+        return False
+    try:
+        json.loads(parent_record_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return True
+
+
 @trace_mod.traced("segment.redistribute_ocr", category="io")
 def _redistribute_parent_ocr(
     *, case_id: str, bundle_id: str, segments: list[dict],
@@ -3539,8 +3576,32 @@ def split_bundle(
     written_paths: list[Path] = []
     file_sizes: dict[int, int] = {}
 
+    # A child PDF is only worth materializing when the child is what gets read.
+    # Under the post-2026-08-05 order the bundle is OCR'd and redacted BEFORE
+    # segmentation, so each child is handed the parent's pages (see
+    # _redistribute_parent_ocr below) and NOTHING opens a child file:
+    # run_document_stage.select_documents skips any entry whose ocr_status is
+    # already completed, which an inheriting child always is.
+    #
+    # Writing them anyway cost 44MB against an 11.4MB intake on CASE_142. The
+    # arithmetic is the giveaway: every single-page child of the 19-page
+    # DOC_005 weighed 1.34MB -- the same as the whole parent -- because
+    # page selection keeps the parent's unreferenced fonts and images and
+    # save() was not asked to collect them. Twelve children, twelve copies of
+    # one scan.
+    #
+    # Under the older order (split first, OCR each child afterwards) the child
+    # file IS the OCR input, so it must still be written. Both orders coexist
+    # because already-processed cases are not reprocessed.
+    inherits_parent_text = _parent_ocr_available(case_id, bundle_id)
+
     for offset, seg in enumerate(segments):
         doc_id = f"DOC_{start_index + offset:03d}"
+        if inherits_parent_text:
+            if progress:
+                progress(f"{doc_id}: inherits parent pages "
+                         f"(p{seg['page_start']}-{seg['page_end']}), no PDF written")
+            continue
         out_path = raw_dir / f"{doc_id}.pdf"
         # select() keeps the page's own resources; insert_pdf() rebuilds them
         # into a fresh document and drops the glyphs of a page whose text is
@@ -3553,10 +3614,14 @@ def split_bundle(
         # segment to vision OCR -- the failure is invisible except as cost.
         # select() mutates the document it is called on, so each segment opens
         # its own handle rather than sharing one across the loop.
+        #
+        # garbage=4 drops the objects select() left unreferenced and merges
+        # duplicates. It does not touch page content streams, so the text layer
+        # select() exists to preserve is preserved.
         with fitz.open(bundle_pdf_path) as out:
             # select is 0-based; segments are 1-based inclusive.
             out.select(list(range(seg["page_start"] - 1, seg["page_end"])))
-            out.save(out_path)
+            out.save(out_path, garbage=4, deflate=True)
         written_paths.append(out_path)
         file_sizes[seg["page_start"]] = out_path.stat().st_size  # size AFTER save
         if progress:
@@ -3600,6 +3665,7 @@ def split_bundle(
         start_index=start_index,
         file_sizes=file_sizes,
         redaction_redistributed=redistributed_redaction,
+        child_files_written=not inherits_parent_text,
     )
 
     # Mark the bundle superseded rather than deleting it: deleting orphans the
