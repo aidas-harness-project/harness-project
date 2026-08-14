@@ -24,6 +24,10 @@
       "items": { "$ref": "#/$defs/medical_reconciliation_operation" }
     },
     "medical_review_adopted": { "type": "boolean" },
+    "medical_gate_status": {
+      "description": "Whether the medical-appropriateness clearance gate applies to this run. Merge 3569d50 discarded the DAO half of the medical-review flow, so from that merge until 2026-08-14 the gate did not run at all: 53 cases exist on disk with zero medical artifacts, 9 of them with claim_analysis 'passed' through a gate that was not there. Restoring the gate retroactively would retro-fail completed runs whose evaluation results are already recorded, so it is scoped forward: a run state created from the restore onward is 'enforced', and every pre-existing run is stamped 'never_evaluated' exactly once. 'never_evaluated' is NOT a pass and NOT an exemption -- it records that the question was never asked, which is otherwise indistinguishable from 'medical_review_adopted: false' meaning 'asked and not required'. Absent on run states written before the restore that have not yet been stamped.",
+      "enum": ["enforced", "never_evaluated"]
+    },
     "migration_history": {
       "type": "array",
       "description": "Append-only audit history for explicit DAO-owned run-state schema migrations. A migration never fabricates a passed stage or silently deletes legacy state.",

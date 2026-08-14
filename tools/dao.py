@@ -156,6 +156,7 @@ import platform
 import re
 import secrets
 import shutil
+import stat
 import sys
 import time
 import unicodedata
@@ -196,6 +197,65 @@ OUTPUTS = ROOT / "outputs"
 DATA = ROOT / "data"
 FORBIDDEN_TEMPLATE = ROOT / "templates" / "forbidden-expressions.md"
 KST = timezone(timedelta(hours=9))
+
+MEDICAL_CONFIG_DIR = ROOT / "config" / "medical"
+MEDICAL_STRUCTURING_CONFIG = MEDICAL_CONFIG_DIR / "medical_structuring_v0.1.json"
+MEDICAL_PROJECTION_CONFIG = MEDICAL_CONFIG_DIR / "medical_projection_v0.1.json"
+MEDICAL_REVIEW_ROLE_CONFIG = MEDICAL_CONFIG_DIR / "medical_review_roles_v0.1.json"
+MEDICAL_REVIEW_REQUEST_CONFIG = (
+    MEDICAL_CONFIG_DIR / "medical_review_request_v0.1.json"
+)
+MEDICAL_REFERRAL_POLICY_CONFIG = (
+    MEDICAL_CONFIG_DIR / "medical_referral_policy_v0.1.json"
+)
+
+# --- POSIX/Windows portability for the medical write layer -------------------
+# The medical-review modules were authored on Linux against O_DIRECTORY,
+# O_NOFOLLOW and dir_fd-relative os.open/unlink/stat. Windows has none of the
+# four (verified: os.supports_dir_fd is empty there), so the original code
+# could not import, let alone run, on this machine -- which is why merge
+# 3569d50 kept parent1's dao.py and the whole flow went dark.
+#
+# These constants degrade the FLAGS, never the CHECKS. The symlink and
+# hardlink guards below are re-expressed with lstat-based equivalents, so a
+# Windows run still refuses to follow a link or write through a shared inode;
+# it just proves it with a different syscall. The one guarantee that is
+# genuinely POSIX-only is directory-fsync durability, and that is reported
+# honestly (see _fsync_directory) rather than silently skipped.
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_HAS_DIR_FD = os.open in os.supports_dir_fd and os.unlink in os.supports_dir_fd
+
+
+def _fsync_directory(directory: Path) -> bool:
+    """Best-effort parent-directory fsync. True when durability was confirmed.
+
+    POSIX can fsync a directory handle; Windows cannot open one at all. The
+    caller decides what an unconfirmed sync means -- this never pretends.
+    """
+    if not _O_DIRECTORY:
+        return False
+    try:
+        fd = os.open(directory, os.O_RDONLY | _O_DIRECTORY)
+    except OSError:
+        return False
+    try:
+        os.fsync(fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def _is_private_regular_file(metadata) -> bool:
+    """A managed file must be a regular file nobody else holds a link to.
+
+    st_nlink is maintained on NTFS, so the hardlink half of this check is real
+    on both platforms.
+    """
+    return stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
 
 
 def now_iso() -> str:
@@ -252,6 +312,174 @@ def atomic_write_text(path: Path, text: str) -> None:
     tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+class AtomicWriteCommittedError(OSError):
+    """The destination was replaced, but directory durability was not confirmed."""
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Durably publish exact bytes without reformatting or a trailing newline.
+
+    Ported from the medical branch. The POSIX original raised
+    AtomicWriteCommittedError when the parent-directory fsync failed; on a
+    platform with no directory handles at all there is nothing to fail, and
+    raising on every single write would make the whole flow unusable. So the
+    error keeps its exact meaning -- "the replace landed, durability did not" --
+    and is raised only where that distinction is observable.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if _O_DIRECTORY and not _fsync_directory(path.parent):
+        raise AtomicWriteCommittedError(
+            f"{path} was replaced but parent-directory durability was not confirmed"
+        )
+
+
+def atomic_create_bytes(path: Path, content: bytes) -> bool:
+    """Durably create a file once; return False if it already exists.
+
+    An existing file with identical bytes is a satisfied post-condition (the
+    caller's retry), not a conflict. Differing bytes raise -- that is a real
+    collision the caller must see.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return atomic_create_bytes_in_directory(path.parent, path.name, content)
+
+
+def atomic_create_json(path: Path, obj) -> bool:
+    """Durably create a JSON file once; return False if it already exists."""
+    return atomic_create_bytes(
+        path,
+        json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+
+
+def atomic_create_bytes_in_directory(
+    directory: Path,
+    filename: str,
+    content: bytes,
+) -> bool:
+    """Create or compare exact bytes for one private child of `directory`.
+
+    The POSIX original pinned the directory with an O_DIRECTORY|O_NOFOLLOW
+    handle and did every subsequent open/stat/unlink dir_fd-relative, so a
+    symlink swapped in mid-call could not redirect the write. Windows offers
+    no dir_fd, so the same guarantees are re-established per operation:
+
+      * the directory itself must not be a symlink (lstat, not stat);
+      * the created/inspected child must not be a symlink;
+      * the child must be a regular file with st_nlink == 1, so no hardlink
+        aliases the bytes we are about to trust.
+
+    This is a narrower window than a pinned handle, not an equivalent one. It
+    is the strongest check the platform allows, and the difference is recorded
+    here rather than left for someone to rediscover.
+    """
+    if not filename or Path(filename).name != filename:
+        raise ValueError(f"unsafe descriptor-relative filename: {filename!r}")
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(
+            f"cannot open managed directory without following links: {directory}"
+        ) from exc
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError(
+            f"cannot open managed directory without following links: {directory}"
+        )
+
+    target = directory / filename
+    try:
+        fd = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
+            0o600,
+        )
+    except FileExistsError:
+        if target.is_symlink():
+            raise ValueError(
+                f"existing managed file is not a private regular file: {target}"
+            )
+        try:
+            metadata = os.stat(target, follow_symlinks=False)
+            existing = target.read_bytes()
+        except OSError as exc:
+            raise ValueError(
+                f"cannot inspect existing managed file: {target}"
+            ) from exc
+        if not _is_private_regular_file(metadata):
+            raise ValueError(
+                f"existing managed file is not a private regular file: {target}"
+            )
+        if existing != content:
+            raise ValueError(
+                f"existing managed file content mismatch: {target}"
+            )
+        return False
+    except OSError as exc:
+        raise ValueError(f"cannot create managed file: {target}") from exc
+
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        raise
+    _fsync_directory(directory)
+    return True
+
+
+def remove_managed_file_if_content(
+    directory: Path,
+    filename: str,
+    expected: bytes,
+) -> bool:
+    """Remove one private regular child only while its exact bytes still match.
+
+    Every negative answer is a refusal to delete, never an exception: the
+    caller is rolling back and must not be derailed by a file that already
+    changed underneath it.
+    """
+    if not filename or Path(filename).name != filename:
+        raise ValueError(f"unsafe descriptor-relative filename: {filename!r}")
+    target = directory / filename
+    try:
+        if directory.is_symlink() or target.is_symlink():
+            return False
+        metadata = os.stat(target, follow_symlinks=False)
+        if not _is_private_regular_file(metadata):
+            return False
+        if target.read_bytes() != expected:
+            return False
+        current = os.stat(target, follow_symlinks=False)
+    except OSError:
+        return False
+    # Re-check identity: a swap between the read and the unlink would
+    # otherwise delete a file whose contents we never verified.
+    if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+        return False
+    try:
+        target.unlink()
+    except OSError:
+        return False
+    _fsync_directory(directory)
+    return True
 
 
 def _restore_file_preimage(path: Path, preimage: bytes | None) -> None:
@@ -525,6 +753,58 @@ def acquire_lock_blocking(target: Path, held_by: str, run_id: str, purpose: str)
             polls += 1
 
 
+# --- owned-lock shim over this branch's O_EXCL lock model --------------------
+# The medical-review modules call acquire_owned_lock[_blocking]/
+# release_owned_lock, which on the Linux branch were fcntl.flock handles that
+# retained kernel ownership and deliberately never unlinked the lock pathname
+# (so a forked child could not release its parent's lock by pathname alone).
+#
+# Two reasons this is a shim rather than a port:
+#   1. fcntl does not exist on Windows, and this branch's O_EXCL +
+#      dead-owner-reclaim model is the one the user chose to keep (8d818ff,
+#      fleet-review TOCTOU fix; decision recorded 2026-08-14).
+#   2. Nothing here forks worker processes -- fork_case.py copies directories,
+#      it does not fork -- so the fork-safety the owned-lock semantics bought
+#      has no situation to protect in this codebase.
+#
+# The handle is opaque at all four call sites (verified: no attribute access on
+# the returned object anywhere in tools/medical_*.py), so carrying the target
+# is sufficient. The (lock, existing) tuple contract is preserved exactly.
+
+
+class _OwnedPathLock:
+    """Opaque handle pairing an acquired lock with the target it guards."""
+
+    def __init__(self, target: Path):
+        self.target = target
+        self.released = False
+
+
+def acquire_owned_lock(target: Path, held_by: str, run_id: str, purpose: str):
+    """Non-blocking acquire. Returns (handle, None) or (None, existing_lock)."""
+    existing = acquire_lock(target, held_by, run_id, purpose)
+    if existing is not None:
+        return None, existing
+    return _OwnedPathLock(target), None
+
+
+def acquire_owned_lock_blocking(target: Path, held_by: str, run_id: str,
+                                purpose: str):
+    """Blocking acquire with the same tuple contract as acquire_owned_lock."""
+    existing = acquire_lock_blocking(target, held_by, run_id, purpose)
+    if existing is not None:
+        return None, existing
+    return _OwnedPathLock(target), None
+
+
+def release_owned_lock(lock: "_OwnedPathLock") -> None:
+    """Idempotent release. Double-release is a no-op, matching the original."""
+    if lock is None or lock.released:
+        return
+    release_lock(lock.target)
+    lock.released = True
+
+
 # ------------------------------------------------------------- run-state --
 
 def run_state_path(case_id: str) -> Path:
@@ -545,6 +825,8 @@ def load_run_state(case_id: str) -> dict:
         "stages": [],
         "human_input_status": [],
         "medical_review_adopted": False,
+        # A run state created from here on is born under the restored gate.
+        "medical_gate_status": "enforced",
     }
 
 
@@ -564,7 +846,7 @@ def _normalize_legacy_run_state(case_id: str, state: dict) -> dict:
     read unambiguously raises rather than guessing which version it belonged to.
     """
     if "run_state_version" in state:
-        return state
+        return _stamp_medical_gate_status(case_id, state)
     state = json.loads(json.dumps(state))
     evaluation_versions = set()
     for entry in state.get("human_input_status", []):
@@ -589,7 +871,7 @@ def _normalize_legacy_run_state(case_id: str, state: dict) -> dict:
         entry["stage_name"] = f"human_review_v{next(iter(evaluation_versions))}"
     state["run_state_version"] = "run_state.v0.3"
     state["medical_review_adopted"] = _medical_artifacts_present(case_id)
-    return state
+    return _stamp_medical_gate_status(case_id, state)
 
 
 def _medical_artifacts_present(case_id: str) -> bool:
@@ -607,6 +889,102 @@ def _medical_artifacts_present(case_id: str) -> bool:
             directory / "_medical_variable_revisions",
         )
     )
+
+
+def _medical_gate_applies(state: dict) -> bool:
+    """Whether the restored medical clearance gate governs this run.
+
+    Scoped forward on purpose (user decision, 2026-08-14). Between merge
+    3569d50 and the restore the gate did not exist, so 9 cases have
+    claim_analysis 'passed' without it. Enforcing retroactively would mark
+    finished runs -- several with recorded evaluation results -- as failed for
+    a check that was not running when they executed, which would rewrite
+    history rather than fix it.
+
+    A run state carrying no `medical_gate_status` predates the restore and is
+    NOT gated. It is stamped 'never_evaluated' on first touch so the record
+    says the question was never asked, rather than leaving
+    `medical_review_adopted: false` to be misread as 'asked and not required'.
+    """
+    return state.get("medical_gate_status") == "enforced"
+
+
+def _stamp_medical_gate_status(case_id: str, state: dict) -> dict:
+    """Stamp a pre-restore run state exactly once, without gating it."""
+    if state.get("medical_gate_status") is None:
+        state["medical_gate_status"] = "never_evaluated"
+    return state
+
+
+# --- medical-review paths and revision loading -------------------------------
+# Thin delegations to tools/medical_repository.py and
+# tools/medical_review_ledger.py, which survived merge 3569d50 intact. The
+# adjudication logic lives there and is deliberately NOT reimplemented here --
+# these restore the DAO-side entry points those modules call back into.
+
+
+def medical_variables_path(case_id: str) -> Path:
+    import medical_repository
+
+    return medical_repository.medical_variables_path(
+        sys.modules[__name__], case_id)
+
+
+def medical_variable_revisions_dir(case_id: str) -> Path:
+    import medical_repository
+
+    return medical_repository.revisions_dir(sys.modules[__name__], case_id)
+
+
+def medical_review_ledger_path(case_id: str) -> Path:
+    from medical_review_ledger import ledger_path
+
+    return ledger_path(sys.modules[__name__], case_id)
+
+
+def _load_medical_revision(
+    case_id: str, revision_sha: str | None
+) -> tuple[dict | None, str | None]:
+    import medical_repository
+
+    return medical_repository.load_revision(
+        sys.modules[__name__], case_id, revision_sha
+    )
+
+
+def load_medical_review_ledger(case_id: str) -> dict:
+    from medical_review_ledger import load_ledger
+
+    return load_ledger(sys.modules[__name__], case_id)
+
+
+def _reconciliation_request(
+    case_id: str,
+    run_id: str,
+    operation_id: str,
+    ledger_sha256: str,
+) -> dict:
+    request = {
+        "case_id": case_id,
+        "run_id": run_id,
+        "operation_id": operation_id,
+    }
+    if operation_id.startswith("medical-projection:"):
+        request["medical_review_ledger_sha256"] = ledger_sha256
+    return request
+
+
+def _reconciliation_receipt_sha(operation: dict) -> str:
+    fields = {
+        key: operation[key]
+        for key in (
+            "operation_id",
+            "request_sha256",
+            "medical_review_ledger_sha256",
+            "completed_at",
+        )
+    }
+    return hashlib.sha256(_canonical_json_bytes(fields)).hexdigest()
 
 
 def save_run_state(case_id: str, state: dict) -> None:
@@ -1730,7 +2108,24 @@ def cmd_read_ground_truth(args):
 
 @traced_read("dao.read_contract")
 def cmd_read_contract(args):
+    # The medical contracts are owned by purpose-built commands: the ledger and
+    # the immutable revisions are never readable through the generic path, and
+    # a target that is a symlink or carries extra hardlinks is refused rather
+    # than read. Checked BEFORE the existence probe, so a refusal cannot be
+    # turned into an oracle for whether protected state exists.
+    # Resolve the path FIRST so a traversal attempt still exits hard, the way
+    # it did before this guard existed -- a refusal that merely returns 1 would
+    # downgrade a path-safety violation into an ordinary failure.
     p = _require_within(case_dir(args.case_id), args.filename)
+    try:
+        import medical_repository
+
+        medical_repository.require_generic_read_allowed(
+            sys.modules[__name__], args.case_id, args.filename
+        )
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
     if not p.exists():
         print(f"NOT_FOUND: {p}")
         return 1
@@ -1739,9 +2134,34 @@ def cmd_read_contract(args):
 
 
 def read_contract_data(case_id: str, filename: str):
-    """DAO-owned structured contract read for in-process pipeline tools."""
+    """DAO-owned structured contract read for in-process pipeline tools.
+
+    Carries the same medical-ownership guard as the CLI path. In-process
+    callers are the ones that matter most here: a pipeline tool importing the
+    DAO would otherwise reach protected state that `read-contract` refuses,
+    which is exactly the "guard on one path, nothing on the other" shape this
+    repo has closed three times already.
+    """
+    import medical_repository
+
+    medical_repository.require_generic_read_allowed(
+        sys.modules[__name__], case_id, filename
+    )
     p = _require_within(case_dir(case_id), filename)
     return load_json(p)
+
+
+def read_generic_file_bytes(case_id: str, filename: str) -> bytes:
+    """Read an allowed generic file, refusing medical-owned targets."""
+    import medical_repository
+
+    medical_repository.require_generic_target_allowed(
+        sys.modules[__name__], case_id, filename
+    )
+    medical_repository.require_generic_read_allowed(
+        sys.modules[__name__], case_id, filename
+    )
+    return _require_within(case_dir(case_id), filename).read_bytes()
 
 
 def _effective_segmentation_status(document: dict) -> str:
@@ -4777,6 +5197,18 @@ def cmd_write_text(args):
             f"FAIL: {args.filename} is DAO-owned and cannot be replaced "
             "through write-text -- use its dedicated issuing command")
         return 1
+    # Medical-owned contracts need a path-aware check, not a basename one: the
+    # immutable revisions live in a subdirectory, so matching on name alone
+    # would let `_medical_variable_revisions/<sha>.json` through.
+    try:
+        import medical_repository
+
+        medical_repository.require_generic_target_allowed(
+            sys.modules[__name__], args.case_id, args.filename
+        )
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
     return _write_text_locked(args.case_id, args.filename, args.text_file, args.held_by, args.run_id, args.purpose)
 
 
@@ -5798,6 +6230,19 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
                 print(f"  - {b}")
             return None
 
+        # Medical-appropriateness clearance. Deliberately consulted HERE, on
+        # the real transition path, rather than only defined: the flag this
+        # replaces was written by three call sites and read by none, which is
+        # why the gate went dark for 53 cases without anything failing. A test
+        # drives cmd_finalize_stage itself for the same reason.
+        try:
+            _require_transition_medical_clearance(
+                case_id, state.get("run_id"), state, stage, status)
+        except ValueError as exc:
+            print(f"REFUSED: cannot advance run-state for {target}:")
+            print(f"  - {exc}")
+            return None
+
         stages = state["stages"]
         entry = next((s for s in stages if s["stage_name"] == stage), None)
         if entry is None:
@@ -6233,6 +6678,20 @@ def _finalize_stage(case_id, run_id, stage, held_by):
                 print(f"  - {b}")
             return None
 
+        # Medical-appropriateness clearance, enforced on the finalize path as
+        # well as on _update_run_state. These are two independent routes to
+        # 'passed' -- finalize-stage does NOT delegate to _update_run_state --
+        # so a gate wired into only one of them is a gate with a way around
+        # it. Found exactly that way: the finalize test kept passing with the
+        # _update_run_state call deleted, because it was refusing for an
+        # unrelated policy-layer reason instead.
+        try:
+            _require_transition_medical_clearance(
+                case_id, state.get("run_id"), state, stage, "passed")
+        except ValueError as exc:
+            print(f"REFUSED: cannot finalize {stage!r} -- medical clearance: {exc}")
+            return None
+
         # P6. The guardrail says a stage proceeds only once every conflict
         # entry for the case reads resolved or false_positive, and pipeline.md
         # calls screening_report "gated on check-conflicts-clear". Neither was
@@ -6471,6 +6930,30 @@ def conflict_ledger_path(case_id: str) -> Path:
     return case_dir(case_id) / "_conflict_ledger.json"
 
 
+def ensure_conflict_ledger(case_id: str, held_by: str, run_id: str) -> dict:
+    """Initialize a zero-conflict ledger under DAO control, or return the
+    existing one. Restored for the medical publication path, which requires a
+    valid canonical conflict ledger before it will publish."""
+    target = conflict_ledger_path(case_id)
+    existing_lock = acquire_lock_blocking(
+        target, held_by, run_id, "initialize canonical conflict ledger"
+    )
+    if existing_lock is not None:
+        raise ValueError("conflict ledger remained locked")
+    try:
+        if target.exists() or target.is_symlink():
+            return validated_conflict_ledger(case_id)
+        ledger = validated_conflict_ledger(case_id, allow_missing=True)
+        errors = _schema_check(ledger, "conflict_ledger.schema.json")
+        if errors:
+            raise ValueError(
+                "generated conflict ledger is invalid: " + "; ".join(errors))
+        atomic_write_json(target, ledger)
+        return ledger
+    finally:
+        release_lock(target)
+
+
 def load_conflict_ledger(case_id: str) -> dict:
     """The conflict ledger, upgraded to the history-tracked shape if needed.
 
@@ -6661,6 +7144,241 @@ def cmd_check_conflicts_clear(args):
     clear = not pending
     print(json.dumps({"clear": clear, "pending": pending}))
     return 0 if clear else 1
+
+
+# ------------------------------------------------- medical review (T48) --
+# Restored after merge 3569d50 discarded parent2's dao.py wholesale. The
+# adjudication logic was never lost -- it lives in tools/medical_repository.py
+# and tools/medical_review_ledger.py, which the merge kept. What went missing
+# was every DAO-side entry point those modules are called through, which left
+# them dead code: 53 cases on disk, zero medical artifacts, and a clearance
+# gate that no longer ran.
+
+POST_MEDICAL_STAGES = {
+    "denial_response",
+    "consistency_check",
+    "screening_report",
+    "draft_report_v1",
+    "critic_v1",
+    "human_review_v1",
+    "denial_validation",
+    "draft_report_v2",
+    "critic_v2",
+    "human_review_v2",
+}
+
+
+def _medical_clearance_required(
+    state: dict,
+    stage: str,
+    status: str | None = None,
+    *,
+    snapshot: bool = False,
+) -> bool:
+    """Whether this transition must prove medical clearance first.
+
+    `claim_analysis` is gated regardless of `medical_review_adopted`: the
+    medical variables are an INPUT to that stage, so "this case has no medical
+    review yet" is exactly the condition the gate exists to catch, not an
+    exemption from it. Every later stage is gated only once the case has
+    adopted the flow.
+    """
+    if not _medical_gate_applies(state):
+        return False
+    if stage == "claim_analysis":
+        return snapshot or status == "passed"
+    if not state.get("medical_review_adopted", False):
+        return False
+    return stage in POST_MEDICAL_STAGES and (
+        snapshot or status in {"in_progress", "passed"}
+    )
+
+
+def _require_transition_medical_clearance(
+    case_id: str,
+    run_id: str,
+    state: dict,
+    stage: str,
+    status: str | None = None,
+    *,
+    snapshot: bool = False,
+) -> None:
+    if not _medical_clearance_required(state, stage, status, snapshot=snapshot):
+        return
+    from medical_review_ledger import require_clearance
+
+    require_clearance(sys.modules[__name__], case_id, run_id)
+
+
+def cmd_write_medical_variables(args):
+    import medical_repository
+
+    return medical_repository.publish(sys.modules[__name__], args)
+
+
+def cmd_read_medical_variables(args):
+    import medical_repository
+
+    return medical_repository.cmd_read_variables(sys.modules[__name__], args)
+
+
+def cmd_read_medical_evidence(args):
+    import medical_repository
+
+    return medical_repository.cmd_read_evidence(sys.modules[__name__], args)
+
+
+def cmd_check_medical_reviews_clear(args):
+    from medical_review_ledger import cmd_check_clear
+
+    return cmd_check_clear(sys.modules[__name__], args)
+
+
+def _run_medical_review_mutation(command, args):
+    """Fence every ledger mutation to the canonical run owner, then project
+    the resulting waits back into run state."""
+    state_path = run_state_path(args.case_id)
+    owned_lock, existing_lock = acquire_owned_lock_blocking(
+        state_path,
+        args.held_by,
+        args.run_id,
+        "authorize canonical medical-review run owner",
+    )
+    if existing_lock is not None:
+        print(
+            f"LOCKED: held_by={existing_lock['held_by']} "
+            f"run_id={existing_lock['run_id']}"
+        )
+        return 1
+    assert owned_lock is not None
+    try:
+        try:
+            state = validated_run_state(args.case_id, allow_missing=True)
+        except ValueError as exc:
+            print(f"BLOCKED: {exc}")
+            return 1
+        owner = state.get("run_id")
+        if owner is None:
+            variables, error = _load_medical_revision(args.case_id, None)
+            if (
+                error
+                or variables is None
+                or variables.get("run_id") != args.run_id
+            ):
+                print(
+                    "BLOCKED: medical-review mutation does not match the "
+                    "canonical revision run owner"
+                )
+                return 1
+            state["run_id"] = args.run_id
+            save_run_state(args.case_id, state)
+        elif owner != args.run_id:
+            print(
+                "BLOCKED: medical-review mutation does not match the "
+                "canonical run owner")
+            return 1
+        result = command(sys.modules[__name__], args)
+    finally:
+        release_owned_lock(owned_lock)
+    if result == 0:
+        from medical_review_ledger import reconcile_wait_projection
+
+        projected, _, error = reconcile_wait_projection(
+            sys.modules[__name__], args, blocking=False, automatic=True
+        )
+        if not projected:
+            print(
+                "WARNING: canonical medical-review mutation succeeded but "
+                f"run-state wait projection requires reconciliation: {error}"
+            )
+    return result
+
+
+def cmd_open_medical_review_item(args):
+    from medical_review_ledger import cmd_open
+
+    return _run_medical_review_mutation(cmd_open, args)
+
+
+def cmd_record_medical_referral_decision(args):
+    from medical_review_ledger import cmd_record_decision
+
+    return _run_medical_review_mutation(cmd_record_decision, args)
+
+
+def cmd_provide_medical_review_information(args):
+    from medical_review_ledger import cmd_provide_information
+
+    return _run_medical_review_mutation(cmd_provide_information, args)
+
+
+def cmd_transition_medical_review(args):
+    from medical_review_ledger import cmd_transition
+
+    return _run_medical_review_mutation(cmd_transition, args)
+
+
+def cmd_reconcile_medical_review_waits(args):
+    from medical_review_ledger import reconcile_wait_projection
+
+    projected, changed, error = reconcile_wait_projection(
+        sys.modules[__name__], args
+    )
+    if not projected:
+        print(f"FAIL: medical-review wait reconciliation failed: {error}")
+        return 1
+    print(json.dumps({
+        "case_id": args.case_id,
+        "changed": changed,
+        "reconciled": True,
+    }))
+    return 0
+
+
+def cmd_read_medical_review_ledger(args):
+    from medical_review_ledger import cmd_read_ledger
+
+    return cmd_read_ledger(sys.modules[__name__], args)
+
+
+def cmd_read_medical_review_evidence(args):
+    from medical_review_ledger import cmd_read_evidence
+
+    return cmd_read_evidence(sys.modules[__name__], args)
+
+
+def cmd_read_medical_review_outcomes(args):
+    from medical_review_ledger import cmd_read_outcomes
+
+    allowed_consumers = {
+        "screening_report",
+        "denial_validation",
+        "draft_report_v1",
+        "draft_report_v2",
+    }
+    if args.caller_stage not in allowed_consumers:
+        print("BLOCKED: caller stage is not authorized for medical-review outcomes")
+        return 1
+    try:
+        state = validated_run_state(args.case_id)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"BLOCKED: {exc}")
+        return 1
+    if state.get("run_id") != args.run_id:
+        print("BLOCKED: outcome read does not match the canonical run owner")
+        return 1
+    stage = next(
+        (
+            item
+            for item in state.get("stages", [])
+            if item.get("stage_name") == args.caller_stage
+        ),
+        None,
+    )
+    if stage is None or stage.get("status") != "in_progress":
+        print("BLOCKED: authorized outcome consumer stage is not in progress")
+        return 1
+    return cmd_read_outcomes(sys.modules[__name__], args)
 
 
 # --------------------------------------------------- human-review ledger --
@@ -10489,6 +11207,94 @@ def build_parser():
     p = sub.add_parser("check-conflicts-clear"); p.add_argument("case_id")
     p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
     p.set_defaults(fn=cmd_check_conflicts_clear)
+
+    # --- medical review (restored after merge 3569d50; see known-gaps 48) ---
+    p = sub.add_parser("write-medical-variables")
+    p.add_argument("case_id"); p.add_argument("data_file")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.add_argument("--purpose")
+    p.set_defaults(fn=cmd_write_medical_variables)
+
+    p = sub.add_parser("read-medical-variables")
+    p.add_argument("case_id"); p.add_argument("--revision-sha")
+    p.set_defaults(fn=cmd_read_medical_variables)
+
+    p = sub.add_parser("read-medical-evidence")
+    p.add_argument("case_id"); p.add_argument("locator_id")
+    p.set_defaults(fn=cmd_read_medical_evidence)
+
+    p = sub.add_parser("check-medical-reviews-clear")
+    p.add_argument("case_id")
+    p.set_defaults(fn=cmd_check_medical_reviews_clear)
+
+    p = sub.add_parser("reconcile-medical-review-waits")
+    p.add_argument("case_id")
+    p.add_argument("--operation-id", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_reconcile_medical_review_waits)
+
+    p = sub.add_parser("open-medical-review-item")
+    p.add_argument("case_id"); p.add_argument("--issue-id", required=True)
+    p.add_argument("--decision-owner", required=True, choices=["policy", "human"])
+    p.add_argument("--operation-id", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_open_medical_review_item)
+
+    p = sub.add_parser("record-medical-referral-decision")
+    p.add_argument("case_id"); p.add_argument("review_item_id")
+    p.add_argument("decision_file")
+    p.add_argument("--operation-id", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_record_medical_referral_decision)
+
+    p = sub.add_parser("provide-medical-review-information")
+    p.add_argument("case_id"); p.add_argument("review_item_id")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--operation-id", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_provide_medical_review_information)
+
+    p = sub.add_parser("transition-medical-review")
+    p.add_argument("case_id"); p.add_argument("review_item_id")
+    p.add_argument(
+        "--action",
+        required=True,
+        choices=[
+            "provide_information",
+            "assign",
+            "request_information",
+            "supplement_package",
+            "reassign",
+            "submit_response",
+            "amend_response",
+            "withdraw_response",
+            "flag_conflict",
+            "adjudicate",
+            "cancel",
+            "close",
+            "reopen",
+        ],
+    )
+    p.add_argument("--data-file")
+    p.add_argument("--reason")
+    p.add_argument("--operation-id", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_transition_medical_review)
+
+    p = sub.add_parser("read-medical-review-ledger")
+    p.add_argument("case_id")
+    p.set_defaults(fn=cmd_read_medical_review_ledger)
+
+    p = sub.add_parser("read-medical-review-evidence")
+    p.add_argument("case_id"); p.add_argument("review_item_id")
+    p.add_argument("request_id"); p.add_argument("request_version", type=int)
+    p.add_argument("locator_id")
+    p.set_defaults(fn=cmd_read_medical_review_evidence)
+
+    p = sub.add_parser("read-medical-review-outcomes")
+    p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)
+    p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_read_medical_review_outcomes)
 
     p = sub.add_parser("read-human-review-ledger"); p.add_argument("case_id")
     p.set_defaults(fn=cmd_read_human_review_ledger)
