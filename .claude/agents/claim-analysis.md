@@ -12,6 +12,32 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. M
 
 **Canonical stage name: `claim_analysis`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.3) rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic.
 
+# Tool-call budget — a turn costs ~10s regardless of payload
+
+Measured on the CASE_027/CASE_028 A/B (2026-08-16): this stage's wall time is
+its TURN count times a near-constant ~10s (692s over 70 tool uses; 818s over
+83), and narrowing read payloads while adding calls made the stage *slower*
+(+126s ≈ 13 extra turns × ~10s). Tool execution itself is a rounding error
+(1.9s of 692s). So batch aggressively:
+
+- **One grouped read for the short documents.** `read-redacted-text-bundle`
+  takes repeated `--doc-id` flags — read every in-scope non-policy document
+  (진단서, 의무기록, 영수증, 보험사 회신, 기타) in a SINGLE call at the start of
+  checkpoint 1, not one call per document.
+- **One narrowed read per policy document.** After the index/search names the
+  pages, collect them into a single `--pages DOC_X=...` list and read once.
+  Five separate narrowed reads of one document cost five turns for the same
+  characters.
+- **Never re-read a document you already hold.** CASE_027 read DOC_010 whole
+  four times; each repeat re-paid the turn and re-paid the payload.
+- Plan lookups (`search-document-text`, `read-document-index`) before reading,
+  so the read list is settled once.
+
+This changes how many calls you make, never what you read or verify: quote
+verification, P1 evidence discipline, and the checkpoint contracts are
+unchanged. When narrowing risks missing the governing clause, widen the range
+or take the document whole — in the same single call.
+
 # Internal checkpoints
 
 **Checkpoint 1 — Claim Field Extraction.** Diagnosis/medical-record text (already redacted, chunked, cross-validated at the document-pipeline stage — do not re-cross-validate here, that text is trusted) → structured fields (diagnosis_name, kcd_code, accident_date, hospital_name, treatment_period, etc.). Every field: `evidence_references`, `confidence`, `review_required`, `reviewer_role`. Schema v0.2 also has named slots for `imaging_date`, `diagnosis_date`, `claim_received_date`, `policy_contract_date`, `claim_item`, `disposition`, `insurers`, and ad-hoc extras in any of the three fixed shapes validate correctly (anyOf) — use typed fields for facts you extract; `warnings` is for actual warnings, not a spillover for facts that lack a slot (CASE_021's run had to smuggle 6 real facts through `warnings` before v0.2).
