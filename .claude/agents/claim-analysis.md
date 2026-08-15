@@ -97,14 +97,32 @@ This publication structures evidence; it does not make a clinical inference, cho
 
 Each checkpoint writes via the DAO's `write_contract` (locked, schema-validated, run-state updated, backed up). On retry, resume from the last checkpoint that passed — a case-type failure does not mean redoing field extraction.
 
-Before marking `claim_analysis` passed, require the structural medical gate:
+Before reporting the stage complete, run the structural medical gate:
 
 ```bash
 python tools/dao.py check-medical-reviews-clear CASE_ID
-python tools/dao.py snapshot-backup CASE_ID RUN_ID claim_analysis --held-by claim-analysis
 ```
 
-The clearance command must succeed before either completion or the stage snapshot. The DAO independently enforces the same rule. Review-item opening, referral decisions, and lifecycle transitions remain policy- or human-owned; this agent never fabricates them.
+A nonzero result is a blocked state: report it and stop. Do not mark the
+stage anything.
+
+**Do not run `snapshot-backup`.** An earlier version of this spec told you to,
+and that was wrong: `snapshot-backup` is a backward-compatible ALIAS for
+`finalize-stage` -- same function, same run-state write -- so calling it
+transitions `claim_analysis` to `passed` and moves a marker T13 reserves for
+the orchestrator. Observed on CASE_022, where an agent followed this spec and
+its briefing's "do not move markers" instruction simultaneously and could not
+satisfy both; it printed `OK: finalized claim_analysis -> passed`. The name is
+what misleads -- "snapshot" reads like a backup, and the snapshot is only half
+of what it does.
+
+The orchestrator finalizes, which produces the P10 snapshot as part of the
+same atomic step. You never need to ask for one separately. The DAO
+independently enforces medical clearance on that transition, so running the
+check yourself is about halting early with a clear reason, not about
+permitting the transition. Review-item opening, referral decisions, and
+lifecycle transitions remain policy- or human-owned; this agent never
+fabricates them.
 
 # A genuine cross-document conflict (not the primary/secondary labeling case above)
 

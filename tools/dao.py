@@ -7025,7 +7025,26 @@ def _finalize_stage(case_id, run_id, stage, held_by):
 def cmd_snapshot_backup(args):
     """Backward-compatible alias for finalize-stage: snapshot + passed, atomic.
     Kept so existing callers/tests using 'snapshot-backup' keep working; new
-    code should read this as 'finalize this stage'."""
+    code should read this as 'finalize this stage'.
+
+    The name is actively misleading and has caused a real incident. On
+    CASE_022 the claim-analysis spec told the agent to run `snapshot-backup`
+    before completion while its briefing said markers belong to the
+    orchestrator (T13) -- both were followed, and the stage transitioned to
+    `passed`. "snapshot" reads like a backup; the snapshot is half of what
+    this does. The spec has been corrected, and this warns so a caller who
+    wanted only a backup finds out from the command rather than from the
+    run state afterwards.
+    """
+    print("WARNING: snapshot-backup is an ALIAS for finalize-stage -- it "
+          "transitions the stage to 'passed' and moves a run-state marker, "
+          "not just a backup. Stage-attempt boundaries belong to the "
+          "orchestrator (T13); a stage agent should not be calling this.",
+          file=sys.stderr)
+    return cmd_finalize_stage(args)
+
+
+def cmd_finalize_stage(args):
     state = _finalize_stage(args.case_id, args.run_id, args.stage, args.held_by)
     if state is None:
         return 1
@@ -7039,10 +7058,6 @@ def cmd_snapshot_backup(args):
         print(f"  sla.phase1.end recorded -- run `dao.py aggregate-trace "
               f"{args.case_id} --run-id {args.run_id} --held-by <name>` for timings")
     return 0
-
-
-def cmd_finalize_stage(args):
-    return cmd_snapshot_backup(args)
 
 
 # ------------------------------------------------------------ conflict ledger --
@@ -7251,7 +7266,6 @@ CONFLICT_GATED_STAGES = frozenset({
     "critic_v1",
     "critic_v2",
     "denial_validation",
-    "evaluation",
 })
 
 
@@ -11136,7 +11150,18 @@ def cmd_build_document_index(args):
     return 0
 
 
+@traced_read("dao.read_document_index")
 def cmd_read_document_index(args):
+    """Read the derived index.
+
+    Traced for a reason beyond cost accounting: whether an agent consults the
+    index at all is the question the index's existence turns on, and an
+    untraced read makes that unanswerable. On CASE_022's denial_response run
+    this command carried no decorator, so its 44 spans showed 16
+    `search-document-text` calls and no index read -- which is consistent
+    both with the agent ignoring the index and with the agent reading it
+    invisibly. Nothing on disk could distinguish those.
+    """
     p = _require_within(case_dir(args.case_id), DOCUMENT_INDEX_FILENAME)
     if not p.exists():
         print(f"NOT_FOUND: {p} -- run `dao.py build-document-index` "

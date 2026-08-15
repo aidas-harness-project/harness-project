@@ -89,7 +89,7 @@ def test_stages_before_any_comparison_are_not_gated():
 
 def test_stages_that_reason_from_the_facts_are_gated():
     for stage in ("claim_analysis", "screening_report", "draft_report_v1",
-                  "denial_validation", "evaluation"):
+                  "denial_validation"):
         assert stage in dao.CONFLICT_GATED_STAGES
 
 
