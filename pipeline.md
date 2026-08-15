@@ -1,7 +1,7 @@
 ---
 type: Architecture
 title: Loss-Adjustment Pipeline
-description: Stage/agent map, taxonomy, and I/O contracts for the loss-adjustment harness. Redesigned from a coworker's rough draft into the shape actually implemented -- see CLAUDE.md's changelog for what changed and why.
+description: Stage/agent map, taxonomy, and I/O contracts for the loss-adjustment harness. Redesigned from a coworker's rough draft into the shape actually implemented -- see `CHANGELOG.md` for what changed and why.
 tags: [pipeline, agent-harness]
 ---
 
@@ -24,7 +24,7 @@ per-child classification/redaction → chunking) → policy/claim analysis →
 screening report → draft report v1. 10 top-level stages (redesigned down
 from an 18-step draft; several old steps turned out to be redundant or
 wrongly ordered once P8's cross-validation and the DAO's guardrail hooks
-were worked through -- see CLAUDE.md's changelog).
+were worked through -- see `CHANGELOG.md`).
 
 | # | Stage | Agent | Notes |
 |---|---|---|---|

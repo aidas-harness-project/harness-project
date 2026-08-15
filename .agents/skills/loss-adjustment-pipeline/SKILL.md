@@ -389,4 +389,4 @@ entries. `active_s: n/a` means a marker is missing, not that the run was instant
 Phase 0 ledger check was skipped or run without `--run-id`. Read it back later with
 `dao.py read-timing-summary CASE_ID`. `HARNESS_TRACE=0` disables tracing entirely.
 
-At the end of a run (or when halted), report to the user: per-stage pass/fail/pending status from `_run_state.json`, validation PASS/FAIL/SKIP tally, `review_required` count and routing (손사/의사), any partial/warning list, and next actions (e.g. awaiting human review). Ask for feedback — this harness evolves from it, see the root `CLAUDE.md` changelog.
+At the end of a run (or when halted), report to the user: per-stage pass/fail/pending status from `_run_state.json`, validation PASS/FAIL/SKIP tally, `review_required` count and routing (손사/의사), any partial/warning list, and next actions (e.g. awaiting human review). Ask for feedback — this harness evolves from it, see `CHANGELOG.md`.

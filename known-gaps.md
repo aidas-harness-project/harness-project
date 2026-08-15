@@ -8,7 +8,7 @@ undecided. Each entry: what's missing/broken, why it matters, what closes it.
 **Conventions** (enforced by `tests/test_known_gaps_index.py`, so they cannot
 drift back): every item carries a unique number and a status token in its
 `##` header -- `OPEN` / `PARTIAL` / `RISK ACCEPTED` / `RESOLVED` / `FIXED`.
-Items are cited by number from `CLAUDE.md`'s changelog and `open-decisions.md`,
+Items are cited by number from the harness changelog (`CHANGELOG.md`, formerly in `CLAUDE.md`) and `open-decisions.md`,
 so numbers are **never reused or reassigned** once referenced; when a
 collision had to be broken, the item nothing cited was the one renumbered.
 A header must not say `OPEN` above a body announcing a fix -- update both in
