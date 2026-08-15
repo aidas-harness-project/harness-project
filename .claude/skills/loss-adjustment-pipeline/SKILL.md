@@ -252,7 +252,7 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
 | 2 | Document Processing | `document-pipeline` | (a) bundle OCR (`--bundle-ocr`, no classification) → (b) bundle redaction → (c) **segmentation**: propose/approve/split, children inherit the bundle's pages → (d) per-child classification → (e) per-child redaction → (f) case-wide chunking. All under `document_processing`; segmentation sits *inside* because processing runs on both sides of it |
 | 3 | Indexing (adapter, optional) | (tool, no agent) | pass-through by default; no-op unless enabled |
 | 4 | Policy Clause Processing | (driver, no agent) | `run_policy_pipeline_driver.py` after the UID preflight. Normalization retired 2026-08-15, so there is no extraction to delegate; the driver records the manifest fingerprint and the orchestrator finalizes. Policy text stays fully processed, chunked and citable |
-| 5 | Claim Analysis | `claim-analysis` | (a) field extraction + medical-variable content derivation, (b) coverage ID, (c) case-type classification + canonical medical-variable publication, (d) requirement matching, then medical clearance before pass/snapshot |
+| 5 | Claim Analysis | `claim-analysis` | (a) field extraction + medical-variable content derivation, (b) coverage ID, (c) case-type classification + canonical medical-variable publication, (d) requirement matching, then medical clearance before pass/snapshot. Tell it in the briefing whether `_document_index.json` exists (see below) |
 | 6 | Consistency Check | `consistency-check` | conflict-ledger-gated — any disagreement halts via `_conflict_ledger.json`, not an inline ad-hoc halt |
 | 7 | Screening Report | `screening-report` | consumes `denial-response`'s output as a dependency if an insurer-response document exists — not phase-gated |
 | 8 | Draft Report v1 | `draft-report` | same agent reused for v2 in Phase 2 |
@@ -270,6 +270,32 @@ v1 draft/critic lane. Do not open publishable `screening_report` while an
 insurer-response input exists but `denial_reason_result.json` is absent. Each
 concurrent member retains its own locks, attempt boundary, result handling, and
 downstream gate; a phase label is never a reason to delay a ready stage.
+
+**Name the document index in the briefing when one exists.** The policy driver
+writes `_document_index.json` -- every article heading in the case's policy
+documents with its page and owning 약관, plus any table whose row/column
+structure was recovered from the PDF. Confirm it is there
+(`dao.py read-document-index CASE_ID --run-id RUN_ID`), then tell
+`claim-analysis`, `denial-response` and `critic` to start clause lookup from
+it rather than scanning chunks. If the read returns `NOT_FOUND`, say nothing
+about it: a briefing that promises a file the case does not have is worse
+than one that omits it.
+
+This is one of the few things that genuinely belongs in a briefing. It is not
+contract state the agent should read for itself -- it is which TOOLS are
+prepared for this run, which only you know. The rule about keeping contract
+values out is unchanged: never list document types, page counts, or what the
+index contains.
+
+**It is not a gate and must not become one.** Nothing blocks on the index and
+no contract references it; an agent without one falls back to
+`search-document-text` and the chunks. Making it required would recreate what
+killed clause normalization -- an obligation nothing could reliably discharge,
+bypassed rather than met. But an advisory artifact nobody is told about is the
+*other* failure this project keeps hitting (`raw_page_text`,
+`medical_review_adopted`: written by several call sites, read by none), so
+naming it in the briefing is what keeps it from being a file that exists and
+goes unused.
 
 **Claim-analysis medical gate**: after the agent publishes its evidence-derived candidate with `write-medical-variables`, do not mark `claim_analysis` passed or call `snapshot-backup` until `python tools/dao.py check-medical-reviews-clear CASE_ID` succeeds. The DAO also rejects both transitions without clearance. The orchestrator does not open review items, choose referral policy, or stand in for a human decision.
 
