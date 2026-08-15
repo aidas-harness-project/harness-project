@@ -124,10 +124,13 @@ def test_pending_and_failed_never_have_prerequisites():
 def test_unknown_stage_is_fail_closed():
     """Part 11I reversed this. It used to assert that an unlisted stage was
     permissive -- which made inventing a stage name the cheapest way past the
-    whole graph, and left `evaluation` (the sole ground-truth exception) with
-    no prerequisite at all. Both are now closed: every canonical stage has an
-    entry, and a name that is not one of them is refused."""
-    assert sd.requires("evaluation") == ("critic_v1",)
+    whole graph. That is now closed: a name that is not one of the canonical
+    stages is refused for every target status.
+
+    `evaluation` used to be asserted here as the sole ground-truth exception.
+    It is no longer a canonical stage at all -- local Units 1-7 execution is
+    forbidden pending the isolated Unit 11 service -- so it is now correctly
+    refused by this same rule rather than carrying a prerequisite."""
     blockers = sd.check_dependencies("not_a_real_stage", "in_progress", _state())
     assert any("unknown stage" in b for b in blockers), blockers
     # Refused for every target status, not only advancement.
