@@ -105,6 +105,58 @@ def test_unreadable_policy_fails_closed_toward_unapproved(
     assert dao._medical_operations_approved() is False
 
 
+def _seed_enforced_run_state(case_id):
+    state = {
+        "run_state_version": "run_state.v0.3",
+        "case_id": case_id,
+        "run_id": "RUN_20260816_001",
+        "created_at": "2026-08-16T00:00:00+09:00",
+        "updated_at": "2026-08-16T00:00:00+09:00",
+        "stages": [],
+        "human_input_status": [],
+        "medical_review_adopted": False,
+        "medical_gate_status": "enforced",
+    }
+    path = dao.run_state_path(case_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+
+def test_check_clear_command_agrees_with_the_gate_it_fronts(
+        tmp_path, monkeypatch, isolated_dao, capsys):
+    """`check-medical-reviews-clear` must apply the SAME rule as the
+    transitions it guards. While the operator policy is unapproved,
+    `finalize-stage claim_analysis` passes (gate not applicable) -- so the
+    pre-pass check exiting 1 on the missing ledger is a contradiction, not
+    caution. CASE_028 stalled exactly there: all four contracts written, the
+    agent reported "blocked" per its spec, and the run sat `in_progress`.
+    Reintroducing the defect (deleting the gate-applies pre-check in
+    `cmd_check_medical_reviews_clear`) fails this test."""
+    _write_policy(tmp_path, monkeypatch)  # shipped state: unapproved
+    _seed_enforced_run_state("CASE_9601")
+    args = type("A", (), {"case_id": "CASE_9601"})()
+    assert dao.cmd_check_medical_reviews_clear(args) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"clear": True, "gate": "not_applicable"}
+
+
+def test_check_clear_command_still_fails_closed_when_the_gate_applies(
+        tmp_path, monkeypatch, isolated_dao, capsys):
+    """The alignment must not weaken the gated side: approved policy +
+    enforced run + missing ledger is still a hard block."""
+    _write_policy(
+        tmp_path, monkeypatch,
+        operations_enabled=True,
+        approval={"approved_by": "medical lead",
+                  "effective_from": "2026-09-01"},
+        actors=[{"actor_id": "a1"}])
+    _seed_enforced_run_state("CASE_9602")
+    args = type("A", (), {"case_id": "CASE_9602"})()
+    assert dao.cmd_check_medical_reviews_clear(args) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["clear"] is False
+
+
 def test_never_evaluated_is_still_ungated_under_an_approved_policy(
         tmp_path, monkeypatch):
     """Approving the policy must not retro-fail the 53 pre-restore runs -- the

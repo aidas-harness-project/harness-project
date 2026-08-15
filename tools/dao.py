@@ -7507,6 +7507,35 @@ def cmd_read_medical_evidence(args):
 def cmd_check_medical_reviews_clear(args):
     from medical_review_ledger import cmd_check_clear
 
+    # The check must apply the SAME rule as the transitions it guards.
+    # `_require_transition_medical_clearance` waives clearance entirely when
+    # `_medical_gate_applies` is False (pre-restore run, or operator policy
+    # unapproved), so `finalize-stage claim_analysis` passes -- while this
+    # command, left gate-blind, failed closed on the missing ledger. CASE_028
+    # stalled exactly there: all four contracts written, agent reported
+    # "blocked" per its spec, run left `in_progress` forever. A pre-pass check
+    # that disagrees with the gate it fronts is worse than no check.
+    #
+    # The waiver is deliberately NARROWER than the transition gate's: it also
+    # requires that the case carries no medical artifacts on disk. A case that
+    # HAS published medical state owes ledger integrity regardless of policy
+    # activation -- a missing or malformed ledger there is a real integrity
+    # failure, not an inapplicable gate (pinned by
+    # test_no_issue_publication_clears_but_missing_or_malformed_ledger_blocks).
+    # The artifact-free short-circuit is exactly the CASE_027/028/029 shape:
+    # publication refused by the deferred configuration, nothing on disk.
+    # Any error reading run state falls through to the delegate, which fails
+    # closed -- unreadable state must not manufacture clearance.
+    try:
+        state = validated_run_state(args.case_id, allow_missing=True)
+    except ValueError:
+        state = None
+    if (state is not None and not _medical_gate_applies(state)
+            and not _medical_artifacts_present(args.case_id)):
+        print(json.dumps({"clear": True, "gate": "not_applicable"},
+                         sort_keys=True))
+        return 0
+
     return cmd_check_clear(sys.modules[__name__], args)
 
 
