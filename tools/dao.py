@@ -2511,21 +2511,38 @@ def _canonical_uid_finalize_blockers(case_id: str, doc_id: str) -> list[str]:
 
 
 def _automated_policy_documents(manifest: dict) -> list[dict]:
-    """The policy documents that owe a normalized clause contract.
+    """The policy documents that owe a normalized clause contract: NONE.
 
-    Narrow on purpose: `automated_text_pipeline` is the opt-IN to
-    normalization. A `text_only_no_normalization` policy document is fully
-    processed and citable but owes no clause contract, so it is out of scope
-    HERE while remaining in scope for anything about its text -- see
-    `_text_processed_policy_documents`.
+    RETIRED 2026-08-15. Clause normalization is no longer produced by any
+    stage, so nothing owes a clause contract and this scope is permanently
+    empty. The function is kept rather than inlined as `[]` because its
+    callers are the completion gate and the audit/inventory checks, and a
+    named empty scope states WHY they clear where a bare literal would read
+    as an oversight.
+
+    Measured grounds, on the shipped corpus rather than a projection: 211
+    policy documents across 4 pre-2026-08-04 cases carry
+    `automated_text_pipeline`, and 5 clause files were ever produced (2.4%),
+    all in CASE_030 -- whose policy stage is `failed` regardless. CASE_112
+    marked 203 documents, produced 0, and reads `passed` only through a
+    hand-edited `manual_override` that says as much in its own text. A gate
+    nothing can satisfy is not satisfied; it is bypassed, and the bypass then
+    has to be maintained.
+
+    Normalization also never replaced source addressing: a normalized clause
+    still carries `evidence_references: [{document_id, page, quote}]`
+    internally (CASE_030 DOC_004 `CI-a5a6241c6e63996f`), so the UID layered
+    on top of the very addressing it was meant to supersede. It classifies
+    clauses; it does not select them, and selection is what the analysis
+    stages actually spend their time on.
+
+    Deliberately NOT done: removing `automated_text_pipeline` from the
+    manifest enum. Four legacy cases record it, CASE_112 is still forked from,
+    and rewriting those manifests would falsify how those runs really
+    executed -- the same reasoning that keeps `document_segmentation` in the
+    run_state enum. The value stays readable; the obligation is what is gone.
     """
-    return [
-        d for d in (manifest or {}).get("documents", [])
-        if (
-            d.get("document_type") == "insurance_policy"
-            and d.get("downstream_disposition") == "automated_text_pipeline"
-        )
-    ]
+    return []
 
 
 def _text_processed_policy_documents(manifest: dict) -> list[dict]:
@@ -2620,9 +2637,42 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
     if not text_processed_policy_docs:
         return ["no text-processed insurance_policy document is registered"]
 
-    # Only the opted-in documents owe a normalized clause contract; the checks
-    # below are scoped to them.
-    policy_docs = _automated_policy_documents(manifest)
+    # One scope, permanently empty: `_automated_policy_documents` (see there
+    # for the measured grounds). Everything this loop asks for -- clause
+    # contract, boundary inventory, clause audit, parent coverage, and the
+    # P0-8 table disposition -- was an obligation toward normalization, and
+    # normalization is retired as of 2026-08-15.
+    #
+    # The P0-8 TABLE gate goes with it, and that is the non-obvious half.
+    # Mid-change it was moved to the wider text-processed scope, on the
+    # reasoning that "does this PDF contain an unaccounted table" survives
+    # independently. Running it settled the question the other way: the gate
+    # demands a document be SCANNED and every candidate DISPOSITIONED into a
+    # `reference_table` contract or an explicit exclusion -- and the stage
+    # that wrote `reference_table` went away with normalization. Keeping the
+    # demand without its means of discharge is how CASE_112's
+    # `manual_override` happened: a gate nobody can satisfy is not satisfied,
+    # it is bypassed, and the bypass is what ends up in the record.
+    #
+    # Measured before deciding, on CASE_142's two born-digital policy PDFs
+    # (323 pages): the detector finds 55 candidates and extracts all 55
+    # cleanly, but 24 are single-row and 44 are two-column -- term-definition
+    # boxes (`치료비 | 치료비라 함은...`) and blank intake forms
+    # (`시설명세 | 명칭: 용도:`) that are tables only typographically. Seven
+    # have four or more rows, and exactly one is substantive: DOC_010 p13's
+    # 지연이자율표. Blocking a stage over 55 findings to protect one is the
+    # wrong instrument.
+    #
+    # Detection itself is worth keeping and is NOT what is being retired here
+    # -- it is the only thing that recovers row/column structure from a
+    # born-digital policy, because embedded-text extraction flattens that
+    # table into `기 간 / 지 급 이 자 / 지급기일의... / 보험계약대출이율`,
+    # losing which value belongs to which period. That belongs in a derived
+    # index the analysis stages can read, not in a finalize gate; planned as
+    # follow-up with the clause index, since both exist to stop an agent
+    # hunting through 323 chunks for something the page states plainly.
+    normalization_docs = _automated_policy_documents(manifest)
+    policy_docs = normalization_docs
 
     schemas, registry = load_registry()
     # What each policy document owes is DECLARED (policy_processing_role) and
@@ -2674,6 +2724,15 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
         # tables a second time as the parent's unhandled candidates.
         if role != "segmented_parent":
             blockers.extend(_table_region_finalize_blockers(case_id, doc_id))
+
+        # Everything below this line is the NORMALIZED-CLAUSE obligation
+        # (clause contract, boundary inventory, clause audit, parent
+        # coverage), retired 2026-08-15 and scoped to `normalization_docs`,
+        # which is empty. The table gate above is a separate obligation and
+        # runs for every text-processed policy document, which is why the
+        # split happens here rather than at the loop header.
+        if doc not in normalization_docs:
+            continue
 
         if role == "segmented_parent":
             # Normalization is delegated to its segments; parent-coverage
@@ -2830,8 +2889,14 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
     # unresolved (review_required/extraction_failed) page. CASE_030's 133
     # unowned pages (front matter, 별표 appendix, referenced laws) are exactly
     # what this catches.
+    # Named `normalization_docs` rather than `policy_docs` even though the two
+    # are now the same list: parent coverage proves a parent's pages are
+    # accounted for by segments that NORMALIZE them, so it belongs to the
+    # retired obligation by meaning, not just by current value. If a later
+    # change reintroduces a wider policy scope, this must not follow it by
+    # accident.
     physical_parents = [
-        d for d in policy_docs
+        d for d in normalization_docs
         if d.get("document_role") != "segment"
     ]
     for parent in physical_parents:
@@ -4532,6 +4597,21 @@ def promote_policy_document(case_id: str, document_id: str, policy_processing_ro
 
 
 def cmd_promote_policy_document(args):
+    # DEPRECATED 2026-08-15. Retained so pre-2026-08-04 records stay
+    # explicable, and because refusing outright would strand a case that
+    # somehow still owes a clause contract. Measured grounds for retirement:
+    # 211 documents were marked `automated_text_pipeline` across 4 legacy
+    # cases and 5 clause files were ever produced (2.4%), while a normalized
+    # clause still addresses its source by {document_id, page, quote}
+    # internally -- so the UID never replaced source addressing, it layered on
+    # top of it. The warning goes to stderr so piped JSON consumers are
+    # unaffected.
+    print("WARNING: promote-policy-document is DEPRECATED (2026-08-15). "
+          "Policy clauses are addressed by {document_id, page, quote} against "
+          "the processed text; normalization adds cost without changing which "
+          "clause an agent must still select. Promoting demotes "
+          "policy_clause_processing to failed and obliges a clause contract "
+          "that no current stage produces.", file=sys.stderr)
     ok, message = promote_policy_document(
         args.case_id, args.doc_id, args.policy_processing_role,
         args.disputed_by, args.held_by, args.run_id, purpose=args.purpose)

@@ -28,15 +28,33 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. M
    Mapping is bidirectional: every clause-declared boundary must exist and point back
    to that clause, and every normalized boundary must be declared by its target clause.
 
-**You do not normalize every policy document in the case.** Normalization is
-opt-IN, carried by the manifest's `downstream_disposition`: a policy document
-is classified into `text_only_no_normalization` and owes nothing here, while
-one promoted to `automated_text_pipeline` owes the full contract set. Both are
-processed, chunked and citable either way — the difference is only this stage's
-obligation. The reason is cost against consumption: a 145-page 약관 bundle
-carries 800+ conditions, and no downstream stage reads the normalized buckets.
-`denial-response` and `claim-analysis` address a clause by `document_id`, page
-and quoted text, verified verbatim against the processed source.
+**You do not normalize anything. Clause normalization is RETIRED (2026-08-15)**
+— sub-phases 1-4 above describe a contract set that no longer exists, and are
+retained only so the pre-2026-08-04 records stay readable. Every policy
+document is `text_only_no_normalization`: processed, redacted, chunked and
+citable, owing no clause contract. There is nothing for this stage to extract.
+
+Because of that, **this stage is normally not dispatched at all.** The
+orchestrator runs `tools/run_policy_pipeline_driver.py`, which records the
+manifest fingerprint and finalizes. If you were dispatched anyway, verify via
+`document_manifest.json` that every `insurance_policy` document reads
+`text_only_no_normalization`, report that the stage is a no-op, and stop. Do
+not produce a clause contract, a boundary inventory, or an audit result; the
+completion gate no longer asks for them and writing one would create an
+artifact nothing verifies.
+
+Why it was retired, measured on the shipped corpus: 211 policy documents
+across 4 legacy cases carry `automated_text_pipeline` and **5 clause files
+were ever produced** (2.4%), all in CASE_030 — whose policy stage is `failed`
+regardless. CASE_112 marked 203 and produced 0, reading `passed` only through
+a hand-edited `manual_override` that says so itself. Cost was ~813 provider
+calls per 145-page bundle, and the batch never once completed.
+
+And it bought no addressing strength: a normalized clause still carries
+`evidence_references: [{document_id, page, quote}]` internally, so the UID
+layered on top of source addressing instead of replacing it. `denial-response`
+and `claim-analysis` address a clause by `document_id`, page and quoted text,
+verified verbatim against the processed source — the same way they always did.
 
 So a case whose policy documents are all `text_only_no_normalization` finalizes
 this stage with zero normalized contracts, and that is a real pass, not a

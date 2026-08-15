@@ -40,27 +40,31 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. P
    - `match_source: agent_inferred` when you independently find a potentially relevant clause, with an empty insurer-citation array, populated clause evidence, and `review_required: true` routed to `손해사정사`.
    - no match at all when the link is unsupported. An empty `policy_matches` array plus a specific warning is safer than a plausible but wrong link.
 
-**You name which policy documents get normalized.** A policy document is
-classified `text_only_no_normalization` and owes no clause contract unless
-promoted (see `policy-pipeline`). You read the insurer's own citations, so you
-are the stage that learns which policy document a case actually turns on.
-Promote exactly those, and only after you have identified a real dispute:
+**Do not promote a policy document to normalization.** `promote-policy-document`
+is DEPRECATED as of 2026-08-15 and this stage no longer calls it. Cite policy
+clauses by `{document_id, page, quote}` against the processed text, as below —
+that is the only addressing form this pipeline uses.
 
-```
-python tools/dao.py promote-policy-document CASE_ID DOC_ID \
-    --policy-processing-role {standalone_policy|segmented_parent|clause_segment|reference_table_only|mixed_clause_and_table} \
-    --disputed-by "R04 / PM-1" --held-by denial-response --run-id RUN_ID
-```
+Why it is retired rather than merely discouraged: normalization is measurably
+not worth its cost, and the measurement is on the shipped corpus, not a
+projection. 211 policy documents across 4 pre-2026-08-04 cases carry
+`automated_text_pipeline`; **5 clause files were ever produced** (2.4%), all in
+CASE_030, whose policy stage is nonetheless `failed`. CASE_112 marked 203
+documents and produced 0, and its stage reads `passed` only through a
+hand-edited `manual_override` that says so in its own text. A gate nothing can
+satisfy does not get satisfied — it gets bypassed.
 
-`--disputed-by` records which denial reason or `policy_match` motivates it.
-Promoting is not how you get a citable document — you can already cite any
-text-processed policy document (below) — it is how a document that the case
-genuinely disputes acquires a normalized clause contract for downstream
-addressing. Promotion demotes `policy_clause_processing` to `failed`, because
-the document now owes a contract it does not yet have; the policy stage must
-re-run and re-finalize. So do not promote speculatively: promoting every
-policy document you happen to cite would restore exactly the normalize-everything
-cost the opt-in exists to avoid.
+Nor does normalization buy addressing precision worth paying for: a normalized
+clause still carries `evidence_references: [{document_id, page, quote}]`
+internally (CASE_030 DOC_004 `CI-a5a6241c6e63996f`), so the UID layers on top
+of source addressing rather than replacing it. It classifies clauses; it does
+not select them, and selection is the expensive part. No recorded case shows a
+source-form reference that a UID would have caught.
+
+The subcommand still exists so the pre-2026-08-04 records stay explicable, and
+it now prints a deprecation warning. If a future case genuinely needs a
+normalized clause contract, that is a design decision to reopen deliberately —
+not something a stage adopts mid-run to strengthen a citation.
 
 Every extraction carries source locations (P1), classification confidence, and review routing. A location is not decorative: do not write a basis or policy match unless its cited document/page/quote was checked against the processed source available through the DAO. This contract's evidence references are `strict_evidence_reference` — `document_id`, `page`, and `quote` are all required, so a quote with no resolvable location is rejected at the write rather than accepted as grounded.
 

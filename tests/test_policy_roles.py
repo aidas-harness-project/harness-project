@@ -10,8 +10,29 @@ normalize it. The same shape let one dummy child entry exempt a whole parent.
 
 The role is now declared in the manifest and checked against the document's real
 source and real children.
+
+RETIRED 2026-08-15. A policy_processing_role declares what a document owes
+toward a NORMALIZED clause contract, and normalization is retired -- nothing
+owes one, so `check_policy_processing_roles` has an empty scope and returns no
+errors for any manifest. Every test below that asserts a role blocker
+therefore fails by construction, not by regression.
+
+Skipped at module level rather than deleted: this file is the record of what
+the role layer enforced and why inference-from-artifacts was unsafe (the shape
+described above -- "no clause contract was written" read as "no clause contract
+is owed"). Reinstating normalization means reinstating these checks, and that
+argument should not have to be rediscovered. The five tests that pass on
+structure alone are skipped with the rest so the file has one status, not two.
 """
+import pytest
+
 import policy_roles
+
+pytestmark = pytest.mark.skip(
+    reason="clause normalization retired 2026-08-15: policy_processing_role "
+           "declares an obligation toward a normalized clause contract that "
+           "no stage now produces, so check_policy_processing_roles has a "
+           "permanently empty scope")
 
 
 NARRATIVE = (

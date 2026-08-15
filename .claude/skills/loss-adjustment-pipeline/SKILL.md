@@ -138,6 +138,30 @@ digest/UID-enable DAO sequence for in-scope noncanonical policy documents and
 may invalidate stale artifacts while no policy attempt is open. A nonzero
 result is a blocked precondition: do not open or dispatch the policy stage.
 
+Skipping the preflight is not a shortcut — it moves the invalidation INSIDE the
+attempt. On CASE_142 it fired at 09:34:09 while the stage was `in_progress`,
+demoting the stage mid-run and forcing a second attempt.
+
+**Do not dispatch the policy agent. Run the driver.** Clause normalization is
+retired (2026-08-15), so every policy document is `text_only_no_normalization`
+and the stage has no extraction work:
+
+```text
+python tools/run_policy_pipeline_driver.py CASE_ID --held-by orchestrator --run-id RUN_ID
+```
+
+Then finalize through the ordinary T13 path. The driver records the manifest
+fingerprint and returns a no-op result; it BLOCKS if a normalized policy
+document somehow exists, which is a real precondition failure to report, not a
+reason to fall back to dispatching the agent.
+
+This is worth stating as a rule because dispatching cost real time for no work.
+Measured on CASE_142: the stage's two attempts spanned **370.9s** of which the
+DAO did **0.69s** (finalize + snapshot + locks), with zero provider calls and
+zero output files. The span timeline shows 75s and 91s gaps containing no tool
+activity at all — an agent reading the case to conclude there was nothing to do.
+The manifest states that outright, so the orchestrator reads it instead.
+
 **Reducing P8 for a throughput run is YOUR decision, never an agent's.**
 Stage 2's cost is dominated by dual-read OCR (the corpus is overwhelmingly
 scans), so two flags exist on `run_document_stage.py` (and pass through
@@ -227,7 +251,7 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
 | 1 | Case Intake | (orchestrator + `intake_case.py`) | D2-gated `_source_ledger.json` — the one intake decision is raw vs ground_truth, not bundle vs single document. Records under `intake` |
 | 2 | Document Processing | `document-pipeline` | (a) bundle OCR (`--bundle-ocr`, no classification) → (b) bundle redaction → (c) **segmentation**: propose/approve/split, children inherit the bundle's pages → (d) per-child classification → (e) per-child redaction → (f) case-wide chunking. All under `document_processing`; segmentation sits *inside* because processing runs on both sides of it |
 | 3 | Indexing (adapter, optional) | (tool, no agent) | pass-through by default; no-op unless enabled |
-| 4 | Policy Clause Processing | `policy-pipeline` | (a) exact boundary inventory, (b) semantic extraction, (c) reference tables, (d) version-bound audit; finalize only when every audit is current and has no open finding |
+| 4 | Policy Clause Processing | (driver, no agent) | `run_policy_pipeline_driver.py` after the UID preflight. Normalization retired 2026-08-15, so there is no extraction to delegate; the driver records the manifest fingerprint and the orchestrator finalizes. Policy text stays fully processed, chunked and citable |
 | 5 | Claim Analysis | `claim-analysis` | (a) field extraction + medical-variable content derivation, (b) coverage ID, (c) case-type classification + canonical medical-variable publication, (d) requirement matching, then medical clearance before pass/snapshot |
 | 6 | Consistency Check | `consistency-check` | conflict-ledger-gated — any disagreement halts via `_conflict_ledger.json`, not an inline ad-hoc halt |
 | 7 | Screening Report | `screening-report` | consumes `denial-response`'s output as a dependency if an insurer-response document exists — not phase-gated |

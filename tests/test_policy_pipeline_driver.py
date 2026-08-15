@@ -50,6 +50,15 @@ def test_zero_normalization_writes_receipt_without_model(monkeypatch):
 
 
 def test_normalized_policy_is_explicitly_blocked(monkeypatch):
+    """A manifest still recording the retired `automated_text_pipeline` value
+    must hard-block, not finalize over the discrepancy.
+
+    Unreachable for anything intaken after 2026-08-04, but live for the four
+    legacy cases (CASE_112 is still forked from). Silently passing here would
+    reproduce CASE_112's `manual_override`: a stage reading `passed` with the
+    obligation neither met nor withdrawn. The message changed when
+    normalization was retired; the refusal did not.
+    """
     def fake_read(args, *, allow_missing=False):
         if args[0] == "read-contract" and args[2] == "_run_state.json":
             return {"stages": [{"stage_name": "policy_clause_processing", "status": "in_progress"}]}
@@ -58,5 +67,5 @@ def test_normalized_policy_is_explicitly_blocked(monkeypatch):
         raise AssertionError(args)
 
     monkeypatch.setattr(driver, "_dao_json", fake_read)
-    with __import__("pytest").raises(RuntimeError, match="canonical policy normalization"):
+    with __import__("pytest").raises(RuntimeError, match="normalization is retired"):
         driver.run(case_id=CASE, held_by="policy-pipeline", run_id=RUN)

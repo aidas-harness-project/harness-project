@@ -85,11 +85,20 @@ def check_policy_processing_roles(
     stubs.
     """
     errors: list[str] = []
-    policy_docs = [
-        d for d in manifest.get("documents", [])
-        if d.get("document_type") == "insurance_policy"
-        and d.get("downstream_disposition") == "automated_text_pipeline"
-    ]
+    # RETIRED 2026-08-15 along with clause normalization: a role declares what
+    # a document owes toward a NORMALIZED contract, and nothing owes one now.
+    # Kept as an empty scope rather than deleted because the caller is the
+    # policy completion gate, and a named empty scope states why it clears.
+    #
+    # This filter was a second, independent copy of the scope that
+    # `dao._automated_policy_documents` also spelled out -- the drift shape
+    # this project has been bitten by before (2026-07-17 forbidden
+    # expressions). Retiring one and leaving the other would have left the
+    # obligation half-alive: the completion gate would skip the per-document
+    # checks while this function still demanded a role for every legacy
+    # `automated_text_pipeline` entry, so the four pre-2026-08-04 cases would
+    # fail here for a contract no stage produces.
+    policy_docs: list[dict] = []
     for doc in policy_docs:
         doc_id = doc.get("document_id")
         role = declared_role(doc)

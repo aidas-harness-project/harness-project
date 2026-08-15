@@ -88,9 +88,19 @@ def run(*, case_id: str, held_by: str, run_id: str, prompt_version: str = VERSIO
     if not text_only and not normalized:
         raise RuntimeError("BLOCKED: no active text-processed insurance policy is available")
     if normalized:
+        # Retired 2026-08-15, so this is now unreachable for any case intaken
+        # after 2026-08-04 (`default_disposition` classifies every policy
+        # document `text_only_no_normalization`). It still fires for the four
+        # legacy cases whose manifests record the old value, and it must stay
+        # a hard block rather than a silent pass: those documents were marked
+        # as owing a clause contract, and quietly finalizing over that would
+        # repeat CASE_112's `manual_override` -- a stage reading `passed` with
+        # the obligation neither met nor withdrawn.
         ids = ", ".join(doc["document_id"] for doc in normalized)
-        raise RuntimeError("BLOCKED: canonical policy normalization is not implemented by this driver "
-                           f"(requires boundary/table/clause workflow): {ids}")
+        raise RuntimeError("BLOCKED: clause normalization is retired (2026-08-15) and no stage "
+                           "produces a clause contract, but these documents are still recorded "
+                           f"as owing one: {ids}. Re-classify them text_only_no_normalization "
+                           "before re-running, rather than finalizing over the discrepancy.")
     digests = {"document_manifest": _digest(manifest)}
     receipt = _dao_json(["read-driver-receipt", case_id, "--stage", STAGE,
                          "--unit-id", UNIT, "--run-id", run_id], allow_missing=True)

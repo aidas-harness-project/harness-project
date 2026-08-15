@@ -2,6 +2,8 @@
 import hashlib
 import json
 
+import pytest
+
 import dao
 import policy_completeness as pc
 
@@ -249,6 +251,7 @@ def test_normalized_schema_composite_support_requires_two_refs_and_review():
                for error in errors)
 
 
+@pytest.mark.skip(reason="clause normalization retired 2026-08-15: this asserts a per-document obligation (inventory / parent coverage / reference table) that only existed inside the normalization scope, now permanently empty. Kept, not deleted, as the record of what the gate enforced -- reinstating normalization means reinstating these.")
 def test_completion_gate_requires_inventory_for_each_policy_doc(
         isolated_dao):
     out = isolated_dao / "outputs" / "CASE_030"
@@ -311,6 +314,7 @@ def _single_page_manifest_and_norm(out):
         json.dumps(_inventory(), ensure_ascii=False), encoding="utf-8")
 
 
+@pytest.mark.skip(reason="clause normalization retired 2026-08-15: this asserts a per-document obligation (inventory / parent coverage / reference table) that only existed inside the normalization scope, now permanently empty. Kept, not deleted, as the record of what the gate enforced -- reinstating normalization means reinstating these.")
 def test_completion_gate_requires_parent_coverage_contract(isolated_dao):
     """The real CASE_030 regression: a physical policy parent with a complete
     per-document inventory but NO whole-page coverage accounting must not
@@ -328,6 +332,7 @@ def test_completion_gate_requires_parent_coverage_contract(isolated_dao):
                for b in blockers), blockers
 
 
+@pytest.mark.skip(reason="clause normalization retired 2026-08-15: this asserts a per-document obligation (inventory / parent coverage / reference table) that only existed inside the normalization scope, now permanently empty. Kept, not deleted, as the record of what the gate enforced -- reinstating normalization means reinstating these.")
 def test_parent_coverage_gap_blocks_finalize(isolated_dao):
     """A parent-coverage contract that omits some logical pages is itself a
     blocker -- declaring total=2 but only covering page 1."""
@@ -357,6 +362,7 @@ def test_parent_coverage_gap_blocks_finalize(isolated_dao):
     assert not any("missing policy_parent_coverage" in b for b in blockers)
 
 
+@pytest.mark.skip(reason="clause normalization retired 2026-08-15: this asserts a per-document obligation (inventory / parent coverage / reference table) that only existed inside the normalization scope, now permanently empty. Kept, not deleted, as the record of what the gate enforced -- reinstating normalization means reinstating these.")
 def test_parent_coverage_review_required_page_blocks_finalize(isolated_dao):
     out = isolated_dao / "outputs" / "CASE_030"
     processed = isolated_dao / "data" / "processed" / "CASE_030" / "DOC_001"
@@ -450,6 +456,7 @@ def test_segmented_parent_is_exempt_from_per_doc_normalization(isolated_dao):
     assert not any("DOC_001: missing policy_audit_result" in b for b in blockers), blockers
 
 
+@pytest.mark.skip(reason="clause normalization retired 2026-08-15: this asserts a per-document obligation (inventory / parent coverage / reference table) that only existed inside the normalization scope, now permanently empty. Kept, not deleted, as the record of what the gate enforced -- reinstating normalization means reinstating these.")
 def test_reference_table_only_segment_is_exempt_from_clauses_but_needs_inventory(
         isolated_dao):
     """A segment whose content is a reference_table (no normalized clauses) is
@@ -493,6 +500,7 @@ def test_reference_table_only_segment_is_exempt_from_clauses_but_needs_inventory
                for b in blockers), blockers
 
 
+@pytest.mark.skip(reason="clause normalization retired 2026-08-15: this asserts a per-document obligation (inventory / parent coverage / reference table) that only existed inside the normalization scope, now permanently empty. Kept, not deleted, as the record of what the gate enforced -- reinstating normalization means reinstating these.")
 def test_reference_table_only_segment_cannot_finalize_with_review_flags(
         isolated_dao):
     out = isolated_dao / "outputs" / "CASE_030"
@@ -857,15 +865,24 @@ def test_text_only_policy_document_owes_no_clause_contract(isolated_dao):
     assert not any("policy_parent_coverage" in b for b in blockers), blockers
 
 
-def test_same_document_promoted_does_owe_a_clause_contract(isolated_dao):
-    """The identical manifest, promoted, must demand the full contract set --
-    otherwise the opt-in would be indistinguishable from removing the gate."""
+def test_promoted_document_no_longer_owes_a_clause_contract(isolated_dao):
+    """Normalization retired 2026-08-15: the legacy `automated_text_pipeline`
+    value is still READABLE (four pre-2026-08-04 cases record it, and CASE_112
+    is still forked from) but no longer carries an obligation.
+
+    This test previously asserted the opposite -- that promoting demands the
+    full contract set -- and it was right to, because that was the whole point
+    of the opt-in being distinguishable from removing the gate. The gate is
+    now deliberately removed, so the assertion inverts rather than being
+    deleted: what must be pinned is that a legacy manifest does not become
+    unfinalizable for a contract no stage produces.
+    """
     _seed_policy_case(isolated_dao, "automated_text_pipeline")
 
     blockers = dao._policy_completion_blockers("CASE_030")
 
-    assert any("normalized_policy_clause_DOC_001.json" in b for b in blockers), \
-        blockers
+    assert not any("normalized_policy_clause" in b for b in blockers), blockers
+    assert not any("policy_processing_role" in b for b in blockers), blockers
 
 
 def test_case_with_no_text_processed_policy_document_still_refuses(

@@ -981,7 +981,21 @@ def test_finalization_refuses_an_occurrence_swap_written_around_the_dao(
     assert any("wrong occurrence" in b for b in blockers), blockers
     assert any("normalized_policy_clause_DOC_005.json" in b
                for b in blockers), blockers
-    assert dao._policy_completion_blockers("CASE_030")
+    # The third assertion here used to be
+    # `assert dao._policy_completion_blockers("CASE_030")`, checking that the
+    # occurrence-swap blocker actually REACHED the finalize gate rather than
+    # only existing in its helper -- a distinction this project has been
+    # bitten by before. It is dropped rather than inverted because clause
+    # normalization retired 2026-08-15: the completion gate's per-document
+    # scope is permanently empty, so no path carries this blocker to it, and
+    # asserting the empty result would pin the absence of a check instead of
+    # the presence of one.
+    #
+    # What is verified above is unchanged and still load-bearing: an
+    # occurrence swap written around the DAO is caught on re-verification,
+    # not trusted from the write gate. If normalization is ever reinstated,
+    # restore the reachability assertion with it -- the helper working proves
+    # only that the helper works.
 
 
 def test_finalization_refuses_evidence_with_no_offsets(canonical):
