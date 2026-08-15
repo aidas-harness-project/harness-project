@@ -91,6 +91,44 @@ def test_quote_validator_applies_dao_whitespace_rule_and_rejects_absent_quote():
         driver._validate_cp1_output(body, bundle, schema)
 
 
+def test_cp1_transport_schema_natively_rejects_scalar_field_members():
+    """The 2026-08-16 arm E failure shape: a scalar `confidence` inside
+    `fields` must be rejected by the TRANSPORT schema (at generation time),
+    not merely by the local gate afterwards -- otherwise the P4 correction is
+    burned on a shape the native constraint could have prevented."""
+    from jsonschema import Draft202012Validator, ValidationError
+
+    validator = Draft202012Validator(driver._transport_schema())
+    good = {"status": "success", "confidence": 0.9, "review_required": False,
+            "warnings": [], "fields": {"diagnosis_name": {"value": "x"}}}
+    validator.validate(good)
+
+    bad = json.loads(json.dumps(good))
+    bad["fields"]["confidence"] = 0.72
+    with pytest.raises(ValidationError):
+        validator.validate(bad)
+
+
+def test_cp3_transport_schema_natively_rejects_misnamed_profile_keys():
+    """The second arm E failure shape: right semantics, wrong key names
+    (`mechanism`/`depth`) inside report_profile. The transport schema must
+    reject them at generation time."""
+    from jsonschema import Draft202012Validator, ValidationError
+
+    validator = Draft202012Validator(driver._transport_schema_cp3())
+    good = _cp3_body()
+    validator.validate(good)
+
+    bad = json.loads(json.dumps(good))
+    bad["report_profile"] = {"format_contract_version": "loss_adjustment_report.v1",
+                             "family": "liability_damages",
+                             "mechanism": "insured_liability",  # wrong key
+                             "depth": "full",                   # wrong key
+                             "support_status": "supported"}
+    with pytest.raises(ValidationError):
+        validator.validate(bad)
+
+
 def test_run_refuses_unless_orchestrator_opened_the_attempt(monkeypatch):
     def fake_read(args, *, allow_missing=False):
         assert args[:3] == ["read-contract", CASE, "_run_state.json"]
@@ -221,6 +259,8 @@ def _dao_fakes(monkeypatch, *, stored_candidates=None):
         payload = json.loads(open(path, encoding="utf-8").read())
         if args[0] == "write-contract":
             writes[("write-contract", args[2])] = payload
+        elif args[0] == "write-driver-candidate":
+            writes[(args[0], args[args.index("--candidate-id") + 1])] = payload
         else:
             writes[(args[0], args[args.index("--unit-id") + 1])] = payload
 
@@ -299,6 +339,26 @@ def test_cp1_candidate_reuse_skips_only_the_first_provider_call(monkeypatch):
     assert provider.calls == 4  # CP1 came from the stored candidate
     assert result["units"]["cp1_field_extraction"]["status"] == "published"
     assert ("write-contract", "extracted_claim_fields.json") in writes
+
+
+def test_selection_keeps_continuation_pages_and_drops_only_unreadable_ones(monkeypatch):
+    """The read plan admits continuation pages (indexed ceilings, not indexed
+    membership): the first arm E run burned its correction on DOC_009's
+    p3-style continuation. Pages beyond the ceiling are dropped, not fatal."""
+    writes = _dao_fakes(monkeypatch)
+    # index lists only p2; selection asks for p2, p1 (continuation-range) and p99
+    select = {"pages": [{"document_id": "DOC_009", "page": 2},
+                        {"document_id": "DOC_009", "page": 1},
+                        {"document_id": "DOC_009", "page": 99}]}
+    provider = _SequenceProvider(_valid_body(), select, _cp2_body(),
+                                 _cp3_body(), _cp4_body())
+
+    result = driver.run(case_id=CASE, held_by="claim-analysis", run_id=RUN, provider=provider)
+
+    assert result["status"] == "complete"
+    stored = writes[("write-driver-candidate", "cp2_select")]
+    assert {"document_id": "DOC_009", "page": 1} in stored["result"]["pages"]
+    assert stored["result"]["dropped"] == ["DOC_009p99"]
 
 
 def test_cp4_join_enforcement_refuses_unknown_coverage_name():

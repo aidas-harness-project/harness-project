@@ -210,6 +210,44 @@ and always including the 보통약관's 보상하는손해/면책 articles; CP4 
 same served set so an exclusion the judge call saw is visible to the
 requirements call too.
 
+## 6. VERDICT (2026-08-16): kill criterion met — plan closed as measured-negative
+
+Arm E ran to completion on CASE_034 (all four contracts published,
+DAO-validated, clause refs verified, stage finalized). The numbers end the
+plan under its own rule:
+
+| unit | successful call | failed calls actually paid |
+|---|---:|---:|
+| CP1 grouped | 253.5s (131.9s on CASE_033 — 2x call variance) | 241.5s (scalar-in-fields) |
+| CP2 select | 29.2s | 78.7s (over-strict page rule, since fixed) |
+| CP2 judge | 75.3s | — |
+| CP3 | 248.0s | 262.5s (misnamed profile keys, since fixed) |
+| CP4 | 326.0s | 322.4s (grounding, since fixed) + 180.1s (timeout) |
+| **clean composite** | **≈944s** (≈822s with best-observed CP1) | |
+
+Against agent arm C's 528.2s the driver loses by 56–79% even on the
+defect-free path. **Root cause is not the architecture's logic but the call
+economics**: a cold monolithic `claude -p` structured call at opus costs
+200–330s nearly regardless of payload (CP3's small output cost 248s; CP2's
+small select cost 29–79s only because its output is trivial), while the
+agent's warm conversation pays ~10s per incremental turn. Five cold calls
+cannot beat 47 warm turns. The v1 CASE_601 pilot (16 calls × ~40s) and this
+v2 (5 calls × ~50–330s) bracket the same wall from both sides.
+
+What survives: the driver itself is a working, resumable, guardrail-stronger
+implementation (per-unit receipts meant each fix-and-rerun reused every
+finished unit — the five debugging invocations re-paid zero completed calls),
+and its three generation-time schema hardenings are general lessons. Semantic
+output was plausible but noticeably more variant than agent runs (19
+requirements vs 10–13; first-ever `not_met`; mixed `applicable`).
+
+Reassessment paths, each a separate P2/accuracy decision, none authorized
+here: (a) `anthropic-api` provider with prompt caching and streaming instead
+of cold CLI children; (b) a faster model for the extraction-shaped calls; (c)
+a ≤2-call design (CP1+CP2 merged, CP3+CP4 merged) that accepts coarser P9
+resume. Absent one of those, **the agent path with arm C's turn-budget spec
+(528s) remains the production route for claim_analysis.**
+
 ## 5. Effort and sequence
 
 1. `tools/run_claim_analysis.py` skeleton: bundle assembly + CP1 grouped call

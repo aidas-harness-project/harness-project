@@ -180,7 +180,14 @@ def _transport_schema() -> dict:
             "review_required": {"type": "boolean"},
             "reviewer_role": {"enum": ["손해사정사", "의사", "법률전문가"]},
             "warnings": {"type": "array", "items": {"type": "string"}},
-            "fields": {"type": "object"},
+            # additionalProperties as OBJECT is load-bearing: the arm E run of
+            # 2026-08-16 died on CP1 twice because the model put a scalar
+            # `confidence: 0.72` inside `fields`, which a bare {"type":
+            # "object"} accepts natively and the local gate then refuses --
+            # burning the P4 correction on a shape the transport schema could
+            # have prevented at generation time.
+            "fields": {"type": "object",
+                       "additionalProperties": {"type": "object"}},
         },
         "required": ["status", "confidence", "review_required", "warnings", "fields"],
     }
@@ -227,7 +234,10 @@ single value {{value, normalized_value?}}, date {{value: YYYY-MM-DD|null}}, or p
 {{start_date, end_date|null, days|null}} -- each with confidence, evidence_references, and
 review_required (reviewer_role when true; 의사 for medical-judgment fields). Use these named slots
 when the fact exists: {named}. Additional facts get descriptive snake_case field names in the same
-three shapes. `warnings` is for actual warnings only, never facts that lack a slot.
+three shapes. EVERY member of `fields` must be an OBJECT in one of those three shapes -- never a
+bare string or number, and never top-level keys like status/confidence/review_required repeated
+inside `fields` (those belong at the top level only). `warnings` is for actual warnings only,
+never facts that lack a slot.
 
 Evidence discipline: every field cites at least one evidence reference with document_id, page, and
 an EXACT quote from the supplied text. A fact that is redacted or absent records value null with
@@ -392,7 +402,25 @@ def _transport_schema_cp3() -> dict:
         "secondary_case_types": {"type": "array", "items": {"type": "string"}},
         "candidate_types": {"type": "array", "items": {"type": "object"}},
         "template_id": {"type": ["string", "null"]},
-        "report_profile": {"type": "object"},
+        # Fully keyed, additionalProperties false: the second arm E run died
+        # here twice with the RIGHT semantics under the WRONG key names
+        # (`mechanism` for claim_mechanism, `depth` for mode, plus extra
+        # rationale/template_id members) -- the same generation-time shape
+        # failure as CP1's scalar-in-fields, fixed the same way: the native
+        # transport schema carries the exact keys so the model cannot spend
+        # the P4 correction on spelling.
+        "report_profile": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "format_contract_version": {"type": "string"},
+                "family": {"type": "string"},
+                "claim_mechanism": {"type": "string"},
+                "mode": {"type": "string"},
+                "support_status": {"type": "string"},
+            },
+            "required": ["format_contract_version", "family", "claim_mechanism",
+                         "mode", "support_status"],
+        },
         "evidence_references": {"type": "array", "items": {"type": "object"}},
     }, ["case_type", "case_type_source", "template_id", "report_profile",
         "evidence_references"])
@@ -419,13 +447,21 @@ def _known_quote_set(*contracts: Mapping[str, Any]) -> set[tuple]:
 
 
 def _check_ref_grounding(value: Any, served: Mapping[tuple, str],
-                         known: set[tuple], *, clause_keys: tuple = ()) -> None:
-    """Every reference must quote a SERVED page or reuse a verified quote.
+                         known: set[tuple], *, clause_keys: tuple = (),
+                         dao_verify=None) -> None:
+    """Every reference must quote a SERVED page, reuse a verified quote, or --
+    when `dao_verify` is supplied -- survive the DAO's own verification.
 
-    Clause refs (`matched_clause_ref`/`clause_ref`) are held stricter: they
-    must quote a served policy page -- reusing a claim-document quote as a
-    clause address would be a category error the DAO would reject later.
+    The local rules are the fast path; the DAO is the authority. The third arm
+    E run showed why the fallback matters: CP4 cited a real, verbatim
+    condition sentence on a page outside the local fast path and the strict
+    local rule burned the P4 correction refusing a citation the DAO's write
+    gate would have accepted. Clause refs never fall back to `known` -- a
+    claim-document quote is not a clause address -- but they may verify
+    through the DAO like any real citation.
     """
+    unresolved: list[tuple[dict, str]] = []
+
     def check_ref(ref: Mapping[str, Any], *, clause: bool) -> None:
         doc_id, page, quote = ref.get("document_id"), ref.get("page"), ref.get("quote", "")
         page_text = served.get((doc_id, page))
@@ -434,9 +470,9 @@ def _check_ref_grounding(value: Any, served: Mapping[tuple, str],
         if not clause and (doc_id, page, _norm(quote)) in known:
             return
         kind = "clause reference" if clause else "evidence reference"
-        raise ValueError(
-            f"{doc_id} p{page}: {kind} quote is neither on a served page nor "
-            "a previously verified quote")
+        unresolved.append((dict(ref), f"{doc_id} p{page}: {kind} quote "
+                                      f"{quote[:60]!r} is neither on a served "
+                                      "page nor a previously verified quote"))
 
     def walk(node: Any) -> None:
         if isinstance(node, list):
@@ -455,6 +491,33 @@ def _check_ref_grounding(value: Any, served: Mapping[tuple, str],
                 walk(child)
 
     walk(value)
+    if not unresolved:
+        return
+    if dao_verify is None:
+        raise ValueError("; ".join(message for _, message in unresolved))
+    try:
+        dao_verify([ref for ref, _ in unresolved])
+    except RuntimeError as exc:
+        raise ValueError(
+            f"{'; '.join(message for _, message in unresolved)} -- and the DAO "
+            f"could not verify them either: {str(exc)[:300]}") from exc
+
+
+def _make_dao_verifier(case_id: str, run_id: str):
+    """Batch-verify refs against the processed text through the DAO. Raises
+    RuntimeError when any reference fails, mirroring the write gate."""
+    def verify(refs: list[dict]) -> None:
+        ref_file = _temp_json({"references": refs})
+        try:
+            checked = _dao_json(["verify-evidence-references", case_id,
+                                 "--references-file", str(ref_file),
+                                 "--run-id", run_id])
+        finally:
+            ref_file.unlink(missing_ok=True)
+        verified = checked.get("verified_references", [])
+        if len(verified) != len(refs):
+            raise RuntimeError("DAO verified fewer references than submitted")
+    return verify
 
 
 def _structured_call(provider, prompt: str, transport: Mapping[str, Any],
@@ -801,20 +864,29 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
             return existing["result"]["pages"]
 
         def validate_selection(value: Mapping[str, Any]) -> dict:
+            # The selection is a READ PLAN, not evidence, so out-of-range
+            # pages are dropped rather than refused: the first arm E run
+            # burned its P4 correction on `DOC_010 p36` -- a legitimate
+            # CONTINUATION page of the p35 article that the index (which
+            # lists article START pages) does not name. Any page up to a
+            # document's highest indexed page is guaranteed readable and
+            # admits continuations; only an empty result is an error.
             Draft202012Validator(_transport_schema_select()).validate(value)
-            pages, seen = [], set()
+            ceilings = {doc_id: max(pages) for doc_id, pages in index_pages.items() if pages}
+            pages, seen, dropped = [], set(), []
             for item in value["pages"]:
                 key = (item["document_id"], item["page"])
                 if key in seen:
                     continue
-                if item["page"] not in index_pages.get(item["document_id"], set()):
-                    raise ValueError(
-                        f"{item['document_id']} p{item['page']} is not in the index listing")
                 seen.add(key)
+                if not 1 <= item["page"] <= ceilings.get(item["document_id"], 0):
+                    dropped.append(f"{item['document_id']}p{item['page']}")
+                    continue
                 pages.append({"document_id": item["document_id"], "page": item["page"]})
             if not pages:
-                raise ValueError("selection returned no valid pages")
-            return {"pages": pages[:MAX_SELECTED_PAGES]}
+                raise ValueError("selection returned no readable pages")
+            return {"pages": pages[:MAX_SELECTED_PAGES],
+                    **({"dropped": dropped} if dropped else {})}
 
         result = _structured_call(provider, _select_prompt(fields_json, listing),
                                   _transport_schema_select(), validate_selection,
@@ -852,7 +924,8 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
         def validate_cp2(value: Mapping[str, Any]) -> dict:
             Draft202012Validator(schema_cp2, format_checker=FormatChecker()).validate(value)
             _check_ref_grounding(value["coverages"], served, known,
-                                 clause_keys=("matched_clause_ref",))
+                                 clause_keys=("matched_clause_ref",),
+                                 dao_verify=_make_dao_verifier(case_id, run_id))
             return dict(value)
 
         existing = stored.get("cp2_judge")
@@ -896,7 +969,8 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
 
         def validate_cp3(value: Mapping[str, Any]) -> dict:
             Draft202012Validator(schema_cp3, format_checker=FormatChecker()).validate(value)
-            _check_ref_grounding(value, {}, known3)
+            _check_ref_grounding(value, {}, known3,
+                                 dao_verify=_make_dao_verifier(case_id, run_id))
             return dict(value)
 
         stored3 = (_dao_json(["read-driver-candidates", case_id, "--stage", STAGE,
@@ -960,7 +1034,8 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
                         f"{group.get('standardized_coverage_name')!r}; join exactly on "
                         f"checkpoint 2's standardized_coverage_name values")
             _check_ref_grounding(value["coverage_requirements"], served, known4,
-                                 clause_keys=("clause_ref",))
+                                 clause_keys=("clause_ref",),
+                                 dao_verify=_make_dao_verifier(case_id, run_id))
             return dict(value)
 
         stored4 = (_dao_json(["read-driver-candidates", case_id, "--stage", STAGE,
