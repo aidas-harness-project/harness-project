@@ -482,3 +482,61 @@ def test_fork_without_a_source_id_keeps_the_old_field_only_behaviour(tmp_path):
         (tmp_path / "outputs" / "CASE_006" / "document_manifest.json")
         .read_text(encoding="utf-8"))["documents"][0]
     assert entry["file_path"] == "data/raw/CASE_005/DOC_001.pdf"
+
+
+def test_a_fork_starts_under_the_medical_gate(tmp_path):
+    """A pre-restore source is exempt from the medical clearance gate; its
+    fork must not be.
+
+    `medical_gate_status: never_evaluated` marks a run that FINISHED before
+    the 2026-08-14 restore, and the scoping decision was not to retroactively
+    fail those. A fork is a different thing: new run_id, stages about to
+    execute again, check available now. Observed on CASE_022 (fork of the
+    pre-restore CASE_142), where `check-medical-reviews-clear` exited 1 while
+    `claim_analysis` finalized `passed` -- nothing bypassed a gate, the
+    exemption simply propagated through a copy.
+    """
+    _seed_source_case(tmp_path)
+    state_path = tmp_path / "outputs" / "CASE_005" / "_run_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["medical_gate_status"] = "never_evaluated"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    fc.copy_outputs_and_rewrite_case_id(
+        dao.case_dir("CASE_005"), "CASE_006", "CASE_005")
+
+    forked = json.loads(
+        (tmp_path / "outputs" / "CASE_006" / "_run_state.json")
+        .read_text(encoding="utf-8"))
+    assert forked["medical_gate_status"] == "enforced"
+
+
+def test_a_source_with_no_gate_status_still_yields_an_enforced_fork(tmp_path):
+    """The commoner shape: every case created before 2026-08-14 carries no
+    `medical_gate_status` at all and is stamped `never_evaluated` on first
+    touch. Copying it unchanged would hand the fork that stamp."""
+    _seed_source_case(tmp_path)
+    state_path = tmp_path / "outputs" / "CASE_005" / "_run_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.pop("medical_gate_status", None)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    fc.copy_outputs_and_rewrite_case_id(
+        dao.case_dir("CASE_005"), "CASE_006", "CASE_005")
+
+    forked = json.loads(
+        (tmp_path / "outputs" / "CASE_006" / "_run_state.json")
+        .read_text(encoding="utf-8"))
+    assert forked["medical_gate_status"] == "enforced"
+
+
+def test_a_stage_cut_fork_declares_the_gate_explicitly(tmp_path):
+    """The cut path rebuilds run state rather than copying it, so it needs the
+    field set outright -- omitting it is not neutral, since an absent value is
+    stamped `never_evaluated` on first touch."""
+    state = fc.build_stage_cut_run_state(
+        new_case_id="CASE_006", run_id="RUN_20260816_001",
+        through_stage="document_processing",
+        source_state={"stages": [{"stage_name": "intake", "status": "passed"}]})
+
+    assert state["medical_gate_status"] == "enforced"

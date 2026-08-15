@@ -453,6 +453,31 @@ def verify_stage_cut_source(source_case_id: str, source_root: Path,
             "source_state": state}
 
 
+def _enforce_medical_gate_on_fork(state: dict) -> dict:
+    """A fork starts under the medical gate, whatever its source did.
+
+    `medical_gate_status: never_evaluated` marks a run that executed before
+    the 2026-08-14 gate restore. The scoping decision behind it was narrow:
+    do not retroactively fail runs that FINISHED without a check that was not
+    running at the time. A fork is not one of those. It carries a new
+    `run_id`, its stages are about to execute again, and the check exists now
+    -- so inheriting the exemption would let a brand-new run skip the gate for
+    no reason other than the age of the case it was copied from.
+
+    Observed on CASE_022 (fork of CASE_142, a pre-restore case):
+    `check-medical-reviews-clear` exited 1 while `claim_analysis` finalized
+    `passed`. Nothing was bypassed -- `_medical_gate_applies` requires
+    `enforced` and this said `never_evaluated` -- which is exactly the
+    problem: the exemption propagated silently through a copy.
+
+    Deliberately unconditional. Reading the source's value and preserving it
+    when already `enforced` would be the same result by a longer route, and a
+    branch here would eventually be read as "sometimes a fork is exempt".
+    """
+    state["medical_gate_status"] = "enforced"
+    return state
+
+
 def build_stage_cut_run_state(*, new_case_id: str, run_id: str,
                               through_stage: str, source_state: dict) -> dict:
     """A truthful fresh run state for the cut fork.
@@ -497,6 +522,10 @@ def build_stage_cut_run_state(*, new_case_id: str, run_id: str,
         "created_at": now,
         "updated_at": now,
         "medical_review_adopted": False,
+        # Explicit, not omitted. An absent value is stamped `never_evaluated`
+        # on first touch, which would hand a freshly built fork the exemption
+        # meant for runs that finished before the gate existed.
+        "medical_gate_status": "enforced",
         "stages": stages,
     }
 
@@ -727,6 +756,8 @@ def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str,
         if source_case_id and json_path.name != "_fork_record.json":
             data = _rewrite_reconstructed_value(data, source_case_id, new_case_id)
         data["case_id"] = new_case_id
+        if json_path.name == "_run_state.json":
+            data = _enforce_medical_gate_on_fork(data)
         atomic_write_json(json_path, data)
         schema_name = schema_name_for(json_path)
         if schema_name:
