@@ -21,6 +21,36 @@ After checkpoint 1, derive the evidence-grounded medical-variable content only f
 
 **Checkpoint 2 — Coverage Identification.** Policy text (from `policy-pipeline`) + claim fields → `coverage_result.json` — an array under `coverages`, since a claim can trigger more than one coverage at once. Per coverage: `coverage_name` + `standardized_coverage_name`, `applicable` (whether its conditions are actually met by the claim's facts, not just whether the claim mentions it), `matched_clause_ref`, confidence + evidence.
 
+**Start from the document index, not from a chunk scan.** Run
+`python tools/dao.py read-document-index CASE_ID --run-id RUN_ID` first. It
+lists every article heading in the case's policy documents with the page it
+sits on and the 약관 that owns it, plus any table whose row/column structure
+was recovered from the PDF. A 323-page policy bundle yields ~564 headings, so
+locating 제38조 of the 구내치료비 추가특별약관 is a lookup rather than a
+search.
+
+Three things it does NOT do, and treating it otherwise will produce wrong
+work:
+
+- **It is candidates, not verdicts** — the same contract `search-document-text`
+  carries. It says 제38조 is on page 38. Whether that clause governs this
+  accident is your judgement, made by reading the page.
+- **It never substitutes for reading the clause.** A `matched_clause_ref`
+  quote must still be verified verbatim against the processed text; the DAO
+  refuses one that is not. Citing a heading you found in the index without
+  opening the page is exactly the fabrication P1 exists to prevent.
+- **It is derived and may be absent or stale.** No stage requires it and
+  nothing blocks on it. `NOT_FOUND` means fall back to
+  `search-document-text` and the chunks, not that the case has no clauses.
+
+Its tables matter for a reason worth knowing: a born-digital policy's
+embedded-text extraction flattens a table into a run of lines, so DOC_010
+p13's 지연이자율표 reaches you as `기 간 / 지 급 이 자 / 지급기일의 다음 날부터
+30일 이내 기간 / 보험계약대출이율 / ...` and which rate belongs to which
+period becomes positional guesswork. The index carries the rows intact. When
+a table's structure is load-bearing for a coverage or an amount, read it from
+the index and cite the page.
+
 **`matched_clause_ref` has two addressing forms; which one you use is decided by the document, not by preference.** Normalization is opt-in, so most policy documents have no clause contract:
 
 | document | form | fields |

@@ -11771,6 +11771,9 @@ def build_parser():
     p = sub.add_parser("read-document-index",
                        help="Read _document_index.json.")
     p.add_argument("case_id")
+    p.add_argument("--run-id", default=None,
+                   help="records this read's cost into the run's trace; "
+                        "omitting it still works but records nothing")
     p.set_defaults(fn=cmd_read_document_index)
 
     p = sub.add_parser("record-human-review")
