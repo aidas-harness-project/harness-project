@@ -261,10 +261,15 @@
           "minimum": 0,
           "description": "Harness-reported tool-call count summed over this stage's recorded dispatches. Distinct from the trace's own span count: this counts what the SUBAGENT called in a process the DAO never forked, so the two are expected to differ and neither corrects the other. null means not recorded."
         },
+        "dispatch_human_wait_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Seconds this stage's dispatches sat blocked on a human -- a permission prompt, a gate answer -- as reported by the orchestrator via `record-dispatch --human-wait-s`. Distinct from the stage's own human_wait_s, which counts gates opened through the DAO; a permission prompt inside a dispatch emits no span of its own and is invisible without this. Measured at 506.2s of an 862.2s dispatch on CASE_027's denial_response. null means not recorded, never 0."
+        },
         "dispatch_tokens_per_s": {
           "type": ["number", "null"],
           "minimum": 0,
-          "description": "dispatch_total_tokens divided by dispatch_wall_s. Per second of DISPATCH wall, not of the stage's marker window, which can contain operator-side work no dispatch covers. A descriptive rate for comparing stages, not a throughput guarantee. null when either input is null or the wall is zero."
+          "description": "dispatch_total_tokens divided by (dispatch_wall_s - dispatch_human_wait_s). The divisor is WORK time: a permission prompt is not model work, and dividing by raw wall reported 170 tok/s on CASE_027's denial_response for a stage that ran at ~411. Per second of dispatch work, not of the stage's marker window, which can contain operator-side work no dispatch covers. A descriptive rate for comparing stages, not a throughput guarantee. null when tokens are unrecorded or work time is zero."
         },
         "total_attempt_active_wall_s": { "type": "number", "minimum": 0 },
         "passed_attempt_active_wall_s": { "type": "number", "minimum": 0 },

@@ -127,6 +127,11 @@ _ALLOWED_ATTRS: dict[str, frozenset[str]] = {
     "dispatch": frozenset({
         "stage_name", "agent_kind", "agent_reported_s", "attempt",
         "input_tokens", "output_tokens", "total_tokens", "tool_uses",
+        # Time the dispatch sat blocked on a human (a permission prompt, a
+        # gate answer). Subtracted before any rate, because a prompt the
+        # operator took 8 minutes to answer is not model work: on CASE_027 it
+        # was 506s of an 862s stage and made 411 tok/s report as 170.
+        "human_wait_s",
     }),
     "marker": frozenset({
         "marker_kind", "stage_name", "attempt_outcome",

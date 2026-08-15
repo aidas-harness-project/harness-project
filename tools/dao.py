@@ -11004,6 +11004,15 @@ def cmd_record_dispatch(args):
               f"--input-tokens + --output-tokens "
               f"({args.input_tokens + args.output_tokens})")
         return 1
+    if args.human_wait_s is not None:
+        if args.human_wait_s < 0:
+            print("REFUSED: --human-wait-s cannot be negative")
+            return 1
+        if args.human_wait_s > args.duration_s:
+            print(f"REFUSED: --human-wait-s ({args.human_wait_s}) exceeds "
+                  f"--duration-s ({args.duration_s}) -- the wait cannot outlast "
+                  "the dispatch that contains it")
+            return 1
     if args.agent_reported_s is not None:
         if args.agent_reported_s < 0:
             print("REFUSED: --agent-reported-s cannot be negative")
@@ -11041,6 +11050,9 @@ def cmd_record_dispatch(args):
         if value is not None:
             attrs[key] = value
 
+    if args.human_wait_s:
+        attrs["human_wait_s"] = args.human_wait_s
+
     span_id = trace_mod.closed_interval(
         "dispatch.subagent", category="dispatch",
         t_start_wall=args.started_at, duration_s=args.duration_s,
@@ -11050,13 +11062,33 @@ def cmd_record_dispatch(args):
     if span_id is None:
         print("NOTE: tracing produced no span -- nothing recorded")
         return 0
+    if args.human_wait_s:
+        # A real human_wait span, so the SLA subtraction that already exists
+        # applies to a permission prompt exactly as it does to a gate. Anchored
+        # to the dispatch start rather than the prompt's real moment, which the
+        # orchestrator does not observe: the DURATION is what gets subtracted,
+        # and placing it inside the dispatch window is what makes that correct.
+        trace_mod.closed_interval(
+            "dispatch.human_wait", category="human_wait",
+            t_start_wall=args.started_at, duration_s=args.human_wait_s,
+            case_id=args.case_id, gate_kind="dispatch_permission",
+            waited_s=args.human_wait_s)
+
     round_trip = (args.duration_s - args.agent_reported_s
                   if args.agent_reported_s is not None else None)
+    # Every derived figure is computed on WORK time. A permission prompt is not
+    # model work, and dividing tokens by a wall that contains one understates
+    # the rate by however long the operator took to answer -- measured at 506s
+    # of 862s on CASE_027's denial_response, which reported 170 tok/s for a
+    # stage that actually ran at ~411.
+    work_s = max(args.duration_s - (args.human_wait_s or 0.0), 0.0)
     parts = [f"{args.duration_s:.1f}s"]
+    if args.human_wait_s:
+        parts.append(f"{args.human_wait_s:.1f}s human wait -> {work_s:.1f}s work")
     if round_trip is not None:
         parts.append(f"round trip {round_trip:.1f}s")
     if args.total_tokens is not None:
-        rate = (args.total_tokens / args.duration_s) if args.duration_s > 0 else None
+        rate = (args.total_tokens / work_s) if work_s > 0 else None
         parts.append(f"{args.total_tokens} tokens"
                      + (f", {rate:.0f} tok/s" if rate is not None else ""))
     print(f"OK: recorded dispatch for {args.stage} ({', '.join(parts)})")
@@ -11831,6 +11863,11 @@ def build_parser():
                         "~0.15-1.9%% of it, token volume tracks it closely.")
     p.add_argument("--tool-uses", dest="tool_uses", type=int, default=None,
                    help="harness-reported tool-call count for this dispatch")
+    p.add_argument("--human-wait-s", dest="human_wait_s", type=float, default=None,
+                   help="seconds the dispatch spent blocked on a human -- a "
+                        "permission prompt, a gate answer. Subtracted before "
+                        "any rate is computed, and emitted as a human_wait "
+                        "span so the SLA's existing subtraction applies.")
     p.add_argument("--outcome", default="completed",
                    choices=["completed", "failed", "interrupted"])
     p.set_defaults(fn=cmd_record_dispatch)

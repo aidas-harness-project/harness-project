@@ -53,6 +53,7 @@ class _Args:
         self.output_tokens = None
         self.total_tokens = None
         self.tool_uses = None
+        self.human_wait_s = None
         for key, value in kw.items():
             setattr(self, key, value)
 
@@ -429,3 +430,63 @@ def test_tokens_are_counts_only_and_prose_cannot_ride_along(monkeypatch):
     assert attrs["total_tokens"] == 213_857
     assert "prompt_text" not in attrs
     assert spans[0]["dropped_attrs"] == 1
+
+
+# --- human wait inside a dispatch ------------------------------------------
+#
+# Found by running, not reading. CASE_027's denial_response recorded 862.2s and
+# 170 tok/s; 506.2s of that was a permission prompt the operator took eight
+# minutes to answer, so the stage actually ran at ~411 tok/s. A `human_wait`
+# category already existed and the SLA already subtracted it -- but a prompt
+# raised INSIDE a dispatch emits no span, so human_wait_s read 0.0 while 506
+# seconds of waiting had happened.
+
+def test_human_wait_is_excluded_from_the_token_rate(monkeypatch):
+    """CASE_027's real numbers: 146,355 tokens, 862.2s wall, 506.2s waiting."""
+    _scratch_case(monkeypatch)
+    assert dao.cmd_record_dispatch(_Args(
+        stage="denial_response", duration_s=862.159, agent_reported_s=862.159,
+        total_tokens=146_355, tool_uses=34, human_wait_s=506.2)) == 0
+
+    stage = _summarize()["by_stage"]["denial_response"]
+    assert stage["dispatch_wall_s"] == pytest.approx(862.159)
+    assert stage["dispatch_human_wait_s"] == pytest.approx(506.2)
+    # 146355 / (862.159 - 506.2) = 411.2, not 146355/862.159 = 169.8.
+    assert stage["dispatch_tokens_per_s"] == pytest.approx(411.16, abs=0.1)
+    # The fixture must straddle the two policies, or it proves nothing.
+    assert abs(146_355 / 862.159 - 411.16) > 200
+
+
+def test_human_wait_becomes_a_real_span_the_sla_subtracts(monkeypatch):
+    """Emitting the attr alone would fix the rate and leave run-level
+    human_wait_s at 0.0 -- the reading that hid this for a whole run."""
+    _scratch_case(monkeypatch)
+    assert dao.cmd_record_dispatch(_Args(human_wait_s=300.0)) == 0
+
+    spans, _, _ = trace_aggregate.read_shards(dao.trace_spans_dir(CASE, RUN))
+    waits = [s for s in spans if s.get("category") == "human_wait"]
+    assert len(waits) == 1
+    assert waits[0]["duration_s"] == pytest.approx(300.0)
+    assert waits[0]["attrs"]["gate_kind"] == "dispatch_permission"
+    assert _summarize()["human_wait_s"] == pytest.approx(300.0)
+
+
+def test_wait_longer_than_its_dispatch_is_refused(monkeypatch):
+    """Would make work time negative, which reads as a measurement."""
+    _scratch_case(monkeypatch)
+    assert dao.cmd_record_dispatch(_Args(
+        duration_s=100.0, agent_reported_s=None, human_wait_s=200.0)) == 1
+    assert dao.cmd_record_dispatch(_Args(human_wait_s=-1.0)) == 1
+    assert not list(dao.trace_spans_dir(CASE, RUN).glob("*.jsonl"))
+
+
+def test_unrecorded_wait_leaves_the_rate_on_raw_wall(monkeypatch):
+    """No wait recorded means none is subtracted -- the figure stays what it
+    always was rather than being silently adjusted by a guess."""
+    _scratch_case(monkeypatch)
+    assert dao.cmd_record_dispatch(_Args(
+        duration_s=773.0, agent_reported_s=760.0, total_tokens=213_857)) == 0
+
+    stage = _summarize()["by_stage"]["claim_analysis"]
+    assert stage["dispatch_human_wait_s"] is None
+    assert stage["dispatch_tokens_per_s"] == pytest.approx(276.66, abs=0.01)

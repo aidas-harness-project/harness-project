@@ -597,6 +597,7 @@ def summarize_stage_attempts(spans: list[dict],
         entry.setdefault("dispatch_total_tokens", None)
         entry.setdefault("dispatch_tool_uses", None)
         entry.setdefault("dispatch_tokens_per_s", None)
+        entry.setdefault("dispatch_human_wait_s", None)
     for span in dispatch_spans:
         stage_name = (span.get("attrs") or {}).get("stage_name")
         if not isinstance(stage_name, str):
@@ -613,7 +614,7 @@ def summarize_stage_attempts(spans: list[dict],
             "dispatch_round_trip_s": None,
             "dispatch_input_tokens": None, "dispatch_output_tokens": None,
             "dispatch_total_tokens": None, "dispatch_tool_uses": None,
-            "dispatch_tokens_per_s": None,
+            "dispatch_tokens_per_s": None, "dispatch_human_wait_s": None,
         })
         duration = float(span.get("duration_s") or 0.0)
         attrs = span.get("attrs") or {}
@@ -634,16 +635,28 @@ def summarize_stage_attempts(spans: list[dict],
             # bool is an int subclass and would silently sum as 0/1.
             if isinstance(value, int) and not isinstance(value, bool):
                 entry[out_key] = (entry[out_key] or 0) + value
+        waited = attrs.get("human_wait_s")
+        if isinstance(waited, (int, float)) and not isinstance(waited, bool):
+            entry["dispatch_human_wait_s"] = round(
+                (entry["dispatch_human_wait_s"] or 0.0) + float(waited), 6)
 
     # Rate is derived last, over the stage's summed dispatches, so a stage
     # dispatched twice reports one honest rate rather than two averaged. It is
     # tokens per second of DISPATCH wall, not of the stage's marker window: the
     # window can contain operator-side work no dispatch covers.
+    # The divisor is dispatch wall MINUS human wait. A permission prompt is not
+    # model work: on CASE_027's denial_response it was 506.2s of an 862.2s
+    # dispatch, and dividing by the raw wall reported 170 tok/s for a stage
+    # that actually ran at ~411. A rate that silently includes operator
+    # response time is not a property of the pipeline.
     for entry in by_stage.values():
         total = entry.get("dispatch_total_tokens")
         wall = entry.get("dispatch_wall_s")
-        if isinstance(total, int) and isinstance(wall, (int, float)) and wall > 0:
-            entry["dispatch_tokens_per_s"] = round(total / wall, 3)
+        if not (isinstance(total, int) and isinstance(wall, (int, float))):
+            continue
+        work = wall - (entry.get("dispatch_human_wait_s") or 0.0)
+        if work > 0:
+            entry["dispatch_tokens_per_s"] = round(total / work, 3)
 
     settled = {"complete", "abandoned"}
     coverage = {

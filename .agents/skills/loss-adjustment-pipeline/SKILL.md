@@ -103,6 +103,19 @@ Copy the harness's figures; never estimate one. Omit a flag you were not given
 indistinguishable from a real reading. This is diagnostic like the rest of the
 timing layer: a failure here never blocks the stage.
 
+**If the dispatch stopped for a human — a permission prompt, a gate answer —
+pass `--human-wait-s`.** It is subtracted before any rate is computed and
+emitted as a `human_wait` span, so the SLA's existing subtraction applies. A
+prompt raised *inside* a dispatch produces no span on its own: on CASE_027's
+`denial_response` the operator took 506.2s of an 862.2s dispatch to answer, the
+summary read `human_wait_s: 0.0`, and the stage reported **170 tok/s for work
+that actually ran at 411**. Recover the interval from the trace when you did
+not time it directly — the gap sits between two adjacent tool spans:
+
+```text
+python tools/dao.py read-timing-summary CASE_ID
+```
+
 It matters because **tool spans do not explain an agent stage**. On CASE_022,
 `claim_analysis` spent 1.20s in tools across 773.0s of wall (0.15%), while
 token volume tracked wall time closely (277 tok/s; `denial_response` 327).
