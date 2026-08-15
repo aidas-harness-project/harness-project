@@ -137,7 +137,26 @@ This publication structures evidence; it does not make a clinical inference, cho
 
 **Checkpoint 4 — Requirement Matching.** Coverage + normalized policy clauses + claim fields → `requirement_matching_result.json`, grouped per coverage (`coverage_requirements: [{standardized_coverage_name, requirements: [...]}]`, joining on checkpoint 2's coverage names). Each requirement references the exact source condition with `{document_id, clause_uid, condition_uid, display_clause_id?}`; the immutable UIDs are mandatory and the display label is never a join key. Each requirement's `status` is `met` / `not_met` / `uncertain` — `met`/`not_met` must cite at least one evidence_reference; `uncertain` may have none, but only when evidence is genuinely absent, not as a shortcut.
 
-Each checkpoint writes via the DAO's `write_contract` (locked, schema-validated, run-state updated, backed up). On retry, resume from the last checkpoint that passed — a case-type failure does not mean redoing field extraction.
+**Write in two rounds, not four.** A turn costs roughly the same regardless of
+payload, so the number of times you stop to compose is the cost. On CASE_027
+the four contract-writing intervals were 124s, 66s, 55s and 103s — 348s of
+692s, each one composing JSON and re-establishing context. Group them:
+
+- **Round A — checkpoints 1 and 2.** Verify the quotes for both, then write
+  `extracted_claim_fields.json` and `coverage_result.json`.
+- **Round B — checkpoints 3 and 4.** Verify, then write `case_type_result.json`
+  and `requirement_matching_result.json` — in that order, because checkpoint 4
+  joins on checkpoint 2's coverage names and the medical-variable publication
+  copies checkpoint 3's `case_type`.
+
+**Do not merge the files themselves.** All four have real downstream consumers:
+across the 20 shipped screening reports, `source_refs` cite
+`extracted_claim_fields` 64 times, `requirement_matching_result` 52,
+`coverage_result` 37 and `case_type_result` 6 — and `draft-report` halts
+outright on a missing `template_id`, so that low count is one decisive field,
+not disuse. What merges is the composing, not the contracts.
+
+Each checkpoint writes via the DAO's `write_contract` (locked, schema-validated, run-state updated, backed up). On retry, resume from the last contract that was written — a case-type failure does not mean redoing field extraction. Resume granularity stays per CONTRACT, not per round: if round B fails after `case_type_result.json` is on disk, resume at checkpoint 4 alone. Check what already exists before redoing work.
 
 Before reporting the stage complete, run the structural medical gate:
 
