@@ -206,12 +206,21 @@ def test_local_harness_is_fail_closed_and_ground_truth_blind():
         "After checkpoint 1, derive the evidence-grounded medical-variable content"
     )
     case_type_position = claim_agent.find(
-        "**Checkpoint 3 — Case Type Classification.**"
+        "**Checkpoint 3 — Case Type and Report Profile Classification.**"
     )
     publish_position = claim_agent.find(
         "After checkpoint 3 has produced canonical `case_type_result.json`, publish"
     )
-    assert 0 <= derive_position < case_type_position < publish_position
+    # Each anchor must EXIST before the ordering means anything. Without these
+    # a renamed heading makes find() return -1, and `derive < -1` fails with an
+    # unreadable `assert 2166 < -1` that looks like an ordering violation
+    # rather than a stale string. That is exactly what happened: the heading
+    # gained "and Report Profile" in 6fdcb30 while this string was written in
+    # 902c8de, so the ordering below has never actually been checked.
+    assert derive_position >= 0, "derive-after-checkpoint-1 anchor not found"
+    assert case_type_position >= 0, "checkpoint 3 heading not found"
+    assert publish_position >= 0, "publish-after-checkpoint-3 anchor not found"
+    assert derive_position < case_type_position < publish_position
     assert "`.lock` present" not in pipeline_skill
     assert "check-lock" in pipeline_skill
     assert "No local Evaluation stage or read-ground-truth command is authorized" in settings
