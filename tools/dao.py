@@ -11145,8 +11145,8 @@ def cmd_build_document_index(args):
     clauses = sum(len(d["clauses"]) for d in index["documents"])
     tables = sum(len(d["tables"]) for d in index["documents"])
     print(f"OK: {target}")
-    print(f"  {len(index['documents'])} document(s), {clauses} clause "
-          f"heading(s), {tables} table(s)")
+    print(f"  {len(index['documents'])} document(s), {clauses} article(s) "
+          f"under 'clauses', {tables} table(s) under 'tables'")
     return 0
 
 
@@ -11784,10 +11784,11 @@ def build_parser():
     p.set_defaults(fn=cmd_read_timing_summary)
 
     p = sub.add_parser("build-document-index",
-                       help="Regenerate _document_index.json: clause headings "
-                            "and recovered table structure for the case's "
-                            "policy documents. Derived and advisory -- no "
-                            "stage requires it and its absence blocks nothing.")
+                       help="Regenerate _document_index.json: policy articles "
+                            "under 'clauses' ({page, policy_name, article, "
+                            "heading}) and recovered table structure under "
+                            "'tables'. Derived and advisory -- no stage "
+                            "requires it and its absence blocks nothing.")
     p.add_argument("case_id")
     p.add_argument("--held-by", required=True)
     p.add_argument("--run-id", required=True)

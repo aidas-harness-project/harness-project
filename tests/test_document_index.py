@@ -342,6 +342,57 @@ def test_an_unreadable_pdf_yields_no_tables_rather_than_raising(isolated_root):
     assert di.extract_tables(broken) == []
 
 
+def test_the_field_names_the_specs_promise_are_the_field_names_emitted(
+        isolated_root):
+    """CASE_022: the specs said the index "lists every article heading", so an
+    agent looked for a `headings` array, found none, and nearly concluded the
+    index was empty. `heading` IS a field -- just one inside a `clauses` entry,
+    holding the article title -- which is exactly what made the wording
+    plausible and wrong.
+
+    Pinned because the drift is silent: renaming a key here breaks four
+    documents (claim-analysis, denial-response, critic, the pipeline skill)
+    that no test otherwise reads, and the failure mode is an agent quietly
+    deciding the index is empty rather than an error.
+    """
+    _write_pages(isolated_root, "CASE_900", "DOC_001",
+                 {1: "특별약관\n제1조(사고)\n"})
+
+    index = di.build_index("CASE_900", _manifest(_policy("DOC_001")),
+                           raw_pdf_for=lambda d: None)
+
+    assert set(index) == {"index_version", "case_id", "documents"}
+    document = index["documents"][0]
+    assert set(document) == {
+        "document_id", "extraction_method", "clauses", "tables"}
+    assert "headings" not in document, (
+        "if a `headings` array is ever added, the specs' wording becomes "
+        "ambiguous again -- pick one name")
+    assert set(document["clauses"][0]) == {
+        "page", "policy_name", "article", "heading"}
+
+
+def test_a_table_entry_uses_the_documented_keys(isolated_root, monkeypatch):
+    """Same contract for the other array. Driven through `build_index` with a
+    stubbed detector rather than a real PDF, so it checks the keys the code
+    actually writes -- an earlier version of this test compared a literal set
+    to itself and would have passed under any renaming."""
+    _write_pages(isolated_root, "CASE_900", "DOC_001", {1: "제1조(사고)\n"})
+    pdf = isolated_root / "DOC_001.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+    monkeypatch.setattr(di, "extract_tables", lambda path: [{
+        "page": 13, "rows": 5, "cols": 2,
+        "header": ["기 간", "지 급 이 자"],
+        "cells": [["30일 이내", "보험계약대출이율"]],
+    }])
+
+    index = di.build_index("CASE_900", _manifest(_policy("DOC_001")),
+                           raw_pdf_for=lambda d: pdf)
+
+    assert set(index["documents"][0]["tables"][0]) == {
+        "page", "rows", "cols", "header", "cells"}
+
+
 def test_the_index_records_its_version(isolated_root):
     index = di.build_index("CASE_900", _manifest(), raw_pdf_for=lambda d: None)
 

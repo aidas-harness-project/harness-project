@@ -41,11 +41,13 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. P
 
 **Find the clause through the index, verify it in the page.** `python
 tools/dao.py read-document-index CASE_ID --run-id RUN_ID` lists every article
-heading in the case's policy documents with its page and owning 약관, which is
-how you locate a clause the insurer names without scanning a 323-page bundle
-(CASE_142's two policy documents carry ~564 headings). The index is derived
-and advisory: `NOT_FOUND` means fall back to `search-document-text` and the
-chunks, never that the clause does not exist.
+in the case's policy documents with its page and owning 약관, which is how you
+locate a clause the insurer names without scanning a 323-page bundle
+(CASE_142's two policy documents carry ~564). Entries live under `clauses`,
+each `{page, policy_name, article, heading}` — `heading` is the parenthesised
+article title, not the array. The index is derived and advisory: `NOT_FOUND`
+means fall back to `search-document-text` and the chunks, never that the
+clause does not exist.
 
 It locates; it does not license. A `policy_match` still needs its quote
 verified verbatim against the processed text, and the insurer's own citation

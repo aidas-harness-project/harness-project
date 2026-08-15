@@ -272,9 +272,10 @@ concurrent member retains its own locks, attempt boundary, result handling, and
 downstream gate; a phase label is never a reason to delay a ready stage.
 
 **Name the document index in the briefing when one exists.** The policy driver
-writes `_document_index.json` -- every article heading in the case's policy
-documents with its page and owning 약관, plus any table whose row/column
-structure was recovered from the PDF. Confirm it is there
+writes `_document_index.json` -- every article in the case's policy documents
+under `clauses` (`{page, policy_name, article, heading}`) with its page and
+owning 약관, plus any table whose row/column structure was recovered from the
+PDF under `tables`. Confirm it is there
 (`dao.py read-document-index CASE_ID --run-id RUN_ID`), then tell
 `claim-analysis`, `denial-response` and `critic` to start clause lookup from
 it rather than scanning chunks. If the read returns `NOT_FOUND`, say nothing

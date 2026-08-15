@@ -31,6 +31,21 @@ CANDIDATES, NOT VERDICTS -- the same contract `search-document-text` carries.
 The index says "제38조 is on page 38". Whether that clause governs this
 accident stays the agent's judgement, and is not a question a regex can be
 allowed to appear to answer.
+
+Shape, stated here because the naming misled a real reader. On CASE_022 an
+agent went looking for a `headings` array, found none, and came close to
+concluding the index was empty before re-reading it:
+
+    {"index_version": ..., "case_id": ...,
+     "documents": [{"document_id": "DOC_010", "extraction_method": ...,
+       "clauses": [{"page": 38, "policy_name": "구내치료비 추가특별약관",
+                    "article": "제1조", "heading": "보상하는 손해"}],
+       "tables":  [{"page": 13, "rows": 5, "cols": 2,
+                    "header": [...], "cells": [[...]]}]}]}
+
+`clauses` is the array. `heading` is a FIELD inside one entry, holding the
+parenthesised article title -- prose describing this file should say
+"articles", never "headings", or it names the field where it means the array.
 """
 from __future__ import annotations
 

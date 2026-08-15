@@ -23,11 +23,26 @@ After checkpoint 1, derive the evidence-grounded medical-variable content only f
 
 **Start from the document index, not from a chunk scan.** Run
 `python tools/dao.py read-document-index CASE_ID --run-id RUN_ID` first. It
-lists every article heading in the case's policy documents with the page it
-sits on and the 약관 that owns it, plus any table whose row/column structure
-was recovered from the PDF. A 323-page policy bundle yields ~564 headings, so
+lists every article in the case's policy documents with the page it sits on
+and the 약관 that owns it, plus any table whose row/column structure was
+recovered from the PDF. A 323-page policy bundle yields ~564 articles, so
 locating 제38조 of the 구내치료비 추가특별약관 is a lookup rather than a
 search.
+
+The shape, because guessing at it wastes a round trip — on CASE_022 an agent
+looked for a `headings` array, found none, and nearly concluded the index was
+empty:
+
+```json
+{"documents": [{"document_id": "DOC_010",
+  "clauses": [{"page": 38, "policy_name": "구내치료비 추가특별약관",
+               "article": "제1조", "heading": "보상하는 손해"}],
+  "tables":  [{"page": 13, "rows": 5, "cols": 2,
+               "header": ["기 간", "지 급 이 자"], "cells": [[...]]}]}]}
+```
+
+`clauses` is the array; `heading` is one field inside an entry, holding the
+parenthesised article title.
 
 Three things it does NOT do, and treating it otherwise will produce wrong
 work:
