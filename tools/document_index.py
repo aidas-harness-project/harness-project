@@ -61,11 +61,30 @@ _POLICY_TITLE = re.compile(
 # Tables that are tables only typographically. Measured on CASE_142's 55
 # detected candidates: 24 are single-row and 44 are two-column, and the bulk
 # are term-definition boxes (`치료비 | 치료비라 함은 응급처치...`) or blank
-# intake forms (`시설명세 | 명칭: 용도: 구조:`). Seven have >=4 rows and
-# exactly one is substantive. Filtering on shape plus filled-cell density keeps
-# the real one without hand-listing titles.
-_MIN_TABLE_ROWS = 3
+# intake forms (`시설명세 | 명칭: 용도: 구조:`).
+#
+# The filter is tuned to FAVOUR RECALL: a real table dropped from the index is
+# invisible to its reader, while a spurious one is noise they skip in a line.
+# Every judgement call below therefore breaks toward keeping.
+#
+# Swept against those 55 candidates, the ratio is the only dial that moves and
+# loosening it buys nothing real:
+#
+#     ratio 0.50 -> 3 kept        ratio 0.30 -> 11 kept
+#     ratio 0.40 -> 5 kept        ratio 0.20 -> 17 kept
+#
+# The two that 0.40 adds (DOC_009 p4, DOC_010 p37) are fully blank intake
+# forms, not tables the stricter setting was losing -- so 0.50 is already at
+# this corpus's recall ceiling, not trading recall for precision. Revisit on a
+# case that has real payout tables; this one has exactly one substantive
+# table (DOC_010 p13's 지연이자율표) and the setting keeps it.
 _MIN_FILLED_RATIO = 0.5
+
+# Kept at 3 as a floor on definition boxes (`치료비 | 치료비라 함은...`, 24 of
+# the 55). It is doing no work beyond that: on this corpus 2 and 3 keep the
+# identical set, because the density check already rejects everything a
+# two-row table would have added.
+_MIN_TABLE_ROWS = 3
 
 
 def _page_files(case_id: str, doc_id: str) -> list[tuple[int, Path]]:
@@ -150,12 +169,39 @@ def _is_substantive(rows: list[list[str | None]]) -> bool:
     ]
     if not lines:
         return False
-    # A value-bearing line states something; a prompt ends at its colon or
-    # carries nothing after it. `보험계약대출이율+가산이율(4.0%)` is a value,
-    # `상호(성명):` is a prompt, and `용도` alone is a bare field label.
-    filled = sum(1 for line in lines
-                 if ":" not in line or line.split(":", 1)[1].strip())
+    filled = sum(1 for line in lines if _states_a_value(line))
     return filled / len(lines) >= _MIN_FILLED_RATIO
+
+
+def _states_a_value(line: str) -> bool:
+    """Whether one body line answers something rather than asking it.
+
+    A line WITHOUT a colon is a value. That is the load-bearing decision and
+    it is deliberately generous: `보험계약대출이율+가산이율(4.0%)` and
+    `지급기일의 91일 이후 기간` are both content, and no cheap rule separates
+    a data cell from a field label by wording alone. An attempt to do so --
+    treating any short colon-free string as a bare label -- classified all
+    eight cells of DOC_010 p13's 지연이자율표 as labels and discarded the one
+    substantive table in the case. Over-rejecting here is worse than
+    over-keeping: the index is candidates, and a missing real table is
+    invisible while a spurious one is merely noise a reader skips.
+
+    A line WITH a colon is answered only if what follows says something that
+    is not itself another prompt. `면적:(옥내:  옥외:  )` is real text from
+    CASE_142 DOC_009 p44 -- it has characters after the colon, and every one
+    of them is two more empty prompts, so a naive "text after the colon"
+    check scored it as filled.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False
+    _, sep, tail = stripped.partition(":")
+    if not sep:
+        return True
+    # Strip nested `label:` pairs, then see whether anything survives that is
+    # not punctuation or whitespace.
+    remainder = re.sub(r"[^:()\s]{1,20}\s*:", "", tail)
+    return bool(remainder.strip(" ()\t"))
 
 
 def extract_tables(pdf_path: Path) -> list[dict[str, Any]]:

@@ -212,6 +212,66 @@ def test_an_all_empty_body_is_rejected():
     assert not di._is_substantive([["구 분", "내 용"], ["", ""], ["", ""]])
 
 
+def test_a_prompt_whose_colon_is_followed_by_more_prompts_is_not_filled():
+    """CASE_142 DOC_009 p44 verbatim. `면적:(옥내:  옥외:  )` has characters
+    after its colon and every one of them is two further empty prompts, so a
+    naive "text after the colon" check scores it filled. That plus one bare
+    label put this form at exactly 4/8 -- through a `>= 0.5` threshold."""
+    rows = [
+        ["구 분", "내 용"],
+        ["시설명세",
+         "상호(성명):\n구조:\n면적:(옥내:  옥외:  )\n"
+         "권리관계(소유, 임차, 관리 등의 구별)\n주차대수:\n관리인 여부:"],
+        ["업무내용", ""],
+    ]
+
+    assert not di._is_substantive(rows)
+
+
+def test_recall_is_favoured_over_precision():
+    """The filter's standing bias, pinned so a later tightening cannot quietly
+    reverse it: a real table dropped from the index is invisible to its
+    reader, a spurious one is a line they skip.
+
+    The rows here sit just above the threshold on purpose -- 4 of 7 body
+    lines carry values, the shape a partly-completed form takes. It must be
+    KEPT.
+
+    Written by measuring rather than by eye: a first attempt at "marginal"
+    scored 0.83 and passed even with the ratio tightened to 0.75, so it was
+    pinning nothing. Reintroduce the tightening and this version fails, which
+    is the whole point of having it.
+    """
+    rows = [
+        ["구 분", "내 용"],
+        ["시설명세", "상호(성명): 대한빌딩\n구조:\n용도:\n면적:"],
+        ["업무내용", "시설 내의 업무: 임대\n관리자: 김"],
+    ]
+
+    lines = [line for row in rows[1:] for cell in row
+             for line in cell.splitlines() if line.strip()]
+    filled = sum(1 for line in lines if di._states_a_value(line))
+    assert 0.5 <= filled / len(lines) < 0.75, (
+        f"fixture must straddle the threshold to pin anything: "
+        f"{filled}/{len(lines)}")
+    assert di._is_substantive(rows)
+
+
+def test_a_colon_free_data_line_is_a_value_not_a_label():
+    """The over-correction this pins, and the more dangerous direction.
+
+    Tightening the previous test's fix by treating any short colon-free
+    string as a bare field label classified all eight cells of DOC_010 p13's
+    지연이자율표 as labels and discarded the one substantive table in the
+    case. The index is candidates: a missing real table is invisible to its
+    reader, a spurious one is noise they skip.
+    """
+    assert di._states_a_value("보험계약대출이율+가산이율(4.0%)")
+    assert di._states_a_value("지급기일의 91일 이후 기간")
+    assert not di._states_a_value("상호(성명):")
+    assert not di._states_a_value("면적:(옥내:  옥외:  )")
+
+
 # --------------------------------------------------------------------------
 # index assembly
 # --------------------------------------------------------------------------
