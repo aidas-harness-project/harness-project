@@ -174,6 +174,7 @@ import source_provenance
 import stage_dependencies
 import segment_lineage
 import segment_derivation
+import document_index
 import table_region_provenance
 import policy_completeness
 import policy_uid
@@ -11092,6 +11093,59 @@ def cmd_read_timing_summary(args):
     return 0
 
 
+DOCUMENT_INDEX_FILENAME = "_document_index.json"
+
+
+@trace_mod.traced("dao.build_document_index", category="compute")
+def cmd_build_document_index(args):
+    """Regenerate the derived policy navigation index.
+
+    Deliberately not a `write_contract` write. The index owes nothing: it is
+    recomputable from processed text plus the registered PDF, no stage
+    consumes it as a precondition, and no gate reads it. Routing it through
+    the contract machinery would attach a schema obligation and a finalize
+    dependency to an artifact whose entire value is that it has neither --
+    which is the shape clause normalization died of (retired 2026-08-15): a
+    gate on an artifact nothing could produce, bypassed rather than met.
+
+    It still writes under the lock and through `_require_within`, because
+    those protect the CASE DIRECTORY, not the contract semantics.
+    """
+    manifest = read_contract_data(args.case_id, "document_manifest.json")
+    if manifest is None:
+        print("BLOCKED: document_manifest.json does not exist")
+        return 1
+    index = document_index.build_index(
+        args.case_id, manifest,
+        raw_pdf_for=lambda doc_id: _raw_source_path(args.case_id, doc_id))
+    target = _require_within(case_dir(args.case_id), DOCUMENT_INDEX_FILENAME)
+    existing = acquire_lock_blocking(
+        target, args.held_by, args.run_id, "build document index")
+    if existing is not None:
+        print(f"LOCKED: held_by={existing['held_by']}")
+        return 1
+    try:
+        atomic_write_json(target, index)
+    finally:
+        release_lock(target)
+    clauses = sum(len(d["clauses"]) for d in index["documents"])
+    tables = sum(len(d["tables"]) for d in index["documents"])
+    print(f"OK: {target}")
+    print(f"  {len(index['documents'])} document(s), {clauses} clause "
+          f"heading(s), {tables} table(s)")
+    return 0
+
+
+def cmd_read_document_index(args):
+    p = _require_within(case_dir(args.case_id), DOCUMENT_INDEX_FILENAME)
+    if not p.exists():
+        print(f"NOT_FOUND: {p} -- run `dao.py build-document-index` "
+              "(the index is derived; its absence blocks nothing)")
+        return 1
+    print(p.read_text(encoding="utf-8"))
+    return 0
+
+
 # ------------------------------------------------------------------- main --
 
 def build_parser():
@@ -11703,6 +11757,21 @@ def build_parser():
                        help="Read _timing_summary.json (read-contract's symmetric reader).")
     p.add_argument("case_id")
     p.set_defaults(fn=cmd_read_timing_summary)
+
+    p = sub.add_parser("build-document-index",
+                       help="Regenerate _document_index.json: clause headings "
+                            "and recovered table structure for the case's "
+                            "policy documents. Derived and advisory -- no "
+                            "stage requires it and its absence blocks nothing.")
+    p.add_argument("case_id")
+    p.add_argument("--held-by", required=True)
+    p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_build_document_index)
+
+    p = sub.add_parser("read-document-index",
+                       help="Read _document_index.json.")
+    p.add_argument("case_id")
+    p.set_defaults(fn=cmd_read_document_index)
 
     p = sub.add_parser("record-human-review")
     p.add_argument("case_id")
