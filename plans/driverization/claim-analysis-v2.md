@@ -158,6 +158,31 @@ any met↔not_met flip attributable to curated context, or a correction-round
 rate that pushes P90 above the agent's. Any of these ends the plan the way
 CASE_601 ended v1 — recorded, with numbers.
 
+## 4a. Arm E-cp1 result (2026-08-16): CP1 driven, CP2-4 agent — hybrid rejected
+
+Step 1's skeleton ran for real on CASE_033: **CP1 in 137.0s** (one 131.9s
+opus call, zero corrections, 2.6s glue), schema-PASS, 50 fields, redacted
+facts null-not-substituted. The per-call projection was low (60–90s
+projected, 131.9s actual for the grouped 15-document payload) — update the
+spine estimate accordingly.
+
+**The hybrid does not compose.** The remaining CP2–4 agent dispatch cost
+517.3s / 59 tool uses — statistically indistinguishable from arm C running
+all four checkpoints (528.2s / 47). An agent dispatch's cost is fixed
+context establishment plus discipline overhead; the marginal checkpoint is
+cheap. Therefore incremental migration (drive CP1, keep the agent for the
+rest) is dead: the value hypothesis rests entirely on step 2 — all four
+checkpoints driven, no agent dispatch. Revised spine estimate with the
+measured CP1 figure: CP1 132s + CP2 ~60–90s + CP3 ~40s + CP4 ~60–90s + glue
+≈ **300–360s**, still under arm C but with less margin than first projected;
+the CP2+CP3 merge variant matters more than it did.
+
+Also observed: `coverage_result.applicable` is a non-nullable boolean, and an
+unresolved liability question forced opposite readings across runs (three
+arms `true`, arm E `false` with an explicit not-adopting-the-denial warning).
+A schema design observation to carry to the coverage_result owner, not an
+agent defect and not this plan's scope.
+
 ## 5. Effort and sequence
 
 1. `tools/run_claim_analysis.py` skeleton: bundle assembly + CP1 grouped call
