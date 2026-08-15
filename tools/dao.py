@@ -1325,11 +1325,26 @@ def cmd_read_document_text(args):
     return 1
 
 
-def _redacted_bundle_document(case_id: str, manifest_entry: dict) -> dict:
+def _redacted_bundle_document(case_id: str, manifest_entry: dict,
+                              want_pages: set[int] | None = None) -> dict:
     """Return one driver-safe redacted document payload.
 
     This helper is deliberately DAO-local: downstream drivers receive content
     and revision binding, never a processed-layer pathname they could reopen.
+
+    `want_pages` narrows the returned `pages` to those page numbers. The whole
+    document is still read and hashed, so `redacted_text_sha256` keeps binding
+    the FULL revision and a verification against it stays valid -- narrowing is
+    a delivery decision, never a different source of truth.
+
+    Why this exists: on CASE_027 `claim_analysis` pulled DOC_010's 124,454
+    characters and DOC_009's 97,630 to cite five pages of one and none of the
+    other -- 81% of the stage's whole input for 5 pages of output. There was no
+    redacted page-level read at all (`read-page-text` serves the PRE-redaction
+    layer and is refused here), so an agent that knew exactly which pages it
+    needed still had to take the bundle whole and select inside its own
+    context. `search-document-text` and `_document_index.json` both already
+    report page numbers; this is what makes those numbers actionable.
     """
     doc_id = manifest_entry["document_id"]
     disposition = manifest_entry.get("downstream_disposition")
@@ -1347,6 +1362,20 @@ def _redacted_bundle_document(case_id: str, manifest_entry: dict) -> dict:
         pages = _cross_contract.split_pages(source)
     except Exception as exc:
         raise ValueError(f"UNREADABLE: {doc_id}: {exc}") from exc
+    selected = sorted(pages)
+    omitted = 0
+    if want_pages is not None:
+        missing = sorted(want_pages - set(pages))
+        if missing:
+            # Fail loud. A silently-empty result would read as "that page holds
+            # nothing", which is a different and much worse claim than "you
+            # asked for a page this document does not have".
+            raise ValueError(
+                f"NO_SUCH_PAGE: {doc_id} has no page(s) {missing}; "
+                f"it has {min(pages)}-{max(pages)}" if pages else
+                f"NO_SUCH_PAGE: {doc_id} has no pages at all")
+        selected = sorted(want_pages)
+        omitted = len(pages) - len(selected)
     revision = revision_entry_for(case_id, doc_id) or {}
     return {
         "document_id": doc_id,
@@ -1358,19 +1387,39 @@ def _redacted_bundle_document(case_id: str, manifest_entry: dict) -> dict:
         "document_type": manifest_entry.get("document_type"),
         "source_text_revision_sha256": revision.get("current_revision_sha256"),
         "redacted_text_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        # Always present, so a consumer can tell a narrowed read from a whole
+        # one without inferring it from the page count. 0 means it got
+        # everything; a caller that ignores this field still behaves correctly.
+        "pages_omitted": omitted,
+        "total_page_count": len(pages),
         "pages": [
             {"page": page, "text": pages[page]}
-            for page in sorted(pages)
+            for page in selected
         ],
     }
 
 
-def read_redacted_text_bundle_data(case_id: str, doc_ids: list[str]) -> dict:
-    """DAO-owned content bundle for drivers; never returns processed paths."""
+def read_redacted_text_bundle_data(
+        case_id: str, doc_ids: list[str],
+        pages_by_doc: dict[str, set[int]] | None = None) -> dict:
+    """DAO-owned content bundle for drivers; never returns processed paths.
+
+    `pages_by_doc` narrows individual documents to named pages. A document
+    absent from that mapping is returned whole, so the default is unchanged and
+    a caller that passes nothing sees exactly what it saw before.
+    """
     if not doc_ids:
         raise ValueError("at least one --doc-id is required")
     if len(set(doc_ids)) != len(doc_ids):
         raise ValueError("duplicate --doc-id is not permitted")
+    pages_by_doc = pages_by_doc or {}
+    unknown_scope = sorted(set(pages_by_doc) - set(doc_ids))
+    if unknown_scope:
+        # A --pages for a document not in --doc-id is a mistake that would
+        # otherwise silently deliver the whole bundle it meant to narrow.
+        raise ValueError(
+            f"UNSCOPED_PAGES: --pages given for {unknown_scope}, which "
+            "is not among the requested --doc-id values")
     manifest = read_contract_data(case_id, "document_manifest.json")
     if manifest is None:
         raise ValueError(f"NOT_FOUND: {case_id} has no document_manifest.json")
@@ -1380,15 +1429,53 @@ def read_redacted_text_bundle_data(case_id: str, doc_ids: list[str]) -> dict:
         entry = by_id.get(doc_id)
         if not isinstance(entry, dict):
             raise ValueError(f"UNKNOWN_DOCUMENT: {doc_id} is not in document_manifest.json")
-        documents.append(_redacted_bundle_document(case_id, entry))
+        documents.append(
+            _redacted_bundle_document(case_id, entry, pages_by_doc.get(doc_id)))
     return {"case_id": case_id, "documents": documents}
+
+
+def _parse_pages_argument(values: list[str] | None) -> dict[str, set[int]]:
+    """Parse repeated `--pages DOC_ID=1,3,5-7` into {doc_id: {pages}}.
+
+    Ranges are accepted because a clause routinely spans consecutive pages and
+    `5-7` is what a person writes. Rejects anything malformed rather than
+    silently dropping it: a page filter that quietly loses a page produces an
+    analysis missing evidence it believes it read.
+    """
+    parsed: dict[str, set[int]] = {}
+    for raw in values or []:
+        doc_id, sep, spec = raw.partition("=")
+        if not sep or not doc_id.strip() or not spec.strip():
+            raise ValueError(
+                f"BAD_PAGES: {raw!r} is not DOC_ID=PAGES (e.g. DOC_010=11,35-36)")
+        pages: set[int] = set()
+        for part in spec.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            lo_s, dash, hi_s = part.partition("-")
+            try:
+                lo = int(lo_s)
+                hi = int(hi_s) if dash else lo
+            except ValueError:
+                raise ValueError(
+                    f"BAD_PAGES: {part!r} in {raw!r} is not a page or range") from None
+            if lo < 1 or hi < lo:
+                raise ValueError(f"BAD_PAGES: {part!r} in {raw!r} is not a valid range")
+            pages.update(range(lo, hi + 1))
+        if not pages:
+            raise ValueError(f"BAD_PAGES: {raw!r} names no pages")
+        parsed.setdefault(doc_id.strip(), set()).update(pages)
+    return parsed
 
 
 @traced_read("dao.read_redacted_text_bundle")
 def cmd_read_redacted_text_bundle(args):
     try:
+        pages_by_doc = _parse_pages_argument(getattr(args, "pages", None))
         print(json.dumps(
-            read_redacted_text_bundle_data(args.case_id, args.doc_id),
+            read_redacted_text_bundle_data(
+                args.case_id, args.doc_id, pages_by_doc),
             ensure_ascii=False,
         ))
         return 0
@@ -11322,6 +11409,16 @@ def build_parser():
     p.add_argument("case_id")
     p.add_argument("--doc-id", required=True, action="append",
                    help="active processed document to include; repeat for each document")
+    p.add_argument("--pages", action="append", metavar="DOC_ID=PAGES",
+                   help="Return only these pages of one document, e.g. "
+                        "--pages DOC_010=11,35-36,38. Repeat per document; a "
+                        "document with no --pages is returned whole. Use it "
+                        "for a long policy once search-document-text or "
+                        "read-document-index has told you which pages matter: "
+                        "on CASE_027 the two policy bundles were 81% of the "
+                        "stage's input and five pages of them were cited. The "
+                        "revision hash still covers the FULL document, so a "
+                        "narrowed read verifies exactly like a whole one.")
     p.add_argument("--run-id", help="Optional trace attribution for this read.")
     p.set_defaults(fn=cmd_read_redacted_text_bundle)
 

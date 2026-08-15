@@ -56,6 +56,16 @@ still has to actually say what you claim it says. Writing a match from an
 index entry you never opened is the failure `match_source` exists to make
 visible.
 
+Open those pages narrowly. Once the index or `search-document-text` names
+them, `read-redacted-text-bundle CASE_ID --doc-id DOC_010 --pages
+DOC_010=11,35-36 --run-id RUN_ID` returns just those pages of a long policy; a
+document with no `--pages` still comes back whole, so keep the insurer's own
+letters and short documents entire. The `redacted_text_sha256` still covers the
+full document, so the quote verifies identically. On CASE_027 the policy
+bundles were 81% of a stage's input for five cited pages — and an agent stage's
+wall time is its token volume, not its tool latency. Widen or read whole when
+unsure: missing the governing clause costs far more than the tokens saved.
+
 **Do not promote a policy document to normalization.** `promote-policy-document`
 is DEPRECATED as of 2026-08-15 and this stage no longer calls it. Cite policy
 clauses by `{document_id, page, quote}` against the processed text, as below —

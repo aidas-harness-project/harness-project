@@ -43,6 +43,16 @@ material, not a live spec).
   value is harness-reported and copied, never estimated: an omitted flag records as "not
   measured", a guessed one is indistinguishable from a reading. The pipeline skill's T13
   lifecycle places the call between agent return and `finalize-stage`.
+- `dao.py read-redacted-text-bundle CASE_ID --doc-id DOC_X [--pages DOC_X=11,35-36]` -- the
+  redacted read for analysis stages. `--pages` narrows ONE document to named pages (repeat per
+  document; anything without it still comes back whole), for a long policy after
+  `search-document-text` or `read-document-index` has said which pages matter. `read-page-text`
+  serves the PRE-redaction layer and is refused here, so before this flag an agent that knew its
+  five pages still had to take the bundle whole -- on CASE_027 the two policy documents were
+  222,084 of `claim_analysis`'s 272,655 input characters (81%) and five pages of one were cited,
+  none of the other. `redacted_text_sha256` still covers the FULL document, so a quote from a
+  narrowed read verifies identically; `pages_omitted`/`total_page_count` say whether a read was
+  narrowed. A requested page the document lacks is refused, never returned empty.
 - `python tools/validate_output.py <file.json>` -- standalone schema validation (also used internally by `dao.py write-contract`).
 - `python tools/intake_case.py <source-cases folder> <CASE_ID>` -- case intake with the D2 per-file review ledger.
 - `python tools/document_assembly.py --sections-file <spec.json> --held-by <agent> --run-id <run>` -- renders narrative reports and auto-generates `[E#]` citation tags + sidecar (P1). DAO-backed like any other write path: locked, atomic, sidecar schema-validated before either file touches disk.

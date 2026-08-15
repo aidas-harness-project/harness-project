@@ -54,6 +54,33 @@ work:
   quote must still be verified verbatim against the processed text; the DAO
   refuses one that is not. Citing a heading you found in the index without
   opening the page is exactly the fabrication P1 exists to prevent.
+
+**Read a policy by the page once you know which pages.** The index and
+`search-document-text` both report page numbers; turn them into a narrow read:
+
+```text
+python tools/dao.py read-redacted-text-bundle CASE_ID \\
+  --doc-id DOC_010 --pages DOC_010=11,35-36,38-39 --run-id RUN_ID
+```
+
+A document with no `--pages` still comes back whole, so narrow the long policy
+bundles and take short documents (진단서, 의무기록, 영수증, 보험사 회신) entire —
+they are small and you do not yet know which lines matter. `read-page-text`
+serves the PRE-redaction layer and is refused here; this flag is the redacted
+page-level read.
+
+This matters more than it looks. On CASE_027 the two policy bundles were
+222,084 of `claim_analysis`'s 272,655 characters of input — 81% — and the four
+checkpoint contracts cited **five pages of DOC_010 and none of DOC_009**.
+Narrowing DOC_010 to its cited pages is 121,002 characters down to 4,911, and
+an agent stage's wall time is essentially its token volume: tool time was 1.92s
+of 692s. The `redacted_text_sha256` still covers the FULL document, so a quote
+taken from a narrowed read verifies exactly as it would from a whole one, and
+`pages_omitted` tells you a read was narrowed.
+
+Narrow only after a lookup names the pages. Guessing a page range and missing
+the governing clause is a wrong analysis, which costs far more than the tokens
+it saves — when in doubt widen the range or read the document whole.
 - **It is derived and may be absent or stale.** No stage requires it and
   nothing blocks on it. `NOT_FOUND` means fall back to
   `search-document-text` and the chunks, not that the case has no clauses.
