@@ -906,8 +906,62 @@ def _medical_gate_applies(state: dict) -> bool:
     NOT gated. It is stamped 'never_evaluated' on first touch so the record
     says the question was never asked, rather than leaving
     `medical_review_adopted: false` to be misread as 'asked and not required'.
+
+    An `enforced` run is STILL not gated while the medical operator policy is
+    unapproved. That is not a loophole -- it is the same rule the rest of this
+    subsystem already applies, read in the other direction. `medical_contracts`
+    and `medical_review_ledger` both refuse to act on
+    `operations_enabled is not True or approval is None`, and the deferral
+    register states that configuration presence alone cannot ACTIVATE
+    behaviour. The converse has to hold too: a policy that cannot be activated
+    cannot be enforced either, because clearance is unreachable by any
+    sanctioned route. `record-medical-referral-decision` -- the only path to
+    the non-blocking `do_not_refer` state -- authenticates through
+    `operator_auth`, which fails closed on the shipped policy (`actors: []`,
+    `operations_enabled: false`). So an enforced run would block
+    `claim_analysis` FOREVER, for every case, with no action any human could
+    take to clear it.
+
+    Found by running CASE_027, the first run ever to reach claim_analysis with
+    the gate live: the two decisions are individually sound and jointly a dead
+    end. A gate nothing can satisfy is not satisfied, it is bypassed -- the
+    exact failure that retired clause normalization on 2026-08-15, where
+    CASE_112 recorded `passed` through a hand-edited override.
+
+    The moment the policy is approved this returns True again for every
+    enforced run, with no code change. Nothing here weakens the gate for a case
+    that can actually use it.
     """
-    return state.get("medical_gate_status") == "enforced"
+    if state.get("medical_gate_status") != "enforced":
+        return False
+    return _medical_operations_approved()
+
+
+def _medical_operations_approved() -> bool:
+    """Whether the medical operator policy is approved and switched on.
+
+    Read with the same rule its own consumers use
+    (`operations_enabled is not True or approval is None` ->
+    `medical_contracts._role_transition_permitted`,
+    `medical_review_ledger._load_role_policy`, `operator_auth._load_policy`),
+    so activation cannot mean one thing to the gate and another to the code
+    that would have to satisfy it.
+
+    Fails CLOSED toward 'unapproved' on any read or parse error. The direction
+    matters: unreadable policy means clearance is unreachable, so treating it
+    as approved would reinstate the permanent block this exists to prevent.
+    """
+    try:
+        import operator_auth
+
+        policy = json.loads(
+            operator_auth.POLICY_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 -- any failure means "not approved"
+        return False
+    if not isinstance(policy, dict):
+        return False
+    return (policy.get("operations_enabled") is True
+            and policy.get("approval") is not None)
 
 
 def _stamp_medical_gate_status(case_id: str, state: dict) -> dict:

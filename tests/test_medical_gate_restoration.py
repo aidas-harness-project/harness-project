@@ -34,6 +34,35 @@ def fast_lock_wait(monkeypatch):
     monkeypatch.setattr(dao, "LOCK_MAX_WAIT_SECONDS", 0.05)
 
 
+@pytest.fixture(autouse=True)
+def approved_medical_policy(tmp_path_factory, monkeypatch):
+    """Every test here asserts what the gate does WHEN IT APPLIES.
+
+    Since 2026-08-16 an enforced run also requires the medical operator policy
+    to be approved, because the shipped policy (`operations_enabled: false`,
+    `actors: []`) makes clearance unreachable by any sanctioned route -- an
+    enforced run would block claim_analysis permanently, for every case, with
+    no action any human could take (found by running CASE_027).
+
+    Approving the policy here keeps these tests measuring the gate's own logic
+    rather than the activation switch, which
+    `test_medical_gate_policy_activation.py` owns. Without this fixture they
+    would pass vacuously the moment the gate stopped applying at all -- the
+    exact "defined but never consulted" failure this module exists to catch.
+    """
+    import operator_auth
+
+    path = tmp_path_factory.mktemp("operator_policy") / "policy.json"
+    path.write_text(json.dumps({
+        "policy_version": "operator_auth_policy.v0.1",
+        "schema_version": "0.1",
+        "actors": [],
+        "operations_enabled": True,
+        "approval": {"approved_by": "test", "effective_from": "2026-01-01"},
+    }), encoding="utf-8")
+    monkeypatch.setattr(operator_auth, "POLICY_PATH", path)
+
+
 @pytest.fixture
 def no_stage_dependencies(monkeypatch):
     """Neutralize the dependency layer so ONLY the medical gate can refuse.
