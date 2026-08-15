@@ -84,7 +84,34 @@ increments `attempt_count` nor emits another timing marker. Contract writes
 with `--stage` are checkpoints inside this invocation; they do not begin an
 attempt and do not count as P9 retries.
 
-After a successful agent return, the orchestrator alone calls:
+**Note the wall time before you dispatch**, so the interval below is a
+measurement and not a recollection.
+
+After the agent returns, record the dispatch before finalizing. The harness
+reports the subagent's duration, token counts and tool-call count on
+completion; pass them through:
+
+```text
+python tools/dao.py record-dispatch CASE_ID --run-id RUN_ID --stage STAGE \
+  --started-at ISO8601 --duration-s WALL --agent-reported-s REPORTED \
+  --agent-kind AGENT --attempt N \
+  --input-tokens IN --output-tokens OUT --total-tokens TOTAL --tool-uses USES
+```
+
+Copy the harness's figures; never estimate one. Omit a flag you were not given
+— an omitted count records as "not measured", while a guessed one is
+indistinguishable from a real reading. This is diagnostic like the rest of the
+timing layer: a failure here never blocks the stage.
+
+It matters because **tool spans do not explain an agent stage**. On CASE_022,
+`claim_analysis` spent 1.20s in tools across 773.0s of wall (0.15%), while
+token volume tracked wall time closely (277 tok/s; `denial_response` 327).
+Without the counts, the only available reading of the remainder is
+`unattributed_active_s`, which T13 states is *not* a claim about model
+reasoning — and misreading it that way is what produced a document index that
+optimized a 0.15-second lookup.
+
+Then the orchestrator alone calls:
 
 ```text
 python tools/dao.py finalize-stage CASE_ID RUN_ID STAGE --held-by orchestrator
@@ -242,7 +269,8 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
 3. **Conflict-ledger check**: before dispatching *any* stage, call `check_conflicts_clear(case_id)`. If not clear, halt and report every pending entry (old and new) — do not proceed past an unresolved conflict, no matter which stage raised it.
 4. **Lock check**: if a stage's target file already has a `.lock` present at run start/resume, do not poll and do not assume it's stale — halt, report the lock's full contents, wait for human confirmation (P5).
 5. **Medical-clearance check**: after canonical medical variables have been published, call `python tools/dao.py check-medical-reviews-clear CASE_ID` immediately before every downstream agent dispatch. Halt while it reports blocked. The DAO independently repeats this check before downstream `in_progress`/`passed` transitions and snapshots.
-6. **Begin the stage attempt** using the T13 lifecycle command above, then dispatch. Never infer an attempt start from the first output write.
+6. **Begin the stage attempt** using the T13 lifecycle command above, noting the wall time, then dispatch. Never infer an attempt start from the first output write.
+7. **Record the dispatch** with `record-dispatch` when the agent returns, passing the harness's reported duration, token counts and tool-use count (T13 lifecycle above). Before `finalize-stage`, not after — finalize closes the attempt.
 
 ## Phase 1 — initial claim review
 

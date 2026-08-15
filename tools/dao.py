@@ -10972,9 +10972,37 @@ def cmd_record_dispatch(args):
     A dispatch that is never recorded leaves the residual exactly as it is
     today: reported, unexplained, and honestly labelled. Missing data is not
     fabricated from marker times.
+
+    The token flags answer the question the duration cannot. Measured on
+    CASE_022, tool time is a rounding error inside an agent stage
+    (claim_analysis: 1.20s of tools against 773.0s of wall, 0.15%) while wall
+    time tracks token volume closely (denial_response 158,349 tokens / 483.9s,
+    claim_analysis 213,857 / 773.0s -- 327 and 277 tok/s). Recording the counts
+    turns that from an observation someone made once into a figure every run
+    carries. They are harness-reported like `--agent-reported-s`: this process
+    never sees the model's context, so it records what it is told and does not
+    derive tokens from anything.
     """
     if args.duration_s < 0:
         print("REFUSED: --duration-s cannot be negative")
+        return 1
+    for flag, value in (("--input-tokens", args.input_tokens),
+                        ("--output-tokens", args.output_tokens),
+                        ("--total-tokens", args.total_tokens),
+                        ("--tool-uses", args.tool_uses)):
+        if value is not None and value < 0:
+            print(f"REFUSED: {flag} cannot be negative")
+            return 1
+    if (args.total_tokens is not None and args.input_tokens is not None
+            and args.output_tokens is not None
+            and args.total_tokens < args.input_tokens + args.output_tokens):
+        # A total below its own parts is a transcription slip, and it would
+        # read as a measurement. The reverse is allowed: a harness total may
+        # legitimately include cache-read or cache-creation tokens that neither
+        # named component covers.
+        print(f"REFUSED: --total-tokens ({args.total_tokens}) is below "
+              f"--input-tokens + --output-tokens "
+              f"({args.input_tokens + args.output_tokens})")
         return 1
     if args.agent_reported_s is not None:
         if args.agent_reported_s < 0:
@@ -11006,6 +11034,12 @@ def cmd_record_dispatch(args):
         attrs["agent_reported_s"] = args.agent_reported_s
     if args.attempt is not None:
         attrs["attempt"] = args.attempt
+    for key, value in (("input_tokens", args.input_tokens),
+                       ("output_tokens", args.output_tokens),
+                       ("total_tokens", args.total_tokens),
+                       ("tool_uses", args.tool_uses)):
+        if value is not None:
+            attrs[key] = value
 
     span_id = trace_mod.closed_interval(
         "dispatch.subagent", category="dispatch",
@@ -11018,8 +11052,21 @@ def cmd_record_dispatch(args):
         return 0
     round_trip = (args.duration_s - args.agent_reported_s
                   if args.agent_reported_s is not None else None)
-    print(f"OK: recorded dispatch for {args.stage} ({args.duration_s:.1f}s"
-          + (f", round trip {round_trip:.1f}s)" if round_trip is not None else ")"))
+    parts = [f"{args.duration_s:.1f}s"]
+    if round_trip is not None:
+        parts.append(f"round trip {round_trip:.1f}s")
+    if args.total_tokens is not None:
+        rate = (args.total_tokens / args.duration_s) if args.duration_s > 0 else None
+        parts.append(f"{args.total_tokens} tokens"
+                     + (f", {rate:.0f} tok/s" if rate is not None else ""))
+    print(f"OK: recorded dispatch for {args.stage} ({', '.join(parts)})")
+    if args.total_tokens is None:
+        # Said once, at the point where it can still be supplied. The counts
+        # are the only recorded figure that explains an agent stage's wall
+        # time; a dispatch without them records the interval and leaves its
+        # cost as unexplained as before.
+        print("NOTE: no --total-tokens given -- this dispatch's wall time will "
+              "have no token figure to explain it", file=sys.stderr)
     return 0
 
 
@@ -11774,6 +11821,16 @@ def build_parser():
     p.add_argument("--agent-kind", default=None,
                    help="which agent identity was dispatched")
     p.add_argument("--attempt", type=int, default=None)
+    p.add_argument("--input-tokens", dest="input_tokens", type=int, default=None,
+                   help="harness-reported input tokens for this dispatch")
+    p.add_argument("--output-tokens", dest="output_tokens", type=int, default=None,
+                   help="harness-reported output tokens for this dispatch")
+    p.add_argument("--total-tokens", dest="total_tokens", type=int, default=None,
+                   help="harness-reported total tokens. The figure that "
+                        "explains an agent stage's wall time: tool time is "
+                        "~0.15-1.9%% of it, token volume tracks it closely.")
+    p.add_argument("--tool-uses", dest="tool_uses", type=int, default=None,
+                   help="harness-reported tool-call count for this dispatch")
     p.add_argument("--outcome", default="completed",
                    choices=["completed", "failed", "interrupted"])
     p.set_defaults(fn=cmd_record_dispatch)

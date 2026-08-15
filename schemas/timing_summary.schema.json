@@ -241,6 +241,31 @@
           "minimum": 0,
           "description": "Sum of (dispatch wall - agent-reported duration): the orchestration cost of asking and receiving, excluding the agent's work. This is the half of a stage's residual that is structural and engineerable; the rest is operator-side work that happened while the marker was open. null when no dispatch carried an agent-reported duration -- never 0, which would claim the round trip was measured at nothing."
         },
+        "dispatch_input_tokens": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Harness-reported input tokens summed over this stage's recorded dispatches. Reported by the orchestrator via `record-dispatch`, NOT measured by the DAO, which never sees a model's context. null means not recorded, never 0."
+        },
+        "dispatch_output_tokens": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Harness-reported output tokens summed over this stage's recorded dispatches. null means not recorded, never 0."
+        },
+        "dispatch_total_tokens": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Harness-reported total tokens summed over this stage's recorded dispatches. This is the figure that explains an agent stage's wall time: measured on CASE_022, tool spans accounted for 0.15% of claim_analysis (1.20s of 773.0s) while token volume tracked wall time closely. May exceed input+output, which do not cover cache-read or cache-creation tokens. null means not recorded, never 0 -- a stage that did model work and recorded no count must not read as a stage that did none."
+        },
+        "dispatch_tool_uses": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Harness-reported tool-call count summed over this stage's recorded dispatches. Distinct from the trace's own span count: this counts what the SUBAGENT called in a process the DAO never forked, so the two are expected to differ and neither corrects the other. null means not recorded."
+        },
+        "dispatch_tokens_per_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "dispatch_total_tokens divided by dispatch_wall_s. Per second of DISPATCH wall, not of the stage's marker window, which can contain operator-side work no dispatch covers. A descriptive rate for comparing stages, not a throughput guarantee. null when either input is null or the wall is zero."
+        },
         "total_attempt_active_wall_s": { "type": "number", "minimum": 0 },
         "passed_attempt_active_wall_s": { "type": "number", "minimum": 0 },
         "human_wait_s": { "type": "number", "minimum": 0 },

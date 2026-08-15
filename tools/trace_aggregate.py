@@ -582,10 +582,21 @@ def summarize_stage_attempts(spans: list[dict],
     # sat inside the marker window (operator-side work, one person's habits).
     # A stage with no recorded dispatch keeps nulls rather than zeros: zero
     # would claim the round trip was measured and found to be nothing.
+    #
+    # Tokens follow the same rule for the same reason. They are the only
+    # recorded figure that explains an agent stage's wall time -- tool spans
+    # account for well under 2% of it -- so a stage with no recorded token
+    # count must say "not recorded", not "0 tokens", which would read as a
+    # stage that did no model work at all.
     for stage_name, entry in by_stage.items():
         entry.setdefault("dispatch_count", 0)
         entry.setdefault("dispatch_wall_s", None)
         entry.setdefault("dispatch_round_trip_s", None)
+        entry.setdefault("dispatch_input_tokens", None)
+        entry.setdefault("dispatch_output_tokens", None)
+        entry.setdefault("dispatch_total_tokens", None)
+        entry.setdefault("dispatch_tool_uses", None)
+        entry.setdefault("dispatch_tokens_per_s", None)
     for span in dispatch_spans:
         stage_name = (span.get("attrs") or {}).get("stage_name")
         if not isinstance(stage_name, str):
@@ -600,16 +611,39 @@ def summarize_stage_attempts(spans: list[dict],
             "attribution_complete": True, "skipped": False,
             "dispatch_count": 0, "dispatch_wall_s": None,
             "dispatch_round_trip_s": None,
+            "dispatch_input_tokens": None, "dispatch_output_tokens": None,
+            "dispatch_total_tokens": None, "dispatch_tool_uses": None,
+            "dispatch_tokens_per_s": None,
         })
         duration = float(span.get("duration_s") or 0.0)
+        attrs = span.get("attrs") or {}
         entry["dispatch_count"] += 1
         entry["dispatch_wall_s"] = round(
             (entry["dispatch_wall_s"] or 0.0) + duration, 6)
-        reported = (span.get("attrs") or {}).get("agent_reported_s")
+        reported = attrs.get("agent_reported_s")
         if isinstance(reported, (int, float)):
             entry["dispatch_round_trip_s"] = round(
                 (entry["dispatch_round_trip_s"] or 0.0)
                 + max(duration - float(reported), 0.0), 6)
+        for attr_key, out_key in (
+                ("input_tokens", "dispatch_input_tokens"),
+                ("output_tokens", "dispatch_output_tokens"),
+                ("total_tokens", "dispatch_total_tokens"),
+                ("tool_uses", "dispatch_tool_uses")):
+            value = attrs.get(attr_key)
+            # bool is an int subclass and would silently sum as 0/1.
+            if isinstance(value, int) and not isinstance(value, bool):
+                entry[out_key] = (entry[out_key] or 0) + value
+
+    # Rate is derived last, over the stage's summed dispatches, so a stage
+    # dispatched twice reports one honest rate rather than two averaged. It is
+    # tokens per second of DISPATCH wall, not of the stage's marker window: the
+    # window can contain operator-side work no dispatch covers.
+    for entry in by_stage.values():
+        total = entry.get("dispatch_total_tokens")
+        wall = entry.get("dispatch_wall_s")
+        if isinstance(total, int) and isinstance(wall, (int, float)) and wall > 0:
+            entry["dispatch_tokens_per_s"] = round(total / wall, 3)
 
     settled = {"complete", "abandoned"}
     coverage = {

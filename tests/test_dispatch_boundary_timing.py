@@ -46,6 +46,13 @@ class _Args:
         self.agent_kind = "claim-analysis"
         self.attempt = 1
         self.outcome = "completed"
+        # Token counts default to None -- the CLI's own defaults. A dispatch
+        # recorded without them stays legal, because the harness does not
+        # always report them and a guessed count is worse than an absent one.
+        self.input_tokens = None
+        self.output_tokens = None
+        self.total_tokens = None
+        self.tool_uses = None
         for key, value in kw.items():
             setattr(self, key, value)
 
@@ -271,3 +278,154 @@ def test_summary_with_dispatch_is_schema_valid(monkeypatch):
     errors = _validation.validate_instance(
         summary, "timing_summary.schema.json", schemas, registry)
     assert errors == [], errors
+
+
+# --- token counts: the figure that explains an agent stage -----------------
+#
+# Duration alone cannot say why a stage took its time. Measured on CASE_022,
+# claim_analysis spent 1.20s in tools across 773.0s of wall (0.15%) while token
+# volume tracked wall time closely. These tests pin the counts as recorded,
+# summed, and never invented.
+
+def test_token_counts_reach_the_stage_rollup(monkeypatch):
+    """CASE_022's real claim_analysis figures, end to end."""
+    _scratch_case(monkeypatch)
+    assert dao.cmd_record_dispatch(_Args(
+        duration_s=773.0, agent_reported_s=760.0,
+        input_tokens=190_000, output_tokens=23_857,
+        total_tokens=213_857, tool_uses=61)) == 0
+
+    stage = _summarize()["by_stage"]["claim_analysis"]
+    assert stage["dispatch_input_tokens"] == 190_000
+    assert stage["dispatch_output_tokens"] == 23_857
+    assert stage["dispatch_total_tokens"] == 213_857
+    assert stage["dispatch_tool_uses"] == 61
+    # 213857 / 773.0 -- the hand-computed 277 tok/s from the CASE_022 notes.
+    assert stage["dispatch_tokens_per_s"] == pytest.approx(276.66, abs=0.01)
+
+
+def test_unrecorded_tokens_stay_null_not_zero(monkeypatch):
+    """0 tokens would read as a stage that did no model work. The stage did
+    the work; what is missing is the count.
+
+    Both paths are exercised, because they are separate code and an earlier
+    version of this test caught neither: a stage WITH a dispatch that carried
+    no counts goes through the accumulator, while a stage with no dispatch at
+    all is initialised by `setdefault`. Defaulting those to 0 leaves the first
+    assertion passing.
+    """
+    _scratch_case(monkeypatch)
+    dao._emit_stage_attempt_marker(CASE, RUN, "consistency_check", 1, "start")
+    dao._emit_stage_attempt_marker(
+        CASE, RUN, "consistency_check", 1, "end", outcome="passed")
+    assert dao.cmd_record_dispatch(_Args()) == 0
+
+    by_stage = _summarize()["by_stage"]
+
+    # (a) dispatched, but the harness reported no counts.
+    dispatched = by_stage["claim_analysis"]
+    assert dispatched["dispatch_wall_s"] == pytest.approx(678.4)
+    for key in ("dispatch_input_tokens", "dispatch_output_tokens",
+                "dispatch_total_tokens", "dispatch_tool_uses",
+                "dispatch_tokens_per_s"):
+        assert dispatched[key] is None, key
+
+    # (b) never dispatched -- the setdefault path.
+    undispatched = by_stage["consistency_check"]
+    assert undispatched["dispatch_count"] == 0
+    for key in ("dispatch_input_tokens", "dispatch_output_tokens",
+                "dispatch_total_tokens", "dispatch_tool_uses",
+                "dispatch_tokens_per_s"):
+        assert undispatched[key] is None, key
+
+
+def test_two_dispatches_sum_and_yield_one_rate(monkeypatch):
+    """A retried stage reports one honest rate over its summed dispatches, not
+    the average of two rates -- which would weight a short attempt equally."""
+    _scratch_case(monkeypatch)
+    assert dao.cmd_record_dispatch(_Args(
+        duration_s=100.0, agent_reported_s=90.0,
+        total_tokens=10_000, tool_uses=5, attempt=1)) == 0
+    assert dao.cmd_record_dispatch(_Args(
+        started_at=(BASE + timedelta(seconds=200)).isoformat(),
+        duration_s=300.0, agent_reported_s=280.0,
+        total_tokens=50_000, tool_uses=20, attempt=2)) == 0
+
+    stage = _summarize()["by_stage"]["claim_analysis"]
+    assert stage["dispatch_count"] == 2
+    assert stage["dispatch_total_tokens"] == 60_000
+    assert stage["dispatch_tool_uses"] == 25
+    assert stage["dispatch_wall_s"] == pytest.approx(400.0)
+    # 60000/400 = 150. The mean of the two rates (100 and 166.7) is 133.3, so
+    # this fixture distinguishes the two policies rather than agreeing on one.
+    assert stage["dispatch_tokens_per_s"] == pytest.approx(150.0)
+
+
+def test_total_below_its_own_parts_is_refused(monkeypatch):
+    """A transcription slip that would otherwise read as a measurement."""
+    _scratch_case(monkeypatch)
+    assert dao.cmd_record_dispatch(_Args(
+        input_tokens=190_000, output_tokens=23_857, total_tokens=1_000)) == 1
+    assert not list(dao.trace_spans_dir(CASE, RUN).glob("*.jsonl"))
+
+
+def test_total_above_its_parts_is_allowed(monkeypatch):
+    """Cache-read and cache-creation tokens belong to neither named component,
+    so a harness total legitimately exceeds input+output. Refusing this would
+    reject the common case."""
+    _scratch_case(monkeypatch)
+    assert dao.cmd_record_dispatch(_Args(
+        input_tokens=10_000, output_tokens=2_000, total_tokens=500_000)) == 0
+
+    stage = _summarize()["by_stage"]["claim_analysis"]
+    assert stage["dispatch_total_tokens"] == 500_000
+
+
+def test_negative_token_count_is_refused(monkeypatch):
+    _scratch_case(monkeypatch)
+    assert dao.cmd_record_dispatch(_Args(input_tokens=-1)) == 1
+    assert dao.cmd_record_dispatch(_Args(output_tokens=-1)) == 1
+    assert dao.cmd_record_dispatch(_Args(total_tokens=-1)) == 1
+    assert dao.cmd_record_dispatch(_Args(tool_uses=-1)) == 1
+    assert not list(dao.trace_spans_dir(CASE, RUN).glob("*.jsonl"))
+
+
+def test_token_summary_is_schema_valid(monkeypatch):
+    """stage_rollup sets additionalProperties:false, so an aggregated field
+    that the schema does not declare fails the run's own timing write."""
+    import _validation
+
+    _scratch_case(monkeypatch)
+    dao._emit_stage_attempt_marker(CASE, RUN, "claim_analysis", 1, "start")
+    assert dao.cmd_record_dispatch(_Args(
+        input_tokens=190_000, output_tokens=23_857,
+        total_tokens=213_857, tool_uses=61)) == 0
+    dao._emit_stage_attempt_marker(
+        CASE, RUN, "claim_analysis", 1, "end", outcome="passed")
+
+    summary = _summarize(run_state_stages=[
+        {"stage_name": "claim_analysis", "status": "passed", "attempt_count": 1}])
+    summary.setdefault("case_id", CASE)
+
+    schemas, registry = _validation.load_registry()
+    errors = _validation.validate_instance(
+        summary, "timing_summary.schema.json", schemas, registry)
+    assert errors == [], errors
+
+
+def test_tokens_are_counts_only_and_prose_cannot_ride_along(monkeypatch):
+    """The counts are ints, so the allow-list admits them; a prompt string on
+    the same span is dropped and the drop is counted."""
+    _scratch_case(monkeypatch)
+    trace_mod.configure(CASE, RUN, root=dao.OUTPUTS)
+    trace_mod.closed_interval(
+        "dispatch.subagent", category="dispatch",
+        t_start_wall=BASE.isoformat(), duration_s=1.0, case_id=CASE,
+        stage_name="claim_analysis", total_tokens=213_857,
+        prompt_text="환자 홍길동의 진단 내용")
+
+    spans, _, _ = trace_aggregate.read_shards(dao.trace_spans_dir(CASE, RUN))
+    attrs = spans[0]["attrs"]
+    assert attrs["total_tokens"] == 213_857
+    assert "prompt_text" not in attrs
+    assert spans[0]["dropped_attrs"] == 1
