@@ -183,6 +183,33 @@ arms `true`, arm E `false` with an explicit not-adopting-the-denial warning).
 A schema design observation to carry to the coverage_result owner, not an
 agent defect and not this plan's scope.
 
+## 4b. Step 2 detailed design (authorized 2026-08-16)
+
+Five provider calls, serial spine, no agent dispatch:
+
+| unit | calls | inputs served | deterministic work |
+|---|---|---|---|
+| cp1_field_extraction | 1 | all non-policy docs whole | (shipped in step 1) |
+| cp2_coverage | 2 — **select** then **judge** | select: CP1 fields + the document index's full clause listing (title/page lines only). judge: CP1 fields + the redacted text of exactly the selected pages (`--pages`, one read) | page-list expansion, `policy-snapshot` fetch/embed, clause-ref local verify against served pages |
+| cp3_case_type | 1 | CP1 fields + CP2 coverages + `adjuster_case_type` + the profile mapping table from the agent spec | registry template mapping is DAO-validated; adjuster copy-in when present |
+| cp4_requirements | 1 | CP2 result + CP1 fields + the same served policy pages | REQ-N renumbering, coverage-name join enforcement, snapshot embed |
+| medical publication | 0 | — | deterministic candidate projection from CP1+CP3; attempt `write-medical-variables`; a deferred-config refusal is recorded and non-blocking (matching observed agent behaviour on CASE_029/032/033), any other refusal raises |
+
+**Evidence discipline for calls that see no new source text (CP2 judge partly,
+CP3 entirely):** an evidence reference must either quote a SERVED policy page
+or reuse a quote already verified in an earlier checkpoint's contract
+(matched by document, page, and whitespace-normalized quote). Anything else
+is refused in local validation, so it gets P4's one correction rather than a
+write-time surprise. The DAO's `verify-evidence-references` still binds every
+reference before publication — the local rule is a faster, narrower prefilter,
+not a replacement.
+
+Selection-call risk (missing the governing clause) is mitigated by
+instructed inclusiveness (읽을지 말지 망설여지면 포함), a generous page cap,
+and always including the 보통약관's 보상하는손해/면책 articles; CP4 reuses the
+same served set so an exclusion the judge call saw is visible to the
+requirements call too.
+
 ## 5. Effort and sequence
 
 1. `tools/run_claim_analysis.py` skeleton: bundle assembly + CP1 grouped call

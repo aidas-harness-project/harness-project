@@ -1,11 +1,12 @@
-"""Claim-analysis checkpoint 1 driver (v2 pilot, grouped-call variant).
+"""Claim-analysis full-stage driver (v2 pilot).
 
-Skeleton scope per `plans/driverization/claim-analysis-v2.md` step 1: input
-bundle assembly + ONE grouped CP1 extraction call + local quote verification +
-governed DAO write of `extracted_claim_fields.json`, resumable via driver
-receipts/candidates. Checkpoints 2-4 and the medical publication arrive in
-step 2; until then the stage is completed by the agent path and this command
-exists for the arm E measurement only.
+All four checkpoints per `plans/driverization/claim-analysis-v2.md` step 2,
+five provider calls on the serial spine: CP1 grouped extraction (1), CP2
+coverage select + judge (2), CP3 case type (1), CP4 requirement matching (1),
+plus the deterministic medical-variable publication attempt after CP3. Each
+unit is resumable via driver receipts/candidates; the hybrid arm (CP1 driven,
+CP2-4 agent) measured 654s against the plain agent's 528s, so partial routing
+is dead and this command replaces the agent dispatch whole or not at all.
 
 Why grouped: the CASE_601 v1 pilot ran CP1 as 16 per-document calls summing
 647s at max concurrency 2. The whole non-policy payload of the measurement
@@ -28,6 +29,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -43,8 +45,16 @@ from llm_providers import ProviderExecutionError, add_provider_args, build_provi
 ROOT = Path(__file__).resolve().parent.parent
 DAO = ROOT / "tools" / "dao.py"
 STAGE, UNIT = "claim_analysis", "cp1_field_extraction"
+UNIT_CP2, UNIT_CP3, UNIT_CP4 = "cp2_coverage", "cp3_case_type", "cp4_requirements"
 CONTRACT, SCHEMA = "extracted_claim_fields.json", "extracted_claim_fields.schema.json"
-VERSION = "claim_analysis_cp1_driver.v0.1"
+CONTRACT_CP2, SCHEMA_CP2 = "coverage_result.json", "coverage_result.schema.json"
+CONTRACT_CP3, SCHEMA_CP3 = "case_type_result.json", "case_type_result.schema.json"
+CONTRACT_CP4, SCHEMA_CP4 = "requirement_matching_result.json", "requirement_matching_result.schema.json"
+VERSION = "claim_analysis_driver.v0.2"
+# Selection breadth: pages the judge/requirements calls will be served. Wide
+# on purpose -- a missed governing clause is a wrong analysis, and pages are
+# cheap inside one read (arm B's lesson: cost is calls, not characters).
+MAX_SELECTED_PAGES = 60
 TEXT_DISPOSITIONS = frozenset({"automated_text_pipeline", "text_only_no_normalization"})
 # CP1 reads the claim-side documents whole. Policy bundles are checkpoint 2's
 # input and are read there by the page; handing 200k+ characters of 약관 to a
@@ -286,6 +296,427 @@ def _extract(provider, bundle: list[dict], schema: Mapping[str, Any],
             validate=lambda value: _validate_cp1_output(value, bundle, schema))
 
 
+# ---------------------------------------------------------------- CP2-4 --
+
+_SCALAR_SHELL_PROPS = {
+    "status": {"enum": ["success", "partial"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "review_required": {"type": "boolean"},
+    "reviewer_role": {"enum": ["손해사정사", "의사", "법률전문가"]},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+}
+_REVIEWER_CONDITIONAL = {
+    "if": {"properties": {"review_required": {"const": True}}, "required": ["review_required"]},
+    "then": {"required": ["reviewer_role"]},
+}
+
+
+def _local_schema(schema_name: str, body_props: dict, body_required: list[str]) -> dict:
+    """Authoritative local schema for one checkpoint's response body.
+
+    The unit's substantive shapes come from the materialized public contract
+    schema, so the driver cannot drift from what `write-contract` enforces;
+    the public $defs ride along for the same fragment-resolution reason as
+    CP1's `_body_schema`.
+    """
+    public = driver_schema.load_materialized_schema(schema_name)
+    all_of = public.get("allOf", [])
+    props = all_of[1].get("properties", {}) if len(all_of) > 1 else {}
+    resolved = {}
+    for name in body_props:
+        if name not in props:
+            raise RuntimeError(f"{schema_name} has no {name} definition")
+        resolved[name] = props[name]
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object", "additionalProperties": False,
+        "properties": {**_SCALAR_SHELL_PROPS, **resolved},
+        "required": ["status", "confidence", "review_required", "warnings", *body_required],
+        "allOf": [_REVIEWER_CONDITIONAL],
+        "$defs": public.get("$defs", {}),
+    }
+
+
+def _body_schema_cp2() -> dict:
+    return _local_schema(SCHEMA_CP2, {"coverages": True}, ["coverages"])
+
+
+def _body_schema_cp3() -> dict:
+    names = ["case_type", "coverage_basis", "loss_type", "is_claim_case",
+             "case_type_source", "secondary_case_types", "candidate_types",
+             "template_id", "report_profile", "evidence_references"]
+    return _local_schema(SCHEMA_CP3, {name: True for name in names},
+                         ["case_type", "coverage_basis", "loss_type", "case_type_source",
+                          "template_id", "report_profile", "evidence_references"])
+
+
+def _body_schema_cp4() -> dict:
+    return _local_schema(SCHEMA_CP4, {"coverage_requirements": True}, ["coverage_requirements"])
+
+
+def _transport_shell(extra: dict, required: list[str]) -> dict:
+    return {
+        "type": "object", "additionalProperties": False,
+        "properties": {**_SCALAR_SHELL_PROPS, **extra},
+        "required": ["status", "confidence", "review_required", "warnings", *required],
+    }
+
+
+def _transport_schema_select() -> dict:
+    return {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "pages": {"type": "array", "items": {
+                "type": "object", "additionalProperties": False,
+                "properties": {"document_id": {"type": "string"},
+                               "page": {"type": "integer", "minimum": 1}},
+                "required": ["document_id", "page"]}},
+            "rationale": {"type": "string"},
+        },
+        "required": ["pages"],
+    }
+
+
+def _transport_schema_cp2() -> dict:
+    return _transport_shell({"coverages": {"type": "array", "items": {"type": "object"}}},
+                            ["coverages"])
+
+
+def _transport_schema_cp3() -> dict:
+    return _transport_shell({
+        "case_type": {"type": "string"},
+        "coverage_basis": {"type": ["string", "null"]},
+        "loss_type": {"type": ["string", "null"]},
+        "is_claim_case": {"type": "boolean"},
+        "case_type_source": {"enum": ["adjuster_input", "inferred"]},
+        "secondary_case_types": {"type": "array", "items": {"type": "string"}},
+        "candidate_types": {"type": "array", "items": {"type": "object"}},
+        "template_id": {"type": ["string", "null"]},
+        "report_profile": {"type": "object"},
+        "evidence_references": {"type": "array", "items": {"type": "object"}},
+    }, ["case_type", "case_type_source", "template_id", "report_profile",
+        "evidence_references"])
+
+
+def _transport_schema_cp4() -> dict:
+    return _transport_shell({"coverage_requirements": {"type": "array", "items": {"type": "object"}}},
+                            ["coverage_requirements"])
+
+
+def _norm(text: str) -> str:
+    return _cross_contract._normalize_ws(text)
+
+
+def _known_quote_set(*contracts: Mapping[str, Any]) -> set[tuple]:
+    """(document_id, page, normalized quote) for every reference already
+    verified in an earlier checkpoint's contract. A later call that sees no
+    new source text may only cite these."""
+    known: set[tuple] = set()
+    for contract in contracts:
+        for ref in _refs(contract):
+            known.add((ref.get("document_id"), ref.get("page"), _norm(ref.get("quote", ""))))
+    return known
+
+
+def _check_ref_grounding(value: Any, served: Mapping[tuple, str],
+                         known: set[tuple], *, clause_keys: tuple = ()) -> None:
+    """Every reference must quote a SERVED page or reuse a verified quote.
+
+    Clause refs (`matched_clause_ref`/`clause_ref`) are held stricter: they
+    must quote a served policy page -- reusing a claim-document quote as a
+    clause address would be a category error the DAO would reject later.
+    """
+    def check_ref(ref: Mapping[str, Any], *, clause: bool) -> None:
+        doc_id, page, quote = ref.get("document_id"), ref.get("page"), ref.get("quote", "")
+        page_text = served.get((doc_id, page))
+        if page_text is not None and _norm(quote) in _norm(page_text):
+            return
+        if not clause and (doc_id, page, _norm(quote)) in known:
+            return
+        kind = "clause reference" if clause else "evidence reference"
+        raise ValueError(
+            f"{doc_id} p{page}: {kind} quote is neither on a served page nor "
+            "a previously verified quote")
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+        for key, child in node.items():
+            if key == "evidence_references" and isinstance(child, list):
+                for ref in child:
+                    check_ref(ref, clause=False)
+            elif key in clause_keys and isinstance(child, dict):
+                check_ref(child, clause=True)
+            else:
+                walk(child)
+
+    walk(value)
+
+
+def _structured_call(provider, prompt: str, transport: Mapping[str, Any],
+                     validate, version: str, case_id: str, run_id: str,
+                     unit_id: str) -> dict:
+    driver_runtime.maybe_interrupt(STAGE, unit_id)
+    with driver_runtime.driver_span(case_id, run_id, "provider_wait", unit_id=unit_id, items=1):
+        return driver_runtime.structured_with_one_correction(
+            provider=provider, prompt=prompt, prompt_version=version,
+            output_schema=transport, validate=validate)
+
+
+def _dao_json_loose(args: list[str]) -> dict:
+    """A DAO command whose output carries a leading human NOTE before the JSON
+    object (policy-snapshot does). Parse from the first brace."""
+    proc = subprocess.run([sys.executable, str(DAO), *args], cwd=ROOT,
+                          capture_output=True, text=True, encoding="utf-8")
+    if proc.returncode:
+        raise RuntimeError((proc.stdout or proc.stderr or "DAO command failed").strip())
+    out = proc.stdout
+    start = out.find("{")
+    if start < 0:
+        raise RuntimeError(f"DAO command returned no JSON object: {args[0]}")
+    return json.loads(out[start:])
+
+
+def _fetch_snapshot(case_id: str, run_id: str, cited_doc_ids: list[str]) -> dict:
+    args = ["policy-snapshot", case_id]
+    for doc_id in sorted(set(cited_doc_ids)):
+        args += ["--document-id", doc_id]
+    args += ["--run-id", run_id]
+    return _dao_json_loose(args)
+
+
+def _compact_fields(cp1: Mapping[str, Any]) -> str:
+    """CP1's fields with their evidence quotes, compact, for later prompts."""
+    return json.dumps(cp1.get("fields", {}), ensure_ascii=False)
+
+
+def _index_listing(index: Mapping[str, Any]) -> tuple[str, dict[str, set[int]]]:
+    lines: list[str] = []
+    pages_by_doc: dict[str, set[int]] = {}
+    for doc in index.get("documents", []):
+        doc_id = doc.get("document_id")
+        pages = pages_by_doc.setdefault(doc_id, set())
+        for clause in doc.get("clauses", []):
+            pages.add(clause["page"])
+            lines.append(f"{doc_id} p{clause['page']} [{clause.get('policy_name')}] "
+                         f"{clause.get('article')}({clause.get('heading')})")
+        for table in doc.get("tables", []):
+            pages.add(table["page"])
+            lines.append(f"{doc_id} p{table['page']} [table] {table.get('header')}")
+    return "\n".join(lines), pages_by_doc
+
+
+def _select_prompt(fields_json: str, listing: str) -> str:
+    return f"""You are selecting which policy pages to read for coverage analysis of one insurance claim.
+Below are the claim's extracted facts and the complete article index of the case's policy documents
+(document, page, owning 약관, article number and heading). Return the pages likely to contain: the
+coverages this claim could trigger, their 보상하는 손해 definitions, their 면책/exclusion articles,
+payout conditions and limits, and any 특별약관 relevant to the claim's facts. ALWAYS include the
+보통약관's 보상하는 손해 and 면책 articles. Be inclusive -- a missed governing clause is a wrong
+analysis; when unsure, include the page. Select only pages that appear in the index listing, and
+include adjacent listed pages when an article likely continues. At most {MAX_SELECTED_PAGES} pages.
+
+CLAIM FACTS:
+{fields_json}
+
+POLICY ARTICLE INDEX:
+{listing}
+"""
+
+
+def _render_pages(bundle: list[dict]) -> str:
+    return "\n\n".join(
+        f"## {doc['document_id']} pages\n" + "\n".join(
+            f"[page {page['page']}]\n{page['text']}" for page in doc["pages"])
+        for doc in bundle)
+
+
+def _cp2_prompt(fields_json: str, pages_text: str) -> str:
+    return f"""Identify the coverages this claim could trigger, from the policy pages below and the claim facts.
+Return only the supplied JSON Schema. `coverages` is an array; a claim can trigger more than one.
+Per coverage: `coverage_name` (the policy's own name), `standardized_coverage_name` (snake_case
+English), `applicable` (whether its conditions are actually met by the claim's facts, not merely
+mentioned -- if a condition is genuinely unresolved on this record, record your best-supported
+reading, state the unresolved condition in `warnings`, and set review_required with the right
+role), `matched_clause_ref` ({{document_id, page, quote}} with an EXACT quote from a policy page
+shown below -- null ONLY if no clause was found at all), `confidence`, `evidence_references`, and
+`review_required`. Every evidence reference must either quote a policy page shown below or reuse
+an exact quote from the claim facts above (same document, page, and quote). Do not cite anything
+else. Top-level review_required true requires reviewer_role.
+
+CLAIM FACTS (with their verified evidence quotes):
+{fields_json}
+
+POLICY PAGES:
+{pages_text}
+"""
+
+
+def _cp3_prompt(fields_json: str, coverages_json: str, adjuster_case_type) -> str:
+    adjuster = json.dumps(adjuster_case_type, ensure_ascii=False)
+    return f"""Classify this claim's case type and report profile from the claim facts and identified coverages.
+Return only the supplied JSON Schema. `adjuster_case_type` from intake is: {adjuster}. If it is
+non-null, copy its axes verbatim, set case_type_source "adjuster_input", and record axis_cross_check
+per your independent view. If null, infer: `coverage_basis` one of 배상책임/개인보험/자동차보험,
+`loss_type` one of 후유장해/진단·수술비/실손, legacy `case_type` the closest single value, and
+case_type_source "inferred". Set `report_profile` from the actual contractual mechanism:
+third-party automobile bodily injury -> automobile_compensation/statutory_or_policy_auto_compensation/compact/supported, template 자동차보험_대인배상_간이형;
+first-party automobile self-injury -> automobile_self_injury/automobile_policy_benefit/full/provisional, template 자동차보험_자기신체사고형 (review_required true, 손해사정사);
+first-party personal-accident disability -> personal_accident_benefit/personal_accident_policy_benefit/full/supported, template 개인보험_후유장해형;
+third-party liability damages -> liability_damages/insured_liability (or mutual_or_cooperative_liability as evidenced)/full/supported, template 배상책임_후유장해형;
+disease/diagnosis-triggered benefit -> disease_benefit/disease_policy_benefit/full/supported, template 진단수술비형.
+report_profile also carries format_contract_version "loss_adjustment_report.v1". For 실손, an
+unconfirmed primary type, or no supported registry contract: family/mechanism other_review_required,
+support_status unsupported, template_id null, review_required true. The profile records the
+mechanism under which the claim was brought, never a verdict on whether it succeeds. Include
+`is_claim_case`, `candidate_types` (ranked, with confidence), `secondary_case_types` (only genuine
+ones), and `evidence_references` that REUSE exact quotes from the claim facts or coverage evidence
+below (same document, page, quote) -- cite nothing else.
+
+CLAIM FACTS:
+{fields_json}
+
+IDENTIFIED COVERAGES:
+{coverages_json}
+"""
+
+
+def _cp4_prompt(fields_json: str, coverages_json: str, pages_text: str) -> str:
+    return f"""Match each identified coverage's payout requirements against the claim's facts.
+Return only the supplied JSON Schema. `coverage_requirements` groups requirements per coverage,
+joining EXACTLY on the `standardized_coverage_name` values in the coverages below -- never invent
+a new name. Per requirement: `requirement_id` (provisional REQ-N; the driver renumbers),
+`requirement_text`, `clause_ref` ({{document_id, page, quote}} quoting the SPECIFIC condition
+sentence from a policy page shown below), `status` met/not_met/uncertain, `confidence`,
+`evidence_references`, `review_required`. met/not_met require at least one evidence reference;
+uncertain may have none ONLY when evidence is genuinely absent -- a redaction-blanked fact that
+blocks a check is uncertain with the blockage stated in the requirement_text or warnings. Every
+evidence reference must quote a policy page below or reuse an exact quote from the claim facts.
+Include exclusion/면책 requirements, time-limit conditions, and any interaction between coverages
+you can ground in the shown pages.
+
+CLAIM FACTS:
+{fields_json}
+
+IDENTIFIED COVERAGES:
+{coverages_json}
+
+POLICY PAGES:
+{pages_text}
+"""
+
+
+def _renumber_requirements(body: dict) -> dict:
+    copied = json.loads(json.dumps(body, ensure_ascii=False))
+    number = 1
+    for group in copied["coverage_requirements"]:
+        for requirement in group.get("requirements", []):
+            requirement["requirement_id"] = f"REQ-{number}"
+            number += 1
+    return copied
+
+
+def _medical_candidate(case_id: str, run_id: str, case_type: str) -> dict:
+    """The deterministic publication candidate. Structures evidence only; the
+    empty collections are honest -- no clinical inference is made here, and
+    under the deferred configuration (`variable_kinds: []`) no variable could
+    be enabled anyway. Schema-validity is pinned by test so a refusal is
+    always the CONFIG refusal, never a malformed candidate."""
+    return {
+        "case_id": case_id, "run_id": run_id, "component": "claim-analysis",
+        "status": "success", "case_type": case_type,
+        "schema_version": "medical_variables.v0.1",
+        "config_version": "medical_structuring.v0.1",
+        "source_coverage": [], "domains": [], "medical_issues": [],
+        "variables": [], "contradiction_groups": [],
+        "importance_assignments": [], "quantity_summaries": [],
+        "timeline_observation_ids": [],
+    }
+
+
+_DEFERRED_REFUSALS = ("disabled or lacks approval", "is not enabled by medical configuration")
+
+
+def _attempt_medical_publication(case_id: str, run_id: str, held_by: str,
+                                 case_type: str) -> dict:
+    candidate_file = _temp_json(_medical_candidate(case_id, run_id, case_type))
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(DAO), "write-medical-variables", case_id,
+             str(candidate_file), "--held-by", held_by, "--run-id", run_id],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+    finally:
+        candidate_file.unlink(missing_ok=True)
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode == 0:
+        return {"published": True}
+    if any(marker in output for marker in _DEFERRED_REFUSALS):
+        # The approved deferred state (P11): report, do not fabricate a way
+        # through. The stage gate is `check-medical-reviews-clear`, which the
+        # orchestrator and the DAO's finalize both consult.
+        return {"published": False, "deferred_config_refusal": True,
+                "detail": output.strip()[:500]}
+    raise RuntimeError(f"medical-variable publication failed: {output.strip()[:500]}")
+
+
+def _unit_receipt_reuse(case_id: str, run_id: str, unit_id: str, contract: str,
+                        digests: Mapping[str, str], prompt_version: str,
+                        provider) -> dict | None:
+    receipt = _dao_json(["read-driver-receipt", case_id, "--stage", STAGE,
+                         "--unit-id", unit_id, "--run-id", run_id], allow_missing=True)
+    if receipt and driver_runtime.receipt_matches(
+            receipt, input_digests=digests, prompt_version=prompt_version,
+            response_schema_version=VERSION, provider_name=provider.provider_name,
+            model_name=provider.model_name):
+        return _dao_json(["read-contract", case_id, contract, "--run-id", run_id],
+                         allow_missing=True)
+    return None
+
+
+def _write_unit(case_id: str, run_id: str, held_by: str, unit_id: str,
+                contract_name: str, schema_name: str, contract: Mapping[str, Any],
+                digests: Mapping[str, str], prompt_version: str, provider) -> None:
+    data_file = _temp_json(contract)
+    try:
+        with driver_runtime.driver_span(case_id, run_id, "dao_publish", unit_id=unit_id):
+            _dao_write(["write-contract", case_id, contract_name,
+                        "--data-file", str(data_file), "--schema-name", schema_name,
+                        "--held-by", held_by, "--run-id", run_id, "--stage", STAGE])
+    finally:
+        data_file.unlink(missing_ok=True)
+    receipt_file = _temp_json(driver_runtime.make_receipt(
+        case_id=case_id, run_id=run_id, stage=STAGE, unit_id=unit_id,
+        input_digests=digests, prompt_version=prompt_version,
+        response_schema_version=VERSION, provider_name=provider.provider_name,
+        model_name=provider.model_name, completed_contracts=[contract_name]))
+    try:
+        _dao_write(["write-driver-receipt", case_id, "--stage", STAGE,
+                    "--unit-id", unit_id, "--data-file", str(receipt_file),
+                    "--held-by", held_by, "--run-id", run_id])
+    finally:
+        receipt_file.unlink(missing_ok=True)
+
+
+def _envelope(case_id: str, run_id: str, body: Mapping[str, Any], provider,
+              prompt_version: str, extra: Mapping[str, Any]) -> dict:
+    contract = {"case_id": case_id, "run_id": run_id, "component": "claim-analysis",
+                "status": body["status"],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "model_info": {"model_name": provider.model_name,
+                               "prompt_version": prompt_version},
+                "confidence": body["confidence"],
+                "review_required": body["review_required"],
+                "warnings": body["warnings"], "source_grounded": True}
+    if body["review_required"]:
+        contract["reviewer_role"] = body["reviewer_role"]
+    contract.update(extra)
+    return contract
+
+
 def run(*, case_id: str, held_by: str, run_id: str, provider,
         prompt_version: str = VERSION) -> dict:
     state = _dao_json(["read-contract", case_id, "_run_state.json", "--run-id", run_id])
@@ -313,92 +744,296 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
         digests = {"manifest_entries": _digest(selected)}
         digests.update({f"redacted:{doc_id}": by_id[doc_id]["redacted_text_sha256"]
                         for doc_id in doc_ids})
-    receipt = _dao_json(["read-driver-receipt", case_id, "--stage", STAGE, "--unit-id", UNIT,
-                         "--run-id", run_id], allow_missing=True)
-    if receipt and driver_runtime.receipt_matches(
-            receipt, input_digests=digests, prompt_version=prompt_version,
-            response_schema_version=VERSION, provider_name=provider.provider_name,
-            model_name=provider.model_name):
-        if _dao_json(["read-contract", case_id, CONTRACT, "--run-id", run_id],
-                     allow_missing=True) is not None:
-            return {"status": "reused", "document_count": len(doc_ids), "contract": CONTRACT}
-    candidate_id = grouped_candidate_id(selected)
-    stored = (_dao_json(["read-driver-candidates", case_id, "--stage", STAGE,
-                         "--unit-id", UNIT, "--run-id", run_id],
-                        allow_missing=True) or {}).get("candidates", {})
-    existing = stored.get(candidate_id)
-    provider_called = False
-    if isinstance(existing, dict) and driver_runtime.candidate_matches(
-            existing, input_digests=digests, prompt_version=prompt_version,
-            response_schema_version=VERSION, provider_name=provider.provider_name,
-            model_name=provider.model_name):
-        body = _validate_cp1_output(existing["result"], bundle, schema)
+    summary: dict = {"units": {}}
+
+    # ------------------------------------------------------------- CP1 --
+    unit_start = time.monotonic()
+    cp1_contract = _unit_receipt_reuse(case_id, run_id, UNIT, CONTRACT, digests,
+                                       prompt_version, provider)
+    if cp1_contract is not None:
+        summary["units"][UNIT] = {"status": "reused", "seconds": round(time.monotonic() - unit_start, 1)}
     else:
-        body = _extract(provider, bundle, schema, transport_schema, prompt_version,
-                        case_id, run_id)
-        provider_called = True
-        payload = driver_runtime.make_candidate(
-            case_id=case_id, run_id=run_id, stage=STAGE, unit_id=UNIT,
-            candidate_id=candidate_id, input_digests=digests,
-            prompt_version=prompt_version, response_schema_version=VERSION,
-            provider_name=provider.provider_name, model_name=provider.model_name,
-            result=body)
-        candidate_file = _temp_json(payload)
-        try:
-            _dao_write(["write-driver-candidate", case_id, "--stage", STAGE,
-                        "--unit-id", UNIT, "--candidate-id", candidate_id,
-                        "--data-file", str(candidate_file), "--held-by", held_by,
-                        "--run-id", run_id])
-        finally:
-            candidate_file.unlink(missing_ok=True)
-    refs = _refs(body)
-    if refs:
-        ref_file = _temp_json({"references": refs})
-        try:
-            with driver_runtime.driver_span(case_id, run_id, "evidence_verify",
-                                            unit_id=UNIT, items=len(refs)):
-                checked = _dao_json(["verify-evidence-references", case_id,
-                                     "--references-file", str(ref_file), "--run-id", run_id])
-        finally:
-            ref_file.unlink(missing_ok=True)
-        verified = checked.get("verified_references", [])
-        if len(verified) != len(refs):
-            raise RuntimeError("DAO returned an incomplete evidence verification result")
-        body = _bind(body, {_ref_key(ref): ref for ref in verified})
-    contract = {"case_id": case_id, "run_id": run_id, "component": "claim-analysis",
-                "status": body["status"],
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "model_info": {"model_name": provider.model_name, "prompt_version": prompt_version},
-                "confidence": body["confidence"], "review_required": body["review_required"],
-                "warnings": body["warnings"], "source_grounded": True,
-                "fields": body["fields"]}
-    if refs:
-        contract["evidence_references"] = _refs(body)
-    if body["review_required"]:
-        contract["reviewer_role"] = body["reviewer_role"]
-    data_file = _temp_json(contract)
-    try:
-        with driver_runtime.driver_span(case_id, run_id, "dao_publish", unit_id=UNIT):
-            _dao_write([
-                "write-contract", case_id, CONTRACT,
-                "--data-file", str(data_file),
-                "--schema-name", SCHEMA,
-                "--held-by", held_by, "--run-id", run_id, "--stage", STAGE,
-            ])
-    finally:
-        data_file.unlink(missing_ok=True)
-    receipt_file = _temp_json(driver_runtime.make_receipt(
-        case_id=case_id, run_id=run_id, stage=STAGE, unit_id=UNIT, input_digests=digests,
+        candidate_id = grouped_candidate_id(selected)
+        stored = (_dao_json(["read-driver-candidates", case_id, "--stage", STAGE,
+                             "--unit-id", UNIT, "--run-id", run_id],
+                            allow_missing=True) or {}).get("candidates", {})
+        existing = stored.get(candidate_id)
+        if isinstance(existing, dict) and driver_runtime.candidate_matches(
+                existing, input_digests=digests, prompt_version=prompt_version,
+                response_schema_version=VERSION, provider_name=provider.provider_name,
+                model_name=provider.model_name):
+            body = _validate_cp1_output(existing["result"], bundle, schema)
+        else:
+            body = _extract(provider, bundle, schema, transport_schema, prompt_version,
+                            case_id, run_id)
+            _persist_candidate(case_id, run_id, held_by, UNIT, candidate_id,
+                               digests, prompt_version, provider, body)
+        body = _verify_and_bind(case_id, run_id, UNIT, body)
+        cp1_contract = _envelope(case_id, run_id, body, provider, prompt_version,
+                                 {"fields": body["fields"],
+                                  **({"evidence_references": _refs(body)} if _refs(body) else {})})
+        _write_unit(case_id, run_id, held_by, UNIT, CONTRACT, SCHEMA, cp1_contract,
+                    digests, prompt_version, provider)
+        summary["units"][UNIT] = {"status": "published", "seconds": round(time.monotonic() - unit_start, 1)}
+
+    # ------------------------------------------------------------- CP2 --
+    unit_start = time.monotonic()
+    index = _dao_json(["read-document-index", case_id, "--run-id", run_id],
+                      allow_missing=True)
+    if index is None:
+        raise RuntimeError("BLOCKED: _document_index.json is required for the CP2 "
+                           "selection call -- run the policy driver first")
+    listing, index_pages = _index_listing(index)
+    fields_json = _compact_fields(cp1_contract)
+    digests_cp2 = {"cp1_contract": _digest(cp1_contract), "document_index": _digest(index)}
+    cp2_contract = _unit_receipt_reuse(case_id, run_id, UNIT_CP2, CONTRACT_CP2,
+                                       digests_cp2, prompt_version, provider)
+    stored = (_dao_json(["read-driver-candidates", case_id, "--stage", STAGE,
+                         "--unit-id", UNIT_CP2, "--run-id", run_id],
+                        allow_missing=True) or {}).get("candidates", {})
+
+    def _selection() -> list[dict]:
+        existing = stored.get("cp2_select")
+        if isinstance(existing, dict) and driver_runtime.candidate_matches(
+                existing, input_digests=digests_cp2, prompt_version=prompt_version,
+                response_schema_version=VERSION, provider_name=provider.provider_name,
+                model_name=provider.model_name):
+            return existing["result"]["pages"]
+
+        def validate_selection(value: Mapping[str, Any]) -> dict:
+            Draft202012Validator(_transport_schema_select()).validate(value)
+            pages, seen = [], set()
+            for item in value["pages"]:
+                key = (item["document_id"], item["page"])
+                if key in seen:
+                    continue
+                if item["page"] not in index_pages.get(item["document_id"], set()):
+                    raise ValueError(
+                        f"{item['document_id']} p{item['page']} is not in the index listing")
+                seen.add(key)
+                pages.append({"document_id": item["document_id"], "page": item["page"]})
+            if not pages:
+                raise ValueError("selection returned no valid pages")
+            return {"pages": pages[:MAX_SELECTED_PAGES]}
+
+        result = _structured_call(provider, _select_prompt(fields_json, listing),
+                                  _transport_schema_select(), validate_selection,
+                                  prompt_version, case_id, run_id, UNIT_CP2)
+        _persist_candidate(case_id, run_id, held_by, UNIT_CP2, "cp2_select",
+                           digests_cp2, prompt_version, provider, result)
+        return result["pages"]
+
+    def _served_pages() -> tuple[list[dict], dict]:
+        pages = _selection()
+        by_doc: dict[str, list[int]] = {}
+        for item in pages:
+            by_doc.setdefault(item["document_id"], []).append(item["page"])
+        args = ["read-redacted-text-bundle", case_id]
+        for doc_id in sorted(by_doc):
+            args += ["--doc-id", doc_id,
+                     "--pages", f"{doc_id}={','.join(str(p) for p in sorted(set(by_doc[doc_id])))}"]
+        args += ["--run-id", run_id]
+        with driver_runtime.driver_span(case_id, run_id, "dao_content_read", unit_id=UNIT_CP2):
+            raw_pages = _dao_json(args)
+        bundle_docs = raw_pages.get("documents", [])
+        served = {(doc["document_id"], page["page"]): page["text"]
+                  for doc in bundle_docs for page in doc.get("pages", [])}
+        return bundle_docs, served
+
+    served_bundle: list[dict] = []
+    served: dict = {}
+    if cp2_contract is not None:
+        summary["units"][UNIT_CP2] = {"status": "reused", "seconds": round(time.monotonic() - unit_start, 1)}
+    else:
+        served_bundle, served = _served_pages()
+        known = _known_quote_set(cp1_contract)
+        schema_cp2 = _body_schema_cp2()
+
+        def validate_cp2(value: Mapping[str, Any]) -> dict:
+            Draft202012Validator(schema_cp2, format_checker=FormatChecker()).validate(value)
+            _check_ref_grounding(value["coverages"], served, known,
+                                 clause_keys=("matched_clause_ref",))
+            return dict(value)
+
+        existing = stored.get("cp2_judge")
+        if isinstance(existing, dict) and driver_runtime.candidate_matches(
+                existing, input_digests=digests_cp2, prompt_version=prompt_version,
+                response_schema_version=VERSION, provider_name=provider.provider_name,
+                model_name=provider.model_name):
+            body = validate_cp2(existing["result"])
+        else:
+            body = _structured_call(provider, _cp2_prompt(fields_json, _render_pages(served_bundle)),
+                                    _transport_schema_cp2(), validate_cp2,
+                                    prompt_version, case_id, run_id, UNIT_CP2)
+            _persist_candidate(case_id, run_id, held_by, UNIT_CP2, "cp2_judge",
+                               digests_cp2, prompt_version, provider, body)
+        body = _verify_and_bind(case_id, run_id, UNIT_CP2, body)
+        cited = [c["matched_clause_ref"]["document_id"] for c in body["coverages"]
+                 if isinstance(c.get("matched_clause_ref"), dict)]
+        extra: dict = {"coverages": body["coverages"]}
+        if cited:
+            extra["upstream_policy_snapshot"] = _fetch_snapshot(case_id, run_id, cited)
+        cp2_contract = _envelope(case_id, run_id, body, provider, prompt_version, extra)
+        _write_unit(case_id, run_id, held_by, UNIT_CP2, CONTRACT_CP2, SCHEMA_CP2,
+                    cp2_contract, digests_cp2, prompt_version, provider)
+        summary["units"][UNIT_CP2] = {"status": "published", "seconds": round(time.monotonic() - unit_start, 1)}
+
+    # ------------------------------------------------------------- CP3 --
+    unit_start = time.monotonic()
+    adjuster_case_type = manifest.get("adjuster_case_type")
+    coverages_json = json.dumps(cp2_contract.get("coverages", []), ensure_ascii=False)
+    digests_cp3 = {"cp1_contract": _digest(cp1_contract),
+                   "cp2_contract": _digest(cp2_contract),
+                   "adjuster_case_type": _digest(adjuster_case_type)}
+    cp3_contract = _unit_receipt_reuse(case_id, run_id, UNIT_CP3, CONTRACT_CP3,
+                                       digests_cp3, prompt_version, provider)
+    cp3_reused = cp3_contract is not None
+    if cp3_reused:
+        summary["units"][UNIT_CP3] = {"status": "reused", "seconds": round(time.monotonic() - unit_start, 1)}
+    else:
+        known3 = _known_quote_set(cp1_contract, cp2_contract)
+        schema_cp3 = _body_schema_cp3()
+
+        def validate_cp3(value: Mapping[str, Any]) -> dict:
+            Draft202012Validator(schema_cp3, format_checker=FormatChecker()).validate(value)
+            _check_ref_grounding(value, {}, known3)
+            return dict(value)
+
+        stored3 = (_dao_json(["read-driver-candidates", case_id, "--stage", STAGE,
+                              "--unit-id", UNIT_CP3, "--run-id", run_id],
+                             allow_missing=True) or {}).get("candidates", {})
+        existing = stored3.get("cp3")
+        if isinstance(existing, dict) and driver_runtime.candidate_matches(
+                existing, input_digests=digests_cp3, prompt_version=prompt_version,
+                response_schema_version=VERSION, provider_name=provider.provider_name,
+                model_name=provider.model_name):
+            body = validate_cp3(existing["result"])
+        else:
+            body = _structured_call(provider,
+                                    _cp3_prompt(fields_json, coverages_json, adjuster_case_type),
+                                    _transport_schema_cp3(), validate_cp3,
+                                    prompt_version, case_id, run_id, UNIT_CP3)
+            _persist_candidate(case_id, run_id, held_by, UNIT_CP3, "cp3",
+                               digests_cp3, prompt_version, provider, body)
+        body = _verify_and_bind(case_id, run_id, UNIT_CP3, body)
+        extra = {name: body[name] for name in
+                 ("case_type", "coverage_basis", "loss_type", "is_claim_case",
+                  "case_type_source", "secondary_case_types", "candidate_types",
+                  "template_id", "report_profile", "evidence_references")
+                 if name in body}
+        cp3_contract = _envelope(case_id, run_id, body, provider, prompt_version, extra)
+        # case_type_result's envelope carries its own confidence/evidence at the
+        # top level per its schema; reviewer routing follows the body.
+        _write_unit(case_id, run_id, held_by, UNIT_CP3, CONTRACT_CP3, SCHEMA_CP3,
+                    cp3_contract, digests_cp3, prompt_version, provider)
+        summary["units"][UNIT_CP3] = {"status": "published", "seconds": round(time.monotonic() - unit_start, 1)}
+
+    # ------------------------------------------- medical publication --
+    if cp3_reused:
+        summary["medical_publication"] = {"skipped": "cp3 unit reused"}
+    else:
+        summary["medical_publication"] = _attempt_medical_publication(
+            case_id, run_id, held_by, cp3_contract["case_type"])
+
+    # ------------------------------------------------------------- CP4 --
+    unit_start = time.monotonic()
+    digests_cp4 = {"cp1_contract": _digest(cp1_contract),
+                   "cp2_contract": _digest(cp2_contract)}
+    cp4_contract = _unit_receipt_reuse(case_id, run_id, UNIT_CP4, CONTRACT_CP4,
+                                       digests_cp4, prompt_version, provider)
+    if cp4_contract is not None:
+        summary["units"][UNIT_CP4] = {"status": "reused", "seconds": round(time.monotonic() - unit_start, 1)}
+    else:
+        if not served:
+            served_bundle, served = _served_pages()
+        coverage_names = {c.get("standardized_coverage_name")
+                          for c in cp2_contract.get("coverages", [])}
+        known4 = _known_quote_set(cp1_contract, cp2_contract)
+        schema_cp4 = _body_schema_cp4()
+
+        def validate_cp4(value: Mapping[str, Any]) -> dict:
+            Draft202012Validator(schema_cp4, format_checker=FormatChecker()).validate(value)
+            for group in value["coverage_requirements"]:
+                if group.get("standardized_coverage_name") not in coverage_names:
+                    raise ValueError(
+                        f"coverage_requirements names unknown coverage "
+                        f"{group.get('standardized_coverage_name')!r}; join exactly on "
+                        f"checkpoint 2's standardized_coverage_name values")
+            _check_ref_grounding(value["coverage_requirements"], served, known4,
+                                 clause_keys=("clause_ref",))
+            return dict(value)
+
+        stored4 = (_dao_json(["read-driver-candidates", case_id, "--stage", STAGE,
+                              "--unit-id", UNIT_CP4, "--run-id", run_id],
+                             allow_missing=True) or {}).get("candidates", {})
+        existing = stored4.get("cp4")
+        if isinstance(existing, dict) and driver_runtime.candidate_matches(
+                existing, input_digests=digests_cp4, prompt_version=prompt_version,
+                response_schema_version=VERSION, provider_name=provider.provider_name,
+                model_name=provider.model_name):
+            body = validate_cp4(existing["result"])
+        else:
+            body = _structured_call(provider,
+                                    _cp4_prompt(fields_json, coverages_json,
+                                                _render_pages(served_bundle)),
+                                    _transport_schema_cp4(), validate_cp4,
+                                    prompt_version, case_id, run_id, UNIT_CP4)
+            _persist_candidate(case_id, run_id, held_by, UNIT_CP4, "cp4",
+                               digests_cp4, prompt_version, provider, body)
+        body = _renumber_requirements(body)
+        body = _verify_and_bind(case_id, run_id, UNIT_CP4, body)
+        cited = [r["clause_ref"]["document_id"]
+                 for group in body["coverage_requirements"]
+                 for r in group.get("requirements", [])
+                 if isinstance(r.get("clause_ref"), dict)]
+        extra = {"coverage_requirements": body["coverage_requirements"]}
+        if cited:
+            extra["upstream_policy_snapshot"] = _fetch_snapshot(case_id, run_id, cited)
+        cp4_contract = _envelope(case_id, run_id, body, provider, prompt_version, extra)
+        _write_unit(case_id, run_id, held_by, UNIT_CP4, CONTRACT_CP4, SCHEMA_CP4,
+                    cp4_contract, digests_cp4, prompt_version, provider)
+        summary["units"][UNIT_CP4] = {"status": "published", "seconds": round(time.monotonic() - unit_start, 1)}
+
+    summary["status"] = "complete"
+    summary["document_count"] = len(doc_ids)
+    return summary
+
+
+def _persist_candidate(case_id: str, run_id: str, held_by: str, unit_id: str,
+                       candidate_id: str, digests: Mapping[str, str],
+                       prompt_version: str, provider, result: Mapping[str, Any]) -> None:
+    payload = driver_runtime.make_candidate(
+        case_id=case_id, run_id=run_id, stage=STAGE, unit_id=unit_id,
+        candidate_id=candidate_id, input_digests=digests,
         prompt_version=prompt_version, response_schema_version=VERSION,
         provider_name=provider.provider_name, model_name=provider.model_name,
-        completed_contracts=[CONTRACT]))
+        result=result)
+    candidate_file = _temp_json(payload)
     try:
-        _dao_write(["write-driver-receipt", case_id, "--stage", STAGE, "--unit-id", UNIT,
-                    "--data-file", str(receipt_file), "--held-by", held_by, "--run-id", run_id])
+        _dao_write(["write-driver-candidate", case_id, "--stage", STAGE,
+                    "--unit-id", unit_id, "--candidate-id", candidate_id,
+                    "--data-file", str(candidate_file), "--held-by", held_by,
+                    "--run-id", run_id])
     finally:
-        receipt_file.unlink(missing_ok=True)
-    return {"status": "published", "document_count": len(doc_ids),
-            "provider_called": provider_called, "contract": CONTRACT}
+        candidate_file.unlink(missing_ok=True)
+
+
+def _verify_and_bind(case_id: str, run_id: str, unit_id: str, body: dict) -> dict:
+    refs = _refs(body)
+    if not refs:
+        return body
+    ref_file = _temp_json({"references": refs})
+    try:
+        with driver_runtime.driver_span(case_id, run_id, "evidence_verify",
+                                        unit_id=unit_id, items=len(refs)):
+            checked = _dao_json(["verify-evidence-references", case_id,
+                                 "--references-file", str(ref_file), "--run-id", run_id])
+    finally:
+        ref_file.unlink(missing_ok=True)
+    verified = checked.get("verified_references", [])
+    if len(verified) != len(refs):
+        raise RuntimeError("DAO returned an incomplete evidence verification result")
+    return _bind(body, {_ref_key(ref): ref for ref in verified})
 
 
 def main(argv: list[str] | None = None) -> int:

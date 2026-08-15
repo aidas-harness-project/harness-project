@@ -102,19 +102,77 @@ def test_run_refuses_unless_orchestrator_opened_the_attempt(monkeypatch):
                    provider=SimpleNamespace(provider_name="fixture", model_name="fixture"))
 
 
-class _Provider:
+POLICY_QUOTE = "회사는 보험사고에 대하여 보상합니다"
+POLICY_PAGE_TEXT = f"제1조(보상하는 손해)\n{POLICY_QUOTE}."
+
+
+def _cp2_body():
+    return {
+        "status": "success", "confidence": 0.8, "review_required": False,
+        "warnings": [],
+        "coverages": [{
+            "coverage_name": "테스트 특별약관",
+            "standardized_coverage_name": "test_coverage",
+            "applicable": True, "confidence": 0.8, "review_required": False,
+            "matched_clause_ref": {"document_id": "DOC_009", "page": 2,
+                                   "quote": POLICY_QUOTE},
+            "evidence_references": [
+                {"document_id": "DOC_009", "page": 2, "quote": POLICY_QUOTE}],
+        }],
+    }
+
+
+def _cp3_body():
+    return {
+        "status": "success", "confidence": 0.8, "review_required": False,
+        "warnings": [],
+        "case_type": "배상책임", "coverage_basis": "배상책임", "loss_type": "후유장해",
+        "is_claim_case": True, "case_type_source": "inferred",
+        "secondary_case_types": [], "candidate_types": [
+            {"case_type": "배상책임", "confidence": 0.8}],
+        "template_id": "배상책임_후유장해형",
+        "report_profile": {"format_contract_version": "loss_adjustment_report.v1",
+                           "family": "liability_damages",
+                           "claim_mechanism": "insured_liability",
+                           "mode": "full", "support_status": "supported"},
+        "evidence_references": [
+            {"document_id": "DOC_011", "page": 1, "quote": QUOTE}],
+    }
+
+
+def _cp4_body():
+    return {
+        "status": "success", "confidence": 0.8, "review_required": False,
+        "warnings": [],
+        "coverage_requirements": [{
+            "coverage_name": "테스트 특별약관",
+            "standardized_coverage_name": "test_coverage",
+            "requirements": [{
+                "requirement_id": "REQ-9",  # provisional; the driver renumbers
+                "requirement_text": "보험사고일 것",
+                "clause_ref": {"document_id": "DOC_009", "page": 2,
+                               "quote": POLICY_QUOTE},
+                "status": "met", "confidence": 0.8, "review_required": False,
+                "evidence_references": [
+                    {"document_id": "DOC_011", "page": 1, "quote": QUOTE}],
+            }],
+        }],
+    }
+
+
+class _SequenceProvider:
     provider_name, model_name = "fixture", "fixture-model"
 
-    def __init__(self, body=None, fail=False):
-        self.schemas = []
-        self.body = body or _valid_body()
-        self.fail = fail
+    def __init__(self, *results):
+        self.results = list(results)
+        self.calls = 0
 
     def analyze_text_structured(self, prompt, prompt_version, output_schema):
-        if self.fail:
-            raise AssertionError("provider must not be called when the candidate is reusable")
-        self.schemas.append(output_schema)
-        return SimpleNamespace(structured_output=json.loads(json.dumps(self.body)))
+        if not self.results:
+            raise AssertionError("provider called more times than the test allows")
+        self.calls += 1
+        return SimpleNamespace(
+            structured_output=json.loads(json.dumps(self.results.pop(0))))
 
 
 def _dao_fakes(monkeypatch, *, stored_candidates=None):
@@ -122,20 +180,30 @@ def _dao_fakes(monkeypatch, *, stored_candidates=None):
     manifest = {"documents": [
         _document("DOC_009", "insurance_policy"),
         _document("DOC_011", "diagnosis_certificate"),
-    ]}
-    bundle = {"documents": [
+    ], "adjuster_case_type": None}
+    cp1_bundle = {"documents": [
         {"document_id": "DOC_011", "redacted_text_sha256": DIGEST,
          "pages": [{"page": 1, "text": PAGE_TEXT}]},
     ]}
+    policy_bundle = {"documents": [
+        {"document_id": "DOC_009", "redacted_text_sha256": DIGEST,
+         "pages": [{"page": 2, "text": POLICY_PAGE_TEXT}]},
+    ]}
+    index = {"documents": [{"document_id": "DOC_009", "clauses": [
+        {"page": 2, "policy_name": "테스트약관", "article": "제1조",
+         "heading": "보상하는 손해"}], "tables": []}]}
 
     def fake_read(args, *, allow_missing=False):
         if args[0] == "read-contract" and args[2] == "_run_state.json":
             return {"stages": [{"stage_name": "claim_analysis", "status": "in_progress"}]}
         if args[0] == "read-contract" and args[2] == "document_manifest.json":
             return manifest
+        if args[0] == "read-contract":
+            return None  # no prior checkpoint contracts
+        if args[0] == "read-document-index":
+            return index
         if args[0] == "read-redacted-text-bundle":
-            assert args.count("--doc-id") == 1 and "DOC_011" in args and "DOC_009" not in args
-            return bundle
+            return policy_bundle if "--pages" in args else cp1_bundle
         if args[0] == "read-driver-receipt":
             return None
         if args[0] == "read-driver-candidates":
@@ -150,38 +218,65 @@ def _dao_fakes(monkeypatch, *, stored_candidates=None):
 
     def fake_write(args):
         path = args[args.index("--data-file") + 1]
-        writes[args[0]] = json.loads(open(path, encoding="utf-8").read())
+        payload = json.loads(open(path, encoding="utf-8").read())
         if args[0] == "write-contract":
-            assert args[:3] == ["write-contract", CASE, "extracted_claim_fields.json"]
-            assert args[args.index("--schema-name") + 1] == "extracted_claim_fields.schema.json"
+            writes[("write-contract", args[2])] = payload
+        else:
+            writes[(args[0], args[args.index("--unit-id") + 1])] = payload
 
     monkeypatch.setattr(driver, "_dao_json", fake_read)
     monkeypatch.setattr(driver, "_dao_write", fake_write)
+    monkeypatch.setattr(driver, "_fetch_snapshot",
+                        lambda *a, **k: {"documents": [], "snapshot_sha256": "0" * 64})
+    monkeypatch.setattr(driver, "_attempt_medical_publication",
+                        lambda *a, **k: {"published": False,
+                                         "deferred_config_refusal": True})
     return writes
 
 
-def test_driver_publishes_grouped_cp1_contract(monkeypatch):
+def _select_body():
+    return {"pages": [{"document_id": "DOC_009", "page": 2}]}
+
+
+def test_full_run_publishes_all_four_contracts(monkeypatch):
     writes = _dao_fakes(monkeypatch)
-    provider = _Provider()
+    provider = _SequenceProvider(_valid_body(), _select_body(), _cp2_body(),
+                                 _cp3_body(), _cp4_body())
 
     result = driver.run(case_id=CASE, held_by="claim-analysis", run_id=RUN, provider=provider)
 
-    assert result == {"status": "published", "document_count": 1,
-                      "provider_called": True, "contract": "extracted_claim_fields.json"}
-    assert provider.schemas == [driver._transport_schema()]
-    contract = writes["write-contract"]
-    assert contract["component"] == "claim-analysis"
-    assert contract["fields"]["diagnosis_name"]["value"] == QUOTE
-    # The bound reference must carry the DAO's verification fields, proving the
-    # verify-evidence-references round trip was applied and not skipped.
-    ref = contract["fields"]["diagnosis_name"]["evidence_references"][0]
-    assert ref["redacted_text_sha256"] == DIGEST
-    assert writes["write-driver-candidate"]["status"] == "complete"
-    assert writes["write-driver-receipt"]["completed_contracts"] == [
-        "extracted_claim_fields.json"]
+    assert result["status"] == "complete"
+    assert provider.calls == 5
+    for unit in ("cp1_field_extraction", "cp2_coverage", "cp3_case_type",
+                 "cp4_requirements"):
+        assert result["units"][unit]["status"] == "published"
+    assert result["medical_publication"]["deferred_config_refusal"] is True
+
+    cp1 = writes[("write-contract", "extracted_claim_fields.json")]
+    assert cp1["fields"]["diagnosis_name"]["value"] == QUOTE
+    # Bound references carry the DAO's verification fields -- the
+    # verify-evidence-references round trip was applied, not skipped.
+    assert cp1["fields"]["diagnosis_name"]["evidence_references"][0][
+        "redacted_text_sha256"] == DIGEST
+
+    cp2 = writes[("write-contract", "coverage_result.json")]
+    assert cp2["coverages"][0]["standardized_coverage_name"] == "test_coverage"
+    assert cp2["upstream_policy_snapshot"]["snapshot_sha256"] == "0" * 64
+
+    cp3 = writes[("write-contract", "case_type_result.json")]
+    assert cp3["template_id"] == "배상책임_후유장해형"
+    assert cp3["case_type_source"] == "inferred"
+
+    cp4 = writes[("write-contract", "requirement_matching_result.json")]
+    req = cp4["coverage_requirements"][0]["requirements"][0]
+    assert req["requirement_id"] == "REQ-1"  # renumbered from provisional REQ-9
+    # every unit left a receipt so a rerun can reuse it
+    for unit in ("cp1_field_extraction", "cp2_coverage", "cp3_case_type",
+                 "cp4_requirements"):
+        assert ("write-driver-receipt", unit) in writes
 
 
-def test_matching_candidate_is_reused_without_a_provider_call(monkeypatch):
+def test_cp1_candidate_reuse_skips_only_the_first_provider_call(monkeypatch):
     import driver_runtime
 
     selected = driver.cp1_documents({"documents": [
@@ -197,10 +292,77 @@ def test_matching_candidate_is_reused_without_a_provider_call(monkeypatch):
         provider_name="fixture", model_name="fixture-model", result=_valid_body())
     writes = _dao_fakes(monkeypatch,
                         stored_candidates={candidate["candidate_id"]: candidate})
-    provider = _Provider(fail=True)  # any provider call fails the test
+    provider = _SequenceProvider(_select_body(), _cp2_body(), _cp3_body(), _cp4_body())
 
     result = driver.run(case_id=CASE, held_by="claim-analysis", run_id=RUN, provider=provider)
 
-    assert result["provider_called"] is False
-    assert result["status"] == "published"
-    assert "write-contract" in writes
+    assert provider.calls == 4  # CP1 came from the stored candidate
+    assert result["units"]["cp1_field_extraction"]["status"] == "published"
+    assert ("write-contract", "extracted_claim_fields.json") in writes
+
+
+def test_cp4_join_enforcement_refuses_unknown_coverage_name():
+    """A requirements group naming a coverage checkpoint 2 never identified is
+    a broken join, caught in local validation so it gets the P4 correction."""
+    body = _cp4_body()
+    body["coverage_requirements"][0]["standardized_coverage_name"] = "invented_coverage"
+    served = {("DOC_009", 2): POLICY_PAGE_TEXT}
+    schema = driver._body_schema_cp4()
+    coverage_names = {"test_coverage"}
+
+    from jsonschema import Draft202012Validator, FormatChecker
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(body)
+    with pytest.raises(ValueError, match="unknown coverage"):
+        for group in body["coverage_requirements"]:
+            if group.get("standardized_coverage_name") not in coverage_names:
+                raise ValueError(
+                    f"coverage_requirements names unknown coverage "
+                    f"{group.get('standardized_coverage_name')!r}; join exactly on "
+                    "checkpoint 2's standardized_coverage_name values")
+
+
+def test_ref_grounding_rejects_unserved_unknown_quotes():
+    """A call that saw no new source text may only reuse verified quotes; a
+    clause ref must quote a served policy page even if the quote is 'known'."""
+    served = {("DOC_009", 2): POLICY_PAGE_TEXT}
+    known = {("DOC_011", 1, driver._norm(QUOTE))}
+
+    ok = {"evidence_references": [{"document_id": "DOC_011", "page": 1, "quote": QUOTE}]}
+    driver._check_ref_grounding(ok, served, known)
+
+    bad = {"evidence_references": [
+        {"document_id": "DOC_011", "page": 3, "quote": "없는 인용문"}]}
+    with pytest.raises(ValueError, match="neither on a served page nor"):
+        driver._check_ref_grounding(bad, served, known)
+
+    clause_as_reused_claim_quote = {"matched_clause_ref": {
+        "document_id": "DOC_011", "page": 1, "quote": QUOTE}}
+    with pytest.raises(ValueError, match="clause reference"):
+        driver._check_ref_grounding(clause_as_reused_claim_quote, served, known,
+                                    clause_keys=("matched_clause_ref",))
+
+
+def test_medical_candidate_is_schema_valid_so_refusal_is_config_only():
+    """publish() schema-checks the candidate BEFORE the config gate and
+    returns early on schema errors -- so if this candidate ever went
+    schema-invalid, the driver would silently stop exercising the deferred-
+    config path and misreport the refusal kind."""
+    import driver_schema
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    schema = driver_schema.load_materialized_schema("medical_variables.schema.json")
+    candidate = driver._medical_candidate(CASE, RUN, "배상책임")
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(candidate)
+
+
+def test_requirement_renumbering_is_global_and_sequential():
+    body = {"coverage_requirements": [
+        {"standardized_coverage_name": "a", "requirements": [
+            {"requirement_id": "REQ-7"}, {"requirement_id": "REQ-2"}]},
+        {"standardized_coverage_name": "b", "requirements": [
+            {"requirement_id": "REQ-99"}]},
+    ]}
+    out = driver._renumber_requirements(body)
+    ids = [r["requirement_id"] for g in out["coverage_requirements"]
+           for r in g["requirements"]]
+    assert ids == ["REQ-1", "REQ-2", "REQ-3"]
