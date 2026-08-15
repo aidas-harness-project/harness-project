@@ -388,6 +388,13 @@ def main():
     ap.add_argument("--init-ledger", action="store_true", help="Write _source_ledger.json with the proposed plan (all pending)")
     ap.add_argument("--execute", action="store_true", help="Copy files, but only if the ledger is fully approved")
     ap.add_argument("--run-id", help="Only used for lock metadata on document_manifest.json; a fresh one is generated if omitted")
+    ap.add_argument("--no-content-scan", action="store_true",
+                    help="Skip the D2 vision content pre-check at --init-ledger. The per-file "
+                         "human review gate is unchanged -- every entry still starts 'pending' "
+                         "and must be approved. Use for reprocessing/timing intakes of material "
+                         "whose classification was already reviewed once; a first-contact "
+                         "source folder should keep the scan (known-gaps.md item 2: filename "
+                         "patterns alone missed two completed adjuster reports).")
     ap.add_argument("--scan-provider", choices=SUPPORTED_PROVIDERS,
                     help="Provider for D2 content pre-check; defaults to HARNESS_INTAKE_SCAN_PROVIDER or claude-cli")
     ap.add_argument("--scan-model", help="Model name for --scan-provider")
@@ -475,6 +482,15 @@ def main():
 
         pdf_raw = [f for f in raw if f.suffix.lower() == ".pdf"]
         content_warnings = {}
+        if args.no_content_scan and pdf_raw:
+            # User-directed opt-out (2026-08-14): the vision pre-check cost
+            # ~41s on CASE_144's 4 PDFs and is redundant on a re-intake whose
+            # classification a human already reviewed. The D2 gate itself is
+            # untouched: every entry below is still written 'pending'.
+            print(f"\nContent pre-check SKIPPED (--no-content-scan) for {len(pdf_raw)} "
+                  f"'raw'-proposed PDF(s). Reviewers approve without a scan signal; "
+                  f"do not use this on a first-contact source folder.")
+            pdf_raw = []
         if pdf_raw:
             print(f"\nContent pre-check: scanning {len(pdf_raw)} 'raw'-proposed PDF(s) for "
                   f"answer-key-class content (harness-guardrails-dev D2, known-gaps.md item 2) ...")
