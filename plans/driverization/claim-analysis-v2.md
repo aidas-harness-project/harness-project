@@ -312,6 +312,47 @@ also unlocks streaming and parallel fan-out), and a fan-out variant
 M1 -> judge -> CP3 in parallel with CP4 (bounded by max instead of sum,
 projected ~450-550s, borderline, not built).
 
+**The sonnet 1-pass extraction question, asked and closed (2026-08-16).**
+Downgrade-(b) was rejected on recall; this asked whether recall was a *prompt*
+problem rather than a model ceiling -- i.e. whether `claude-sonnet-5` could do
+CP1 in ONE call at ~95s with no supplementary call, no 2-pass, and no reliance
+on P4. Scoring was pre-registered first: **46 semantic slots reconciled by
+fact, not field name** (`slots.py`), because the earlier "sonnet drops 21 of
+fable's 36 fields" number was a key-set diff. On that axis the real gap is
+**9, not 21** (sonnet 31, fable bar 40, opus 45-46) -- sonnet had already
+captured the disability rate, evaluation item, coverage limit and hospital
+totals under its own names.
+
+Three bench-only prompt revisions (production driver and agent spec untouched;
+budget pre-registered at 3):
+
+| variant | s | fields | refs | slots/46 | first-shot gate |
+|---|---|---|---|---|---|
+| v1 exhaustive checklist | 90.3 | 57 | 63 | 43 | FAIL -- `review_required` missing on 38/57 |
+| v2 + required member keys pinned | 168.5 | 56 | 66 | 36* | FAIL -- `value` missing on 56/56 |
+| v3 + payload keys declared | 99.6 | 59 | 86 | 44 | FAIL -- 2 numeric `normalized_value`, 3 non-verbatim quotes |
+
+\* v2's recall score is an artifact of the empty fields, not a regression.
+
+**Recall closes; first-shot compliance does not.** v1 cleared the recall bar
+immediately and kept sonnet's speed -- the checklist is the whole lever, and
+it works. But each shape fixed exposed the next: pinning the common member
+keys made the model read the enumeration as the complete member spec and drop
+the payload; declaring the payload keys fixed that and left a numeric
+`normalized_value` on 2 of 59 fields plus **3 of 86 quotes not verbatim** --
+the second axis, checked independently because a schema error short-circuits
+the quote pass, and the one that is not schema-blockable at all. v3's two
+scored slot misses are matcher false negatives (both facts present and
+correctly cited); the pre-registered list was not loosened afterward.
+
+**Rejected at budget.** A fourth revision would be tuning to n=1 on one source
+case -- the failure mode the budget exists to prevent. Production route
+unchanged: agent dispatch under arm C's turn-budget spec (528.2s). What the
+run does establish, for whoever revisits (a): the exhaustive-checklist prompt
+is a real, transferable recall lever independent of model choice, and the
+generation-time-shape pattern now has seven instances, three of them from
+this one session.
+
 ## 5. Effort and sequence
 
 1. `tools/run_claim_analysis.py` skeleton: bundle assembly + CP1 grouped call
