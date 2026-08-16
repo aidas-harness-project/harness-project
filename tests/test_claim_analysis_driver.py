@@ -587,3 +587,81 @@ def test_cp4_transport_pins_the_coverage_group_nesting():
         {"standardized_coverage_name": "x", "requirements": []}]}
     with pytest.raises(ValidationError):
         validator.validate(empty)
+
+
+def test_cp1_corrects_an_unambiguous_citation_page_and_records_it():
+    """Measured 2026-08-17: the model cited DOC_019's N1611 row on page 1
+    while it sits on page 2. Where the page is knowably right, the driver
+    fixes it rather than spending a ~90s correction round -- but it must
+    leave a trace, or the signal that the model cited the wrong page is
+    erased."""
+    bundle = [{"document_id": "DOC_019", "pages": [
+        {"page": 1, "text": "진찰료 초진료 18,520"},
+        {"page": 2, "text": "사지골절정복술 582,738"}]}]
+    body = {"status": "success", "confidence": 0.9, "review_required": False,
+            "warnings": ["기존 경고"],
+            "fields": {"surgery_name": {
+                "value": "수술", "confidence": 0.9, "review_required": False,
+                "evidence_references": [{"document_id": "DOC_019", "page": 1,
+                                         "quote": "사지골절정복술"}]}}}
+    out = driver._validate_cp1_output(body, bundle, driver._body_schema())
+    assert out["fields"]["surgery_name"]["evidence_references"][0]["page"] == 2
+    assert "기존 경고" in out["warnings"]
+    assert any("page corrected" in w for w in out["warnings"])
+
+
+def test_cp1_still_refuses_an_ambiguous_or_absent_citation():
+    """The correction must not become 'page numbers are advisory'."""
+    bundle = [{"document_id": "DOC_019", "pages": [
+        {"page": 1, "text": "수술 2023-12-05"},
+        {"page": 2, "text": "검사 2023-12-05"},
+        {"page": 3, "text": "합계"}]}]
+
+    def body(quote, page):
+        return {"status": "success", "confidence": 0.9, "review_required": False,
+                "warnings": [],
+                "fields": {"surgery_date": {
+                    "value": "2023-12-05", "confidence": 0.9, "review_required": False,
+                    "evidence_references": [{"document_id": "DOC_019", "page": page,
+                                             "quote": quote}]}}}
+
+    # On two pages: which one the model meant is not knowable.
+    with pytest.raises(ValueError, match="not present on page"):
+        driver._validate_cp1_output(body("2023-12-05", 3), bundle, driver._body_schema())
+    # Nowhere: the fabrication case.
+    with pytest.raises(ValueError, match="not present on page"):
+        driver._validate_cp1_output(body("음주 상태", 1), bundle, driver._body_schema())
+
+
+def test_normalize_drops_a_null_normalized_value():
+    """The public schema declares `normalized_value` a bare string and does
+    not require the key, so ABSENT is how "none" is said and null is invalid.
+    A CASE_039 run emitted null and the gate refused it; dropping the key is
+    the honest repair, since inventing a string would be fabrication."""
+    body = {"status": "success", "confidence": 0.9, "review_required": False,
+            "warnings": [],
+            "fields": {"claim_item": {
+                "value": "배상책임", "normalized_value": None, "confidence": 0.9,
+                "review_required": False,
+                "evidence_references": [
+                    {"document_id": "DOC_011", "page": 1, "quote": QUOTE}]}}}
+    fixed, log = driver.normalize_cp1_shape(body)
+    assert "normalized_value" not in fixed["fields"]["claim_item"]
+    assert fixed["fields"]["claim_item"]["value"] == "배상책임"
+    assert any("normalized_value" in entry for entry in log)
+
+
+def test_cp1_transport_refuses_a_null_normalized_value():
+    """Blocked at generation time too, or the model keeps emitting it."""
+    from jsonschema import Draft202012Validator, ValidationError
+
+    validator = Draft202012Validator(driver._transport_schema())
+    body = {"status": "success", "confidence": 0.9, "review_required": False,
+            "warnings": [],
+            "fields": {"claim_item": {
+                "value": "x", "normalized_value": None, "confidence": 0.9,
+                "review_required": False,
+                "evidence_references": [
+                    {"document_id": "DOC_011", "page": 1, "quote": QUOTE}]}}}
+    with pytest.raises(ValidationError):
+        validator.validate(body)

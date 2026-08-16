@@ -528,6 +528,46 @@ def quote_in_normalized_page(quote: str, normalized_page: str) -> bool:
             or _normalize_ws(_heal_wraps(quote)) in normalized_page)
 
 
+def find_quote_pages(quote: str, pages_by_number, claimed_page) -> list:
+    """Pages (other than the claimed one) whose text contains `quote`.
+
+    The single search both `locate_quote_hint` and the page-number correction
+    are built on, so the message a model is shown and the fix the driver
+    applies can never disagree about where the text is.
+
+    `pages_by_number` MUST be the REDACTED layer -- see `locate_quote_hint`.
+    """
+    if not quote:
+        return []
+    return [number for number, text in sorted(pages_by_number.items())
+            if number != claimed_page and quote_matches_page(quote, text)]
+
+
+def resolve_cited_page(quote: str, pages_by_number, claimed_page):
+    """The page a citation unambiguously meant, or None to refuse.
+
+    Returns a page number ONLY when the quote appears on exactly one other
+    page. That is a deterministic correction in the same family as the
+    driver's id renumbering: the cited text exists, in one place, and the page
+    number is the only thing wrong with it.
+
+    Returns None -- meaning "refuse, let P4 handle it" -- in the two cases a
+    correction would have to guess or would hide a real defect:
+
+      * the quote appears on SEVERAL pages (`2023-12-05` is on all 7 pages of
+        CASE_038's DOC_019), where picking one would silently point the
+        evidence at a page the model may not have read; and
+      * the quote appears NOWHERE, which is the fabrication case -- CASE_038's
+        DOC_011 run quoted `골절상` where the source says `골절`, and inventing
+        a page for it would launder exactly what P1 exists to catch.
+
+    Callers must record every correction they apply; a silently rewritten
+    citation would erase the signal that the model cited the wrong page.
+    """
+    found = find_quote_pages(quote, pages_by_number, claimed_page)
+    return found[0] if len(found) == 1 else None
+
+
 def locate_quote_hint(quote: str, pages_by_number, claimed_page) -> str:
     """Where the quote ACTUALLY is, as a suffix for a refusal message.
 
@@ -553,8 +593,7 @@ def locate_quote_hint(quote: str, pages_by_number, claimed_page) -> str:
     """
     if not quote:
         return ""
-    found = [number for number, text in sorted(pages_by_number.items())
-             if number != claimed_page and quote_matches_page(quote, text)]
+    found = find_quote_pages(quote, pages_by_number, claimed_page)
     if not found:
         return ""
     if len(found) == 1:

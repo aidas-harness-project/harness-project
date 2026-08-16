@@ -1686,3 +1686,37 @@ def test_locate_quote_hint_only_searches_the_pages_it_is_handed():
     out of the next model call. The function takes a mapping and reads nothing
     else; this pins that it finds nothing outside it."""
     assert _cross_contract.locate_quote_hint("환자성명 홍길동", {1: "환자성명"}, 1) == ""
+
+
+def test_resolve_cited_page_corrects_only_an_unambiguous_page_number():
+    """A quote on exactly one other page is a knowably-wrong page number:
+    the text exists, in one place, and only the number is wrong. Correcting
+    it deterministically saves a ~90s P4 round."""
+    pages = {1: "진찰료 초진료 18,520", 2: "사지골절정복술 582,738", 3: "합계"}
+    assert _cross_contract.resolve_cited_page("사지골절정복술", pages, 1) == 2
+
+
+def test_resolve_cited_page_refuses_when_it_would_have_to_guess():
+    """The two cases a correction must NOT make.
+
+    Several candidates: `2023-12-05` sits on all 7 pages of CASE_038's
+    DOC_019, so picking one would point the evidence at a page the model may
+    never have read. Nowhere at all: the fabrication case -- a run quoted
+    `골절상` where the source says `골절`, and inventing a page for it would
+    launder precisely what P1 exists to catch.
+    """
+    multi = {1: "수술 2023-12-05", 2: "검사 2023-12-05", 3: "합계"}
+    assert _cross_contract.resolve_cited_page("2023-12-05", multi, 3) is None
+    assert _cross_contract.resolve_cited_page("음주 상태였다", multi, 1) is None
+    # Already on the claimed page: nothing to correct.
+    assert _cross_contract.resolve_cited_page("수술", multi, 1) is None
+
+
+def test_page_correction_and_hint_agree_about_where_the_text_is():
+    """Both are built on one search, so the message a model is shown and the
+    fix the driver applies can never disagree."""
+    pages = {1: "진찰료", 2: "사지골절정복술", 3: "합계"}
+    assert _cross_contract.find_quote_pages("사지골절정복술", pages, 1) == [2]
+    assert _cross_contract.resolve_cited_page("사지골절정복술", pages, 1) == 2
+    assert " -- that text is on page 2, not 1" == _cross_contract.locate_quote_hint(
+        "사지골절정복술", pages, 1)

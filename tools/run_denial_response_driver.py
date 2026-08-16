@@ -282,6 +282,7 @@ def _validate_bundle_output(value: Mapping[str, Any], bundle: list[dict],
         for doc in bundle
         for page in doc.get("pages", [])
     }
+    page_corrections: list[str] = []
     for ref in _refs(value):
         doc_id = ref["document_id"]
         page = ref["page"]
@@ -307,11 +308,24 @@ def _validate_bundle_output(value: Mapping[str, Any], bundle: list[dict],
             # fails at final publication.
             if not _cross_contract.quote_spans_page_pair(
                     quote, page_text, page_text_by_key.get((doc_id, page + 1))):
-                hint = _cross_contract.locate_quote_hint(
-                    quote, {p: t for (d, p), t in page_text_by_key.items() if d == doc_id},
-                    page)
-                raise ValueError(
-                    f"{doc_id}: quote is not present on page {page}{hint}")
+                doc_pages = {p: t for (d, p), t in page_text_by_key.items()
+                             if d == doc_id}
+                # Same rule as the claim driver: a quote found on exactly one
+                # other page is a knowably-wrong page number, corrected and
+                # recorded; anything else refuses.
+                resolved = _cross_contract.resolve_cited_page(quote, doc_pages, page)
+                if resolved is None:
+                    hint = _cross_contract.locate_quote_hint(quote, doc_pages, page)
+                    raise ValueError(
+                        f"{doc_id}: quote is not present on page {page}{hint}")
+                ref["page"] = resolved
+                page_corrections.append(f"{doc_id}: evidence page {page} -> {resolved}")
+    if page_corrections:
+        warnings = list(value.get("warnings") or [])
+        warnings.extend(f"citation page corrected -- {item}" for item in page_corrections)
+        value = {**value, "warnings": warnings}
+        print(f"denial citation page corrections ({len(page_corrections)}): "
+              + "; ".join(page_corrections[:6]), file=sys.stderr)
     return dict(value)
 
 

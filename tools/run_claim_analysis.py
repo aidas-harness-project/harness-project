@@ -265,7 +265,11 @@ def _transport_schema() -> dict:
                     "type": "object",
                     "properties": {
                         "value": {"type": ["string", "number", "boolean", "null"]},
-                        "normalized_value": {"type": ["string", "null"]},
+                        # Public schema declares a bare string and does not
+                        # require the key, so ABSENT is the way to say "none".
+                        # Allowing null here made the model emit null, which the
+                        # gate then refused (CASE_039, 2026-08-17).
+                        "normalized_value": {"type": "string"},
                         "start_date": {"type": ["string", "null"]},
                         "end_date": {"type": ["string", "null"]},
                         "days": {"type": ["integer", "null"]},
@@ -439,6 +443,12 @@ def normalize_cp1_shape(value: Mapping[str, Any]) -> tuple[dict, list[str]]:
             repaired[name] = member
             continue
 
+        # `normalized_value: null` is not a value -- the public schema says
+        # string-or-absent, so the honest repair is to drop the key rather
+        # than invent a string for it.
+        if member.get("normalized_value", "") is None:
+            member.pop("normalized_value")
+            log.append(f"drop {name}.normalized_value (null is not a string)")
         for key in (_MEMBER_DATE_KEYS if is_period else _MEMBER_STRING_KEYS):
             if key in member and isinstance(member[key], (int, float, bool)):
                 member[key] = str(member[key])
@@ -501,6 +511,7 @@ def _validate_cp1_output(value: Mapping[str, Any], bundle: list[dict],
         for doc in bundle
         for page in doc.get("pages", [])
     }
+    page_corrections: list[str] = []
     for ref in _refs(value):
         doc_id = ref["document_id"]
         page = ref["page"]
@@ -525,13 +536,33 @@ def _validate_cp1_output(value: Mapping[str, Any], bundle: list[dict],
             # or this would refuse citations the DAO would then accept.
             if not _cross_contract.quote_spans_page_pair(
                     quote, page_text, page_text_by_key.get((doc_id, page + 1))):
-                # Name the page the text IS on, so P4's one correction fixes a
-                # page number instead of guessing another.
-                hint = _cross_contract.locate_quote_hint(
-                    quote, {p: t for (d, p), t in page_text_by_key.items() if d == doc_id},
-                    page)
-                raise ValueError(
-                    f"{doc_id}: quote is not present on page {page}{hint}")
+                doc_pages = {p: t for (d, p), t in page_text_by_key.items()
+                             if d == doc_id}
+                # A quote that exists on exactly ONE other page is a page
+                # number that is wrong and knowably right: correcting it is
+                # deterministic, like the driver's own id renumbering, and
+                # saves a ~90s correction round. Several candidates, or none,
+                # still refuse -- see `resolve_cited_page`.
+                resolved = _cross_contract.resolve_cited_page(quote, doc_pages, page)
+                if resolved is None:
+                    # Name the page the text IS on, so P4's one correction
+                    # fixes a page number instead of guessing another.
+                    hint = _cross_contract.locate_quote_hint(quote, doc_pages, page)
+                    raise ValueError(
+                        f"{doc_id}: quote is not present on page {page}{hint}")
+                ref["page"] = resolved
+                page_corrections.append(f"{doc_id}: evidence page {page} -> {resolved}")
+    if page_corrections:
+        # Recorded, never silent: a rewritten citation that left no trace
+        # would erase the evidence that the model cited the wrong page, which
+        # is a real quality signal about the run.
+        warnings = list(value.get("warnings") or [])
+        warnings.extend(f"citation page corrected -- {item}"
+                        for item in page_corrections)
+        value = {**value, "warnings": warnings}
+        print(f"cp1 citation page corrections ({len(page_corrections)}): "
+              + "; ".join(page_corrections[:6])
+              + (" ..." if len(page_corrections) > 6 else ""), file=sys.stderr)
     return dict(value)
 
 
