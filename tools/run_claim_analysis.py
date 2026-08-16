@@ -289,15 +289,25 @@ def _transport_schema() -> dict:
                 "additionalProperties": {
                     "type": "object",
                     "properties": {
-                        "value": {"type": ["string", "number", "boolean", "null"]},
+                        # No `"type": [...]` anywhere in a transport schema:
+                        # claude-cli validates --json-schema with ajv in STRICT
+                        # mode, which refuses a union outright ("use
+                        # allowUnionTypes"). A CASE_042 run died on exactly that
+                        # after 411.9s -- i.e. after the call was paid for --
+                        # and it survived earlier runs only because those cases
+                        # happened not to trip the check. The keys stay
+                        # DECLARED, which is what stopped the model dropping
+                        # `value`; their types are enforced by `_body_schema()`
+                        # and repaired by `normalize_cp1_shape`.
+                        "value": {},
                         # Public schema declares a bare string and does not
                         # require the key, so ABSENT is the way to say "none".
                         # Allowing null here made the model emit null, which the
                         # gate then refused (CASE_039, 2026-08-17).
                         "normalized_value": {"type": "string"},
-                        "start_date": {"type": ["string", "null"]},
-                        "end_date": {"type": ["string", "null"]},
-                        "days": {"type": ["integer", "null"]},
+                        "start_date": {},
+                        "end_date": {},
+                        "days": {},
                         "is_primary": {"type": "boolean"},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                         "review_required": {"type": "boolean"},
@@ -715,7 +725,9 @@ def _transport_schema_cp3() -> dict:
         "case_type_source": {"enum": ["adjuster_input", "inferred"]},
         "secondary_case_types": {"type": "array", "items": {"enum": _CASE_TYPES}},
         "candidate_types": {"type": "array", "items": {"type": "object"}},
-        "template_id": {"type": ["string", "null"]},
+        # Union refused by ajv strict mode; nullability is enforced by the
+        # public schema, which this transport never replaces.
+        "template_id": {},
         # Fully keyed, additionalProperties false: the second arm E run died
         # here twice with the RIGHT semantics under the WRONG key names
         # (`mechanism` for claim_mechanism, `depth` for mode, plus extra
@@ -754,7 +766,10 @@ def _clause_ref_shape(policy_doc_ids: list | None) -> dict:
     document_id = ({"enum": list(policy_doc_ids)} if policy_doc_ids
                    else {"type": "string"})
     return {
-        "type": ["object", "null"],
+        # Object only: a union with "null" is refused by ajv strict mode (see
+        # the transport note above). A requirement that rests on no located
+        # clause simply OMITS the key, which the public schema allows.
+        "type": "object",
         "properties": {
             "document_id": document_id,
             "page": {"type": "integer", "minimum": 1},

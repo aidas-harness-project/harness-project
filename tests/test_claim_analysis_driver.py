@@ -701,10 +701,12 @@ def test_clause_ref_transport_pins_document_id_to_the_policy_set():
     with pytest.raises(ValidationError):
         validator.validate(body("DOC_022"))
 
-    # A requirement resting on no located clause stays expressible.
-    none_ref = json.loads(json.dumps(body("DOC_009")))
-    none_ref["coverage_requirements"][0]["requirements"][0]["clause_ref"] = None
-    validator.validate(none_ref)
+    # A requirement resting on no located clause stays expressible -- by
+    # OMITTING the key. `"type": ["object", "null"]` would be a union, which
+    # ajv strict mode refuses (see test_no_transport_schema_declares_a_union_type).
+    omitted = json.loads(json.dumps(body("DOC_009")))
+    del omitted["coverage_requirements"][0]["requirements"][0]["clause_ref"]
+    validator.validate(omitted)
 
     # With no policy set known, the shape must not forbid every clause ref.
     permissive = Draft202012Validator(driver._transport_schema_cp4())
@@ -727,3 +729,36 @@ def test_validate_m2_refuses_a_clause_ref_outside_the_policy_set():
     driver._check_clause_documents(ok, req, ["DOC_009", "DOC_010"])
     # Unknown policy set: refusing every clause reference would be worse.
     driver._check_clause_documents(cov, req, None)
+
+
+def test_no_transport_schema_declares_a_union_type():
+    """claude-cli validates --json-schema with ajv in STRICT mode, which
+    refuses `"type": ["string", "null"]` outright ("use allowUnionTypes").
+
+    A CASE_042 run died on exactly that after 411.9s -- AFTER the call was
+    paid for -- and earlier runs survived only because those cases happened
+    not to trip the check, which makes this the kind of defect a test has to
+    hold rather than a run. Nullability and type are enforced by the public
+    body schemas, which no transport replaces.
+    """
+    def unions(node, path=""):
+        found = []
+        if isinstance(node, dict):
+            if isinstance(node.get("type"), list):
+                found.append(path or "/")
+            for key, child in node.items():
+                found += unions(child, f"{path}/{key}")
+        elif isinstance(node, list):
+            for index, child in enumerate(node):
+                found += unions(child, f"{path}/{index}")
+        return found
+
+    for name, schema in [
+        ("cp1", driver._transport_schema()),
+        ("m1", driver._transport_schema_m1()),
+        ("cp2", driver._transport_schema_cp2(["DOC_009"])),
+        ("cp3", driver._transport_schema_cp3()),
+        ("cp4", driver._transport_schema_cp4(["DOC_009"])),
+        ("m2", driver._transport_schema_m2(["DOC_009"])),
+    ]:
+        assert unions(schema) == [], f"{name} transport declares a union type"
