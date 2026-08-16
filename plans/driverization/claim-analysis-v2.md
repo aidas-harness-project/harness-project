@@ -271,6 +271,27 @@ rounds, reruns inside the TTL) hit. A caching win would need the schema moved
 out of the tool position or a shared-tool design, which is part of path (a)'s
 work, not a free rider.
 
+**Paths (b) and (c) measured/assessed 2026-08-16, same session.** The bench
+walked the model axis on the identical prompt: **opus-5 146.0/149.2s with
+51/59 fields (n=2)**; fable-5 -- the CLI default, i.e. what every prior
+"opus 200-330s" record actually measured -- 227.2/237.4s with 36/35 (n=2;
+131.9/253.5 historically); sonnet-5 95.3s/26; haiku-4.5 71.1s/21 (n=1).
+Latency is the model, not the CLI child (3.3x spread, same process).
+First-shot gate failures happen at every tier (fable 1/2, opus 1/2,
+sonnet 0/1, haiku 0/1) -- P4's correction is part of any driver's cost.
+Recall is the differentiator and is monotone: sonnet loses 21 of fable's
+fields including `disability_rate`, the liability/fault opinion pairs,
+`surgery_date` and the expense/limit figures CP4 consumes; haiku loses more;
+**opus-5 extracts more than the default in ~62% of its time.** (c) is
+mechanically feasible at exactly 2 calls (CP1+select / judge+CP3+CP4; no
+dependency blocker; merged transports fit the argv cap) but projects
+500-700s on default-model call costs; **a 2-call opus-5 spine (~2x147s +
+correction margin) is the first (c) shape whose projection lands under
+528s.** Downgrade-(b) rejected on measured recall; (c) not built alone. Live
+candidates: (a) with a key; an opus-5 model switch (extraction call or whole
+dispatch); (b)+(c) jointly on opus-5. Each needs a stage-level accuracy A/B
+at n>1 and user authorization -- nothing rewired here.
+
 ## 5. Effort and sequence
 
 1. `tools/run_claim_analysis.py` skeleton: bundle assembly + CP1 grouped call
