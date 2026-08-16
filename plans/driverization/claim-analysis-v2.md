@@ -248,6 +248,11 @@ a ≤2-call design (CP1+CP2 merged, CP3+CP4 merged) that accepts coarser P9
 resume. Absent one of those, **the agent path with arm C's turn-budget spec
 (528s) remains the production route for claim_analysis.**
 
+**Implementation removed 2026-08-16** after the verdict, restoring the
+pre-driver tree: `tools/run_claim_analysis.py` and its tests live at commit
+`198baf6` if a reassessment path (api-with-caching / faster model / <=2-call
+design) is ever authorized -- do not rewrite them from scratch.
+
 ## 5. Effort and sequence
 
 1. `tools/run_claim_analysis.py` skeleton: bundle assembly + CP1 grouped call
