@@ -1521,7 +1521,13 @@ def _verify_driver_reference(case_id: str, reference: dict,
         if end > len(page_text) or page_text[start:end] != quote:
             raise ValueError(f"{doc_id}: quote does not exactly match the claimed page range")
     elif not _cross_contract.quote_matches_page(quote, page_text):
-        raise ValueError(f"{doc_id}: quote is not present on page {page}")
+        # Only after failing page N on its own: a sentence may run past the
+        # page break. `quote_spans_page_pair` refuses a quote that fits wholly
+        # on N+1, so a mis-numbered citation is still caught.
+        next_text = next((item["text"] for item in document["pages"]
+                          if item["page"] == page + 1), None)
+        if not _cross_contract.quote_spans_page_pair(quote, page_text, next_text):
+            raise ValueError(f"{doc_id}: quote is not present on page {page}")
     verified = {
         "document_id": doc_id,
         "page": page,

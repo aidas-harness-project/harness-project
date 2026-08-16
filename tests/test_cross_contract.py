@@ -1615,3 +1615,52 @@ def test_heal_wraps_leaves_non_hangul_boundaries_alone():
     assert _cross_contract._heal_wraps("ab\ncd") == "ab\ncd"
     assert _cross_contract._heal_wraps("가 \n 나") == "가 \n 나"
     assert _cross_contract._heal_wraps("가.\n나") == "가.\n나"
+
+
+# --- quotes that span a page boundary (2026-08-16) --------------------------
+
+_SPAN_P3 = "하자가 있더라도 무관한 것으로 보이므로, 피\n\n- 3 -\n"
+_SPAN_P4 = "보험자는 이 사건 피해자에 대하여 배상책임을 부담하지 않는다고 판단됩니다."
+
+
+def test_quote_spanning_a_page_boundary_is_accepted():
+    """CASE_038's DOC_008 ends page 3 with `...보이므로, 피` and opens page 4
+    with `보험자는 ...`, so `피보험자는` -- which inverts the legal subject if
+    misread as `보험자는` -- exists in the document but on NO single page.
+    105 of that case's 350 page boundaries continue Hangul across the break.
+    """
+    assert _cross_contract.quote_spans_page_pair(
+        "피보험자는 이 사건 피해자에 대하여 배상책임을 부담하지 않는다고 판단됩니다.",
+        _SPAN_P3, _SPAN_P4)
+    # The joined word itself, which exists on neither page alone.
+    assert _cross_contract.quote_spans_page_pair("피보험자는", _SPAN_P3, _SPAN_P4)
+    assert not _cross_contract.quote_matches_page("피보험자는", _SPAN_P3)
+    assert not _cross_contract.quote_matches_page("피보험자는", _SPAN_P4)
+
+
+def test_page_pair_refuses_a_quote_lying_wholly_on_the_next_page():
+    """The clause that keeps the fallback from becoming 'page numbers may be
+    off by one'. A CASE_038 run cited DOC_019's N1611 row on page 1 when it
+    is on page 2 -- a real model error that must stay refused."""
+    assert not _cross_contract.quote_spans_page_pair(
+        "보험자는 이 사건 피해자에 대하여", _SPAN_P3, _SPAN_P4)
+    assert not _cross_contract.quote_spans_page_pair(
+        "배상책임을 부담하지 않는다고 판단됩니다.", _SPAN_P3, _SPAN_P4)
+
+
+def test_page_pair_refuses_absent_content_and_the_last_page():
+    assert not _cross_contract.quote_spans_page_pair(
+        "피해자는 음주 상태였다", _SPAN_P3, _SPAN_P4)
+    # No successor page: nothing to join, so nothing to accept.
+    assert not _cross_contract.quote_spans_page_pair("피보험자는", _SPAN_P3, None)
+
+
+def test_page_footer_is_stripped_only_at_the_join():
+    """A running `- 3 -` printed after the body would otherwise sit between
+    the two halves and prevent the sentence from reading continuously. It is
+    removed only when joining, never from a page examined on its own."""
+    assert _cross_contract._PAGE_FOOTER_RE.search(_SPAN_P3)
+    # The footer is still part of the page's own text.
+    assert _cross_contract.quote_matches_page("- 3 -", _SPAN_P3)
+    # A number inside a line is not a footer.
+    assert not _cross_contract._PAGE_FOOTER_RE.search("금액 - 3 - 원 합계")

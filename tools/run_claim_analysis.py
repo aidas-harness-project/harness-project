@@ -519,10 +519,13 @@ def _validate_cp1_output(value: Mapping[str, Any], bundle: list[dict],
             if end > len(page_text) or page_text[start:end] != quote:
                 raise ValueError(f"{doc_id}: quote does not exactly match the claimed page range")
         elif not _cross_contract.quote_matches_page(quote, page_text):
-            # The DAO's exact whitespace-normalized substring gate, applied
-            # before candidate persistence so a bad citation gets P4's one
-            # model correction instead of failing only at final publication.
-            raise ValueError(f"{doc_id}: quote is not present on page {page}")
+            # The DAO's exact gate, applied before candidate persistence so a
+            # bad citation gets P4's one model correction instead of failing
+            # only at final publication -- including the page-pair fallback,
+            # or this would refuse citations the DAO would then accept.
+            if not _cross_contract.quote_spans_page_pair(
+                    quote, page_text, page_text_by_key.get((doc_id, page + 1))):
+                raise ValueError(f"{doc_id}: quote is not present on page {page}")
     return dict(value)
 
 
@@ -748,7 +751,10 @@ def _check_ref_grounding(value: Any, served: Mapping[tuple, str],
     def check_ref(ref: Mapping[str, Any], *, clause: bool) -> None:
         doc_id, page, quote = ref.get("document_id"), ref.get("page"), ref.get("quote", "")
         page_text = served.get((doc_id, page))
-        if page_text is not None and _norm(quote) in _norm(page_text):
+        if page_text is not None and (
+                _norm(quote) in _norm(page_text)
+                or _cross_contract.quote_spans_page_pair(
+                    quote, page_text, served.get((doc_id, page + 1)))):
             return
         if not clause and (doc_id, page, _norm(quote)) in known:
             return

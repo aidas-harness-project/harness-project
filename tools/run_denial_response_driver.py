@@ -300,11 +300,14 @@ def _validate_bundle_output(value: Mapping[str, Any], bundle: list[dict],
             if end > len(page_text) or page_text[start:end] != quote:
                 raise ValueError(f"{doc_id}: quote does not exactly match the claimed page range")
         elif not _cross_contract.quote_matches_page(quote, page_text):
-            # This reproduces the DAO's exact whitespace-normalized substring
-            # gate before candidate persistence. A bad citation therefore gets
-            # P4's one model correction rather than becoming an orphaned
-            # candidate that only fails at final publication.
-            raise ValueError(f"{doc_id}: quote is not present on page {page}")
+            # Reproduces the DAO's exact gate before candidate persistence --
+            # page-pair fallback included, or this would refuse citations the
+            # DAO would accept. A bad citation therefore gets P4's one model
+            # correction rather than becoming an orphaned candidate that only
+            # fails at final publication.
+            if not _cross_contract.quote_spans_page_pair(
+                    quote, page_text, page_text_by_key.get((doc_id, page + 1))):
+                raise ValueError(f"{doc_id}: quote is not present on page {page}")
     return dict(value)
 
 

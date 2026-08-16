@@ -459,6 +459,12 @@ _HANGUL_WRAP_RE = re.compile("(?<=[가-힣])\n(?=[가-힣])")
 # characters `_normalize_ws` would have collapsed, so no real quote can span
 # the join and match across both copies.
 _WRAP_ALT_SEP = "\n<<WRAP_ALT>>\n"
+# A running page-number footer (`- 3 -`) printed AFTER the body text, on its
+# own line at the very end of a page. Stripped only when joining a page to its
+# successor, so a sentence broken by the page break can be read continuously;
+# never removed from a page examined on its own. Anchored to end-of-text so a
+# figure like "- 3 -" inside a table row is untouched.
+_PAGE_FOOTER_RE = re.compile(r"\n\s*-\s*\d+\s*-\s*$")
 
 
 def _heal_wraps(text: str) -> str:
@@ -520,6 +526,62 @@ def quote_in_normalized_page(quote: str, normalized_page: str) -> bool:
     """
     return (_normalize_ws(quote) in normalized_page
             or _normalize_ws(_heal_wraps(quote)) in normalized_page)
+
+
+def _spans_normalized_pair(quote: str, normalized_pages, page) -> bool:
+    """Page-pair fallback for callers holding a normalized page map.
+
+    The map's entries are already whitespace-normalized (and carry both wrap
+    readings), so the raw text needed by `quote_spans_page_pair` is gone. The
+    same two rules still apply: a quote lying wholly on N+1 is refused as a
+    mis-numbered citation, and the pair is only consulted after N failed.
+    """
+    nxt = normalized_pages.get(page + 1) if hasattr(normalized_pages, "get") else None
+    if nxt is None:
+        return False
+    if quote_in_normalized_page(quote, nxt):
+        return False
+    joined = _PAGE_FOOTER_RE.sub("", normalized_pages[page].rstrip()).rstrip() + " " + nxt
+    return quote_in_normalized_page(quote, joined)
+
+
+def quote_spans_page_pair(quote: str, page_text: str,
+                          next_page_text: str | None) -> bool:
+    """Last resort: does `quote` sit across the N/N+1 page boundary?
+
+    Called ONLY when the quote already failed against page N alone (both
+    readings). A document's sentence can run past a page break -- CASE_038's
+    DOC_008 ends page 3 with `...보이므로, 피` and opens page 4 with
+    `보험자는 ...`, so `피보험자는` (which inverts the legal subject if
+    read as `보험자는`) exists in the document but on NO single page. 105 of
+    CASE_038's 350 page boundaries continue Hangul text across the break.
+
+    Deliberately not a sentence-completeness test. Whether page N "ends
+    mid-sentence" is unreliable here: running headers and footers sit after
+    the body text (`...보이므로, 피
+
+- 3 -
+`), and form/table pages do
+    not end in punctuation at all. Trying only after a real failure needs no
+    such judgment.
+
+    The final clause is what keeps this from weakening the gate: a quote that
+    fits entirely inside page N+1 is REFUSED, because that is a
+    wrong-page-number citation, not a spanning one -- the live example being a
+    CASE_038 run citing DOC_019's N1611 row on page 1 when it is on page 2.
+    """
+    if next_page_text is None:
+        return False
+    if quote_matches_page(quote, next_page_text):
+        return False  # wholly on N+1: a mis-numbered citation, not a span
+    # Join with exactly one newline and no surrounding blank lines, so a word
+    # split by the page break (`...지무하지` / `않는다`) presents to
+    # `_heal_wraps` as the single Hangul-newline-Hangul it heals. A blank line
+    # between the halves would leave `피\\n\\n보험자는`, which is not that
+    # pattern and would silently defeat the whole function.
+    head = _PAGE_FOOTER_RE.sub("", page_text.rstrip()).rstrip()
+    joined = head + "\n" + next_page_text.lstrip()
+    return quote_matches_page(quote, joined)
 
 
 def normalize_page_for_quotes(text: str) -> str:
@@ -938,7 +1000,7 @@ def check_normalized_policy_clause(
                     f"{target_doc} (pages present: {sorted(normalized_pages)})"
                 )
                 continue
-            if not quote_in_normalized_page(quote, normalized_pages[page]):
+            if not quote_in_normalized_page(quote, normalized_pages[page])                     and not _spans_normalized_pair(quote, normalized_pages, page):
                 errors.append(
                     f"{loc}: quote not found on page {page} of the processed text -- "
                     "the cited quote does not appear verbatim on the page it claims "
@@ -1603,9 +1665,12 @@ def _location_errors(doc_id, page, quote, normalized_pages, what):
         return [f"page {page} does not exist in the processed text for "
                 f"{doc_id} (pages present: {sorted(normalized_pages)})"]
     if not quote_in_normalized_page(quote, normalized_pages[page]):
-        return [f"quote not found on page {page} of {doc_id}'s processed text "
-                "-- the cited quote does not appear verbatim on the page it "
-                f"claims (quote={quote[:60]!r}...)"]
+        # Only after page N fails on its own; refuses a quote lying wholly on
+        # N+1, so a mis-numbered citation is still an error.
+        if not _spans_normalized_pair(quote, normalized_pages, page):
+            return [f"quote not found on page {page} of {doc_id}'s processed text "
+                    "-- the cited quote does not appear verbatim on the page it "
+                    f"claims (quote={quote[:60]!r}...)"]
     return []
 
 
