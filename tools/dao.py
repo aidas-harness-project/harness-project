@@ -40,6 +40,11 @@ Subcommands:
         [--file GT_ID | --list]
     read-contract CASE_ID FILENAME
     check-segmentation-ready CASE_ID [--doc-id DOC_ID]
+    declare-no-policy-documents CASE_ID --reviewer NAME --note TEXT
+        --held-by NAME --run-id RUN_ID
+        (PoC-phase D5 waiver: records that a case genuinely carries no 약관,
+         so policy_clause_processing can finalize. Refused when the manifest
+         actually types a document as insurance_policy.)
     set-segmentation-status CASE_ID DOC_ID {required|not_required}
         --reviewer NAME --held-by NAME --run-id RUN_ID [--note TEXT]
     write-contract CASE_ID FILENAME --data-file PATH --schema-name NAME
@@ -2758,6 +2763,72 @@ def _policy_layer_scheme_blockers(case_id: str, action: str) -> list[str]:
     return _canonical_state_blockers(case_id, doc_ids, action)
 
 
+_NO_POLICY_DECLARATION = "_no_policy_documents.json"
+
+
+def _no_policy_waiver(case_id: str):
+    """The recorded declaration that this case carries no policy document.
+
+    D5 (harness-guardrails-dev): a PoC-phase allowance, because part of the
+    supplied corpus arrives as a diagnosis certificate plus an insurer letter
+    with no 약관 attached, and `policy_clause_processing` cannot pass without
+    one -- which blocks `claim_analysis` on cases that are otherwise complete.
+
+    Deliberately NOT an environment variable or a global dev flag. The gate
+    cannot distinguish "this case has no policy" from "the policy work was
+    skipped", so the distinction has to come from a person: the declaration
+    names a reviewer and a reason, lands in the case directory beside the
+    contracts, and is refused the moment the manifest actually types a
+    document as `insurance_policy`. A flag would have applied silently to
+    every case in a run, including ones whose policy work merely failed.
+    """
+    return load_json(case_dir(case_id) / _NO_POLICY_DECLARATION)
+
+
+def declare_no_policy_documents(case_id: str, reviewer: str, note: str,
+                                held_by: str, run_id: str):
+    """Record that a case genuinely carries no policy document."""
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        return False, "FAIL: document_manifest.json is missing"
+    typed = sorted(d.get("document_id") for d in manifest.get("documents", [])
+                   if d.get("document_type") == "insurance_policy")
+    if typed:
+        return False, (f"FAIL: refused -- the manifest types {typed} as "
+                       "insurance_policy, so this case DOES carry policy "
+                       "documents; process them instead of declaring their absence")
+    if not (reviewer or "").strip():
+        return False, "FAIL: --reviewer is required (this is a human declaration)"
+    if not (note or "").strip():
+        return False, "FAIL: --note is required (record why no policy exists)"
+    target = case_dir(case_id) / _NO_POLICY_DECLARATION
+    held = acquire_lock_blocking(target, held_by, run_id,
+                                 "declare-no-policy-documents")
+    if held is not None:
+        return False, f"FAIL: {target.name} is locked by {held.get('held_by')}"
+    try:
+        atomic_write_json(target, {
+            "case_id": case_id,
+            "declared_at": datetime.now(timezone.utc).isoformat(),
+            "reviewer": reviewer,
+            "note": note,
+            "held_by": held_by,
+            "run_id": run_id,
+            "scope": "harness-guardrails-dev D5 -- PoC phase only",
+        })
+    finally:
+        release_lock(target)
+    return True, (f"OK: recorded that {case_id} carries no policy document "
+                  f"(reviewer: {reviewer})")
+
+
+def cmd_declare_no_policy_documents(args):
+    ok, message = declare_no_policy_documents(
+        args.case_id, args.reviewer, args.note, args.held_by, args.run_id)
+    print(message)
+    return 0 if ok else 1
+
+
 def _policy_completion_blockers(case_id: str) -> list[str]:
     """Return every condition that prevents policy_clause_processing finalize.
 
@@ -2770,6 +2841,21 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
     manifest = read_contract_data(case_id, "document_manifest.json")
     if manifest is None:
         return ["document_manifest.json is missing"]
+    # A D5 declaration is a statement ABOUT the manifest, so it is checked
+    # against the manifest first. When policy documents were added or re-typed
+    # after the declaration was recorded, the declaration has become false --
+    # and a false statement on disk must block rather than sit there, because
+    # the next reader has no way to tell it apart from a true one. Checked
+    # here, not inside the no-policy branch, where a case that HAS policy
+    # documents would never reach it.
+    declared_none = _no_policy_waiver(case_id) is not None
+    typed_policy = sorted(d.get("document_id") for d in manifest.get("documents", [])
+                          if d.get("document_type") == "insurance_policy")
+    if declared_none and typed_policy:
+        return [f"a no-policy-documents declaration is recorded, but the "
+                f"manifest types {typed_policy} as insurance_policy -- the "
+                "declaration is stale; process those documents and remove "
+                f"{_NO_POLICY_DECLARATION}, or re-type them"]
     # The stage may not finalize on a case whose policy documents were never
     # processed at all -- that was the CASE_112 failure, where an override
     # recorded `passed` over zero policy work. But "processed" is about TEXT:
@@ -2783,7 +2869,17 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
         and d.get("downstream_disposition") in policy_completeness._TEXT_PROCESSED
     ]
     if not text_processed_policy_docs:
-        return ["no text-processed insurance_policy document is registered"]
+        # A case that genuinely CARRIES no policy document is a different
+        # situation from one whose policy work was skipped, and the gate
+        # cannot tell them apart on its own -- which is why the waiver is a
+        # recorded human declaration rather than a flag the pipeline can set
+        # for itself. D5 (harness-guardrails-dev) scopes it to the PoC.
+        if not declared_none:
+            return ["no text-processed insurance_policy document is registered "
+                    "-- if this case genuinely has no policy document, record "
+                    "that with `dao.py declare-no-policy-documents CASE_ID "
+                    "--reviewer NAME --note TEXT`"]
+        return []
 
     # One scope, permanently empty: `_automated_policy_documents` (see there
     # for the measured grounds). Everything this loop asks for -- clause
@@ -11569,6 +11665,13 @@ def build_parser():
     p.add_argument("--reviewer", required=True); p.add_argument("--note")
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_set_segmentation_status)
+
+    p = sub.add_parser("declare-no-policy-documents")
+    p.add_argument("case_id")
+    p.add_argument("--reviewer", required=True)
+    p.add_argument("--note", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_declare_no_policy_documents)
 
     p = sub.add_parser("write-contract")
     p.add_argument("case_id"); p.add_argument("filename")

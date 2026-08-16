@@ -41,3 +41,41 @@ The switch condition is a **genuinely technology-independent second reader (a re
 ## D4. Directory/stage references must stay in sync with reality
 
 Skill and agent docs that name specific directories or pipeline stages must stay in sync with the real structure. When the project's directory structure or stage names change, every doc referencing the old path/name gets updated in the same change — not left stale for someone to trip over later. If a stale reference is found (a skill says one thing, reality is another), that mismatch gets fixed immediately, not noted and deferred.
+
+## D5. A case with no policy document may be declared, never assumed
+
+Part of the supplied PoC corpus arrives as a diagnosis certificate plus an
+insurer letter with **no 약관 attached**. `policy_clause_processing` cannot
+finalize without a text-processed `insurance_policy` document, and
+`claim_analysis` cannot start until it does — so those cases are unrunnable
+end-to-end even though nothing about them is defective.
+
+The allowance is a **recorded human declaration, per case**:
+
+```
+dao.py declare-no-policy-documents CASE_ID --reviewer NAME --note TEXT
+       --held-by NAME --run-id RUN_ID
+```
+
+It writes `_no_policy_documents.json` into the case directory, and the policy
+completeness gate treats that as clearing the "no policy document" blocker —
+and only that one.
+
+- **Not an environment variable and not a global dev flag.** The gate cannot
+  tell "this case has no policy" apart from "the policy work was skipped or
+  failed", and a flag would apply that judgment silently to every case in the
+  run. A person makes the call, per case, with a name and a reason attached.
+- **Refused when the manifest actually types a document as
+  `insurance_policy`** — at declaration time and again at the gate, so a
+  declaration that goes stale (because policy documents were later added or
+  re-typed) blocks instead of quietly persisting.
+- **It clears one blocker, not the stage.** Every other policy-completeness
+  condition still applies, and nothing about P0-3's canonical-UID requirement
+  changes: a `clause_ref` still may not name a non-policy document.
+- **Downstream consequences are real and must be read as such.** A case with
+  no policy has no clause for CP2 to match or CP4 to ground a requirement in;
+  those checkpoints will produce thin or uncertain output, and that is the
+  honest result for such a case — not a defect to tune away.
+- **Dev-only. Must not ship to prod.** In production a claim without its
+  policy is an intake gap to fix at intake, not a gate to waive. This rule
+  disappears with the PoC, along with the rest of `harness-guardrails-dev`.
