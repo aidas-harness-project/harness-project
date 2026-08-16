@@ -528,6 +528,41 @@ def quote_in_normalized_page(quote: str, normalized_page: str) -> bool:
             or _normalize_ws(_heal_wraps(quote)) in normalized_page)
 
 
+def locate_quote_hint(quote: str, pages_by_number, claimed_page) -> str:
+    """Where the quote ACTUALLY is, as a suffix for a refusal message.
+
+    A refusal that says only "not present on page 1" tells the model the page
+    it chose was wrong but not which page is right, so P4's single correction
+    is spent guessing. Measured on CASE_038: the correction re-cited the same
+    row on page 1, then on page 6, while it sits on page 2 -- the model was
+    not being told the one thing it needed.
+
+    `pages_by_number` MUST be the REDACTED layer -- the same pages the model
+    was served. That is what every caller passes (the drivers build it from
+    `read-redacted-text-bundle`, and the DAO gate from the redacted bundle it
+    already digest-checks), and it is load-bearing rather than incidental: the
+    hint text goes into a prompt, so sourcing it from the pre-redaction layer
+    would leak masked PII into the correction call by way of an error message.
+    This function therefore searches only what it is handed and never reads a
+    page itself.
+
+    Everything here is read from the SAME served pages the model was given, so
+    this reveals nothing the run did not already hold (no ground truth, no
+    unserved document). Returns "" when the quote is nowhere, which is the
+    fabrication case and must not be softened into a hint.
+    """
+    if not quote:
+        return ""
+    found = [number for number, text in sorted(pages_by_number.items())
+             if number != claimed_page and quote_matches_page(quote, text)]
+    if not found:
+        return ""
+    if len(found) == 1:
+        return f" -- that text is on page {found[0]}, not {claimed_page}"
+    listed = ", ".join(str(number) for number in found[:5])
+    return f" -- that text appears on page(s) {listed}, not {claimed_page}"
+
+
 def _spans_normalized_pair(quote: str, normalized_pages, page) -> bool:
     """Page-pair fallback for callers holding a normalized page map.
 

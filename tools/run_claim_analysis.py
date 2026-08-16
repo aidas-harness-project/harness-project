@@ -525,7 +525,13 @@ def _validate_cp1_output(value: Mapping[str, Any], bundle: list[dict],
             # or this would refuse citations the DAO would then accept.
             if not _cross_contract.quote_spans_page_pair(
                     quote, page_text, page_text_by_key.get((doc_id, page + 1))):
-                raise ValueError(f"{doc_id}: quote is not present on page {page}")
+                # Name the page the text IS on, so P4's one correction fixes a
+                # page number instead of guessing another.
+                hint = _cross_contract.locate_quote_hint(
+                    quote, {p: t for (d, p), t in page_text_by_key.items() if d == doc_id},
+                    page)
+                raise ValueError(
+                    f"{doc_id}: quote is not present on page {page}{hint}")
     return dict(value)
 
 
@@ -759,9 +765,15 @@ def _check_ref_grounding(value: Any, served: Mapping[tuple, str],
         if not clause and (doc_id, page, _norm(quote)) in known:
             return
         kind = "clause reference" if clause else "evidence reference"
+        # Same reasoning as CP1's gate: name the served page the text is on,
+        # so the one correction fixes a page number instead of guessing.
+        # `served` is the redacted layer, which is what keeps masked text out
+        # of the correction prompt.
+        hint = _cross_contract.locate_quote_hint(
+            quote, {p: t for (d, p), t in served.items() if d == doc_id}, page)
         unresolved.append((dict(ref), f"{doc_id} p{page}: {kind} quote "
                                       f"{quote[:60]!r} is neither on a served "
-                                      "page nor a previously verified quote"))
+                                      f"page nor a previously verified quote{hint}"))
 
     def walk(node: Any) -> None:
         if isinstance(node, list):

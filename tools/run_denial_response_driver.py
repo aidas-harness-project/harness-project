@@ -307,7 +307,11 @@ def _validate_bundle_output(value: Mapping[str, Any], bundle: list[dict],
             # fails at final publication.
             if not _cross_contract.quote_spans_page_pair(
                     quote, page_text, page_text_by_key.get((doc_id, page + 1))):
-                raise ValueError(f"{doc_id}: quote is not present on page {page}")
+                hint = _cross_contract.locate_quote_hint(
+                    quote, {p: t for (d, p), t in page_text_by_key.items() if d == doc_id},
+                    page)
+                raise ValueError(
+                    f"{doc_id}: quote is not present on page {page}{hint}")
     return dict(value)
 
 

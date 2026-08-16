@@ -1664,3 +1664,25 @@ def test_page_footer_is_stripped_only_at_the_join():
     assert _cross_contract.quote_matches_page("- 3 -", _SPAN_P3)
     # A number inside a line is not a footer.
     assert not _cross_contract._PAGE_FOOTER_RE.search("금액 - 3 - 원 합계")
+
+
+def test_locate_quote_hint_names_the_real_page_and_stays_silent_on_fabrication():
+    """A refusal saying only "not on page 1" spends P4's single correction on
+    a guess. Measured on CASE_038: the correction re-cited the same row on
+    page 1, then page 6, while it sits on page 2."""
+    pages = {1: "진찰료 초진료 18,520", 2: "사지골절정복술 582,738", 3: "합계"}
+    assert " -- that text is on page 2, not 1" == _cross_contract.locate_quote_hint(
+        "사지골절정복술", pages, 1)
+    # Nowhere in the served pages: the fabrication case, which must NOT be
+    # softened into a hint.
+    assert _cross_contract.locate_quote_hint("음주 상태였다", pages, 1) == ""
+    # Present on the claimed page: nothing to say.
+    assert _cross_contract.locate_quote_hint("초진료", pages, 1) == ""
+
+
+def test_locate_quote_hint_only_searches_the_pages_it_is_handed():
+    """The hint is embedded in a correction PROMPT, so it must never reach for
+    a page of its own -- passing the redacted layer is what keeps masked PII
+    out of the next model call. The function takes a mapping and reads nothing
+    else; this pins that it finds nothing outside it."""
+    assert _cross_contract.locate_quote_hint("환자성명 홍길동", {1: "환자성명"}, 1) == ""
