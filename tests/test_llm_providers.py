@@ -1236,3 +1236,143 @@ def test_cli_schema_sanitizer_strips_only_documented_keywords():
     assert cleaned["properties"]["nested"]["type"] == "object"
     # The authoritative input schema is never mutated in place.
     assert schema == original
+
+
+def _fake_anthropic_response(body: bytes):
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return body
+
+    return FakeResponse()
+
+
+def test_anthropic_provider_forces_tool_use_with_cached_prompt(monkeypatch):
+    captured = {}
+    response = json.dumps({
+        "id": "msg_1",
+        "stop_reason": "tool_use",
+        "content": [
+            {"type": "tool_use", "name": "emit_result", "input": {"ok": True}},
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5,
+                  "cache_read_input_tokens": 0},
+    }).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.header_items())
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return _fake_anthropic_response(response)
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.delenv("HARNESS_STRUCTURED_TEXT_TIMEOUT", raising=False)
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="anthropic-api", model_name="claude-test"),
+        env={"ANTHROPIC_API_KEY": "secret"},
+    )
+
+    result = provider.analyze_text_structured(
+        "analyze this", "driver_v1",
+        {"$schema": "https://json-schema.org/draft/2020-12/schema",
+         "type": "object", "properties": {"ok": {"type": "boolean"}}},
+    )
+
+    assert captured["url"].endswith("/v1/messages")
+    assert captured["headers"]["X-api-key"] == "secret"
+    assert captured["headers"]["Anthropic-version"] == "2023-06-01"
+    payload = captured["payload"]
+    assert payload["model"] == "claude-test"
+    assert payload["max_tokens"] == providers._ANTHROPIC_MAX_TOKENS_DEFAULT
+    assert payload["tool_choice"] == {"type": "tool", "name": "emit_result"}
+    tool = payload["tools"][0]
+    assert tool["name"] == "emit_result"
+    # The CLI keyword strip applies here too, keeping the two transports
+    # byte-comparable ($schema would otherwise ride to the API for nothing).
+    assert "$schema" not in tool["input_schema"]
+    assert tool["input_schema"]["properties"] == {"ok": {"type": "boolean"}}
+    block = payload["messages"][0]["content"][0]
+    assert block["cache_control"] == {"type": "ephemeral"}
+    assert block["text"] == "analyze this"
+    assert captured["timeout"] == 180
+    assert result.structured_output == {"ok": True}
+    assert json.loads(result.text) == {"ok": True}
+    assert result.raw_metadata["usage"]["cache_read_input_tokens"] == 0
+    assert result.finish_reason == "tool_use"
+
+
+def test_anthropic_provider_refuses_max_tokens_truncation(monkeypatch):
+    # A truncated response can still carry a tool_use block whose input is
+    # silently partial -- stop_reason is the only honest signal, so it must
+    # win even when a parseable input is present.
+    response = json.dumps({
+        "id": "msg_2",
+        "stop_reason": "max_tokens",
+        "content": [
+            {"type": "tool_use", "name": "emit_result", "input": {"ok": True}},
+        ],
+    }).encode("utf-8")
+    monkeypatch.setattr(
+        providers.urllib.request, "urlopen",
+        lambda request, timeout: _fake_anthropic_response(response),
+    )
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="anthropic-api", model_name="claude-test"),
+        env={"ANTHROPIC_API_KEY": "secret"},
+    )
+
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.analyze_text_structured("p", "v", {"type": "object"})
+
+    assert "truncated at max_tokens" in str(excinfo.value)
+    assert "HARNESS_ANTHROPIC_MAX_TOKENS" in str(excinfo.value)
+
+
+def test_anthropic_provider_refuses_text_only_response(monkeypatch):
+    response = json.dumps({
+        "id": "msg_3",
+        "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": "prose, not the tool"}],
+    }).encode("utf-8")
+    monkeypatch.setattr(
+        providers.urllib.request, "urlopen",
+        lambda request, timeout: _fake_anthropic_response(response),
+    )
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="anthropic-api", model_name="claude-test"),
+        env={"ANTHROPIC_API_KEY": "secret"},
+    )
+
+    with pytest.raises(providers.ProviderExecutionError) as excinfo:
+        provider.analyze_text_structured("p", "v", {"type": "object"})
+
+    assert "structured tool_use" in str(excinfo.value)
+
+
+def test_anthropic_provider_max_tokens_env_must_be_a_positive_integer():
+    with pytest.raises(providers.ProviderConfigError):
+        providers.AnthropicApiProvider(
+            model_name="claude-test",
+            env={"ANTHROPIC_API_KEY": "secret",
+                 "HARNESS_ANTHROPIC_MAX_TOKENS": "many"},
+        )
+    with pytest.raises(providers.ProviderConfigError):
+        providers.AnthropicApiProvider(
+            model_name="claude-test",
+            env={"ANTHROPIC_API_KEY": "secret",
+                 "HARNESS_ANTHROPIC_MAX_TOKENS": "0"},
+        )
+    provider = providers.AnthropicApiProvider(
+        model_name="claude-test",
+        env={"ANTHROPIC_API_KEY": "secret",
+             "HARNESS_ANTHROPIC_MAX_TOKENS": "32000"},
+    )
+    assert provider.max_output_tokens == 32000

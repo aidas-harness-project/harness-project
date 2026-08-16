@@ -253,6 +253,24 @@ pre-driver tree: `tools/run_claim_analysis.py` and its tests live at commit
 `198baf6` if a reassessment path (api-with-caching / faster model / <=2-call
 design) is ever authorized -- do not rewrite them from scratch.
 
+**Path (a) opened and paused 2026-08-16, same day.**
+`AnthropicApiProvider.analyze_text_structured` is now implemented (Messages
+API, forced tool-use transport, `cache_control` on the prompt block,
+truncation/fail-closed guards, unit-tested) and a paired one-call CP1 bench
+exists; the CLI side of that pair measured **227.2s** on CASE_034's identical
+prompt (bracketed by the earlier 131.9/253.5s), model confirmed as the CLI's
+default `claude-fable-5`. The API side was **not run: no `ANTHROPIC_API_KEY`
+was available and the user chose to stop rather than provide one**, so the
+cold-call-cost hypothesis (CLI child overhead vs true model latency) stays
+untested and no part of the arm E verdict changes. Known design constraint
+recorded for whenever a key exists: Anthropic's cache prefix runs
+tools→system→messages, and each checkpoint sends a different transport schema
+as its forced tool, so the 5-call spine gets **no cross-checkpoint cache
+reuse** under the current shape -- only identical re-calls (P4 correction
+rounds, reruns inside the TTL) hit. A caching win would need the schema moved
+out of the tool position or a shared-tool design, which is part of path (a)'s
+work, not a free rider.
+
 ## 5. Effort and sequence
 
 1. `tools/run_claim_analysis.py` skeleton: bundle assembly + CP1 grouped call

@@ -209,6 +209,9 @@ def structured_text_timeout(env: Mapping[str, str] | None = None) -> int:
         return _STRUCTURED_TEXT_DEFAULT_TIMEOUT_SECONDS
     return value
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+_ANTHROPIC_MAX_TOKENS_ENV = "HARNESS_ANTHROPIC_MAX_TOKENS"
+_ANTHROPIC_MAX_TOKENS_DEFAULT = 16_000
 
 # ---------------------------------------------------------------- T6: in-flight cap --
 #
@@ -1201,9 +1204,154 @@ class _ApiProviderStub(BaseProvider):
 
 
 class AnthropicApiProvider(_ApiProviderStub):
+    """Direct Messages-API backend. Only ``analyze_text_structured`` is live.
+
+    Exists for the P2-(a) driver reassessment: the cold ``claude -p``
+    structured call costs 200-330s nearly regardless of payload, and the only
+    way to know whether that is CLI overhead or model latency is a direct API
+    arm on the same prompt. Image/OCR paths stay unimplemented -- P8's
+    provider-exposure notes were written for the CLI paths, and nothing sends
+    raw page images here.
+
+    Prompt caching: the user text block carries ``cache_control`` ephemeral.
+    Anthropic's cache key is a prefix over tools -> system -> messages, and
+    each checkpoint sends a DIFFERENT transport schema as its forced tool, so
+    cross-checkpoint reuse of the shared case-material prefix does NOT happen
+    under this shape -- only an identical re-call (a P4 correction round
+    resending the same material, a rerun inside the 5-minute TTL) gets read
+    hits. ``usage.cache_read_input_tokens`` in raw_metadata is the ground
+    truth for whether a given call actually hit.
+    """
+
     provider_name = "anthropic-api"
     required_key_env = "ANTHROPIC_API_KEY"
     model_env_names = ("HARNESS_ANTHROPIC_MODEL", "ANTHROPIC_MODEL")
+    STRUCTURED_TOOL_NAME = "emit_result"
+
+    def __init__(
+        self,
+        *,
+        model_name: str | None,
+        env: Mapping[str, str],
+        base_url: str | None = None,
+    ):
+        super().__init__(model_name=model_name, env=env)
+        self.base_url = (
+            base_url or env.get("ANTHROPIC_BASE_URL") or DEFAULT_ANTHROPIC_BASE_URL
+        ).rstrip("/")
+        raw_cap = env.get(_ANTHROPIC_MAX_TOKENS_ENV, "")
+        try:
+            cap = int(raw_cap) if raw_cap else _ANTHROPIC_MAX_TOKENS_DEFAULT
+        except ValueError:
+            raise ProviderConfigError(
+                f"{_ANTHROPIC_MAX_TOKENS_ENV} must be an integer, got {raw_cap!r}"
+            )
+        if cap <= 0:
+            raise ProviderConfigError(f"{_ANTHROPIC_MAX_TOKENS_ENV} must be positive")
+        self.max_output_tokens = cap
+
+    def analyze_text_structured(
+        self,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        # Structured output via forced tool use: the schema rides as the one
+        # tool's input_schema and tool_choice pins it, so the model must
+        # answer through it. The API conforms tool inputs to the schema but is
+        # not a hard validator -- the caller's validate_instance() gate against
+        # the unmodified on-disk schema stays authoritative, same as the CLI
+        # path (see _cli_json_schema; its keyword strip is harmless here and
+        # keeps the two transports byte-comparable).
+        payload = {
+            "model": self.model_name,
+            "max_tokens": self.max_output_tokens,
+            "tools": [{
+                "name": self.STRUCTURED_TOOL_NAME,
+                "description": (
+                    "Return the complete analysis result in the required structure."
+                ),
+                "input_schema": _cli_json_schema(output_schema),
+            }],
+            "tool_choice": {"type": "tool", "name": self.STRUCTURED_TOOL_NAME},
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+            }],
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/messages",
+            data=body,
+            headers={
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        timeout = structured_text_timeout()
+        try:
+            with provider_slot("anthropic-api"), \
+                    urllib.request.urlopen(request, timeout=timeout) as response:
+                response_body = response.read().decode("utf-8")
+                status_code = getattr(response, "status", None)
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise ProviderExecutionError(
+                f"anthropic-api call failed ({exc.code}): {error_body}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise ProviderExecutionError(f"anthropic-api call failed: {exc.reason}") from exc
+
+        try:
+            parsed = json.loads(response_body)
+        except json.JSONDecodeError as exc:
+            raise ProviderExecutionError(
+                f"anthropic-api returned non-JSON response: {response_body!r}"
+            ) from exc
+
+        # Truncation guard, same posture as the other providers: a response cut
+        # off at max_tokens carries a syntactically broken or silently partial
+        # tool input. Refuse it rather than validate half a result.
+        stop_reason = parsed.get("stop_reason")
+        if stop_reason == "max_tokens":
+            raise ProviderExecutionError(
+                "anthropic-api response was truncated at max_tokens "
+                f"({self.max_output_tokens}); refusing to use a partial result. "
+                f"Raise {_ANTHROPIC_MAX_TOKENS_ENV} if the output is legitimately larger."
+            )
+
+        content = parsed.get("content")
+        blocks = content if isinstance(content, list) else []
+        tool_block = next(
+            (b for b in blocks
+             if isinstance(b, Mapping) and b.get("type") == "tool_use"
+             and b.get("name") == self.STRUCTURED_TOOL_NAME),
+            None,
+        )
+        structured = tool_block.get("input") if tool_block is not None else None
+        if not isinstance(structured, dict):
+            raise ProviderExecutionError(
+                "anthropic-api did not return a structured tool_use result "
+                f"(stop_reason={stop_reason!r})"
+            )
+        return self._result(
+            json.dumps(structured, ensure_ascii=False),
+            prompt_version,
+            {
+                "response_id": parsed.get("id"),
+                "stop_reason": stop_reason,
+                "http_status": status_code,
+                "usage": parsed.get("usage"),
+            },
+            finish_reason=stop_reason,
+            structured_output=structured,
+        )
 
 
 class OpenAIApiProvider(_ApiProviderStub):
