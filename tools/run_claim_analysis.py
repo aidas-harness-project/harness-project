@@ -191,6 +191,31 @@ def cp1_documents(manifest: Mapping[str, Any]) -> list[dict]:
     return sorted(selected, key=lambda doc: doc["document_id"])
 
 
+def policy_documents(manifest: Mapping[str, Any]) -> list[str]:
+    """The case's actual policy documents, in stable order.
+
+    The only documents a `clause_ref`/`matched_clause_ref` may name. Read from
+    the manifest rather than the document index because the index is derived
+    and optional, while `document_type` is what the DAO's own policy gate
+    ultimately judges: `_canonical_state_blockers` refuses a clause reference
+    to any document that never went through canonical UID registration, which
+    a non-policy document never does.
+
+    Measured 2026-08-17 on CASE_040: CP4 grounded a requirement in DOC_022 --
+    `document_type: other`, whose first page reads `[자료 13] 위자료
+    산정기준표 ... 서울중앙지방법원 ... 기준` -- a court's consolation-money
+    reference table, not an insurance policy. The write was refused after the
+    call was already paid for. Naming the permitted set up front is the
+    generation-time form of the same rule.
+    """
+    return sorted({
+        doc["document_id"] for doc in manifest.get("documents", [])
+        if isinstance(doc, dict)
+        and doc.get("document_type") in EXCLUDED_TYPES
+        and isinstance(doc.get("document_id"), str)
+    })
+
+
 def _body_schema() -> dict:
     """The authoritative local schema for the model's CP1 response body.
 
@@ -658,8 +683,17 @@ def _transport_schema_select() -> dict:
     }
 
 
-def _transport_schema_cp2() -> dict:
-    return _transport_shell({"coverages": {"type": "array", "items": {"type": "object"}}},
+def _transport_schema_cp2(policy_doc_ids: list | None = None) -> dict:
+    # `matched_clause_ref` is bound to the case's policy documents for the same
+    # reason as cp4's `clause_ref`: a coverage matched against a non-policy
+    # document is refused by the DAO's canonical-UID gate, and refusing it at
+    # generation time costs nothing. The rest of a coverage stays permissive --
+    # the authoritative shape is the local body schema.
+    coverage = {
+        "type": "object",
+        "properties": {"matched_clause_ref": _clause_ref_shape(policy_doc_ids)},
+    }
+    return _transport_shell({"coverages": {"type": "array", "items": coverage}},
                             ["coverages"])
 
 
@@ -706,7 +740,32 @@ def _transport_schema_cp3() -> dict:
         "evidence_references"])
 
 
-def _transport_schema_cp4() -> dict:
+def _clause_ref_shape(policy_doc_ids: list | None) -> dict:
+    """A clause reference, with `document_id` pinned to the case's policies.
+
+    Nullable, because a requirement may genuinely rest on no located clause.
+    When the policy set is known the enum makes a non-policy document
+    unrepresentable at generation time -- CASE_040 grounded a requirement in a
+    court's 위자료 산정기준표 and the DAO refused the write after the call had
+    been paid for. With no set supplied the shape stays permissive, so a caller
+    that cannot determine the policies is not silently given a schema that
+    forbids every clause reference.
+    """
+    document_id = ({"enum": list(policy_doc_ids)} if policy_doc_ids
+                   else {"type": "string"})
+    return {
+        "type": ["object", "null"],
+        "properties": {
+            "document_id": document_id,
+            "page": {"type": "integer", "minimum": 1},
+            "quote": {"type": "string", "minLength": 1},
+            "display_clause_id": {"type": "string"},
+        },
+        "required": ["document_id", "page", "quote"],
+    }
+
+
+def _transport_schema_cp4(policy_doc_ids: list | None = None) -> dict:
     """CP4's item shape is pinned, unlike cp2/cp3 whose keys were already keyed.
 
     Measured 2026-08-16: with `items: {"type": "object"}` the model emitted six
@@ -733,6 +792,7 @@ def _transport_schema_cp4() -> dict:
                         "status": {"enum": ["met", "not_met", "uncertain"]},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                         "review_required": {"type": "boolean"},
+                        "clause_ref": _clause_ref_shape(policy_doc_ids),
                     },
                     "required": ["requirement_id", "requirement_text", "status"],
                 },
@@ -981,11 +1041,20 @@ def _render_pages(bundle: list[dict]) -> str:
         for doc in bundle)
 
 
-def _m2_prompt(fields_json: str, pages_text: str, adjuster_case_type) -> str:
+def _m2_prompt(fields_json: str, pages_text: str, adjuster_case_type,
+               policy_doc_ids: list | None = None) -> str:
     """CP2 judgment + CP3 case type + CP4 requirement matching, one response
     (call M2). The three checkpoint instructions are carried verbatim from the
     v2 per-call prompts; only the data blocks are shared instead of repeated."""
     adjuster = json.dumps(adjuster_case_type, ensure_ascii=False)
+    # Naming the permitted documents is what makes the constraint actionable:
+    # CASE_040 grounded a requirement in a court's 위자료 산정기준표, which the
+    # DAO refuses because a policy claim cannot rest on a non-policy document.
+    policy_rule = (
+        f" -- `document_id` MUST be one of this case's policy documents "
+        f"({', '.join(policy_doc_ids)}); a 기준표·자료 or any other non-policy "
+        f"document is never a clause_ref, cite it via evidence_references"
+        if policy_doc_ids else "")
     return f"""Perform the three dependent analysis checkpoints below in ONE response, over the claim facts and
 policy pages supplied at the end. Return only the supplied JSON Schema: an object with exactly
 `coverage_section`, `case_type_section`, and `requirements_section`. Each section carries its OWN
@@ -1025,7 +1094,7 @@ against the claim's facts. `coverage_requirements` groups requirements per cover
 EXACTLY on the `standardized_coverage_name` values from coverage_section -- never invent a new
 name. Per requirement: `requirement_id` (provisional REQ-N; the driver renumbers),
 `requirement_text`, `clause_ref` ({{document_id, page, quote}} quoting the SPECIFIC condition
-sentence from a policy page shown below), `status` met/not_met/uncertain, `confidence`,
+sentence from a policy page shown below){policy_rule}, `status` met/not_met/uncertain, `confidence`,
 `evidence_references`, `review_required`. met/not_met require at least one evidence reference;
 uncertain may have none ONLY when evidence is genuinely absent -- a redaction-blanked fact that
 blocks a check is uncertain with the blockage stated in the requirement_text or warnings. Include
@@ -1045,26 +1114,72 @@ POLICY PAGES:
 """
 
 
-def _transport_schema_m2() -> dict:
+def _transport_schema_m2(policy_doc_ids: list | None = None) -> dict:
     return {
         "type": "object", "additionalProperties": False,
         "properties": {
-            "coverage_section": _transport_schema_cp2(),
+            "coverage_section": _transport_schema_cp2(policy_doc_ids),
             "case_type_section": _transport_schema_cp3(),
-            "requirements_section": _transport_schema_cp4(),
+            "requirements_section": _transport_schema_cp4(policy_doc_ids),
         },
         "required": ["coverage_section", "case_type_section", "requirements_section"],
     }
 
 
+def _clause_refs(value: Any) -> list[tuple[str, dict]]:
+    """Every (key, ref) pair addressing a policy clause, at any depth."""
+    found: list[tuple[str, dict]] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in ("clause_ref", "matched_clause_ref") and isinstance(child, dict):
+                found.append((key, child))
+            else:
+                found.extend(_clause_refs(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(_clause_refs(child))
+    return found
+
+
+def _check_clause_documents(cov: Any, req: Any, policy_doc_ids: list | None) -> None:
+    """A clause reference may only name one of the case's policy documents.
+
+    CASE_040 grounded a requirement in DOC_022 -- `document_type: other`, a
+    court's 위자료 산정기준표 -- and `write-contract` refused the result,
+    because the DAO's canonical-UID gate will not let a policy claim rest on a
+    document that never went through UID registration. Catching it here turns
+    a wasted call into a correction round that can still succeed, and names
+    the permitted set so the correction is actionable.
+
+    Skipped when the policy set is unknown: refusing every clause reference
+    would be worse than the defect.
+    """
+    if not policy_doc_ids:
+        return
+    allowed = set(policy_doc_ids)
+    for key, ref in _clause_refs(cov) + _clause_refs(req):
+        doc_id = ref.get("document_id")
+        if doc_id is not None and doc_id not in allowed:
+            raise ValueError(
+                f"{key} names {doc_id!r}, which is not one of this case's "
+                f"policy documents ({', '.join(sorted(allowed))}). A payout "
+                "condition must be grounded in the policy; cite a non-policy "
+                "document through evidence_references instead")
+
+
 def _validate_m2(value: Mapping[str, Any], served: Mapping[tuple, str],
-                 known_cp1: set, schemas: tuple, dao_verify) -> dict:
+                 known_cp1: set, schemas: tuple, dao_verify,
+                 policy_doc_ids: list | None = None) -> dict:
     """Each section through its own authoritative body schema and grounding
     gate, in dependency order, inside M2's single P4 correction budget."""
     schema_cp2, schema_cp3, schema_cp4 = schemas
     cov = value["coverage_section"]
     ct = value["case_type_section"]
     req = value["requirements_section"]
+    # The transport's enum is a generation-time hint the model can still miss,
+    # so the same rule is enforced here, where a violation costs the one P4
+    # correction instead of a refused DAO write after every call is paid for.
+    _check_clause_documents(cov, req, policy_doc_ids)
     Draft202012Validator(schema_cp2, format_checker=FormatChecker()).validate(cov)
     _check_ref_grounding(cov["coverages"], served, known_cp1,
                          clause_keys=("matched_clause_ref",), dao_verify=dao_verify)
@@ -1311,6 +1426,7 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
                   for doc in served_bundle for page in doc.get("pages", [])}
         known1 = _known_quote_set(cp1_contract)
         dao_verify = _make_dao_verifier(case_id, run_id)
+        policy_doc_ids = policy_documents(manifest)
         schemas = (_body_schema_cp2(), _body_schema_cp3(), _body_schema_cp4())
         stored_m2 = (_dao_json(["read-driver-candidates", case_id, "--stage", STAGE,
                                 "--unit-id", UNIT_M2, "--run-id", run_id],
@@ -1320,15 +1436,19 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
                 existing, input_digests=digests_m2, prompt_version=prompt_version,
                 response_schema_version=VERSION, provider_name=provider.provider_name,
                 model_name=provider.model_name):
-            sections = _validate_m2(existing["result"], served, known1, schemas, dao_verify)
+            sections = _validate_m2(existing["result"], served, known1, schemas,
+                                    dao_verify, policy_doc_ids)
         else:
             driver_runtime.maybe_interrupt(STAGE, "m2")
             with driver_runtime.driver_span(case_id, run_id, "provider_wait", unit_id=UNIT_M2, items=1):
                 sections = driver_runtime.structured_with_one_correction(
                     provider=provider,
-                    prompt=_m2_prompt(fields_json, _render_pages(served_bundle), adjuster_case_type),
-                    prompt_version=prompt_version, output_schema=_transport_schema_m2(),
-                    validate=lambda value: _validate_m2(value, served, known1, schemas, dao_verify))
+                    prompt=_m2_prompt(fields_json, _render_pages(served_bundle),
+                                      adjuster_case_type, policy_doc_ids),
+                    prompt_version=prompt_version,
+                    output_schema=_transport_schema_m2(policy_doc_ids),
+                    validate=lambda value: _validate_m2(value, served, known1, schemas,
+                                                        dao_verify, policy_doc_ids))
             _persist_candidate(case_id, run_id, held_by, UNIT_M2, "m2",
                                digests_m2, prompt_version, provider, sections)
 

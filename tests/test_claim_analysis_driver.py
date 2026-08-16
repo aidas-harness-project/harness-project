@@ -665,3 +665,65 @@ def test_cp1_transport_refuses_a_null_normalized_value():
                     {"document_id": "DOC_011", "page": 1, "quote": QUOTE}]}}}
     with pytest.raises(ValidationError):
         validator.validate(body)
+
+
+def test_policy_documents_selects_only_insurance_policy_entries():
+    """The permitted set for a clause reference. Read from the manifest, not
+    the document index: the index is derived and optional, while
+    `document_type` is what the DAO's canonical-UID gate ultimately judges."""
+    manifest = {"documents": [
+        _document("DOC_009", "insurance_policy"),
+        _document("DOC_010", "insurance_policy"),
+        _document("DOC_022", "other"),            # 위자료 산정기준표 (CASE_040)
+        _document("DOC_011", "diagnosis_certificate"),
+    ]}
+    assert driver.policy_documents(manifest) == ["DOC_009", "DOC_010"]
+
+
+def test_clause_ref_transport_pins_document_id_to_the_policy_set():
+    """Generation-time half. CASE_040 grounded a requirement in DOC_022 and
+    the DAO refused the write after the call was already paid for."""
+    from jsonschema import Draft202012Validator, ValidationError
+
+    validator = Draft202012Validator(driver._transport_schema_cp4(["DOC_009", "DOC_010"]))
+    shell = {"status": "success", "confidence": 0.9, "review_required": False,
+             "warnings": []}
+
+    def body(doc_id):
+        return {**shell, "coverage_requirements": [{
+            "standardized_coverage_name": "facility_owner_liability",
+            "requirements": [{"requirement_id": "REQ-1", "requirement_text": "조건",
+                              "status": "met",
+                              "clause_ref": {"document_id": doc_id, "page": 2,
+                                             "quote": "보상합니다"}}]}]}
+
+    validator.validate(body("DOC_009"))
+    with pytest.raises(ValidationError):
+        validator.validate(body("DOC_022"))
+
+    # A requirement resting on no located clause stays expressible.
+    none_ref = json.loads(json.dumps(body("DOC_009")))
+    none_ref["coverage_requirements"][0]["requirements"][0]["clause_ref"] = None
+    validator.validate(none_ref)
+
+    # With no policy set known, the shape must not forbid every clause ref.
+    permissive = Draft202012Validator(driver._transport_schema_cp4())
+    permissive.validate(body("DOC_022"))
+
+
+def test_validate_m2_refuses_a_clause_ref_outside_the_policy_set():
+    """The gate half: the transport enum is a hint the model can still miss,
+    and this is where the violation costs a correction round rather than a
+    refused DAO write."""
+    cov = {"coverages": [{"standardized_coverage_name": "x",
+                          "matched_clause_ref": {"document_id": "DOC_022",
+                                                 "page": 1, "quote": "위자료"}}]}
+    req = {"coverage_requirements": []}
+    with pytest.raises(ValueError, match="not one of this case's policy documents"):
+        driver._check_clause_documents(cov, req, ["DOC_009", "DOC_010"])
+
+    ok = {"coverages": [{"matched_clause_ref": {"document_id": "DOC_009",
+                                                "page": 1, "quote": "보상"}}]}
+    driver._check_clause_documents(ok, req, ["DOC_009", "DOC_010"])
+    # Unknown policy set: refusing every clause reference would be worse.
+    driver._check_clause_documents(cov, req, None)
