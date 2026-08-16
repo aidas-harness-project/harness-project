@@ -60,7 +60,7 @@ CONTRACT, SCHEMA = "extracted_claim_fields.json", "extracted_claim_fields.schema
 CONTRACT_CP2, SCHEMA_CP2 = "coverage_result.json", "coverage_result.schema.json"
 CONTRACT_CP3, SCHEMA_CP3 = "case_type_result.json", "case_type_result.schema.json"
 CONTRACT_CP4, SCHEMA_CP4 = "requirement_matching_result.json", "requirement_matching_result.schema.json"
-VERSION = "claim_analysis_driver.v0.3_2call"
+VERSION = "claim_analysis_driver.v0.3.1_2call"
 # Span/candidate unit ids for the two merged calls. Receipts stay per public
 # contract (UNIT/UNIT_CP2/UNIT_CP3/UNIT_CP4) so resume grain is unchanged.
 UNIT_M1, UNIT_M2 = "m1_extract_select", "m2_judge_type_requirements"
@@ -254,7 +254,11 @@ never facts that lack a slot.
 
 Evidence discipline: every field cites at least one evidence reference with document_id, page, and
 an EXACT quote from the supplied text. A fact that is redacted or absent records value null with
-review_required true, citing the page where it would appear -- never substitute a value and never
+review_required true, citing the page where it would appear. For a PERIOD slot
+(treatment_period, admission_period, or any *_period field) whose start date is redacted or
+unknown: OMIT the field entirely and state the known partial information (e.g. a stated duration
+like "약 8주") in `warnings` -- the period shape requires a real YYYY-MM-DD start_date, and the
+single-value shape is not valid for named period slots. Never substitute a value and never
 derive one by combining documents; note such a possible derivation in `warnings` instead. When two
 documents disagree on the same field, record BOTH values (the extra one under a descriptive field
 name), set is_primary only where a document-character basis exists, and mark review_required --
@@ -406,13 +410,22 @@ def _transport_schema_cp2() -> dict:
 
 
 def _transport_schema_cp3() -> dict:
+    # The classification enums are pinned NATIVELY, not left as bare strings:
+    # arm G's M2 burned its P4 correction (an entire ~400s re-call) because the
+    # model put a descriptive free-string into secondary_case_types, which the
+    # loose transport accepted and the local enum gate then refused -- the
+    # fourth instance of the same generation-time-shape failure (CP1's
+    # scalar-in-fields, report_profile's wrong keys, the selection ceiling).
+    # Values mirror case_type_result.schema.json's closed enums; the local
+    # body-schema gate remains authoritative if they ever drift.
+    _CASE_TYPES = ["후유장해", "진단·수술비", "실손", "배상책임", "기타"]
     return _transport_shell({
-        "case_type": {"type": "string"},
-        "coverage_basis": {"type": ["string", "null"]},
-        "loss_type": {"type": ["string", "null"]},
+        "case_type": {"enum": _CASE_TYPES},
+        "coverage_basis": {"enum": ["배상책임", "개인보험", "자동차보험", None]},
+        "loss_type": {"enum": ["후유장해", "진단·수술비", "실손", None]},
         "is_claim_case": {"type": "boolean"},
         "case_type_source": {"enum": ["adjuster_input", "inferred"]},
-        "secondary_case_types": {"type": "array", "items": {"type": "string"}},
+        "secondary_case_types": {"type": "array", "items": {"enum": _CASE_TYPES}},
         "candidate_types": {"type": "array", "items": {"type": "object"}},
         "template_id": {"type": ["string", "null"]},
         # Fully keyed, additionalProperties false: the second arm E run died

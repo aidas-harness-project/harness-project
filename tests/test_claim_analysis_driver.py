@@ -436,3 +436,25 @@ def test_requirement_renumbering_is_global_and_sequential():
     ids = [r["requirement_id"] for g in out["coverage_requirements"]
            for r in g["requirements"]]
     assert ids == ["REQ-1", "REQ-2", "REQ-3"]
+
+
+def test_cp3_transport_pins_classification_enums_natively():
+    """Arm G's M2 re-paid its entire ~400s call because a descriptive
+    free-string in secondary_case_types passed the loose transport schema and
+    failed only at the local enum gate -- the shape must be refused at
+    generation time, like report_profile's keys and CP1's field objects."""
+    from jsonschema import Draft202012Validator, ValidationError
+
+    validator = Draft202012Validator(driver._transport_schema_cp3())
+    good = _cp3_body()
+    validator.validate(good)
+
+    freeform_secondary = json.loads(json.dumps(good))
+    freeform_secondary["secondary_case_types"] = ["구내치료비(비배상책임 기반 치료비 담보) 청구"]
+    with pytest.raises(ValidationError):
+        validator.validate(freeform_secondary)
+
+    freeform_axis = json.loads(json.dumps(good))
+    freeform_axis["loss_type"] = "치료비"
+    with pytest.raises(ValidationError):
+        validator.validate(freeform_axis)

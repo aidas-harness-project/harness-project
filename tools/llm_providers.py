@@ -831,6 +831,14 @@ class ClaudeCliProvider(BaseProvider):
                     raw_metadata.update({
                         "session_id": envelope.get("session_id"),
                         "subtype": subtype,
+                        # Kept verbatim from the CLI envelope: token counts are
+                        # the only way to tell a reasoning-heavy call from an
+                        # output-heavy one. Arm G's M2 (822.5s) and M1 (134.2s)
+                        # had near-identical visible input AND output, and with
+                        # usage discarded the 6x gap was unexplainable from
+                        # retained records.
+                        "usage": envelope.get("usage"),
+                        "model_usage": envelope.get("modelUsage"),
                     })
                     return self._result(
                         json.dumps(structured, ensure_ascii=False),
