@@ -77,12 +77,63 @@ EXCLUDED_TYPES = frozenset({"insurance_policy"})
 # The named slots of extracted_claim_fields v0.2, listed in the prompt so the
 # model uses typed fields instead of smuggling facts through warnings (the
 # CASE_021 failure the v0.2 schema bump exists to prevent).
+#
+# These are the slots downstream consumes BY NAME, so they are non-substitutable
+# -- a 2026-08-16 bench run recorded the coverage item as `policy_type` and lost
+# `claim_item` entirely.
 NAMED_FIELDS = (
     "diagnosis_name", "kcd_code", "accident_date", "onset_date", "surgery_name",
     "hospital_name", "treatment_period", "admission_period", "imaging_date",
     "diagnosis_date", "claim_received_date", "policy_contract_date",
     "claim_item", "disposition", "insurers",
 )
+
+# The exhaustive extraction checklist. Measured 2026-08-16: naming every slot
+# the high-recall arms found, and requiring an explicit account of each, moved
+# sonnet-5 from 31 to 43 of 46 semantic slots on CASE_034 and 32 to 42 on
+# CASE_036's M1 -- the single largest recall lever found, and independent of
+# model choice. Grouped by where the facts live so the model walks the case the
+# way the documents are organized.
+EXTRACTION_CHECKLIST = """\
+A. 사고 (사고관련 서류/법률질의회신서/손해사정서)
+   accident_date, accident_time, accident_location, accident_cause
+   (사고경위: 무엇이 어떻게 일어났는지 서술), victim_position_at_accident
+
+B. 진단·상병 (진단서/후유장해진단서/의무기록)
+   diagnosis_name, kcd_code, diagnosis_name_official (KCD 상병명 원문),
+   diagnosis_date, onset_date, injured_body_part, clinical_presentation,
+   diagnosis_certainty (최종/추정)
+
+C. 치료·수술 (수술기록지/의무기록/진료비내역서)
+   surgery_name, surgery_date, anesthesia_method, implant_materials,
+   hospital_name, treatment_department, admission_period,
+   outpatient_visit_dates, expected_treatment_duration, prior_hospital_treatment
+
+D. 영상·검사 (영상판독지/검사기록)
+   imaging_date, imaging_modality, imaging_findings, examination_methods
+
+E. 장해 (후유장해진단서)
+   disability_rate (노동능력상실률 %), disability_evaluation_item
+   (맥브라이드 항목번호 등), disability_evaluation_method,
+   disability_permanence (영구/한시), disability_diagnosis_date,
+   residual_disability_content (잔존 증상·ROM 측정치), rom_measurement_date,
+   preexisting_condition_causation (기왕증 기여도)
+
+F. 책임·과실 -- 양측 의견을 반드시 각각 별도 필드로
+   liability_opinion_claimant_side, liability_opinion_insurer_side,
+   victim_fault_opinion_claimant_side, victim_fault_opinion_insurer_side,
+   legal_basis (근거 법조문), consolation_money_standard (위자료 산정 기준)
+
+G. 계약·담보 (보험증권/사고접수서류)
+   insurers, policy_contract_date, policy_type, policy_number, claim_item,
+   coverage_limit (보상한도액), deductible (자기부담금), claim_received_date,
+   loss_adjuster_firm
+
+H. 금액 -- 기간별로 각각 분리
+   inpatient_expense_total, outpatient_expense_total (진료기간이 다르면
+   기간별로 별개 필드로 분리하고 필드명에 기간을 표시),
+   offered_treatment_cost (보험자가 안내·제시한 금액), disposition
+"""
 
 
 def _digest(value: object) -> str:
@@ -199,8 +250,45 @@ def _transport_schema() -> dict:
             # "object"} accepts natively and the local gate then refuses --
             # burning the P4 correction on a shape the transport schema could
             # have prevented at generation time.
-            "fields": {"type": "object",
-                       "additionalProperties": {"type": "object"}},
+            # Members are pinned to the three keys `field_common` requires plus
+            # the payload keys each shape carries. Measured 2026-08-16: with a
+            # bare {"type": "object"} sonnet-5 omitted `review_required` on 38
+            # of 57 fields; requiring ONLY the three common keys then cost
+            # `value` on 56 of 56, because an enumeration that lists just the
+            # metadata reads as the complete member spec. Declaring the payload
+            # keys alongside them is what closes both. `value` stays untyped
+            # (it legitimately carries strings, numbers and null) while
+            # `normalized_value` is string-only, matching the public schema.
+            "fields": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": ["string", "number", "boolean", "null"]},
+                        "normalized_value": {"type": ["string", "null"]},
+                        "start_date": {"type": ["string", "null"]},
+                        "end_date": {"type": ["string", "null"]},
+                        "days": {"type": ["integer", "null"]},
+                        "is_primary": {"type": "boolean"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        "review_required": {"type": "boolean"},
+                        "reviewer_role": {"enum": ["손해사정사", "의사", "법률전문가"]},
+                        "evidence_references": {
+                            "type": "array", "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "document_id": {"type": "string"},
+                                    "page": {"type": "integer", "minimum": 1},
+                                    "quote": {"type": "string", "minLength": 1},
+                                },
+                                "required": ["document_id", "page", "quote"],
+                            },
+                        },
+                    },
+                    "required": ["confidence", "evidence_references", "review_required"],
+                },
+            },
         },
         "required": ["status", "confidence", "review_required", "warnings", "fields"],
     }
@@ -242,6 +330,14 @@ def _prompt(bundle: list[dict]) -> str:
         for doc in bundle)
     named = ", ".join(NAMED_FIELDS)
     return f"""Extract the structured core claim facts from these validated, redacted claim documents.
+이 작업은 한 번의 호출로 완결되어야 합니다. 아래 체크리스트의 모든 슬롯을 빠짐없이 훑고, 각
+슬롯마다 둘 중 하나를 반드시 수행하십시오: (1) 값을 추출해 해당 필드로 기록한다, 또는 (2) 문서에
+없거나 마스킹되어 추출할 수 없다면 그 사유를 `warnings` 에 슬롯 이름과 함께 한 줄로 적는다
+("accident_date: 마스킹됨" 형식). 슬롯을 조용히 건너뛰는 것은 실패입니다.
+
+{EXTRACTION_CHECKLIST}
+체크리스트에 없는 사실도 발견하면 같은 형태로 서술적 snake_case 이름을 붙여 추가하십시오.
+
 Return only the supplied JSON Schema. Every entry under `fields` uses exactly one of three shapes:
 single value {{value, normalized_value?}}, date {{value: YYYY-MM-DD|null}}, or period
 {{start_date, end_date|null, days|null}} -- each with confidence, evidence_references, and
@@ -251,6 +347,16 @@ three shapes. EVERY member of `fields` must be an OBJECT in one of those three s
 bare string or number, and never top-level keys like status/confidence/review_required repeated
 inside `fields` (those belong at the top level only). `warnings` is for actual warnings only,
 never facts that lack a slot.
+
+필수 키 규칙: `fields` 의 모든 항목은 confidence, evidence_references, review_required 세 키를
+빠짐없이 포함합니다 (확실한 값도 review_required 를 false 로 명시). normalized_value 는 반드시
+문자열입니다 -- 금액 500,000,000 원은 "500000000" 으로 적고 숫자를 그대로 넣지 마십시오.
+
+표 인용 규칙: 본문에 ┌─┬┐│└┘ 괘선으로 그려진 표(진료비 세부산정내역 등)가 있으면, 여러 칸의
+값을 가로로 이어붙여 "2023-12-05 | G6404 | 수관절 4매 | 10,675" 같은 문자열을 만들지 마십시오 --
+그런 문자열은 본문에 연속해서 존재하지 않아 인용 검증에서 거부됩니다. 표에서 인용할 때는 한 줄
+안에 실제로 연속해 나타나는 짧은 구간(예: 항목명 하나, 금액 하나)만 인용하고 나머지 정보는
+value 에 담으십시오. 짧고 정확한 인용이 길고 부정확한 인용보다 낫습니다.
 
 Evidence discipline: every field cites at least one evidence reference with document_id, page, and
 an EXACT quote from the supplied text. A fact that is redacted or absent records value null with
@@ -278,9 +384,117 @@ def grouped_candidate_id(docs: list[dict]) -> str:
     return "grouped_" + hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 
+_REQUIRED_MEMBER_KEYS = ("confidence", "evidence_references", "review_required")
+_MEMBER_STRING_KEYS = ("value", "normalized_value")
+_MEMBER_DATE_KEYS = ("start_date", "end_date")
+
+
+def normalize_cp1_shape(value: Mapping[str, Any]) -> tuple[dict, list[str]]:
+    """Repair the SHAPE defects a model reliably makes, before the gate runs.
+
+    Every repair here is deterministic and content-preserving: inject the
+    default for an omitted required flag, coerce a scalar to the type the
+    public schema declares, unwrap a member the model double-wrapped inside
+    `value`, and drop a member that carries no payload or no evidence at all.
+    Measured 2026-08-16: this turns four separate schema-failing sonnet-5
+    outputs into schema-PASS with zero slot-recall loss, no extra model call.
+
+    What it deliberately does NOT touch is `quote`. A wrong citation is not a
+    format defect, and "repairing" one would automate fabrication -- the thing
+    P1 exists to catch. Quotes pass through unchanged and still fail
+    verification when they are wrong.
+
+    Returns the repaired copy and a log, so a run can report what it changed
+    rather than silently laundering the model's output.
+    """
+    log: list[str] = []
+    out = dict(value)
+    fields = out.get("fields")
+    if not isinstance(fields, dict):
+        return out, log
+
+    repaired: dict[str, Any] = {}
+    for name, member in fields.items():
+        if not isinstance(member, dict):
+            # A bare scalar carries no shape to repair; kept so the schema
+            # names it, for the same reason as the two cases below.
+            log.append(f"keep {name} (non-object): the gate must refuse it")
+            repaired[name] = member
+            continue
+        member = dict(member)
+
+        inner = member.get("value")
+        if isinstance(inner, dict) and ("value" in inner or "start_date" in inner):
+            for key, sub in inner.items():
+                if key not in member or key == "value":
+                    member[key] = sub
+            log.append(f"unwrap {name}: value contained a nested member object")
+
+        # Same rule as the uncited case below: a member with no payload key
+        # carries no fact this layer can restore, but discarding it hides the
+        # failure. It stays, and the schema refuses it.
+        is_period = any(key in member for key in _MEMBER_DATE_KEYS)
+        if not is_period and "value" not in member:
+            log.append(f"keep {name} without payload: the gate must refuse it")
+            repaired[name] = member
+            continue
+
+        for key in (_MEMBER_DATE_KEYS if is_period else _MEMBER_STRING_KEYS):
+            if key in member and isinstance(member[key], (int, float, bool)):
+                member[key] = str(member[key])
+                log.append(f"coerce {name}.{key} to string")
+        if is_period and isinstance(member.get("days"), str):
+            try:
+                member["days"] = int(member["days"])
+                log.append(f"coerce {name}.days to int")
+            except ValueError:
+                pass
+
+        if "review_required" not in member:
+            member["review_required"] = False
+            log.append(f"default {name}.review_required=false")
+        if "confidence" not in member:
+            member["confidence"] = 0.5
+            log.append(f"default {name}.confidence=0.5")
+
+        # An uncited fact is NOT repaired and NOT dropped. Dropping it would
+        # convert a loud refusal into silent data loss -- the model extracted
+        # something and the driver would discard it with no record -- while
+        # synthesizing a citation would be fabrication. Leaving it in place
+        # lets the schema refuse it, which is what earns the P4 correction and
+        # a chance to cite the fact properly.
+        refs = member.get("evidence_references")
+        if not isinstance(refs, list) or not refs:
+            log.append(f"keep {name} uncited: the gate must refuse it, not this layer")
+            repaired[name] = member
+            continue
+        # Per-member `reviewer_role` is left alone for the same reason as the
+        # top-level one: 의사 vs 손해사정사 is the substantive half of the
+        # review flag, and a default would silently mis-route a medical field.
+        repaired[name] = member
+
+    out["fields"] = repaired
+    # Top-level `reviewer_role` is deliberately NOT defaulted. WHICH expert a
+    # case needs is a judgment -- 의사 for a medical-judgment field, not the
+    # generic 손해사정사 -- so supplying one would answer a substantive
+    # question with a placeholder and route a medical review to the wrong
+    # role. The gate refuses it and the correction round asks the model, which
+    # is the only party that read the material.
+    return out, log
+
+
 def _validate_cp1_output(value: Mapping[str, Any], bundle: list[dict],
                          schema: Mapping[str, Any]) -> dict:
     allowed = {doc["document_id"] for doc in bundle}
+    # Shape repair first, so the one P4 correction is spent on a real defect
+    # (a wrong citation) instead of on a missing boolean the driver can supply
+    # itself. The repaired body is what the rest of this function validates and
+    # what the caller persists -- see `normalize_cp1_shape` for the strict
+    # limits on what it will touch.
+    value, repairs = normalize_cp1_shape(value)
+    if repairs:
+        print(f"cp1 shape repairs ({len(repairs)}): {'; '.join(repairs[:8])}"
+              + (" ..." if len(repairs) > 8 else ""), file=sys.stderr)
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(value)
     page_text_by_key = {
         (doc["document_id"], page["page"]): page["text"]
@@ -453,7 +667,40 @@ def _transport_schema_cp3() -> dict:
 
 
 def _transport_schema_cp4() -> dict:
-    return _transport_shell({"coverage_requirements": {"type": "array", "items": {"type": "object"}}},
+    """CP4's item shape is pinned, unlike cp2/cp3 whose keys were already keyed.
+
+    Measured 2026-08-16: with `items: {"type": "object"}` the model emitted six
+    FLAT requirement items with no coverage key at all, and the failure was
+    read (wrongly) as a semantic limit -- attributing a requirement to a
+    coverage looked like something only a human could settle. Pinning the group
+    shape, everything else held constant, produced correct per-coverage
+    grouping twice with the `standardized_coverage_name` join onto
+    coverage_section valid both times. The model could always do it; the schema
+    never asked.
+    """
+    group = {
+        "type": "object",
+        "properties": {
+            "coverage_name": {"type": "string"},
+            "standardized_coverage_name": {"type": "string"},
+            "requirements": {
+                "type": "array", "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "requirement_id": {"type": "string"},
+                        "requirement_text": {"type": "string"},
+                        "status": {"enum": ["met", "not_met", "uncertain"]},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        "review_required": {"type": "boolean"},
+                    },
+                    "required": ["requirement_id", "requirement_text", "status"],
+                },
+            },
+        },
+        "required": ["standardized_coverage_name", "requirements"],
+    }
+    return _transport_shell({"coverage_requirements": {"type": "array", "items": group}},
                             ["coverage_requirements"])
 
 

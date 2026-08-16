@@ -95,18 +95,41 @@ def test_cp1_transport_schema_natively_rejects_scalar_field_members():
     """The 2026-08-16 arm E failure shape: a scalar `confidence` inside
     `fields` must be rejected by the TRANSPORT schema (at generation time),
     not merely by the local gate afterwards -- otherwise the P4 correction is
-    burned on a shape the native constraint could have prevented."""
+    burned on a shape the native constraint could have prevented.
+
+    The member fixture carries the three keys `field_common` requires because
+    the transport now pins them natively too (the 2026-08-16 sonnet arms
+    omitted `review_required` on 38 of 57 fields under the old loose shape).
+    """
     from jsonschema import Draft202012Validator, ValidationError
 
     validator = Draft202012Validator(driver._transport_schema())
+    member = {"value": "x", "confidence": 0.9, "review_required": False,
+              "evidence_references": [
+                  {"document_id": "DOC_011", "page": 1, "quote": QUOTE}]}
     good = {"status": "success", "confidence": 0.9, "review_required": False,
-            "warnings": [], "fields": {"diagnosis_name": {"value": "x"}}}
+            "warnings": [], "fields": {"diagnosis_name": member}}
     validator.validate(good)
 
     bad = json.loads(json.dumps(good))
     bad["fields"]["confidence"] = 0.72
     with pytest.raises(ValidationError):
         validator.validate(bad)
+
+    # The omissions the loose transport used to let through, now refused at
+    # generation time rather than by the local gate.
+    for missing in ("confidence", "review_required", "evidence_references"):
+        incomplete = json.loads(json.dumps(good))
+        del incomplete["fields"]["diagnosis_name"][missing]
+        with pytest.raises(ValidationError):
+            validator.validate(incomplete)
+
+    # `normalized_value` as a number was the v3 failure; the schema declares
+    # a string, so the transport must say so too.
+    numeric = json.loads(json.dumps(good))
+    numeric["fields"]["diagnosis_name"]["normalized_value"] = 500000000
+    with pytest.raises(ValidationError):
+        validator.validate(numeric)
 
 
 def test_cp3_transport_schema_natively_rejects_misnamed_profile_keys():
@@ -458,3 +481,109 @@ def test_cp3_transport_pins_classification_enums_natively():
     freeform_axis["loss_type"] = "치료비"
     with pytest.raises(ValidationError):
         validator.validate(freeform_axis)
+
+
+def test_normalize_repairs_shape_without_touching_content():
+    """The 2026-08-16 shape repairs: defaults, type coercion and unwrapping,
+    each of which turned a schema-failing sonnet-5 response into a passing one
+    with no model call and no recall loss."""
+    body = {
+        "status": "success", "confidence": 0.9, "review_required": False,
+        "warnings": [],
+        "fields": {
+            # review_required omitted on 38 of 57 fields in the v1 arm
+            "diagnosis_name": {"value": "골절", "confidence": 0.9,
+                               "evidence_references": [
+                                   {"document_id": "DOC_011", "page": 1, "quote": QUOTE}]},
+            # normalized_value as a number: the v3 arm's refusal
+            "coverage_limit": {"value": "5억", "normalized_value": 500000000,
+                               "confidence": 0.9, "review_required": False,
+                               "evidence_references": [
+                                   {"document_id": "DOC_011", "page": 1, "quote": QUOTE}]},
+            # double-wrapped member: the v1 arm's other shape
+            "kcd_code": {"value": {"value": "S6280"}, "confidence": 0.9,
+                         "review_required": False,
+                         "evidence_references": [
+                             {"document_id": "DOC_011", "page": 1, "quote": QUOTE}]},
+        },
+    }
+    fixed, log = driver.normalize_cp1_shape(body)
+    assert fixed["fields"]["diagnosis_name"]["review_required"] is False
+    assert fixed["fields"]["coverage_limit"]["normalized_value"] == "500000000"
+    assert fixed["fields"]["kcd_code"]["value"] == "S6280"
+    # Content is preserved, not invented.
+    assert fixed["fields"]["diagnosis_name"]["value"] == "골절"
+    assert len(fixed["fields"]) == 3
+    assert log
+
+
+def test_normalize_never_repairs_a_citation_or_hides_an_uncited_fact():
+    """The line the repair layer must not cross.
+
+    A wrong quote is not a format defect -- repairing one would automate
+    fabrication -- and an uncited fact must reach the gate as a refusal rather
+    than being quietly dropped, which would turn a loud failure into silent
+    data loss. Both are load-bearing: dropping the member instead makes this
+    test fail on the length assertion, and rewriting the quote makes it fail
+    on the equality assertion.
+    """
+    wrong_quote = "이 문장은 원문에 존재하지 않는다"
+    body = {
+        "status": "success", "confidence": 0.9, "review_required": False,
+        "warnings": [],
+        "fields": {
+            "diagnosis_name": {"value": "골절", "confidence": 0.9,
+                               "review_required": False,
+                               "evidence_references": [
+                                   {"document_id": "DOC_011", "page": 1,
+                                    "quote": wrong_quote}]},
+            "uncited_fact": {"value": "근거 없음", "confidence": 0.9,
+                             "review_required": False},
+        },
+    }
+    fixed, _ = driver.normalize_cp1_shape(body)
+    assert fixed["fields"]["diagnosis_name"]["evidence_references"][0]["quote"] == wrong_quote
+    assert "uncited_fact" in fixed["fields"]
+
+    bundle = [{"document_id": "DOC_011", "pages": [{"page": 1, "text": PAGE_TEXT}]}]
+    with pytest.raises(Exception):
+        driver._validate_cp1_output(body, bundle, driver._body_schema())
+
+
+def test_normalize_does_not_default_reviewer_role():
+    """WHICH expert a case needs is a judgment, not a shape. Defaulting it
+    would answer a substantive question with a placeholder and mis-route a
+    medical field away from 의사."""
+    body = {"status": "success", "confidence": 0.9, "review_required": True,
+            "warnings": [], "fields": {}}
+    fixed, _ = driver.normalize_cp1_shape(body)
+    assert "reviewer_role" not in fixed
+
+
+def test_cp4_transport_pins_the_coverage_group_nesting():
+    """Measured 2026-08-16: with `items: {"type": "object"}` the model emitted
+    flat requirement items carrying no coverage key, and pinning the group
+    shape produced correct per-coverage grouping with a valid join twice."""
+    from jsonschema import Draft202012Validator, ValidationError
+
+    validator = Draft202012Validator(driver._transport_schema_cp4())
+    shell = {"status": "success", "confidence": 0.9, "review_required": False,
+             "warnings": []}
+    good = {**shell, "coverage_requirements": [
+        {"standardized_coverage_name": "facility_owner_liability",
+         "requirements": [{"requirement_id": "REQ-1", "requirement_text": "조건",
+                           "status": "met"}]}]}
+    validator.validate(good)
+
+    # The exact failure shape: a flat item with no coverage grouping.
+    flat = {**shell, "coverage_requirements": [
+        {"requirement_id": "REQ-1", "requirement_text": "조건", "status": "met"}]}
+    with pytest.raises(ValidationError):
+        validator.validate(flat)
+
+    # An empty group is refused too -- it was the other half of the observed
+    # output (six flat items alongside `requirements: []`).
+    empty = {**shell, "coverage_requirements": [
+        {"standardized_coverage_name": "x", "requirements": []}]}
+    with pytest.raises(ValidationError):
+        validator.validate(empty)
