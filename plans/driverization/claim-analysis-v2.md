@@ -292,6 +292,26 @@ candidates: (a) with a key; an opus-5 model switch (extraction call or whole
 dispatch); (b)+(c) jointly on opus-5. Each needs a stage-level accuracy A/B
 at n>1 and user authorization -- nothing rewired here.
 
+**Arms F and G ran the same day (user-directed) and closed both candidates.**
+Arm F, opus-5 agent dispatch under arm C's verbatim briefing (CASE_035):
+620.7s / 63 uses / 184,393 tokens -- rejected; per-turn cost 9.85s is
+identical to the default's, and opus took MORE turns. The big-call advantage
+does not transfer to a turn-dominated loop. Arm G, the driver restored from
+198baf6 and rebuilt as the 2-call spine above, run on opus-5 (CASE_036):
+971.9s -- M1 (CP1+selection) 134.2s, vindicating the model half; M2
+(judge+type+requirements merged) 822.5s, killing the merge half. Whether M2
+was one call or a P4 correction pair is not determinable from retained
+records (provider_wait wraps both attempts -- the same instrumentation gap
+arm E recorded); the charitable clean reading (~560s) still fails the
+criterion. Third cost-model correction: a structured call's price follows
+its OUTPUT volume -- input payload is nearly free -- so merging checkpoints
+serializes their combined output into one stream and gives back the saved
+fixed overhead. **Production route unchanged: agent dispatch under arm C's
+turn-budget spec (528.2s).** Unmeasured remainder: (a) with a key (which
+also unlocks streaming and parallel fan-out), and a fan-out variant
+M1 -> judge -> CP3 in parallel with CP4 (bounded by max instead of sum,
+projected ~450-550s, borderline, not built).
+
 ## 5. Effort and sequence
 
 1. `tools/run_claim_analysis.py` skeleton: bundle assembly + CP1 grouped call
