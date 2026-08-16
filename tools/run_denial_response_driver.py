@@ -299,7 +299,7 @@ def _validate_bundle_output(value: Mapping[str, Any], bundle: list[dict],
                 raise ValueError(f"{doc_id}: invalid start_char/end_char range")
             if end > len(page_text) or page_text[start:end] != quote:
                 raise ValueError(f"{doc_id}: quote does not exactly match the claimed page range")
-        elif _cross_contract._normalize_ws(quote) not in _cross_contract._normalize_ws(page_text):
+        elif not _cross_contract.quote_matches_page(quote, page_text):
             # This reproduces the DAO's exact whitespace-normalized substring
             # gate before candidate persistence. A bad citation therefore gets
             # P4's one model correction rather than becoming an orphaned

@@ -1520,7 +1520,7 @@ def _verify_driver_reference(case_id: str, reference: dict,
             raise ValueError(f"{doc_id}: invalid start_char/end_char range")
         if end > len(page_text) or page_text[start:end] != quote:
             raise ValueError(f"{doc_id}: quote does not exactly match the claimed page range")
-    elif _cross_contract._normalize_ws(quote) not in _cross_contract._normalize_ws(page_text):
+    elif not _cross_contract.quote_matches_page(quote, page_text):
         raise ValueError(f"{doc_id}: quote is not present on page {page}")
     verified = {
         "document_id": doc_id,

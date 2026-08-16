@@ -518,7 +518,7 @@ def _validate_cp1_output(value: Mapping[str, Any], bundle: list[dict],
                 raise ValueError(f"{doc_id}: invalid start_char/end_char range")
             if end > len(page_text) or page_text[start:end] != quote:
                 raise ValueError(f"{doc_id}: quote does not exactly match the claimed page range")
-        elif _cross_contract._normalize_ws(quote) not in _cross_contract._normalize_ws(page_text):
+        elif not _cross_contract.quote_matches_page(quote, page_text):
             # The DAO's exact whitespace-normalized substring gate, applied
             # before candidate persistence so a bad citation gets P4's one
             # model correction instead of failing only at final publication.
@@ -705,7 +705,17 @@ def _transport_schema_cp4() -> dict:
 
 
 def _norm(text: str) -> str:
-    return _cross_contract._normalize_ws(text)
+    """The citation-comparison normalizer, shared by M2's grounding fast path
+    and the `known` quote set it checks against.
+
+    Uses the healing form so CP2-4 accept the same citations CP1 does: the
+    Korean mid-word line wraps that blocked the 2026-08-16 CASE_038 runs are a
+    rendering artifact, and a policy clause quoted across one is as legitimate
+    as a claim fact quoted across one. Both sides of every comparison go
+    through this single function, so the fast path and the stored set cannot
+    disagree about what a quote is.
+    """
+    return _cross_contract.normalize_quote_for_pages(text)
 
 
 def _known_quote_set(*contracts: Mapping[str, Any]) -> set[tuple]:

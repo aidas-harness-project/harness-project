@@ -1555,3 +1555,63 @@ def test_a_report_predating_the_acceptance_field_is_not_retro_failed(
     assert check("screening_report.json",
                  _derived(split_outcome_case, legacy),
                  split_outcome_case) == []
+
+
+# --- Korean mid-word line wraps in citations (2026-08-16) -------------------
+
+def test_quote_matches_page_heals_korean_midword_line_wraps():
+    """A line wrap between two Hangul syllables is a rendering artifact.
+
+    `_normalize_ws` collapses whitespace runs rather than removing them, so a
+    source reading `우\n측 손목` normalizes to `우 측 손목` and can never match
+    the `우측 손목` a correct quote contains. Measured on CASE_038: 311 of 367
+    processed pages carry at least one such wrap (1,374 total), and DOC_006's
+    accident-circumstance sentence cannot be quoted without crossing one --
+    two real driver runs died there after spending the P4 correction, on
+    quotes genuinely present in the source.
+    """
+    page = "보행하던 중 미끄러져 넘어져 우\n측 손목 요골 원위부 골절상을 당한 사고"
+    assert _cross_contract.quote_matches_page("우측 손목 요골 원위부 골절상", page)
+    assert _cross_contract.quote_matches_page(
+        "넘어져 우측 손목 요골 원위부 골절상을 당한 사고", page)
+
+
+def test_quote_healing_does_not_weaken_the_fabrication_check():
+    """The healing is narrow ON PURPOSE, and each assertion here fails if it
+    is widened to plain whitespace removal -- the alternative considered and
+    rejected on 2026-08-16."""
+    page = "보험자는 책임이 없다.\n피보험자는 책임이 있다."
+
+    # Content that is simply not there.
+    assert not _cross_contract.quote_matches_page("피해자는 음주 상태였다", page)
+
+    # Spacing altered inside a word: plain whitespace-stripping would accept
+    # this, healing must not.
+    assert not _cross_contract.quote_matches_page("보험 자는책임이없다", page)
+
+    # A wrap next to punctuation is not a mid-word wrap, so the two sentences
+    # do not fuse into a quotable span.
+    assert not _cross_contract.quote_matches_page("없다.피보험자는", page)
+
+
+def test_quote_healing_still_refuses_ascii_table_row_reconstruction():
+    """The dominant REAL citation defect measured this session: a row
+    assembled across box-drawing columns, which exists nowhere contiguously.
+    Only 2 of CASE_038's 367 pages contain such tables, so healing the wraps
+    must leave this refused rather than trading one artifact for a hole."""
+    page = ("│ 2023-12-05 │ N1611 │ 사지골절정복술 │\n"
+            "│ 2023-12-05 │ HE117006 │ 자기공명영상 │")
+    assert not _cross_contract.quote_matches_page(
+        "2023-12-05 | N1611 | 사지골절정복술", page)
+    # The part that IS contiguous on one line still verifies.
+    assert _cross_contract.quote_matches_page("사지골절정복술", page)
+
+
+def test_heal_wraps_leaves_non_hangul_boundaries_alone():
+    """Only Hangul-to-Hangul. A wrap between digits, Latin letters, or across
+    punctuation is a real line boundary in this corpus and stays."""
+    assert _cross_contract._heal_wraps("가\n나") == "가나"
+    assert _cross_contract._heal_wraps("12\n34") == "12\n34"
+    assert _cross_contract._heal_wraps("ab\ncd") == "ab\ncd"
+    assert _cross_contract._heal_wraps("가 \n 나") == "가 \n 나"
+    assert _cross_contract._heal_wraps("가.\n나") == "가.\n나"
