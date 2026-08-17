@@ -226,6 +226,51 @@
         "failed_attempt_count": { "type": "integer", "minimum": 0 },
         "open_attempt_count": { "type": "integer", "minimum": 0 },
         "abandoned_attempt_count": { "type": "integer", "minimum": 0 },
+        "dispatch_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Subagent dispatches recorded for this stage via `dao.py record-dispatch`. Zero means none were recorded, which is not a claim that none happened."
+        },
+        "dispatch_wall_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Sum of recorded dispatch intervals: asking for the work through holding its result. Deliberately excluded from observed_tool_overlap_s, because a dispatch CONTAINS the subagent's own work and folding it in would report model thinking time as observed tool time."
+        },
+        "dispatch_round_trip_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Sum of (dispatch wall - agent-reported duration): the orchestration cost of asking and receiving, excluding the agent's work. This is the half of a stage's residual that is structural and engineerable; the rest is operator-side work that happened while the marker was open. null when no dispatch carried an agent-reported duration -- never 0, which would claim the round trip was measured at nothing."
+        },
+        "dispatch_input_tokens": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Harness-reported input tokens summed over this stage's recorded dispatches. Reported by the orchestrator via `record-dispatch`, NOT measured by the DAO, which never sees a model's context. null means not recorded, never 0."
+        },
+        "dispatch_output_tokens": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Harness-reported output tokens summed over this stage's recorded dispatches. null means not recorded, never 0."
+        },
+        "dispatch_total_tokens": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Harness-reported total tokens summed over this stage's recorded dispatches. This is the figure that explains an agent stage's wall time: measured on CASE_022, tool spans accounted for 0.15% of claim_analysis (1.20s of 773.0s) while token volume tracked wall time closely. May exceed input+output, which do not cover cache-read or cache-creation tokens. null means not recorded, never 0 -- a stage that did model work and recorded no count must not read as a stage that did none."
+        },
+        "dispatch_tool_uses": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Harness-reported tool-call count summed over this stage's recorded dispatches. Distinct from the trace's own span count: this counts what the SUBAGENT called in a process the DAO never forked, so the two are expected to differ and neither corrects the other. null means not recorded."
+        },
+        "dispatch_human_wait_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Seconds this stage's dispatches sat blocked on a human -- a permission prompt, a gate answer -- as reported by the orchestrator via `record-dispatch --human-wait-s`. Distinct from the stage's own human_wait_s, which counts gates opened through the DAO; a permission prompt inside a dispatch emits no span of its own and is invisible without this. Measured at 506.2s of an 862.2s dispatch on CASE_027's denial_response. null means not recorded, never 0."
+        },
+        "dispatch_tokens_per_s": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "dispatch_total_tokens divided by (dispatch_wall_s - dispatch_human_wait_s). The divisor is WORK time: a permission prompt is not model work, and dividing by raw wall reported 170 tok/s on CASE_027's denial_response for a stage that ran at ~411. Per second of dispatch work, not of the stage's marker window, which can contain operator-side work no dispatch covers. A descriptive rate for comparing stages, not a throughput guarantee. null when tokens are unrecorded or work time is zero."
+        },
         "total_attempt_active_wall_s": { "type": "number", "minimum": 0 },
         "passed_attempt_active_wall_s": { "type": "number", "minimum": 0 },
         "human_wait_s": { "type": "number", "minimum": 0 },

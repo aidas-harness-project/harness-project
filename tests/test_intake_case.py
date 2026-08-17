@@ -320,6 +320,28 @@ def test_init_ledger_uses_scan_provider_and_leaves_files_pending(isolated_intake
     assert all("content_warning" in entry for entry in raw_entries)
 
 
+def test_init_ledger_no_content_scan_skips_provider_but_keeps_gate(isolated_intake, monkeypatch):
+    """--no-content-scan (user-directed opt-out, 2026-08-14) must skip the
+    vision pre-check entirely -- no provider is even built -- while the D2
+    review gate is untouched: every raw entry is still written 'pending' with
+    no content_warning. Reintroducing the defect (running the scan despite the
+    flag) fails on the boom provider; weakening the gate fails on 'pending'."""
+    src = _make_source_case(isolated_intake)
+
+    def boom_build_scan_provider(scan_provider_name=None, scan_model=None, env=None):
+        raise AssertionError("--no-content-scan must not build a scan provider")
+
+    monkeypatch.setattr(intake_case, "build_scan_provider", boom_build_scan_provider)
+
+    _run_main(monkeypatch, [str(src), "CASE_009", "--init-ledger", "--no-content-scan"])
+
+    ledger = json.loads((isolated_intake / "outputs" / "CASE_009" / "_source_ledger.json").read_text(encoding="utf-8"))
+    raw_entries = [entry for entry in ledger["files"] if entry["classification"] == "raw"]
+    assert raw_entries, "test setup should include raw-proposed PDFs"
+    assert all(entry["review_status"] == "pending" for entry in raw_entries)
+    assert all("content_warning" not in entry for entry in raw_entries)
+
+
 def test_execute_blocks_when_classification_drifts_from_ledger(isolated_intake, monkeypatch):
     """Fleet D1 fix: a file reviewed+approved as ground_truth must never be
     copied to data/raw because --execute was run with different args than

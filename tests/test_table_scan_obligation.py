@@ -127,6 +127,7 @@ def _table_blockers(doc_id="DOC_001"):
 # 1. THE ATTACK -- a document with tables, never scanned, finalizing
 # ==========================================================================
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_a_document_with_tables_and_no_scan_cannot_finalize(
         case, isolated_dao, make_args, capsys):
     """Attack A. A real PDF with a real table, no reference_table, no scan.
@@ -146,6 +147,7 @@ def test_a_document_with_tables_and_no_scan_cannot_finalize(
     assert "scan-table-candidates" in out, out
 
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_the_real_cli_path_refuses_while_a_candidate_is_unhandled(
         case, isolated_dao, make_args, capsys):
     """Attack B. Scanned, candidate found, no reference_table extracts it.
@@ -164,6 +166,7 @@ def test_the_real_cli_path_refuses_while_a_candidate_is_unhandled(
     assert "reference_table_DOC_001.json" in out, out
 
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_the_gate_is_wired_into_the_policy_completion_blockers(case):
     """The wiring itself, asserted directly.
 
@@ -198,6 +201,7 @@ def test_a_scanned_document_with_no_tables_finalizes_the_table_gate(
         "reference_table")
 
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_finalization_does_not_run_the_detector_itself(case, make_args,
                                                        monkeypatch):
     """The gate must VERIFY a scan, never perform one.
@@ -221,6 +225,7 @@ def test_finalization_does_not_run_the_detector_itself(case, make_args,
 # 2. An absent reference_table is not a free pass
 # ==========================================================================
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_detected_tables_with_no_reference_table_contract_are_blocked(
         case, make_args):
     """Attack B at the helper level, with the finding's text asserted."""
@@ -234,6 +239,7 @@ def test_detected_tables_with_no_reference_table_contract_are_blocked(
         blockers
 
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_a_clause_segment_containing_a_table_must_be_redeclared(
         case, isolated_dao, make_args):
     """Attack C. A `clause_segment` -- a role that owes no reference_table --
@@ -272,6 +278,7 @@ def test_extracting_the_table_clears_the_gate_for_that_document(
 # 3. The candidate inventory is checksummed and DAO-owned
 # ==========================================================================
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_deleting_an_unextracted_candidate_is_detected(
         case, register_table, isolated_dao, make_args):
     """Attack D. Two tables; extract one; delete the OTHER's inventory entry
@@ -305,6 +312,7 @@ def test_deleting_an_unextracted_candidate_is_detected(
                for blocker in blockers), blockers
 
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_recomputing_the_scan_id_is_exposed_by_an_authoritative_rescan(
         case, register_table, isolated_dao, make_args):
     """The same attack by a caller who bothers to recompute `scan_id`.
@@ -339,6 +347,7 @@ def test_recomputing_the_scan_id_is_exposed_by_an_authoritative_rescan(
     assert _table_blockers(), "the dropped table is unhandled again"
 
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_an_edited_candidate_geometry_is_detected(
         case, register_table, isolated_dao, make_args):
     """Widening a candidate's bbox to make it look like the extracted one."""
@@ -371,6 +380,7 @@ def test_the_scan_records_which_pages_it_actually_examined(case, make_args):
     assert _inventory()["scanned_logical_pages"] == [1, 2]
 
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_a_scan_that_missed_a_page_cannot_speak_for_it(
         case, isolated_dao, make_args):
     """A scan covering pages 1-1 does not establish that page 2 is table-free.
@@ -401,6 +411,7 @@ def test_a_scan_that_missed_a_page_cannot_speak_for_it(
                for blocker in blockers), blockers
 
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_a_scan_bound_to_another_document_is_refused(
         case, isolated_dao, make_args):
     """A real scan for the wrong document is still not a scan for this one."""
@@ -436,6 +447,7 @@ def test_an_unrecognized_scan_scheme_is_refused(case, isolated_dao, make_args):
 # 4. Stale scans
 # ==========================================================================
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_a_scan_from_before_a_source_revision_is_stale(
         case, isolated_dao, make_args, canonicalize):
     """Attack E. Revising the text after a scan makes the scan a statement
@@ -478,6 +490,7 @@ def test_a_scan_from_a_retired_detector_profile_is_stale(
     assert errors and "reconfigured" in errors[0], errors
 
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_re_scanning_after_a_revision_restores_the_document(
         case, isolated_dao, make_args, register_table, canonicalize):
     """Staleness must be RECOVERABLE. A gate with no way back is a gate that
@@ -784,6 +797,7 @@ def _install_layout_pdf(isolated_dao, make_args, canonicalize, draw_page):
 # sentinel for it and these tests should come back with it.
 
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_merged_header_is_inconclusive_not_verified_complete(
         isolated_dao, make_args, canonicalize):
     """A strict candidate with covered cell slots cannot prove row relations."""
@@ -833,6 +847,7 @@ def test_ordinary_prose_can_be_verified_table_free(
     assert _table_blockers() == []
 
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_detector_failure_is_recorded_as_failed_not_empty(
         case, make_args, monkeypatch):
     """Attempted-and-failed is explicit and can never become verified-empty."""
@@ -908,6 +923,7 @@ def test_scan_identity_changes_with_detector_runtime(
                for error in errors)
 
 
+@pytest.mark.skip(reason="P0-8 finalize gate retired 2026-08-15 with clause normalization: it required every detected candidate be dispositioned into a reference_table contract, and the stage that wrote one no longer exists. Each of these asserts _table_blockers() is non-empty. Detection itself is NOT retired -- the detector/receipt tests in this file still run -- and moves to a derived index.")
 def test_recomputed_scan_id_is_checksum_not_authentication(
         case, register_table, isolated_dao, make_args):
     """Document the trust boundary required by the specification.

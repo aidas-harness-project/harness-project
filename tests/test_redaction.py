@@ -240,6 +240,35 @@ def test_scan_no_fp_on_fleet_clean_cases(clean):
     assert scan_residual_pii(clean) == [], f"false positive on {clean!r}"
 
 
+# --- billing table: amounts meeting the next row's year are not a phone -----
+# Measured on CASE_046/DOC_005 p14 (2026-08-17). A 진료비 세부산정내역 table
+# printed as "<amount> <amount>\n<date>" put two 3-digit amounts directly above
+# a year, which the plain \d{2,3} SEP \d{3,4} SEP \d{4} rule could not tell from
+# a phone number. It blocked the document three times. The SAME page read by a
+# different model drew box characters instead and produced no hit at all, so the
+# rule's verdict depended on transcription layout rather than on content.
+
+@pytest.mark.parametrize("clean", [
+    "810              810\n2023",   # the exact CASE_046 p14 text
+    "210              210\n2023",
+    "315              315\n2023",
+    "4,870  4,870\n2024",           # comma-grouped amounts above a year
+    "540    540\n1998",             # 19xx year is excluded too
+])
+def test_billing_amounts_above_a_year_are_not_read_as_a_phone(clean):
+    assert scan_residual_pii(clean) == [], f"false positive on {clean!r}"
+
+
+@pytest.mark.parametrize("leak", [
+    "010-1234-\n5678",   # a REAL wrapped phone must still be caught
+    "010-1234-\n5679",   # wrapped, last group simply is not a year
+    "010-1234-2023",     # inline phone whose last group happens to be a year
+    "02 123 4567",       # ordinary in-line phone
+])
+def test_year_exclusion_does_not_blind_the_scan_to_real_phones(leak):
+    assert scan_residual_pii(f"내용 {leak} 끝"), f"missed {leak}"
+
+
 # --- NoPiiClassRedactor: class-scoped exemption, still leak-checked ----------
 
 def test_no_pii_class_redactor_passes_clean_policy_text_through_verbatim():

@@ -106,6 +106,11 @@ Reply with ONLY one JSON object in this exact shape:
 # so a value wrapped across a line ("010-1234-\n5678") or double-spaced still
 # matches -- the earlier single-separator form let those slip (fleet finding).
 _SEP = r"[-.\s]+"
+# Same separators MINUS the line break. Used only where crossing a line changes
+# what the text plausibly is: inside a line, "<digits> <digits>" next to a
+# 4-digit group is a phone; across a line, it is usually a table column meeting
+# the next row (see phone_number_separated below).
+_SEP_NO_NEWLINE = r"[-.\t  ]+"
 # The fixed set of Hangul syllables used in the middle of a Korean vehicle plate
 # (passenger + common commercial/special). Deliberately NOT all of 가-힣.
 _PLATE_SYLLABLES = (
@@ -119,7 +124,19 @@ _PLATE_SYLLABLES = (
 # line-wrapped RRN & phone cannot slip past (fleet finding).
 _RESIDUAL_PII_PATTERNS = {
     "resident_registration_number": re.compile(rf"(?<!\d)\d{{6}}(?:{_SEP})?\d{{7}}(?!\d)"),
-    "phone_number_separated": re.compile(rf"(?<!\d)\(?\d{{2,3}}\)?{_SEP}\d{{3,4}}{_SEP}\d{{4}}(?!\d)"),
+    # The final group is NOT allowed to be a year (19xx/20xx) reached across a
+    # LINE BREAK. A billing table prints "<amount> <amount>\n<date>", and the
+    # amounts plus the next row's year are indistinguishable from a phone under
+    # the plain rule -- measured on CASE_046/DOC_005 p14, where Sonnet's column
+    # order produced "810              810\n2023" three times and blocked the
+    # document, while Opus's box-drawn table of the SAME page produced none.
+    # Narrow on purpose: a real phone wrapped across a line still matches
+    # (010-1234-\n5678), and a phone whose last group happens to be 2023 still
+    # matches when it is written inline (010-1234-2023). Only "year on the next
+    # line" is excluded, because a phone number is never typeset that way.
+    "phone_number_separated": re.compile(
+        rf"(?<!\d)\(?\d{{2,3}}\)?{_SEP}\d{{3,4}}(?:{_SEP_NO_NEWLINE}\d{{4}}"
+        rf"|{_SEP}(?!(?:19|20)\d{{2}}(?!\d))\d{{4}})(?!\d)"),
     # Contiguous phone: any 10-11 digit run beginning 0 (mobile 01x… and landline
     # 02x…), subsumes the old 01x-only pattern and catches "0212345678".
     "phone_number_contiguous": re.compile(r"(?<!\d)0\d{9,10}(?!\d)"),

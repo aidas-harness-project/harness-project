@@ -77,6 +77,31 @@ def policy_documents(manifest: Mapping[str, Any]) -> tuple[list[dict], list[dict
     return text_only, normalized
 
 
+def _build_document_index(case_id: str, held_by: str, run_id: str) -> dict:
+    """Refresh the derived clause/table index, reporting rather than raising.
+
+    Failure here must not fail the stage. The index is advisory -- no contract
+    references it, no gate reads it, and an agent without one falls back to
+    the chunk scan it did before. Letting a table detector crash take down a
+    policy stage that has no stake in the outcome would trade a real
+    completion for an optional convenience.
+
+    The reason it lives in this driver rather than in Stage 2: the index is
+    about POLICY documents, this is the stage that owns them, and Stage 2 is
+    already at 92% busy-union occupancy where the ~10s/document table scan
+    would be pure addition. Here it lands in a stage measured at 6.9s whose
+    only other work is recording a manifest fingerprint.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(DAO), "build-document-index", case_id,
+         "--held-by", held_by, "--run-id", run_id],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+    if proc.returncode:
+        return {"status": "failed",
+                "detail": (proc.stdout or proc.stderr or "").strip()[:200]}
+    return {"status": "built", "detail": (proc.stdout or "").strip()[-120:]}
+
+
 def run(*, case_id: str, held_by: str, run_id: str, prompt_version: str = VERSION) -> dict:
     state = _dao_json(["read-contract", case_id, "_run_state.json", "--run-id", run_id])
     if not any(item.get("stage_name") == STAGE and item.get("status") == "in_progress"
@@ -88,9 +113,28 @@ def run(*, case_id: str, held_by: str, run_id: str, prompt_version: str = VERSIO
     if not text_only and not normalized:
         raise RuntimeError("BLOCKED: no active text-processed insurance policy is available")
     if normalized:
+        # Retired 2026-08-15, so this is now unreachable for any case intaken
+        # after 2026-08-04 (`default_disposition` classifies every policy
+        # document `text_only_no_normalization`). It still fires for the four
+        # legacy cases whose manifests record the old value, and it must stay
+        # a hard block rather than a silent pass: those documents were marked
+        # as owing a clause contract, and quietly finalizing over that would
+        # repeat CASE_112's `manual_override` -- a stage reading `passed` with
+        # the obligation neither met nor withdrawn.
         ids = ", ".join(doc["document_id"] for doc in normalized)
-        raise RuntimeError("BLOCKED: canonical policy normalization is not implemented by this driver "
-                           f"(requires boundary/table/clause workflow): {ids}")
+        raise RuntimeError("BLOCKED: clause normalization is retired (2026-08-15) and no stage "
+                           "produces a clause contract, but these documents are still recorded "
+                           f"as owing one: {ids}. Re-classify them text_only_no_normalization "
+                           "before re-running, rather than finalizing over the discrepancy.")
+    # Build the navigation index before the receipt-reuse branch below, not
+    # after. A resumed run takes that branch and returns early, so an index
+    # built after it would be skipped on exactly the runs most likely to be
+    # missing one -- and because the index is advisory, nothing downstream
+    # would report its absence. Rebuilding is cheap and idempotent: it is
+    # derived from the same processed text and registered PDFs the receipt
+    # already fingerprints.
+    index_summary = _build_document_index(case_id, held_by, run_id)
+
     digests = {"document_manifest": _digest(manifest)}
     receipt = _dao_json(["read-driver-receipt", case_id, "--stage", STAGE,
                          "--unit-id", UNIT, "--run-id", run_id], allow_missing=True)
@@ -98,7 +142,8 @@ def run(*, case_id: str, held_by: str, run_id: str, prompt_version: str = VERSIO
         receipt, input_digests=digests, prompt_version=prompt_version,
         response_schema_version=VERSION, provider_name="deterministic", model_name="none",
     ):
-        return {"status": "reused", "text_only_policy_count": len(text_only)}
+        return {"status": "reused", "text_only_policy_count": len(text_only),
+                "document_index": index_summary}
     with driver_runtime.driver_span(case_id, run_id, "input_snapshot", unit_id=UNIT, items=len(text_only)):
         receipt_data = driver_runtime.make_receipt(
             case_id=case_id, run_id=run_id, stage=STAGE, unit_id=UNIT,
@@ -113,7 +158,8 @@ def run(*, case_id: str, held_by: str, run_id: str, prompt_version: str = VERSIO
                         "--data-file", str(receipt_file), "--held-by", held_by, "--run-id", run_id])
     finally:
         receipt_file.unlink(missing_ok=True)
-    return {"status": "noop", "text_only_policy_count": len(text_only)}
+    return {"status": "noop", "text_only_policy_count": len(text_only),
+            "document_index": index_summary}
 
 
 def main(argv: list[str] | None = None) -> int:

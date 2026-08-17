@@ -15,6 +15,8 @@ them must invalidate work derived from them.
 """
 import json
 
+import pytest
+
 import dao
 import stage_dependencies
 
@@ -96,6 +98,7 @@ def _seed(isolated_dao):
 
 # --- finalize re-runs the full source check, not just the schema ----------
 
+@pytest.mark.skip(reason="clause normalization retired 2026-08-15: this asserts that a NORMALIZED clause contract's evidence is re-checked against current source at finalize. No stage produces a clause contract now, so there is none to go stale. Kept as the record of the attack it closes -- reinstating normalization means reinstating this.")
 def test_finalize_rechecks_normalized_evidence_against_current_source(
         isolated_dao):
     """Rewriting the source after the contract was written must be caught."""
@@ -111,6 +114,7 @@ def test_finalize_rechecks_normalized_evidence_against_current_source(
     assert any("quote not found on page 1" in b for b in after), after
 
 
+@pytest.mark.skip(reason="clause normalization retired 2026-08-15: this asserts that a NORMALIZED clause contract's evidence is re-checked against current source at finalize. No stage produces a clause contract now, so there is none to go stale. Kept as the record of the attack it closes -- reinstating normalization means reinstating this.")
 def test_refreshing_only_the_inventory_does_not_hide_stale_evidence(
         isolated_dao):
     """Touching the inventory/audit cannot launder evidence that no longer

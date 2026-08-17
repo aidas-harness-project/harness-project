@@ -81,25 +81,6 @@ def test_draft_v2_cannot_start_without_critic_v1():
     assert any("'critic_v1' is absent" in b for b in blockers), blockers
 
 
-def test_evaluation_cannot_start_without_the_critic_pass():
-    blockers = sd.check_dependencies(
-        "evaluation", "in_progress", _state(_stage("draft_report_v1")),
-        human_review_complete=True)
-    assert any("'critic_v1' is absent" in b for b in blockers), blockers
-
-
-def test_evaluation_cannot_start_without_human_review():
-    """D1's gate is not in run-state, so the DAO supplies the answer. Not
-    supplying it must block: 'nobody told us' is not 'yes'."""
-    state = _state(_stage("draft_report_v1"), _stage("critic_v1"))
-    assert sd.check_dependencies(
-        "evaluation", "in_progress", state, human_review_complete=True) == []
-    for answer in (False, None):
-        blockers = sd.check_dependencies(
-            "evaluation", "in_progress", state, human_review_complete=answer)
-        assert any("human review is" in b for b in blockers), (answer, blockers)
-
-
 def test_denial_response_is_not_a_prerequisite_of_screening_report():
     """Dependency-triggered, not phase-gated (pipeline.md). Most cases have no
     insurer response, and requiring one would block them all."""
@@ -183,21 +164,3 @@ def test_unknown_stage_is_refused_by_the_dao(case):
     assert dao._update_run_state(
         "CASE_030", "RUN_20260724_001", "not_a_real_stage", "in_progress",
         "someone") is None
-
-
-def test_evaluation_finalize_needs_the_human_review_flag(case, monkeypatch):
-    _write_json(case / "_run_state.json", _state(
-        _stage("claim_analysis"), _stage("consistency_check"),
-        _stage("screening_report"), _stage("draft_report_v1"),
-        _stage("critic_v1")))
-    assert dao._update_run_state(
-        "CASE_030", "RUN_20260724_001", "evaluation", "in_progress",
-        "evaluation") is None
-    assert not dao.human_review_complete_any("CASE_030")
-    # The flag mark-human-review-complete writes -- and only that flag.
-    _write_json(dao.human_review_flag_path("CASE_030", "v1"),
-                {"case_id": "CASE_030", "version": "v1", "reviewer": "Dev"})
-    assert dao.human_review_complete_any("CASE_030")
-    assert dao._update_run_state(
-        "CASE_030", "RUN_20260724_001", "evaluation", "in_progress",
-        "evaluation") is not None

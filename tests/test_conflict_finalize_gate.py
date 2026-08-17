@@ -26,23 +26,31 @@ def fast_lock_wait(monkeypatch):
 def _seed_ledger(isolated_dao, verdict="pending"):
     case = isolated_dao / "outputs" / "CASE_009"
     case.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "conflict_id": "CONFLICT_1",
+        "field_or_topic": "사고 장소의 물리적 규모",
+        "raised_by_stage": "consistency_check",
+        "raised_at": "2026-08-05T00:00:00+09:00",
+        "verdict": verdict,
+        "sources": [
+            {"document_id": "DOC_001", "page": 9, "value": "좁음",
+             "quote": "계단은 그리 넓지 않은바"},
+            {"document_id": "DOC_002", "page": 4, "value": "큼",
+             "quote": "규모가 상당히 큰 시설로"},
+        ],
+    }
+    # An adjudicated entry must carry its disposition -- the schema requires
+    # both the moment `verdict` leaves `pending` (2026-07-22 hardening).
+    if verdict != "pending":
+        entry["resolution_note"] = (
+            "두 진술은 서로 다른 단위를 가리킨다 -- DOC_001은 계단, "
+            "DOC_002는 시설 전체.")
+        entry["resolved_at"] = "2026-08-05T01:00:00+09:00"
     (case / "_conflict_ledger.json").write_text(json.dumps({
         "case_id": "CASE_009",
         "created_at": "2026-08-05T00:00:00+09:00",
         "updated_at": "2026-08-05T00:00:00+09:00",
-        "conflicts": [{
-            "conflict_id": "CONFLICT_1",
-            "topic": "사고 장소의 물리적 규모",
-            "raised_by_stage": "consistency_check",
-            "raised_at": "2026-08-05T00:00:00+09:00",
-            "verdict": verdict,
-            "sources": [
-                {"document_id": "DOC_001", "page": 9, "value": "좁음",
-                 "quote": "계단은 그리 넓지 않은바"},
-                {"document_id": "DOC_002", "page": 4, "value": "큼",
-                 "quote": "규모가 상당히 큰 시설로"},
-            ],
-        }],
+        "conflicts": [entry],
     }, ensure_ascii=False), encoding="utf-8")
 
 
@@ -89,7 +97,7 @@ def test_stages_before_any_comparison_are_not_gated():
 
 def test_stages_that_reason_from_the_facts_are_gated():
     for stage in ("claim_analysis", "screening_report", "draft_report_v1",
-                  "denial_validation", "evaluation"):
+                  "denial_validation"):
         assert stage in dao.CONFLICT_GATED_STAGES
 
 

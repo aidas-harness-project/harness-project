@@ -84,7 +84,47 @@ increments `attempt_count` nor emits another timing marker. Contract writes
 with `--stage` are checkpoints inside this invocation; they do not begin an
 attempt and do not count as P9 retries.
 
-After a successful agent return, the orchestrator alone calls:
+**Note the wall time before you dispatch**, so the interval below is a
+measurement and not a recollection.
+
+After the agent returns, record the dispatch before finalizing. The harness
+reports the subagent's duration, token counts and tool-call count on
+completion; pass them through:
+
+```text
+python tools/dao.py record-dispatch CASE_ID --run-id RUN_ID --stage STAGE \
+  --started-at ISO8601 --duration-s WALL --agent-reported-s REPORTED \
+  --agent-kind AGENT --attempt N \
+  --input-tokens IN --output-tokens OUT --total-tokens TOTAL --tool-uses USES
+```
+
+Copy the harness's figures; never estimate one. Omit a flag you were not given
+— an omitted count records as "not measured", while a guessed one is
+indistinguishable from a real reading. This is diagnostic like the rest of the
+timing layer: a failure here never blocks the stage.
+
+**If the dispatch stopped for a human — a permission prompt, a gate answer —
+pass `--human-wait-s`.** It is subtracted before any rate is computed and
+emitted as a `human_wait` span, so the SLA's existing subtraction applies. A
+prompt raised *inside* a dispatch produces no span on its own: on CASE_027's
+`denial_response` the operator took 506.2s of an 862.2s dispatch to answer, the
+summary read `human_wait_s: 0.0`, and the stage reported **170 tok/s for work
+that actually ran at 411**. Recover the interval from the trace when you did
+not time it directly — the gap sits between two adjacent tool spans:
+
+```text
+python tools/dao.py read-timing-summary CASE_ID
+```
+
+It matters because **tool spans do not explain an agent stage**. On CASE_022,
+`claim_analysis` spent 1.20s in tools across 773.0s of wall (0.15%), while
+token volume tracked wall time closely (277 tok/s; `denial_response` 327).
+Without the counts, the only available reading of the remainder is
+`unattributed_active_s`, which T13 states is *not* a claim about model
+reasoning — and misreading it that way is what produced a document index that
+optimized a 0.15-second lookup.
+
+Then the orchestrator alone calls:
 
 ```text
 python tools/dao.py finalize-stage CASE_ID RUN_ID STAGE --held-by orchestrator
@@ -137,6 +177,30 @@ CASE_ID --held-by orchestrator --run-id RUN_ID`. It performs only the existing
 digest/UID-enable DAO sequence for in-scope noncanonical policy documents and
 may invalidate stale artifacts while no policy attempt is open. A nonzero
 result is a blocked precondition: do not open or dispatch the policy stage.
+
+Skipping the preflight is not a shortcut — it moves the invalidation INSIDE the
+attempt. On CASE_142 it fired at 09:34:09 while the stage was `in_progress`,
+demoting the stage mid-run and forcing a second attempt.
+
+**Do not dispatch the policy agent. Run the driver.** Clause normalization is
+retired (2026-08-15), so every policy document is `text_only_no_normalization`
+and the stage has no extraction work:
+
+```text
+python tools/run_policy_pipeline_driver.py CASE_ID --held-by orchestrator --run-id RUN_ID
+```
+
+Then finalize through the ordinary T13 path. The driver records the manifest
+fingerprint and returns a no-op result; it BLOCKS if a normalized policy
+document somehow exists, which is a real precondition failure to report, not a
+reason to fall back to dispatching the agent.
+
+This is worth stating as a rule because dispatching cost real time for no work.
+Measured on CASE_142: the stage's two attempts spanned **370.9s** of which the
+DAO did **0.69s** (finalize + snapshot + locks), with zero provider calls and
+zero output files. The span timeline shows 75s and 91s gaps containing no tool
+activity at all — an agent reading the case to conclude there was nothing to do.
+The manifest states that outright, so the orchestrator reads it instead.
 
 **Reducing P8 for a throughput run is YOUR decision, never an agent's.**
 Stage 2's cost is dominated by dual-read OCR (the corpus is overwhelmingly
@@ -216,9 +280,10 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
 
    Records under the `document_processing` stage — segmentation is one of its checkpoints, not a stage of its own. Segmentation's own output is document STRUCTURE, not text or type: `document-pipeline` still owns real classification, and a `provisional_type_label` is never copied into `document_type`.
 3. **Conflict-ledger check**: before dispatching *any* stage, call `check_conflicts_clear(case_id)`. If not clear, halt and report every pending entry (old and new) — do not proceed past an unresolved conflict, no matter which stage raised it.
-4. **Lock check**: if a stage's target file already has a `.lock` present at run start/resume, do not poll and do not assume it's stale — halt, report the lock's full contents, wait for human confirmation (P5).
+4. **Lock check**: at run start/resume, ask the DAO — `python tools/dao.py check-lock CASE_ID TARGET_FILENAME` — rather than looking for a lock file yourself; the lock is the DAO's to interpret and its on-disk shape is not an agent-facing contract. If a lock is held, do not poll and do not assume it is stale — halt, report the lock's full contents, and wait for human confirmation (P5).
 5. **Medical-clearance check**: after canonical medical variables have been published, call `python tools/dao.py check-medical-reviews-clear CASE_ID` immediately before every downstream agent dispatch. Halt while it reports blocked. The DAO independently repeats this check before downstream `in_progress`/`passed` transitions and snapshots.
-6. **Begin the stage attempt** using the T13 lifecycle command above, then dispatch. Never infer an attempt start from the first output write.
+6. **Begin the stage attempt** using the T13 lifecycle command above, noting the wall time, then dispatch. Never infer an attempt start from the first output write.
+7. **Record the dispatch** with `record-dispatch` when the agent returns, passing the harness's reported duration, token counts and tool-use count (T13 lifecycle above). Before `finalize-stage`, not after — finalize closes the attempt.
 
 ## Phase 1 — initial claim review
 
@@ -227,8 +292,8 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
 | 1 | Case Intake | (orchestrator + `intake_case.py`) | D2-gated `_source_ledger.json` — the one intake decision is raw vs ground_truth, not bundle vs single document. Records under `intake` |
 | 2 | Document Processing | `document-pipeline` | (a) bundle OCR (`--bundle-ocr`, no classification) → (b) bundle redaction → (c) **segmentation**: propose/approve/split, children inherit the bundle's pages → (d) per-child classification → (e) per-child redaction → (f) case-wide chunking. All under `document_processing`; segmentation sits *inside* because processing runs on both sides of it |
 | 3 | Indexing (adapter, optional) | (tool, no agent) | pass-through by default; no-op unless enabled |
-| 4 | Policy Clause Processing | `policy-pipeline` | (a) exact boundary inventory, (b) semantic extraction, (c) reference tables, (d) version-bound audit; finalize only when every audit is current and has no open finding |
-| 5 | Claim Analysis | `claim-analysis` | (a) field extraction + medical-variable content derivation, (b) coverage ID, (c) case-type classification + canonical medical-variable publication, (d) requirement matching, then medical clearance before pass/snapshot |
+| 4 | Policy Clause Processing | (driver, no agent) | `run_policy_pipeline_driver.py` after the UID preflight. Normalization retired 2026-08-15, so there is no extraction to delegate; the driver records the manifest fingerprint and the orchestrator finalizes. Policy text stays fully processed, chunked and citable |
+| 5 | Claim Analysis | `claim-analysis` | (a) field extraction + medical-variable content derivation, (b) coverage ID, (c) case-type classification + canonical medical-variable publication, (d) requirement matching, then medical clearance before pass/snapshot. Tell it in the briefing whether `_document_index.json` exists (see below) |
 | 6 | Consistency Check | `consistency-check` | conflict-ledger-gated — any disagreement halts via `_conflict_ledger.json`, not an inline ad-hoc halt |
 | 7 | Screening Report | `screening-report` | consumes `denial-response`'s output as a dependency if an insurer-response document exists — not phase-gated |
 | 8 | Draft Report v1 | `draft-report` | same agent reused for v2 in Phase 2 |
@@ -246,6 +311,33 @@ v1 draft/critic lane. Do not open publishable `screening_report` while an
 insurer-response input exists but `denial_reason_result.json` is absent. Each
 concurrent member retains its own locks, attempt boundary, result handling, and
 downstream gate; a phase label is never a reason to delay a ready stage.
+
+**Name the document index in the briefing when one exists.** The policy driver
+writes `_document_index.json` -- every article in the case's policy documents
+under `clauses` (`{page, policy_name, article, heading}`) with its page and
+owning 약관, plus any table whose row/column structure was recovered from the
+PDF under `tables`. Confirm it is there
+(`dao.py read-document-index CASE_ID --run-id RUN_ID`), then tell
+`claim-analysis`, `denial-response` and `critic` to start clause lookup from
+it rather than scanning chunks. If the read returns `NOT_FOUND`, say nothing
+about it: a briefing that promises a file the case does not have is worse
+than one that omits it.
+
+This is one of the few things that genuinely belongs in a briefing. It is not
+contract state the agent should read for itself -- it is which TOOLS are
+prepared for this run, which only you know. The rule about keeping contract
+values out is unchanged: never list document types, page counts, or what the
+index contains.
+
+**It is not a gate and must not become one.** Nothing blocks on the index and
+no contract references it; an agent without one falls back to
+`search-document-text` and the chunks. Making it required would recreate what
+killed clause normalization -- an obligation nothing could reliably discharge,
+bypassed rather than met. But an advisory artifact nobody is told about is the
+*other* failure this project keeps hitting (`raw_page_text`,
+`medical_review_adopted`: written by several call sites, read by none), so
+naming it in the briefing is what keeps it from being a file that exists and
+goes unused.
 
 **Claim-analysis medical gate**: after the agent publishes its evidence-derived candidate with `write-medical-variables`, do not mark `claim_analysis` passed or call `snapshot-backup` until `python tools/dao.py check-medical-reviews-clear CASE_ID` succeeds. The DAO also rejects both transitions without clearance. The orchestrator does not open review items, choose referral policy, or stand in for a human decision.
 
@@ -297,4 +389,4 @@ entries. `active_s: n/a` means a marker is missing, not that the run was instant
 Phase 0 ledger check was skipped or run without `--run-id`. Read it back later with
 `dao.py read-timing-summary CASE_ID`. `HARNESS_TRACE=0` disables tracing entirely.
 
-At the end of a run (or when halted), report to the user: per-stage pass/fail/pending status from `_run_state.json`, validation PASS/FAIL/SKIP tally, `review_required` count and routing (손사/의사), any partial/warning list, and next actions (e.g. awaiting human review). Ask for feedback — this harness evolves from it, see the root `CLAUDE.md` changelog.
+At the end of a run (or when halted), report to the user: per-stage pass/fail/pending status from `_run_state.json`, validation PASS/FAIL/SKIP tally, `review_required` count and routing (손사/의사), any partial/warning list, and next actions (e.g. awaiting human review). Ask for feedback — this harness evolves from it, see `CHANGELOG.md`.

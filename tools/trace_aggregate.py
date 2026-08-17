@@ -345,11 +345,21 @@ def summarize_stage_attempts(spans: list[dict],
     human_intervals = [interval for span in spans
                        if span.get("category") == "human_wait"
                        for interval in [_wall_interval(span)] if interval is not None]
+    # `dispatch` is excluded from tool intervals on purpose: it CONTAINS the
+    # subagent's own work, so folding it in would report the agent's thinking
+    # time as observed tool time and drive unattributed_active_s to ~0 -- the
+    # exact false precision the T13 naming exists to avoid. It is summarised
+    # separately below, where the round trip stays distinguishable from the
+    # work it wraps.
     tool_spans = [span for span in spans
-                  if span.get("category") not in ("marker", "human_wait")
+                  if span.get("category") not in ("marker", "human_wait", "dispatch")
                   and span.get("op") not in STAGE_ATTEMPT_OPS
                   and _wall_interval(span) is not None]
     tool_intervals = [_wall_interval(span) for span in tool_spans]
+
+    dispatch_spans = [span for span in spans
+                      if span.get("category") == "dispatch"
+                      and _wall_interval(span) is not None]
 
     # Spans that NAME their owning stage (trace.py resolves it from the marker
     # directory at write time). These are attributable even when stage windows
@@ -567,6 +577,87 @@ def summarize_stage_attempts(spans: list[dict],
     # that it did. Counting it as incomplete coverage would mean a run can
     # never report complete coverage merely because an invalidation happened,
     # which is a normal event. It still contributes no duration.
+    # Per-stage dispatch accounting. Recorded dispatches split a stage's
+    # residual into the round trip (structural, engineerable) and whatever else
+    # sat inside the marker window (operator-side work, one person's habits).
+    # A stage with no recorded dispatch keeps nulls rather than zeros: zero
+    # would claim the round trip was measured and found to be nothing.
+    #
+    # Tokens follow the same rule for the same reason. They are the only
+    # recorded figure that explains an agent stage's wall time -- tool spans
+    # account for well under 2% of it -- so a stage with no recorded token
+    # count must say "not recorded", not "0 tokens", which would read as a
+    # stage that did no model work at all.
+    for stage_name, entry in by_stage.items():
+        entry.setdefault("dispatch_count", 0)
+        entry.setdefault("dispatch_wall_s", None)
+        entry.setdefault("dispatch_round_trip_s", None)
+        entry.setdefault("dispatch_input_tokens", None)
+        entry.setdefault("dispatch_output_tokens", None)
+        entry.setdefault("dispatch_total_tokens", None)
+        entry.setdefault("dispatch_tool_uses", None)
+        entry.setdefault("dispatch_tokens_per_s", None)
+        entry.setdefault("dispatch_human_wait_s", None)
+    for span in dispatch_spans:
+        stage_name = (span.get("attrs") or {}).get("stage_name")
+        if not isinstance(stage_name, str):
+            continue
+        entry = by_stage.setdefault(stage_name, {
+            "attempt_count_observed": 0, "closed_attempt_count": 0,
+            "failed_attempt_count": 0, "open_attempt_count": 0,
+            "abandoned_attempt_count": 0,
+            "total_attempt_active_wall_s": 0.0,
+            "passed_attempt_active_wall_s": 0.0, "human_wait_s": 0.0,
+            "observed_tool_overlap_s": 0.0, "unattributed_active_s": 0.0,
+            "attribution_complete": True, "skipped": False,
+            "dispatch_count": 0, "dispatch_wall_s": None,
+            "dispatch_round_trip_s": None,
+            "dispatch_input_tokens": None, "dispatch_output_tokens": None,
+            "dispatch_total_tokens": None, "dispatch_tool_uses": None,
+            "dispatch_tokens_per_s": None, "dispatch_human_wait_s": None,
+        })
+        duration = float(span.get("duration_s") or 0.0)
+        attrs = span.get("attrs") or {}
+        entry["dispatch_count"] += 1
+        entry["dispatch_wall_s"] = round(
+            (entry["dispatch_wall_s"] or 0.0) + duration, 6)
+        reported = attrs.get("agent_reported_s")
+        if isinstance(reported, (int, float)):
+            entry["dispatch_round_trip_s"] = round(
+                (entry["dispatch_round_trip_s"] or 0.0)
+                + max(duration - float(reported), 0.0), 6)
+        for attr_key, out_key in (
+                ("input_tokens", "dispatch_input_tokens"),
+                ("output_tokens", "dispatch_output_tokens"),
+                ("total_tokens", "dispatch_total_tokens"),
+                ("tool_uses", "dispatch_tool_uses")):
+            value = attrs.get(attr_key)
+            # bool is an int subclass and would silently sum as 0/1.
+            if isinstance(value, int) and not isinstance(value, bool):
+                entry[out_key] = (entry[out_key] or 0) + value
+        waited = attrs.get("human_wait_s")
+        if isinstance(waited, (int, float)) and not isinstance(waited, bool):
+            entry["dispatch_human_wait_s"] = round(
+                (entry["dispatch_human_wait_s"] or 0.0) + float(waited), 6)
+
+    # Rate is derived last, over the stage's summed dispatches, so a stage
+    # dispatched twice reports one honest rate rather than two averaged. It is
+    # tokens per second of DISPATCH wall, not of the stage's marker window: the
+    # window can contain operator-side work no dispatch covers.
+    # The divisor is dispatch wall MINUS human wait. A permission prompt is not
+    # model work: on CASE_027's denial_response it was 506.2s of an 862.2s
+    # dispatch, and dividing by the raw wall reported 170 tok/s for a stage
+    # that actually ran at ~411. A rate that silently includes operator
+    # response time is not a property of the pipeline.
+    for entry in by_stage.values():
+        total = entry.get("dispatch_total_tokens")
+        wall = entry.get("dispatch_wall_s")
+        if not (isinstance(total, int) and isinstance(wall, (int, float))):
+            continue
+        work = wall - (entry.get("dispatch_human_wait_s") or 0.0)
+        if work > 0:
+            entry["dispatch_tokens_per_s"] = round(total / work, 3)
+
     settled = {"complete", "abandoned"}
     coverage = {
         "run_state_attempts_expected": len(expected_keys),

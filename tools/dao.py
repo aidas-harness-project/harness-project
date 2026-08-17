@@ -40,6 +40,11 @@ Subcommands:
         [--file GT_ID | --list]
     read-contract CASE_ID FILENAME
     check-segmentation-ready CASE_ID [--doc-id DOC_ID]
+    declare-no-policy-documents CASE_ID --reviewer NAME --note TEXT
+        --held-by NAME --run-id RUN_ID
+        (PoC-phase D5 waiver: records that a case genuinely carries no 약관,
+         so policy_clause_processing can finalize. Refused when the manifest
+         actually types a document as insurance_policy.)
     set-segmentation-status CASE_ID DOC_ID {required|not_required}
         --reviewer NAME --held-by NAME --run-id RUN_ID [--note TEXT]
     write-contract CASE_ID FILENAME --data-file PATH --schema-name NAME
@@ -174,6 +179,7 @@ import source_provenance
 import stage_dependencies
 import segment_lineage
 import segment_derivation
+import document_index
 import table_region_provenance
 import policy_completeness
 import policy_uid
@@ -905,8 +911,62 @@ def _medical_gate_applies(state: dict) -> bool:
     NOT gated. It is stamped 'never_evaluated' on first touch so the record
     says the question was never asked, rather than leaving
     `medical_review_adopted: false` to be misread as 'asked and not required'.
+
+    An `enforced` run is STILL not gated while the medical operator policy is
+    unapproved. That is not a loophole -- it is the same rule the rest of this
+    subsystem already applies, read in the other direction. `medical_contracts`
+    and `medical_review_ledger` both refuse to act on
+    `operations_enabled is not True or approval is None`, and the deferral
+    register states that configuration presence alone cannot ACTIVATE
+    behaviour. The converse has to hold too: a policy that cannot be activated
+    cannot be enforced either, because clearance is unreachable by any
+    sanctioned route. `record-medical-referral-decision` -- the only path to
+    the non-blocking `do_not_refer` state -- authenticates through
+    `operator_auth`, which fails closed on the shipped policy (`actors: []`,
+    `operations_enabled: false`). So an enforced run would block
+    `claim_analysis` FOREVER, for every case, with no action any human could
+    take to clear it.
+
+    Found by running CASE_027, the first run ever to reach claim_analysis with
+    the gate live: the two decisions are individually sound and jointly a dead
+    end. A gate nothing can satisfy is not satisfied, it is bypassed -- the
+    exact failure that retired clause normalization on 2026-08-15, where
+    CASE_112 recorded `passed` through a hand-edited override.
+
+    The moment the policy is approved this returns True again for every
+    enforced run, with no code change. Nothing here weakens the gate for a case
+    that can actually use it.
     """
-    return state.get("medical_gate_status") == "enforced"
+    if state.get("medical_gate_status") != "enforced":
+        return False
+    return _medical_operations_approved()
+
+
+def _medical_operations_approved() -> bool:
+    """Whether the medical operator policy is approved and switched on.
+
+    Read with the same rule its own consumers use
+    (`operations_enabled is not True or approval is None` ->
+    `medical_contracts._role_transition_permitted`,
+    `medical_review_ledger._load_role_policy`, `operator_auth._load_policy`),
+    so activation cannot mean one thing to the gate and another to the code
+    that would have to satisfy it.
+
+    Fails CLOSED toward 'unapproved' on any read or parse error. The direction
+    matters: unreadable policy means clearance is unreachable, so treating it
+    as approved would reinstate the permanent block this exists to prevent.
+    """
+    try:
+        import operator_auth
+
+        policy = json.loads(
+            operator_auth.POLICY_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 -- any failure means "not approved"
+        return False
+    if not isinstance(policy, dict):
+        return False
+    return (policy.get("operations_enabled") is True
+            and policy.get("approval") is not None)
 
 
 def _stamp_medical_gate_status(case_id: str, state: dict) -> dict:
@@ -1270,11 +1330,26 @@ def cmd_read_document_text(args):
     return 1
 
 
-def _redacted_bundle_document(case_id: str, manifest_entry: dict) -> dict:
+def _redacted_bundle_document(case_id: str, manifest_entry: dict,
+                              want_pages: set[int] | None = None) -> dict:
     """Return one driver-safe redacted document payload.
 
     This helper is deliberately DAO-local: downstream drivers receive content
     and revision binding, never a processed-layer pathname they could reopen.
+
+    `want_pages` narrows the returned `pages` to those page numbers. The whole
+    document is still read and hashed, so `redacted_text_sha256` keeps binding
+    the FULL revision and a verification against it stays valid -- narrowing is
+    a delivery decision, never a different source of truth.
+
+    Why this exists: on CASE_027 `claim_analysis` pulled DOC_010's 124,454
+    characters and DOC_009's 97,630 to cite five pages of one and none of the
+    other -- 81% of the stage's whole input for 5 pages of output. There was no
+    redacted page-level read at all (`read-page-text` serves the PRE-redaction
+    layer and is refused here), so an agent that knew exactly which pages it
+    needed still had to take the bundle whole and select inside its own
+    context. `search-document-text` and `_document_index.json` both already
+    report page numbers; this is what makes those numbers actionable.
     """
     doc_id = manifest_entry["document_id"]
     disposition = manifest_entry.get("downstream_disposition")
@@ -1292,6 +1367,20 @@ def _redacted_bundle_document(case_id: str, manifest_entry: dict) -> dict:
         pages = _cross_contract.split_pages(source)
     except Exception as exc:
         raise ValueError(f"UNREADABLE: {doc_id}: {exc}") from exc
+    selected = sorted(pages)
+    omitted = 0
+    if want_pages is not None:
+        missing = sorted(want_pages - set(pages))
+        if missing:
+            # Fail loud. A silently-empty result would read as "that page holds
+            # nothing", which is a different and much worse claim than "you
+            # asked for a page this document does not have".
+            raise ValueError(
+                f"NO_SUCH_PAGE: {doc_id} has no page(s) {missing}; "
+                f"it has {min(pages)}-{max(pages)}" if pages else
+                f"NO_SUCH_PAGE: {doc_id} has no pages at all")
+        selected = sorted(want_pages)
+        omitted = len(pages) - len(selected)
     revision = revision_entry_for(case_id, doc_id) or {}
     return {
         "document_id": doc_id,
@@ -1303,19 +1392,39 @@ def _redacted_bundle_document(case_id: str, manifest_entry: dict) -> dict:
         "document_type": manifest_entry.get("document_type"),
         "source_text_revision_sha256": revision.get("current_revision_sha256"),
         "redacted_text_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        # Always present, so a consumer can tell a narrowed read from a whole
+        # one without inferring it from the page count. 0 means it got
+        # everything; a caller that ignores this field still behaves correctly.
+        "pages_omitted": omitted,
+        "total_page_count": len(pages),
         "pages": [
             {"page": page, "text": pages[page]}
-            for page in sorted(pages)
+            for page in selected
         ],
     }
 
 
-def read_redacted_text_bundle_data(case_id: str, doc_ids: list[str]) -> dict:
-    """DAO-owned content bundle for drivers; never returns processed paths."""
+def read_redacted_text_bundle_data(
+        case_id: str, doc_ids: list[str],
+        pages_by_doc: dict[str, set[int]] | None = None) -> dict:
+    """DAO-owned content bundle for drivers; never returns processed paths.
+
+    `pages_by_doc` narrows individual documents to named pages. A document
+    absent from that mapping is returned whole, so the default is unchanged and
+    a caller that passes nothing sees exactly what it saw before.
+    """
     if not doc_ids:
         raise ValueError("at least one --doc-id is required")
     if len(set(doc_ids)) != len(doc_ids):
         raise ValueError("duplicate --doc-id is not permitted")
+    pages_by_doc = pages_by_doc or {}
+    unknown_scope = sorted(set(pages_by_doc) - set(doc_ids))
+    if unknown_scope:
+        # A --pages for a document not in --doc-id is a mistake that would
+        # otherwise silently deliver the whole bundle it meant to narrow.
+        raise ValueError(
+            f"UNSCOPED_PAGES: --pages given for {unknown_scope}, which "
+            "is not among the requested --doc-id values")
     manifest = read_contract_data(case_id, "document_manifest.json")
     if manifest is None:
         raise ValueError(f"NOT_FOUND: {case_id} has no document_manifest.json")
@@ -1325,15 +1434,53 @@ def read_redacted_text_bundle_data(case_id: str, doc_ids: list[str]) -> dict:
         entry = by_id.get(doc_id)
         if not isinstance(entry, dict):
             raise ValueError(f"UNKNOWN_DOCUMENT: {doc_id} is not in document_manifest.json")
-        documents.append(_redacted_bundle_document(case_id, entry))
+        documents.append(
+            _redacted_bundle_document(case_id, entry, pages_by_doc.get(doc_id)))
     return {"case_id": case_id, "documents": documents}
+
+
+def _parse_pages_argument(values: list[str] | None) -> dict[str, set[int]]:
+    """Parse repeated `--pages DOC_ID=1,3,5-7` into {doc_id: {pages}}.
+
+    Ranges are accepted because a clause routinely spans consecutive pages and
+    `5-7` is what a person writes. Rejects anything malformed rather than
+    silently dropping it: a page filter that quietly loses a page produces an
+    analysis missing evidence it believes it read.
+    """
+    parsed: dict[str, set[int]] = {}
+    for raw in values or []:
+        doc_id, sep, spec = raw.partition("=")
+        if not sep or not doc_id.strip() or not spec.strip():
+            raise ValueError(
+                f"BAD_PAGES: {raw!r} is not DOC_ID=PAGES (e.g. DOC_010=11,35-36)")
+        pages: set[int] = set()
+        for part in spec.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            lo_s, dash, hi_s = part.partition("-")
+            try:
+                lo = int(lo_s)
+                hi = int(hi_s) if dash else lo
+            except ValueError:
+                raise ValueError(
+                    f"BAD_PAGES: {part!r} in {raw!r} is not a page or range") from None
+            if lo < 1 or hi < lo:
+                raise ValueError(f"BAD_PAGES: {part!r} in {raw!r} is not a valid range")
+            pages.update(range(lo, hi + 1))
+        if not pages:
+            raise ValueError(f"BAD_PAGES: {raw!r} names no pages")
+        parsed.setdefault(doc_id.strip(), set()).update(pages)
+    return parsed
 
 
 @traced_read("dao.read_redacted_text_bundle")
 def cmd_read_redacted_text_bundle(args):
     try:
+        pages_by_doc = _parse_pages_argument(getattr(args, "pages", None))
         print(json.dumps(
-            read_redacted_text_bundle_data(args.case_id, args.doc_id),
+            read_redacted_text_bundle_data(
+                args.case_id, args.doc_id, pages_by_doc),
             ensure_ascii=False,
         ))
         return 0
@@ -1378,8 +1525,14 @@ def _verify_driver_reference(case_id: str, reference: dict,
             raise ValueError(f"{doc_id}: invalid start_char/end_char range")
         if end > len(page_text) or page_text[start:end] != quote:
             raise ValueError(f"{doc_id}: quote does not exactly match the claimed page range")
-    elif _cross_contract._normalize_ws(quote) not in _cross_contract._normalize_ws(page_text):
-        raise ValueError(f"{doc_id}: quote is not present on page {page}")
+    elif not _cross_contract.quote_matches_page(quote, page_text):
+        # Only after failing page N on its own: a sentence may run past the
+        # page break. `quote_spans_page_pair` refuses a quote that fits wholly
+        # on N+1, so a mis-numbered citation is still caught.
+        next_text = next((item["text"] for item in document["pages"]
+                          if item["page"] == page + 1), None)
+        if not _cross_contract.quote_spans_page_pair(quote, page_text, next_text):
+            raise ValueError(f"{doc_id}: quote is not present on page {page}")
     verified = {
         "document_id": doc_id,
         "page": page,
@@ -2511,21 +2664,38 @@ def _canonical_uid_finalize_blockers(case_id: str, doc_id: str) -> list[str]:
 
 
 def _automated_policy_documents(manifest: dict) -> list[dict]:
-    """The policy documents that owe a normalized clause contract.
+    """The policy documents that owe a normalized clause contract: NONE.
 
-    Narrow on purpose: `automated_text_pipeline` is the opt-IN to
-    normalization. A `text_only_no_normalization` policy document is fully
-    processed and citable but owes no clause contract, so it is out of scope
-    HERE while remaining in scope for anything about its text -- see
-    `_text_processed_policy_documents`.
+    RETIRED 2026-08-15. Clause normalization is no longer produced by any
+    stage, so nothing owes a clause contract and this scope is permanently
+    empty. The function is kept rather than inlined as `[]` because its
+    callers are the completion gate and the audit/inventory checks, and a
+    named empty scope states WHY they clear where a bare literal would read
+    as an oversight.
+
+    Measured grounds, on the shipped corpus rather than a projection: 211
+    policy documents across 4 pre-2026-08-04 cases carry
+    `automated_text_pipeline`, and 5 clause files were ever produced (2.4%),
+    all in CASE_030 -- whose policy stage is `failed` regardless. CASE_112
+    marked 203 documents, produced 0, and reads `passed` only through a
+    hand-edited `manual_override` that says as much in its own text. A gate
+    nothing can satisfy is not satisfied; it is bypassed, and the bypass then
+    has to be maintained.
+
+    Normalization also never replaced source addressing: a normalized clause
+    still carries `evidence_references: [{document_id, page, quote}]`
+    internally (CASE_030 DOC_004 `CI-a5a6241c6e63996f`), so the UID layered
+    on top of the very addressing it was meant to supersede. It classifies
+    clauses; it does not select them, and selection is what the analysis
+    stages actually spend their time on.
+
+    Deliberately NOT done: removing `automated_text_pipeline` from the
+    manifest enum. Four legacy cases record it, CASE_112 is still forked from,
+    and rewriting those manifests would falsify how those runs really
+    executed -- the same reasoning that keeps `document_segmentation` in the
+    run_state enum. The value stays readable; the obligation is what is gone.
     """
-    return [
-        d for d in (manifest or {}).get("documents", [])
-        if (
-            d.get("document_type") == "insurance_policy"
-            and d.get("downstream_disposition") == "automated_text_pipeline"
-        )
-    ]
+    return []
 
 
 def _text_processed_policy_documents(manifest: dict) -> list[dict]:
@@ -2593,6 +2763,72 @@ def _policy_layer_scheme_blockers(case_id: str, action: str) -> list[str]:
     return _canonical_state_blockers(case_id, doc_ids, action)
 
 
+_NO_POLICY_DECLARATION = "_no_policy_documents.json"
+
+
+def _no_policy_waiver(case_id: str):
+    """The recorded declaration that this case carries no policy document.
+
+    D5 (harness-guardrails-dev): a PoC-phase allowance, because part of the
+    supplied corpus arrives as a diagnosis certificate plus an insurer letter
+    with no 약관 attached, and `policy_clause_processing` cannot pass without
+    one -- which blocks `claim_analysis` on cases that are otherwise complete.
+
+    Deliberately NOT an environment variable or a global dev flag. The gate
+    cannot distinguish "this case has no policy" from "the policy work was
+    skipped", so the distinction has to come from a person: the declaration
+    names a reviewer and a reason, lands in the case directory beside the
+    contracts, and is refused the moment the manifest actually types a
+    document as `insurance_policy`. A flag would have applied silently to
+    every case in a run, including ones whose policy work merely failed.
+    """
+    return load_json(case_dir(case_id) / _NO_POLICY_DECLARATION)
+
+
+def declare_no_policy_documents(case_id: str, reviewer: str, note: str,
+                                held_by: str, run_id: str):
+    """Record that a case genuinely carries no policy document."""
+    manifest = read_contract_data(case_id, "document_manifest.json")
+    if manifest is None:
+        return False, "FAIL: document_manifest.json is missing"
+    typed = sorted(d.get("document_id") for d in manifest.get("documents", [])
+                   if d.get("document_type") == "insurance_policy")
+    if typed:
+        return False, (f"FAIL: refused -- the manifest types {typed} as "
+                       "insurance_policy, so this case DOES carry policy "
+                       "documents; process them instead of declaring their absence")
+    if not (reviewer or "").strip():
+        return False, "FAIL: --reviewer is required (this is a human declaration)"
+    if not (note or "").strip():
+        return False, "FAIL: --note is required (record why no policy exists)"
+    target = case_dir(case_id) / _NO_POLICY_DECLARATION
+    held = acquire_lock_blocking(target, held_by, run_id,
+                                 "declare-no-policy-documents")
+    if held is not None:
+        return False, f"FAIL: {target.name} is locked by {held.get('held_by')}"
+    try:
+        atomic_write_json(target, {
+            "case_id": case_id,
+            "declared_at": datetime.now(timezone.utc).isoformat(),
+            "reviewer": reviewer,
+            "note": note,
+            "held_by": held_by,
+            "run_id": run_id,
+            "scope": "harness-guardrails-dev D5 -- PoC phase only",
+        })
+    finally:
+        release_lock(target)
+    return True, (f"OK: recorded that {case_id} carries no policy document "
+                  f"(reviewer: {reviewer})")
+
+
+def cmd_declare_no_policy_documents(args):
+    ok, message = declare_no_policy_documents(
+        args.case_id, args.reviewer, args.note, args.held_by, args.run_id)
+    print(message)
+    return 0 if ok else 1
+
+
 def _policy_completion_blockers(case_id: str) -> list[str]:
     """Return every condition that prevents policy_clause_processing finalize.
 
@@ -2605,6 +2841,21 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
     manifest = read_contract_data(case_id, "document_manifest.json")
     if manifest is None:
         return ["document_manifest.json is missing"]
+    # A D5 declaration is a statement ABOUT the manifest, so it is checked
+    # against the manifest first. When policy documents were added or re-typed
+    # after the declaration was recorded, the declaration has become false --
+    # and a false statement on disk must block rather than sit there, because
+    # the next reader has no way to tell it apart from a true one. Checked
+    # here, not inside the no-policy branch, where a case that HAS policy
+    # documents would never reach it.
+    declared_none = _no_policy_waiver(case_id) is not None
+    typed_policy = sorted(d.get("document_id") for d in manifest.get("documents", [])
+                          if d.get("document_type") == "insurance_policy")
+    if declared_none and typed_policy:
+        return [f"a no-policy-documents declaration is recorded, but the "
+                f"manifest types {typed_policy} as insurance_policy -- the "
+                "declaration is stale; process those documents and remove "
+                f"{_NO_POLICY_DECLARATION}, or re-type them"]
     # The stage may not finalize on a case whose policy documents were never
     # processed at all -- that was the CASE_112 failure, where an override
     # recorded `passed` over zero policy work. But "processed" is about TEXT:
@@ -2618,11 +2869,54 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
         and d.get("downstream_disposition") in policy_completeness._TEXT_PROCESSED
     ]
     if not text_processed_policy_docs:
-        return ["no text-processed insurance_policy document is registered"]
+        # A case that genuinely CARRIES no policy document is a different
+        # situation from one whose policy work was skipped, and the gate
+        # cannot tell them apart on its own -- which is why the waiver is a
+        # recorded human declaration rather than a flag the pipeline can set
+        # for itself. D5 (harness-guardrails-dev) scopes it to the PoC.
+        if not declared_none:
+            return ["no text-processed insurance_policy document is registered "
+                    "-- if this case genuinely has no policy document, record "
+                    "that with `dao.py declare-no-policy-documents CASE_ID "
+                    "--reviewer NAME --note TEXT`"]
+        return []
 
-    # Only the opted-in documents owe a normalized clause contract; the checks
-    # below are scoped to them.
-    policy_docs = _automated_policy_documents(manifest)
+    # One scope, permanently empty: `_automated_policy_documents` (see there
+    # for the measured grounds). Everything this loop asks for -- clause
+    # contract, boundary inventory, clause audit, parent coverage, and the
+    # P0-8 table disposition -- was an obligation toward normalization, and
+    # normalization is retired as of 2026-08-15.
+    #
+    # The P0-8 TABLE gate goes with it, and that is the non-obvious half.
+    # Mid-change it was moved to the wider text-processed scope, on the
+    # reasoning that "does this PDF contain an unaccounted table" survives
+    # independently. Running it settled the question the other way: the gate
+    # demands a document be SCANNED and every candidate DISPOSITIONED into a
+    # `reference_table` contract or an explicit exclusion -- and the stage
+    # that wrote `reference_table` went away with normalization. Keeping the
+    # demand without its means of discharge is how CASE_112's
+    # `manual_override` happened: a gate nobody can satisfy is not satisfied,
+    # it is bypassed, and the bypass is what ends up in the record.
+    #
+    # Measured before deciding, on CASE_142's two born-digital policy PDFs
+    # (323 pages): the detector finds 55 candidates and extracts all 55
+    # cleanly, but 24 are single-row and 44 are two-column -- term-definition
+    # boxes (`치료비 | 치료비라 함은...`) and blank intake forms
+    # (`시설명세 | 명칭: 용도:`) that are tables only typographically. Seven
+    # have four or more rows, and exactly one is substantive: DOC_010 p13's
+    # 지연이자율표. Blocking a stage over 55 findings to protect one is the
+    # wrong instrument.
+    #
+    # Detection itself is worth keeping and is NOT what is being retired here
+    # -- it is the only thing that recovers row/column structure from a
+    # born-digital policy, because embedded-text extraction flattens that
+    # table into `기 간 / 지 급 이 자 / 지급기일의... / 보험계약대출이율`,
+    # losing which value belongs to which period. That belongs in a derived
+    # index the analysis stages can read, not in a finalize gate; planned as
+    # follow-up with the clause index, since both exist to stop an agent
+    # hunting through 323 chunks for something the page states plainly.
+    normalization_docs = _automated_policy_documents(manifest)
+    policy_docs = normalization_docs
 
     schemas, registry = load_registry()
     # What each policy document owes is DECLARED (policy_processing_role) and
@@ -2674,6 +2968,15 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
         # tables a second time as the parent's unhandled candidates.
         if role != "segmented_parent":
             blockers.extend(_table_region_finalize_blockers(case_id, doc_id))
+
+        # Everything below this line is the NORMALIZED-CLAUSE obligation
+        # (clause contract, boundary inventory, clause audit, parent
+        # coverage), retired 2026-08-15 and scoped to `normalization_docs`,
+        # which is empty. The table gate above is a separate obligation and
+        # runs for every text-processed policy document, which is why the
+        # split happens here rather than at the loop header.
+        if doc not in normalization_docs:
+            continue
 
         if role == "segmented_parent":
             # Normalization is delegated to its segments; parent-coverage
@@ -2830,8 +3133,14 @@ def _policy_completion_blockers(case_id: str) -> list[str]:
     # unresolved (review_required/extraction_failed) page. CASE_030's 133
     # unowned pages (front matter, 별표 appendix, referenced laws) are exactly
     # what this catches.
+    # Named `normalization_docs` rather than `policy_docs` even though the two
+    # are now the same list: parent coverage proves a parent's pages are
+    # accounted for by segments that NORMALIZE them, so it belongs to the
+    # retired obligation by meaning, not just by current value. If a later
+    # change reintroduces a wider policy scope, this must not follow it by
+    # accident.
     physical_parents = [
-        d for d in policy_docs
+        d for d in normalization_docs
         if d.get("document_role") != "segment"
     ]
     for parent in physical_parents:
@@ -4532,6 +4841,21 @@ def promote_policy_document(case_id: str, document_id: str, policy_processing_ro
 
 
 def cmd_promote_policy_document(args):
+    # DEPRECATED 2026-08-15. Retained so pre-2026-08-04 records stay
+    # explicable, and because refusing outright would strand a case that
+    # somehow still owes a clause contract. Measured grounds for retirement:
+    # 211 documents were marked `automated_text_pipeline` across 4 legacy
+    # cases and 5 clause files were ever produced (2.4%), while a normalized
+    # clause still addresses its source by {document_id, page, quote}
+    # internally -- so the UID never replaced source addressing, it layered on
+    # top of it. The warning goes to stderr so piped JSON consumers are
+    # unaffected.
+    print("WARNING: promote-policy-document is DEPRECATED (2026-08-15). "
+          "Policy clauses are addressed by {document_id, page, quote} against "
+          "the processed text; normalization adds cost without changing which "
+          "clause an agent must still select. Promoting demotes "
+          "policy_clause_processing to failed and obliges a clause contract "
+          "that no current stage produces.", file=sys.stderr)
     ok, message = promote_policy_document(
         args.case_id, args.doc_id, args.policy_processing_role,
         args.disputed_by, args.held_by, args.run_id, purpose=args.purpose)
@@ -4713,6 +5037,42 @@ def _canonical_state_blockers(case_id: str, doc_ids, action: str) -> list[str]:
     return blockers
 
 
+def _raw_file_entry_for(manifest, entry):
+    """The manifest entry whose file_path locates `entry`'s bytes on disk.
+
+    Usually `entry` itself. But a split child that inherited the parent's
+    already-processed pages has no PDF of its own -- writing one produced 44MB
+    from an 11.4MB intake on CASE_142 and nothing ever opened it -- so its
+    bytes live in the parent named by source_file_name, and it is identified
+    inside that parent by source_page_start/end.
+
+    Resolving to the parent is what keeps the digest MEANINGFUL rather than
+    merely available: `source_pdf_sha256` exists to answer "which registered
+    file is this document made of", and for such a child the honest answer is
+    the parent's file. Returning None instead would block canonical UID
+    activation for every child of an OCR'd bundle, which is exactly the
+    regression this function's own caller reports as
+    "no readable registered raw source".
+
+    Sibling children of one parent therefore share a digest. That is correct:
+    they ARE the same file, and what distinguishes them is the page range,
+    which the UID scheme carries separately.
+    """
+    if entry is None:
+        return None
+    if entry.get("file_path"):
+        return entry
+    source_name = entry.get("source_file_name")
+    if not source_name:
+        return None
+    # The parent is the entry whose own file is named source_file_name. Match
+    # on file_name rather than document_id: source_file_name records the raw
+    # file, and a bundle keeps its file_path after being superseded.
+    return next(
+        (d for d in manifest.get("documents", [])
+         if d.get("file_name") == source_name and d.get("file_path")), None)
+
+
 def registered_source_pdf_sha256(case_id: str, doc_id: str):
     """Hash the registered raw source file ourselves (Part 11J commit b).
 
@@ -4721,6 +5081,9 @@ def registered_source_pdf_sha256(case_id: str, doc_id: str):
     never registered -- the one input that establishes WHICH document this is
     would establish nothing. The manifest's file_path is only used to locate
     the file; the digest always comes from reading it.
+
+    For a split child with no file of its own, the located file is its
+    parent's -- see `_raw_file_entry_for`.
     """
     manifest = read_contract_data(case_id, "document_manifest.json")
     if manifest is None:
@@ -4728,6 +5091,7 @@ def registered_source_pdf_sha256(case_id: str, doc_id: str):
     entry = next(
         (d for d in manifest.get("documents", [])
          if d.get("document_id") == doc_id), None)
+    entry = _raw_file_entry_for(manifest, entry)
     if entry is None or not entry.get("file_path"):
         return None
     # file_path is repo-relative ("data/raw/CASE_030/DOC_005.pdf"). Resolve it
@@ -6904,7 +7268,26 @@ def _finalize_stage(case_id, run_id, stage, held_by):
 def cmd_snapshot_backup(args):
     """Backward-compatible alias for finalize-stage: snapshot + passed, atomic.
     Kept so existing callers/tests using 'snapshot-backup' keep working; new
-    code should read this as 'finalize this stage'."""
+    code should read this as 'finalize this stage'.
+
+    The name is actively misleading and has caused a real incident. On
+    CASE_022 the claim-analysis spec told the agent to run `snapshot-backup`
+    before completion while its briefing said markers belong to the
+    orchestrator (T13) -- both were followed, and the stage transitioned to
+    `passed`. "snapshot" reads like a backup; the snapshot is half of what
+    this does. The spec has been corrected, and this warns so a caller who
+    wanted only a backup finds out from the command rather than from the
+    run state afterwards.
+    """
+    print("WARNING: snapshot-backup is an ALIAS for finalize-stage -- it "
+          "transitions the stage to 'passed' and moves a run-state marker, "
+          "not just a backup. Stage-attempt boundaries belong to the "
+          "orchestrator (T13); a stage agent should not be calling this.",
+          file=sys.stderr)
+    return cmd_finalize_stage(args)
+
+
+def cmd_finalize_stage(args):
     state = _finalize_stage(args.case_id, args.run_id, args.stage, args.held_by)
     if state is None:
         return 1
@@ -6918,10 +7301,6 @@ def cmd_snapshot_backup(args):
         print(f"  sla.phase1.end recorded -- run `dao.py aggregate-trace "
               f"{args.case_id} --run-id {args.run_id} --held-by <name>` for timings")
     return 0
-
-
-def cmd_finalize_stage(args):
-    return cmd_snapshot_backup(args)
 
 
 # ------------------------------------------------------------ conflict ledger --
@@ -7130,7 +7509,6 @@ CONFLICT_GATED_STAGES = frozenset({
     "critic_v1",
     "critic_v2",
     "denial_validation",
-    "evaluation",
 })
 
 
@@ -7230,6 +7608,35 @@ def cmd_read_medical_evidence(args):
 
 def cmd_check_medical_reviews_clear(args):
     from medical_review_ledger import cmd_check_clear
+
+    # The check must apply the SAME rule as the transitions it guards.
+    # `_require_transition_medical_clearance` waives clearance entirely when
+    # `_medical_gate_applies` is False (pre-restore run, or operator policy
+    # unapproved), so `finalize-stage claim_analysis` passes -- while this
+    # command, left gate-blind, failed closed on the missing ledger. CASE_028
+    # stalled exactly there: all four contracts written, agent reported
+    # "blocked" per its spec, run left `in_progress` forever. A pre-pass check
+    # that disagrees with the gate it fronts is worse than no check.
+    #
+    # The waiver is deliberately NARROWER than the transition gate's: it also
+    # requires that the case carries no medical artifacts on disk. A case that
+    # HAS published medical state owes ledger integrity regardless of policy
+    # activation -- a missing or malformed ledger there is a real integrity
+    # failure, not an inapplicable gate (pinned by
+    # test_no_issue_publication_clears_but_missing_or_malformed_ledger_blocks).
+    # The artifact-free short-circuit is exactly the CASE_027/028/029 shape:
+    # publication refused by the deferred configuration, nothing on disk.
+    # Any error reading run state falls through to the delegate, which fails
+    # closed -- unreadable state must not manufacture clearance.
+    try:
+        state = validated_run_state(args.case_id, allow_missing=True)
+    except ValueError:
+        state = None
+    if (state is not None and not _medical_gate_applies(state)
+            and not _medical_artifacts_present(args.case_id)):
+        print(json.dumps({"clear": True, "gate": "not_applicable"},
+                         sort_keys=True))
+        return 0
 
     return cmd_check_clear(sys.modules[__name__], args)
 
@@ -10809,6 +11216,164 @@ def trace_spans_dir(case_id: str, run_id: str) -> Path:
     return _require_within(case_dir(case_id), "_trace", run_id, "spans")
 
 
+def cmd_record_dispatch(args):
+    """Record one closed subagent-dispatch interval into the run's trace.
+
+    Closes the largest measurement hole this project has: a stage's marker
+    window minus the agent's own reported duration left a residual that nothing
+    explained. On CASE_142 that residual was 578.3s across nine stages, of
+    which finalize and snapshot -- the obvious suspects -- accounted for 2.79s.
+    The other 575.5s was split between dispatch round-trip (asking for the work
+    and receiving the result) and operator-side work done while the marker
+    happened to be open, and NOTHING on disk could tell the two apart.
+
+    That distinction decides what a timing number means. Round-trip is a cost
+    the pipeline pays structurally and can be engineered against; operator-side
+    work is one person's working style and changes with the next person. Until
+    they are separable, a per-stage figure cannot honestly be called a stage
+    cost -- which is why this is recorded rather than estimated.
+
+    Deliberately caller-declared, not inferred. The orchestrator is the only
+    party that knows when it asked for work: the dispatch crosses a session
+    boundary the DAO cannot observe, and a subagent's tool calls arrive in a
+    process this one never forked. `--agent-reported-s` carries what the
+    harness says the agent itself took, so the round trip is
+    `duration_s - agent_reported_s` and stays visible instead of being folded
+    into a single opaque number.
+
+    A dispatch that is never recorded leaves the residual exactly as it is
+    today: reported, unexplained, and honestly labelled. Missing data is not
+    fabricated from marker times.
+
+    The token flags answer the question the duration cannot. Measured on
+    CASE_022, tool time is a rounding error inside an agent stage
+    (claim_analysis: 1.20s of tools against 773.0s of wall, 0.15%) while wall
+    time tracks token volume closely (denial_response 158,349 tokens / 483.9s,
+    claim_analysis 213,857 / 773.0s -- 327 and 277 tok/s). Recording the counts
+    turns that from an observation someone made once into a figure every run
+    carries. They are harness-reported like `--agent-reported-s`: this process
+    never sees the model's context, so it records what it is told and does not
+    derive tokens from anything.
+    """
+    if args.duration_s < 0:
+        print("REFUSED: --duration-s cannot be negative")
+        return 1
+    for flag, value in (("--input-tokens", args.input_tokens),
+                        ("--output-tokens", args.output_tokens),
+                        ("--total-tokens", args.total_tokens),
+                        ("--tool-uses", args.tool_uses)):
+        if value is not None and value < 0:
+            print(f"REFUSED: {flag} cannot be negative")
+            return 1
+    if (args.total_tokens is not None and args.input_tokens is not None
+            and args.output_tokens is not None
+            and args.total_tokens < args.input_tokens + args.output_tokens):
+        # A total below its own parts is a transcription slip, and it would
+        # read as a measurement. The reverse is allowed: a harness total may
+        # legitimately include cache-read or cache-creation tokens that neither
+        # named component covers.
+        print(f"REFUSED: --total-tokens ({args.total_tokens}) is below "
+              f"--input-tokens + --output-tokens "
+              f"({args.input_tokens + args.output_tokens})")
+        return 1
+    if args.human_wait_s is not None:
+        if args.human_wait_s < 0:
+            print("REFUSED: --human-wait-s cannot be negative")
+            return 1
+        if args.human_wait_s > args.duration_s:
+            print(f"REFUSED: --human-wait-s ({args.human_wait_s}) exceeds "
+                  f"--duration-s ({args.duration_s}) -- the wait cannot outlast "
+                  "the dispatch that contains it")
+            return 1
+    if args.agent_reported_s is not None:
+        if args.agent_reported_s < 0:
+            print("REFUSED: --agent-reported-s cannot be negative")
+            return 1
+        if args.agent_reported_s > args.duration_s:
+            # The agent cannot have run longer than the dispatch that contains
+            # it. Accepting this would produce a negative round trip, which
+            # reads as a measurement rather than the mistake it is.
+            print(f"REFUSED: --agent-reported-s ({args.agent_reported_s}) exceeds "
+                  f"--duration-s ({args.duration_s}) -- the agent cannot outlast "
+                  "the dispatch that contains it")
+            return 1
+    try:
+        datetime.fromisoformat(args.started_at)
+    except ValueError:
+        print(f"REFUSED: --started-at is not an ISO-8601 timestamp: {args.started_at!r}")
+        return 1
+
+    trace_mod.configure(args.case_id, args.run_id, root=OUTPUTS)
+    if not trace_mod.enabled():
+        print("NOTE: tracing is off (HARNESS_TRACE=0) -- nothing recorded")
+        return 0
+
+    attrs = {"stage_name": args.stage}
+    if args.agent_kind:
+        attrs["agent_kind"] = args.agent_kind
+    if args.agent_reported_s is not None:
+        attrs["agent_reported_s"] = args.agent_reported_s
+    if args.attempt is not None:
+        attrs["attempt"] = args.attempt
+    for key, value in (("input_tokens", args.input_tokens),
+                       ("output_tokens", args.output_tokens),
+                       ("total_tokens", args.total_tokens),
+                       ("tool_uses", args.tool_uses)):
+        if value is not None:
+            attrs[key] = value
+
+    if args.human_wait_s:
+        attrs["human_wait_s"] = args.human_wait_s
+
+    span_id = trace_mod.closed_interval(
+        "dispatch.subagent", category="dispatch",
+        t_start_wall=args.started_at, duration_s=args.duration_s,
+        case_id=args.case_id,
+        status="ok" if args.outcome == "completed" else "error",
+        **attrs)
+    if span_id is None:
+        print("NOTE: tracing produced no span -- nothing recorded")
+        return 0
+    if args.human_wait_s:
+        # A real human_wait span, so the SLA subtraction that already exists
+        # applies to a permission prompt exactly as it does to a gate. Anchored
+        # to the dispatch start rather than the prompt's real moment, which the
+        # orchestrator does not observe: the DURATION is what gets subtracted,
+        # and placing it inside the dispatch window is what makes that correct.
+        trace_mod.closed_interval(
+            "dispatch.human_wait", category="human_wait",
+            t_start_wall=args.started_at, duration_s=args.human_wait_s,
+            case_id=args.case_id, gate_kind="dispatch_permission",
+            waited_s=args.human_wait_s)
+
+    round_trip = (args.duration_s - args.agent_reported_s
+                  if args.agent_reported_s is not None else None)
+    # Every derived figure is computed on WORK time. A permission prompt is not
+    # model work, and dividing tokens by a wall that contains one understates
+    # the rate by however long the operator took to answer -- measured at 506s
+    # of 862s on CASE_027's denial_response, which reported 170 tok/s for a
+    # stage that actually ran at ~411.
+    work_s = max(args.duration_s - (args.human_wait_s or 0.0), 0.0)
+    parts = [f"{args.duration_s:.1f}s"]
+    if args.human_wait_s:
+        parts.append(f"{args.human_wait_s:.1f}s human wait -> {work_s:.1f}s work")
+    if round_trip is not None:
+        parts.append(f"round trip {round_trip:.1f}s")
+    if args.total_tokens is not None:
+        rate = (args.total_tokens / work_s) if work_s > 0 else None
+        parts.append(f"{args.total_tokens} tokens"
+                     + (f", {rate:.0f} tok/s" if rate is not None else ""))
+    print(f"OK: recorded dispatch for {args.stage} ({', '.join(parts)})")
+    if args.total_tokens is None:
+        # Said once, at the point where it can still be supplied. The counts
+        # are the only recorded figure that explains an agent stage's wall
+        # time; a dispatch without them records the interval and leaves its
+        # cost as unexplained as before.
+        print("NOTE: no --total-tokens given -- this dispatch's wall time will "
+              "have no token figure to explain it", file=sys.stderr)
+    return 0
+
+
 def cmd_aggregate_trace(args):
     """Roll the run's span shards up into _timing_summary.json.
 
@@ -10893,6 +11458,70 @@ def cmd_read_timing_summary(args):
     return 0
 
 
+DOCUMENT_INDEX_FILENAME = "_document_index.json"
+
+
+@trace_mod.traced("dao.build_document_index", category="compute")
+def cmd_build_document_index(args):
+    """Regenerate the derived policy navigation index.
+
+    Deliberately not a `write_contract` write. The index owes nothing: it is
+    recomputable from processed text plus the registered PDF, no stage
+    consumes it as a precondition, and no gate reads it. Routing it through
+    the contract machinery would attach a schema obligation and a finalize
+    dependency to an artifact whose entire value is that it has neither --
+    which is the shape clause normalization died of (retired 2026-08-15): a
+    gate on an artifact nothing could produce, bypassed rather than met.
+
+    It still writes under the lock and through `_require_within`, because
+    those protect the CASE DIRECTORY, not the contract semantics.
+    """
+    manifest = read_contract_data(args.case_id, "document_manifest.json")
+    if manifest is None:
+        print("BLOCKED: document_manifest.json does not exist")
+        return 1
+    index = document_index.build_index(
+        args.case_id, manifest,
+        raw_pdf_for=lambda doc_id: _raw_source_path(args.case_id, doc_id))
+    target = _require_within(case_dir(args.case_id), DOCUMENT_INDEX_FILENAME)
+    existing = acquire_lock_blocking(
+        target, args.held_by, args.run_id, "build document index")
+    if existing is not None:
+        print(f"LOCKED: held_by={existing['held_by']}")
+        return 1
+    try:
+        atomic_write_json(target, index)
+    finally:
+        release_lock(target)
+    clauses = sum(len(d["clauses"]) for d in index["documents"])
+    tables = sum(len(d["tables"]) for d in index["documents"])
+    print(f"OK: {target}")
+    print(f"  {len(index['documents'])} document(s), {clauses} article(s) "
+          f"under 'clauses', {tables} table(s) under 'tables'")
+    return 0
+
+
+@traced_read("dao.read_document_index")
+def cmd_read_document_index(args):
+    """Read the derived index.
+
+    Traced for a reason beyond cost accounting: whether an agent consults the
+    index at all is the question the index's existence turns on, and an
+    untraced read makes that unanswerable. On CASE_022's denial_response run
+    this command carried no decorator, so its 44 spans showed 16
+    `search-document-text` calls and no index read -- which is consistent
+    both with the agent ignoring the index and with the agent reading it
+    invisibly. Nothing on disk could distinguish those.
+    """
+    p = _require_within(case_dir(args.case_id), DOCUMENT_INDEX_FILENAME)
+    if not p.exists():
+        print(f"NOT_FOUND: {p} -- run `dao.py build-document-index` "
+              "(the index is derived; its absence blocks nothing)")
+        return 1
+    print(p.read_text(encoding="utf-8"))
+    return 0
+
+
 # ------------------------------------------------------------------- main --
 
 def build_parser():
@@ -10911,6 +11540,16 @@ def build_parser():
     p.add_argument("case_id")
     p.add_argument("--doc-id", required=True, action="append",
                    help="active processed document to include; repeat for each document")
+    p.add_argument("--pages", action="append", metavar="DOC_ID=PAGES",
+                   help="Return only these pages of one document, e.g. "
+                        "--pages DOC_010=11,35-36,38. Repeat per document; a "
+                        "document with no --pages is returned whole. Use it "
+                        "for a long policy once search-document-text or "
+                        "read-document-index has told you which pages matter: "
+                        "on CASE_027 the two policy bundles were 81% of the "
+                        "stage's input and five pages of them were cited. The "
+                        "revision hash still covers the FULL document, so a "
+                        "narrowed read verifies exactly like a whole one.")
     p.add_argument("--run-id", help="Optional trace attribution for this read.")
     p.set_defaults(fn=cmd_read_redacted_text_bundle)
 
@@ -11026,6 +11665,13 @@ def build_parser():
     p.add_argument("--reviewer", required=True); p.add_argument("--note")
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_set_segmentation_status)
+
+    p = sub.add_parser("declare-no-policy-documents")
+    p.add_argument("case_id")
+    p.add_argument("--reviewer", required=True)
+    p.add_argument("--note", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_declare_no_policy_documents)
 
     p = sub.add_parser("write-contract")
     p.add_argument("case_id"); p.add_argument("filename")
@@ -11477,10 +12123,67 @@ def build_parser():
                         "numbers are SLA-judgable.")
     p.set_defaults(fn=cmd_aggregate_trace)
 
+    p = sub.add_parser("record-dispatch",
+                       help="Record one closed subagent-dispatch interval, so a "
+                            "stage's residual separates round-trip cost from "
+                            "operator-side work.")
+    p.add_argument("case_id")
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--stage", required=True,
+                   help="the stage this dispatch belongs to")
+    p.add_argument("--started-at", required=True,
+                   help="ISO-8601 wall time the dispatch was issued")
+    p.add_argument("--duration-s", type=float, required=True,
+                   help="whole dispatch, from asking for the work to holding "
+                        "its result")
+    p.add_argument("--agent-reported-s", type=float, default=None,
+                   help="what the harness says the subagent itself took; the "
+                        "difference from --duration-s is the round trip")
+    p.add_argument("--agent-kind", default=None,
+                   help="which agent identity was dispatched")
+    p.add_argument("--attempt", type=int, default=None)
+    p.add_argument("--input-tokens", dest="input_tokens", type=int, default=None,
+                   help="harness-reported input tokens for this dispatch")
+    p.add_argument("--output-tokens", dest="output_tokens", type=int, default=None,
+                   help="harness-reported output tokens for this dispatch")
+    p.add_argument("--total-tokens", dest="total_tokens", type=int, default=None,
+                   help="harness-reported total tokens. The figure that "
+                        "explains an agent stage's wall time: tool time is "
+                        "~0.15-1.9%% of it, token volume tracks it closely.")
+    p.add_argument("--tool-uses", dest="tool_uses", type=int, default=None,
+                   help="harness-reported tool-call count for this dispatch")
+    p.add_argument("--human-wait-s", dest="human_wait_s", type=float, default=None,
+                   help="seconds the dispatch spent blocked on a human -- a "
+                        "permission prompt, a gate answer. Subtracted before "
+                        "any rate is computed, and emitted as a human_wait "
+                        "span so the SLA's existing subtraction applies.")
+    p.add_argument("--outcome", default="completed",
+                   choices=["completed", "failed", "interrupted"])
+    p.set_defaults(fn=cmd_record_dispatch)
+
     p = sub.add_parser("read-timing-summary",
                        help="Read _timing_summary.json (read-contract's symmetric reader).")
     p.add_argument("case_id")
     p.set_defaults(fn=cmd_read_timing_summary)
+
+    p = sub.add_parser("build-document-index",
+                       help="Regenerate _document_index.json: policy articles "
+                            "under 'clauses' ({page, policy_name, article, "
+                            "heading}) and recovered table structure under "
+                            "'tables'. Derived and advisory -- no stage "
+                            "requires it and its absence blocks nothing.")
+    p.add_argument("case_id")
+    p.add_argument("--held-by", required=True)
+    p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_build_document_index)
+
+    p = sub.add_parser("read-document-index",
+                       help="Read _document_index.json.")
+    p.add_argument("case_id")
+    p.add_argument("--run-id", default=None,
+                   help="records this read's cost into the run's trace; "
+                        "omitting it still works but records nothing")
+    p.set_defaults(fn=cmd_read_document_index)
 
     p = sub.add_parser("record-human-review")
     p.add_argument("case_id")

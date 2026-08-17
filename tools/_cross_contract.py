@@ -451,6 +451,232 @@ def _normalize_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text.replace(" ", " ")).strip()
 
 
+# A line wrap that falls BETWEEN two Hangul syllables is a rendering artifact,
+# not a word boundary: Korean does not hyphenate, so a PDF that breaks a line
+# mid-word leaves a newline inside `우측 손목` where the document says `우측 손목`.
+_HANGUL_WRAP_RE = re.compile("(?<=[가-힣])\n(?=[가-힣])")
+# Separator between the two readings a normalized page carries. Contains
+# characters `_normalize_ws` would have collapsed, so no real quote can span
+# the join and match across both copies.
+_WRAP_ALT_SEP = "\n<<WRAP_ALT>>\n"
+# A running page-number footer (`- 3 -`) printed AFTER the body text, on its
+# own line at the very end of a page. Stripped only when joining a page to its
+# successor, so a sentence broken by the page break can be read continuously;
+# never removed from a page examined on its own. Anchored to end-of-text so a
+# figure like "- 3 -" inside a table row is untouched.
+_PAGE_FOOTER_RE = re.compile(r"\n\s*-\s*\d+\s*-\s*$")
+
+
+def _heal_wraps(text: str) -> str:
+    """Remove line wraps that split a Korean word, leaving everything else.
+
+    Deliberately narrow. Only a newline directly between two Hangul syllables
+    is removed -- never a space, never a wrap next to punctuation, a digit, a
+    Latin letter or a box-drawing character. That is what keeps this a
+    rendering fix rather than a loosening of the fabrication check: an ASCII
+    table row assembled across box columns still contains those characters and
+    still fails, as does a quote whose spacing was altered.
+    """
+    return _HANGUL_WRAP_RE.sub("", text)
+
+
+def quote_matches_page(quote: str, page_text: str) -> bool:
+    """The citation gate: is `quote` verbatim on this page?
+
+    Whitespace-normalized substring containment, applied after healing Korean
+    mid-word line wraps on BOTH sides. The healing exists because the
+    normalization above collapses whitespace runs rather than removing them,
+    so a wrapped `관하/여` normalizes to `관하 여` and can never match the
+    `관하여` a reader (or a model) correctly quotes.
+
+    Measured 2026-08-16 on CASE_038: 311 of 367 processed pages (85%) contain
+    at least one such wrap, 1,374 in total, and DOC_006's accident-circumstance
+    sentence CANNOT be quoted without crossing one -- the driver's real
+    pipeline run failed there twice, after spending its P4 correction, on a
+    quote that is genuinely present in the source. Only 2 of those 367 pages
+    contain box-drawing tables, so this closes the dominant artifact while
+    leaving the rare one refused.
+
+    A wrap is accepted under BOTH readings -- as nothing (`요골
+과절` ->
+    `요골과절`) and as a space (`요골 과절`) -- because which one a correct
+    quote uses depends on whether the wrap fell inside a word or at a real
+    word boundary, and the page text alone cannot say. Healing only one way
+    REFUSED a citation the old rule accepted: a page reading `요골
+과절`
+    heals to `요골과절` while the quote legitimately writes `요골 과절`.
+    That regression was caught by an existing test, which is why the plain
+    comparison is tried first.
+
+    This WIDENS what the gate accepts, so it is written as one shared function
+    rather than repeated at each call site: a citation rule that differs
+    between the DAO and a driver is a rule nobody can reason about.
+    """
+    if _normalize_ws(quote) in _normalize_ws(page_text):
+        return True
+    return _normalize_ws(_heal_wraps(quote)) in _normalize_ws(_heal_wraps(page_text))
+
+
+def quote_in_normalized_page(quote: str, normalized_page: str) -> bool:
+    """`quote_matches_page` for callers holding a PRE-normalized page.
+
+    `normalized_page` must come from `normalize_page_for_quotes`, which keeps
+    both readings of a wrap; the quote is compared under both for the same
+    reason. Kept beside the pair so the three cannot drift apart.
+    """
+    return (_normalize_ws(quote) in normalized_page
+            or _normalize_ws(_heal_wraps(quote)) in normalized_page)
+
+
+def find_quote_pages(quote: str, pages_by_number, claimed_page) -> list:
+    """Pages (other than the claimed one) whose text contains `quote`.
+
+    The single search both `locate_quote_hint` and the page-number correction
+    are built on, so the message a model is shown and the fix the driver
+    applies can never disagree about where the text is.
+
+    `pages_by_number` MUST be the REDACTED layer -- see `locate_quote_hint`.
+    """
+    if not quote:
+        return []
+    return [number for number, text in sorted(pages_by_number.items())
+            if number != claimed_page and quote_matches_page(quote, text)]
+
+
+def resolve_cited_page(quote: str, pages_by_number, claimed_page):
+    """The page a citation unambiguously meant, or None to refuse.
+
+    Returns a page number ONLY when the quote appears on exactly one other
+    page. That is a deterministic correction in the same family as the
+    driver's id renumbering: the cited text exists, in one place, and the page
+    number is the only thing wrong with it.
+
+    Returns None -- meaning "refuse, let P4 handle it" -- in the two cases a
+    correction would have to guess or would hide a real defect:
+
+      * the quote appears on SEVERAL pages (`2023-12-05` is on all 7 pages of
+        CASE_038's DOC_019), where picking one would silently point the
+        evidence at a page the model may not have read; and
+      * the quote appears NOWHERE, which is the fabrication case -- CASE_038's
+        DOC_011 run quoted `골절상` where the source says `골절`, and inventing
+        a page for it would launder exactly what P1 exists to catch.
+
+    Callers must record every correction they apply; a silently rewritten
+    citation would erase the signal that the model cited the wrong page.
+    """
+    found = find_quote_pages(quote, pages_by_number, claimed_page)
+    return found[0] if len(found) == 1 else None
+
+
+def locate_quote_hint(quote: str, pages_by_number, claimed_page) -> str:
+    """Where the quote ACTUALLY is, as a suffix for a refusal message.
+
+    A refusal that says only "not present on page 1" tells the model the page
+    it chose was wrong but not which page is right, so P4's single correction
+    is spent guessing. Measured on CASE_038: the correction re-cited the same
+    row on page 1, then on page 6, while it sits on page 2 -- the model was
+    not being told the one thing it needed.
+
+    `pages_by_number` MUST be the REDACTED layer -- the same pages the model
+    was served. That is what every caller passes (the drivers build it from
+    `read-redacted-text-bundle`, and the DAO gate from the redacted bundle it
+    already digest-checks), and it is load-bearing rather than incidental: the
+    hint text goes into a prompt, so sourcing it from the pre-redaction layer
+    would leak masked PII into the correction call by way of an error message.
+    This function therefore searches only what it is handed and never reads a
+    page itself.
+
+    Everything here is read from the SAME served pages the model was given, so
+    this reveals nothing the run did not already hold (no ground truth, no
+    unserved document). Returns "" when the quote is nowhere, which is the
+    fabrication case and must not be softened into a hint.
+    """
+    if not quote:
+        return ""
+    found = find_quote_pages(quote, pages_by_number, claimed_page)
+    if not found:
+        return ""
+    if len(found) == 1:
+        return f" -- that text is on page {found[0]}, not {claimed_page}"
+    listed = ", ".join(str(number) for number in found[:5])
+    return f" -- that text appears on page(s) {listed}, not {claimed_page}"
+
+
+def _spans_normalized_pair(quote: str, normalized_pages, page) -> bool:
+    """Page-pair fallback for callers holding a normalized page map.
+
+    The map's entries are already whitespace-normalized (and carry both wrap
+    readings), so the raw text needed by `quote_spans_page_pair` is gone. The
+    same two rules still apply: a quote lying wholly on N+1 is refused as a
+    mis-numbered citation, and the pair is only consulted after N failed.
+    """
+    nxt = normalized_pages.get(page + 1) if hasattr(normalized_pages, "get") else None
+    if nxt is None:
+        return False
+    if quote_in_normalized_page(quote, nxt):
+        return False
+    joined = _PAGE_FOOTER_RE.sub("", normalized_pages[page].rstrip()).rstrip() + " " + nxt
+    return quote_in_normalized_page(quote, joined)
+
+
+def quote_spans_page_pair(quote: str, page_text: str,
+                          next_page_text: str | None) -> bool:
+    """Last resort: does `quote` sit across the N/N+1 page boundary?
+
+    Called ONLY when the quote already failed against page N alone (both
+    readings). A document's sentence can run past a page break -- CASE_038's
+    DOC_008 ends page 3 with `...보이므로, 피` and opens page 4 with
+    `보험자는 ...`, so `피보험자는` (which inverts the legal subject if
+    read as `보험자는`) exists in the document but on NO single page. 105 of
+    CASE_038's 350 page boundaries continue Hangul text across the break.
+
+    Deliberately not a sentence-completeness test. Whether page N "ends
+    mid-sentence" is unreliable here: running headers and footers sit after
+    the body text (`...보이므로, 피
+
+- 3 -
+`), and form/table pages do
+    not end in punctuation at all. Trying only after a real failure needs no
+    such judgment.
+
+    The final clause is what keeps this from weakening the gate: a quote that
+    fits entirely inside page N+1 is REFUSED, because that is a
+    wrong-page-number citation, not a spanning one -- the live example being a
+    CASE_038 run citing DOC_019's N1611 row on page 1 when it is on page 2.
+    """
+    if next_page_text is None:
+        return False
+    if quote_matches_page(quote, next_page_text):
+        return False  # wholly on N+1: a mis-numbered citation, not a span
+    # Join with exactly one newline and no surrounding blank lines, so a word
+    # split by the page break (`...지무하지` / `않는다`) presents to
+    # `_heal_wraps` as the single Hangul-newline-Hangul it heals. A blank line
+    # between the halves would leave `피\\n\\n보험자는`, which is not that
+    # pattern and would silently defeat the whole function.
+    head = _PAGE_FOOTER_RE.sub("", page_text.rstrip()).rstrip()
+    joined = head + "\n" + next_page_text.lstrip()
+    return quote_matches_page(quote, joined)
+
+
+def normalize_page_for_quotes(text: str) -> str:
+    """The page side of `quote_matches_page`, for callers that pre-build a
+    {page: normalized_text} map. Kept beside it so the two halves of one rule
+    cannot drift: a caller that healed the quote but not the page would refuse
+    exactly the citations this exists to accept.
+
+    Carries BOTH readings of every wrap, joined, so a quote written either way
+    is found. Concatenation is safe here because the test is containment, not
+    equality, and the separator prevents a match spanning the two copies."""
+    plain = _normalize_ws(text)
+    healed = _normalize_ws(_heal_wraps(text))
+    return plain if plain == healed else plain + _WRAP_ALT_SEP + healed
+
+
+def normalize_quote_for_pages(quote: str) -> str:
+    """The quote side of the same rule."""
+    return _normalize_ws(_heal_wraps(quote))
+
+
 def split_pages(redacted_text: str) -> dict[int, str]:
     """Return {page_number: page_text} split on the <<<PAGE page=N>>> markers.
 
@@ -813,7 +1039,7 @@ def check_normalized_policy_clause(
 
     # Raises SourceUnavailable if boundaries can't be trusted -- deliberate.
     pages = split_pages(redacted_text)
-    normalized_pages = {n: _normalize_ws(t) for n, t in pages.items()}
+    normalized_pages = {n: normalize_page_for_quotes(t) for n, t in pages.items()}
 
     for i, clause in enumerate(clauses):
         for label, ref in _iter_all_references(clause):
@@ -848,7 +1074,7 @@ def check_normalized_policy_clause(
                     f"{target_doc} (pages present: {sorted(normalized_pages)})"
                 )
                 continue
-            if _normalize_ws(quote) not in normalized_pages[page]:
+            if not quote_in_normalized_page(quote, normalized_pages[page])                     and not _spans_normalized_pair(quote, normalized_pages, page):
                 errors.append(
                     f"{loc}: quote not found on page {page} of the processed text -- "
                     "the cited quote does not appear verbatim on the page it claims "
@@ -874,7 +1100,7 @@ def check_reference_table(
         raise SourceUnavailable(
             f"no processed/redacted text found for {target_doc or filename}")
     pages = split_pages(redacted_text)
-    normalized_pages = {number: _normalize_ws(text)
+    normalized_pages = {number: normalize_page_for_quotes(text)
                         for number, text in pages.items()}
 
     seen_table_uids: set[str] = set()
@@ -947,11 +1173,11 @@ def check_reference_table(
                 errors.append(
                     f"{loc}: page {page!r} does not exist in processed source")
                 continue
-            normalized_quote = _normalize_ws(quote)
-            if normalized_quote not in normalized_pages[page]:
+            if not quote_in_normalized_page(quote, normalized_pages[page]):
                 errors.append(
                     f"{loc}: quote not found on page {page} of processed source")
                 continue
+            normalized_quote = _normalize_ws(quote)
             if _normalize_ws(value) not in normalized_quote:
                 errors.append(
                     f"{loc}: cited quote does not contain the table title/cell "
@@ -1487,7 +1713,7 @@ def _policy_match_source_errors(label, doc_id, match, redacted_text_for):
         pages = split_pages(redacted_text)
     except SourceUnavailable as exc:
         return [f"{label}: {exc}"]
-    normalized_pages = {n: _normalize_ws(t) for n, t in pages.items()}
+    normalized_pages = {n: normalize_page_for_quotes(t) for n, t in pages.items()}
     for ref in refs:
         errors.extend(
             f"{label}: {error}" for error in
@@ -1512,10 +1738,13 @@ def _location_errors(doc_id, page, quote, normalized_pages, what):
     if page not in normalized_pages:
         return [f"page {page} does not exist in the processed text for "
                 f"{doc_id} (pages present: {sorted(normalized_pages)})"]
-    if _normalize_ws(quote) not in normalized_pages[page]:
-        return [f"quote not found on page {page} of {doc_id}'s processed text "
-                "-- the cited quote does not appear verbatim on the page it "
-                f"claims (quote={quote[:60]!r}...)"]
+    if not quote_in_normalized_page(quote, normalized_pages[page]):
+        # Only after page N fails on its own; refuses a quote lying wholly on
+        # N+1, so a mis-numbered citation is still an error.
+        if not _spans_normalized_pair(quote, normalized_pages, page):
+            return [f"quote not found on page {page} of {doc_id}'s processed text "
+                    "-- the cited quote does not appear verbatim on the page it "
+                    f"claims (quote={quote[:60]!r}...)"]
     return []
 
 
@@ -1548,7 +1777,7 @@ def source_addressed_ref_errors(ref, redacted_text_for) -> list[str]:
         pages = split_pages(redacted_text)
     except SourceUnavailable as exc:
         return [str(exc)]
-    normalized_pages = {n: _normalize_ws(t) for n, t in pages.items()}
+    normalized_pages = {n: normalize_page_for_quotes(t) for n, t in pages.items()}
     return _location_errors(doc_id, ref.get("page"), ref.get("quote"),
                             normalized_pages, "the reference")
 

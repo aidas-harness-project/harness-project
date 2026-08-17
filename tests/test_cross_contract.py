@@ -1555,3 +1555,168 @@ def test_a_report_predating_the_acceptance_field_is_not_retro_failed(
     assert check("screening_report.json",
                  _derived(split_outcome_case, legacy),
                  split_outcome_case) == []
+
+
+# --- Korean mid-word line wraps in citations (2026-08-16) -------------------
+
+def test_quote_matches_page_heals_korean_midword_line_wraps():
+    """A line wrap between two Hangul syllables is a rendering artifact.
+
+    `_normalize_ws` collapses whitespace runs rather than removing them, so a
+    source reading `우\n측 손목` normalizes to `우 측 손목` and can never match
+    the `우측 손목` a correct quote contains. Measured on CASE_038: 311 of 367
+    processed pages carry at least one such wrap (1,374 total), and DOC_006's
+    accident-circumstance sentence cannot be quoted without crossing one --
+    two real driver runs died there after spending the P4 correction, on
+    quotes genuinely present in the source.
+    """
+    page = "보행하던 중 미끄러져 넘어져 우\n측 손목 요골 원위부 골절상을 당한 사고"
+    assert _cross_contract.quote_matches_page("우측 손목 요골 원위부 골절상", page)
+    assert _cross_contract.quote_matches_page(
+        "넘어져 우측 손목 요골 원위부 골절상을 당한 사고", page)
+
+
+def test_quote_healing_does_not_weaken_the_fabrication_check():
+    """The healing is narrow ON PURPOSE, and each assertion here fails if it
+    is widened to plain whitespace removal -- the alternative considered and
+    rejected on 2026-08-16."""
+    page = "보험자는 책임이 없다.\n피보험자는 책임이 있다."
+
+    # Content that is simply not there.
+    assert not _cross_contract.quote_matches_page("피해자는 음주 상태였다", page)
+
+    # Spacing altered inside a word: plain whitespace-stripping would accept
+    # this, healing must not.
+    assert not _cross_contract.quote_matches_page("보험 자는책임이없다", page)
+
+    # A wrap next to punctuation is not a mid-word wrap, so the two sentences
+    # do not fuse into a quotable span.
+    assert not _cross_contract.quote_matches_page("없다.피보험자는", page)
+
+
+def test_quote_healing_still_refuses_ascii_table_row_reconstruction():
+    """The dominant REAL citation defect measured this session: a row
+    assembled across box-drawing columns, which exists nowhere contiguously.
+    Only 2 of CASE_038's 367 pages contain such tables, so healing the wraps
+    must leave this refused rather than trading one artifact for a hole."""
+    page = ("│ 2023-12-05 │ N1611 │ 사지골절정복술 │\n"
+            "│ 2023-12-05 │ HE117006 │ 자기공명영상 │")
+    assert not _cross_contract.quote_matches_page(
+        "2023-12-05 | N1611 | 사지골절정복술", page)
+    # The part that IS contiguous on one line still verifies.
+    assert _cross_contract.quote_matches_page("사지골절정복술", page)
+
+
+def test_heal_wraps_leaves_non_hangul_boundaries_alone():
+    """Only Hangul-to-Hangul. A wrap between digits, Latin letters, or across
+    punctuation is a real line boundary in this corpus and stays."""
+    assert _cross_contract._heal_wraps("가\n나") == "가나"
+    assert _cross_contract._heal_wraps("12\n34") == "12\n34"
+    assert _cross_contract._heal_wraps("ab\ncd") == "ab\ncd"
+    assert _cross_contract._heal_wraps("가 \n 나") == "가 \n 나"
+    assert _cross_contract._heal_wraps("가.\n나") == "가.\n나"
+
+
+# --- quotes that span a page boundary (2026-08-16) --------------------------
+
+_SPAN_P3 = "하자가 있더라도 무관한 것으로 보이므로, 피\n\n- 3 -\n"
+_SPAN_P4 = "보험자는 이 사건 피해자에 대하여 배상책임을 부담하지 않는다고 판단됩니다."
+
+
+def test_quote_spanning_a_page_boundary_is_accepted():
+    """CASE_038's DOC_008 ends page 3 with `...보이므로, 피` and opens page 4
+    with `보험자는 ...`, so `피보험자는` -- which inverts the legal subject if
+    misread as `보험자는` -- exists in the document but on NO single page.
+    105 of that case's 350 page boundaries continue Hangul across the break.
+    """
+    assert _cross_contract.quote_spans_page_pair(
+        "피보험자는 이 사건 피해자에 대하여 배상책임을 부담하지 않는다고 판단됩니다.",
+        _SPAN_P3, _SPAN_P4)
+    # The joined word itself, which exists on neither page alone.
+    assert _cross_contract.quote_spans_page_pair("피보험자는", _SPAN_P3, _SPAN_P4)
+    assert not _cross_contract.quote_matches_page("피보험자는", _SPAN_P3)
+    assert not _cross_contract.quote_matches_page("피보험자는", _SPAN_P4)
+
+
+def test_page_pair_refuses_a_quote_lying_wholly_on_the_next_page():
+    """The clause that keeps the fallback from becoming 'page numbers may be
+    off by one'. A CASE_038 run cited DOC_019's N1611 row on page 1 when it
+    is on page 2 -- a real model error that must stay refused."""
+    assert not _cross_contract.quote_spans_page_pair(
+        "보험자는 이 사건 피해자에 대하여", _SPAN_P3, _SPAN_P4)
+    assert not _cross_contract.quote_spans_page_pair(
+        "배상책임을 부담하지 않는다고 판단됩니다.", _SPAN_P3, _SPAN_P4)
+
+
+def test_page_pair_refuses_absent_content_and_the_last_page():
+    assert not _cross_contract.quote_spans_page_pair(
+        "피해자는 음주 상태였다", _SPAN_P3, _SPAN_P4)
+    # No successor page: nothing to join, so nothing to accept.
+    assert not _cross_contract.quote_spans_page_pair("피보험자는", _SPAN_P3, None)
+
+
+def test_page_footer_is_stripped_only_at_the_join():
+    """A running `- 3 -` printed after the body would otherwise sit between
+    the two halves and prevent the sentence from reading continuously. It is
+    removed only when joining, never from a page examined on its own."""
+    assert _cross_contract._PAGE_FOOTER_RE.search(_SPAN_P3)
+    # The footer is still part of the page's own text.
+    assert _cross_contract.quote_matches_page("- 3 -", _SPAN_P3)
+    # A number inside a line is not a footer.
+    assert not _cross_contract._PAGE_FOOTER_RE.search("금액 - 3 - 원 합계")
+
+
+def test_locate_quote_hint_names_the_real_page_and_stays_silent_on_fabrication():
+    """A refusal saying only "not on page 1" spends P4's single correction on
+    a guess. Measured on CASE_038: the correction re-cited the same row on
+    page 1, then page 6, while it sits on page 2."""
+    pages = {1: "진찰료 초진료 18,520", 2: "사지골절정복술 582,738", 3: "합계"}
+    assert " -- that text is on page 2, not 1" == _cross_contract.locate_quote_hint(
+        "사지골절정복술", pages, 1)
+    # Nowhere in the served pages: the fabrication case, which must NOT be
+    # softened into a hint.
+    assert _cross_contract.locate_quote_hint("음주 상태였다", pages, 1) == ""
+    # Present on the claimed page: nothing to say.
+    assert _cross_contract.locate_quote_hint("초진료", pages, 1) == ""
+
+
+def test_locate_quote_hint_only_searches_the_pages_it_is_handed():
+    """The hint is embedded in a correction PROMPT, so it must never reach for
+    a page of its own -- passing the redacted layer is what keeps masked PII
+    out of the next model call. The function takes a mapping and reads nothing
+    else; this pins that it finds nothing outside it."""
+    assert _cross_contract.locate_quote_hint("환자성명 홍길동", {1: "환자성명"}, 1) == ""
+
+
+def test_resolve_cited_page_corrects_only_an_unambiguous_page_number():
+    """A quote on exactly one other page is a knowably-wrong page number:
+    the text exists, in one place, and only the number is wrong. Correcting
+    it deterministically saves a ~90s P4 round."""
+    pages = {1: "진찰료 초진료 18,520", 2: "사지골절정복술 582,738", 3: "합계"}
+    assert _cross_contract.resolve_cited_page("사지골절정복술", pages, 1) == 2
+
+
+def test_resolve_cited_page_refuses_when_it_would_have_to_guess():
+    """The two cases a correction must NOT make.
+
+    Several candidates: `2023-12-05` sits on all 7 pages of CASE_038's
+    DOC_019, so picking one would point the evidence at a page the model may
+    never have read. Nowhere at all: the fabrication case -- a run quoted
+    `골절상` where the source says `골절`, and inventing a page for it would
+    launder precisely what P1 exists to catch.
+    """
+    multi = {1: "수술 2023-12-05", 2: "검사 2023-12-05", 3: "합계"}
+    assert _cross_contract.resolve_cited_page("2023-12-05", multi, 3) is None
+    assert _cross_contract.resolve_cited_page("음주 상태였다", multi, 1) is None
+    # Already on the claimed page: nothing to correct.
+    assert _cross_contract.resolve_cited_page("수술", multi, 1) is None
+
+
+def test_page_correction_and_hint_agree_about_where_the_text_is():
+    """Both are built on one search, so the message a model is shown and the
+    fix the driver applies can never disagree."""
+    pages = {1: "진찰료", 2: "사지골절정복술", 3: "합계"}
+    assert _cross_contract.find_quote_pages("사지골절정복술", pages, 1) == [2]
+    assert _cross_contract.resolve_cited_page("사지골절정복술", pages, 1) == 2
+    assert " -- that text is on page 2, not 1" == _cross_contract.locate_quote_hint(
+        "사지골절정복술", pages, 1)

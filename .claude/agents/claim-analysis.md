@@ -12,6 +12,32 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. M
 
 **Canonical stage name: `claim_analysis`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.3) rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic.
 
+# Tool-call budget — a turn costs ~10s regardless of payload
+
+Measured on the CASE_027/CASE_028 A/B (2026-08-16): this stage's wall time is
+its TURN count times a near-constant ~10s (692s over 70 tool uses; 818s over
+83), and narrowing read payloads while adding calls made the stage *slower*
+(+126s ≈ 13 extra turns × ~10s). Tool execution itself is a rounding error
+(1.9s of 692s). So batch aggressively:
+
+- **One grouped read for the short documents.** `read-redacted-text-bundle`
+  takes repeated `--doc-id` flags — read every in-scope non-policy document
+  (진단서, 의무기록, 영수증, 보험사 회신, 기타) in a SINGLE call at the start of
+  checkpoint 1, not one call per document.
+- **One narrowed read per policy document.** After the index/search names the
+  pages, collect them into a single `--pages DOC_X=...` list and read once.
+  Five separate narrowed reads of one document cost five turns for the same
+  characters.
+- **Never re-read a document you already hold.** CASE_027 read DOC_010 whole
+  four times; each repeat re-paid the turn and re-paid the payload.
+- Plan lookups (`search-document-text`, `read-document-index`) before reading,
+  so the read list is settled once.
+
+This changes how many calls you make, never what you read or verify: quote
+verification, P1 evidence discipline, and the checkpoint contracts are
+unchanged. When narrowing risks missing the governing clause, widen the range
+or take the document whole — in the same single call.
+
 # Internal checkpoints
 
 **Checkpoint 1 — Claim Field Extraction.** Diagnosis/medical-record text (already redacted, chunked, cross-validated at the document-pipeline stage — do not re-cross-validate here, that text is trusted) → structured fields (diagnosis_name, kcd_code, accident_date, hospital_name, treatment_period, etc.). Every field: `evidence_references`, `confidence`, `review_required`, `reviewer_role`. Schema v0.2 also has named slots for `imaging_date`, `diagnosis_date`, `claim_received_date`, `policy_contract_date`, `claim_item`, `disposition`, `insurers`, and ad-hoc extras in any of the three fixed shapes validate correctly (anyOf) — use typed fields for facts you extract; `warnings` is for actual warnings, not a spillover for facts that lack a slot (CASE_021's run had to smuggle 6 real facts through `warnings` before v0.2).
@@ -21,6 +47,78 @@ After checkpoint 1, derive the evidence-grounded medical-variable content only f
 **Primary-diagnosis-code selection rule**: when documents disagree on the headline diagnosis/KCD code, the primary (headline) code follows whichever document actually drives the case's damage/loss calculation — for a disability case (case_type includes permanent-disability issues), that's the disability diagnosis document; for a diagnosis/surgery-cost case, it's the acute-phase primary diagnosis document. This is a document-character-based priority rule, not memorized answers for specific cases. Never assert one silently — record both, mark the non-primary one secondary, and keep the disagreement visible via `inconsistencies`/`review_required`. This is a labeling decision, not a P6 deletion — the secondary value is never dropped.
 
 **Checkpoint 2 — Coverage Identification.** Policy text (from `policy-pipeline`) + claim fields → `coverage_result.json` — an array under `coverages`, since a claim can trigger more than one coverage at once. Per coverage: `coverage_name` + `standardized_coverage_name`, `applicable` (whether its conditions are actually met by the claim's facts, not just whether the claim mentions it), `matched_clause_ref`, confidence + evidence.
+
+**Start from the document index, not from a chunk scan.** Run
+`python tools/dao.py read-document-index CASE_ID --run-id RUN_ID` first. It
+lists every article in the case's policy documents with the page it sits on
+and the 약관 that owns it, plus any table whose row/column structure was
+recovered from the PDF. A 323-page policy bundle yields ~564 articles, so
+locating 제38조 of the 구내치료비 추가특별약관 is a lookup rather than a
+search.
+
+The shape, because guessing at it wastes a round trip — on CASE_022 an agent
+looked for a `headings` array, found none, and nearly concluded the index was
+empty:
+
+```json
+{"documents": [{"document_id": "DOC_010",
+  "clauses": [{"page": 38, "policy_name": "구내치료비 추가특별약관",
+               "article": "제1조", "heading": "보상하는 손해"}],
+  "tables":  [{"page": 13, "rows": 5, "cols": 2,
+               "header": ["기 간", "지 급 이 자"], "cells": [[...]]}]}]}
+```
+
+`clauses` is the array; `heading` is one field inside an entry, holding the
+parenthesised article title.
+
+Three things it does NOT do, and treating it otherwise will produce wrong
+work:
+
+- **It is candidates, not verdicts** — the same contract `search-document-text`
+  carries. It says 제38조 is on page 38. Whether that clause governs this
+  accident is your judgement, made by reading the page.
+- **It never substitutes for reading the clause.** A `matched_clause_ref`
+  quote must still be verified verbatim against the processed text; the DAO
+  refuses one that is not. Citing a heading you found in the index without
+  opening the page is exactly the fabrication P1 exists to prevent.
+
+**Read a policy by the page once you know which pages.** The index and
+`search-document-text` both report page numbers; turn them into a narrow read:
+
+```text
+python tools/dao.py read-redacted-text-bundle CASE_ID \
+  --doc-id DOC_010 --pages DOC_010=11,35-36,38-39 --run-id RUN_ID
+```
+
+A document with no `--pages` still comes back whole, so narrow the long policy
+bundles and take short documents (진단서, 의무기록, 영수증, 보험사 회신) entire —
+they are small and you do not yet know which lines matter. `read-page-text`
+serves the PRE-redaction layer and is refused here; this flag is the redacted
+page-level read.
+
+This matters more than it looks. On CASE_027 the two policy bundles were
+222,084 of `claim_analysis`'s 272,655 characters of input — 81% — and the four
+checkpoint contracts cited **five pages of DOC_010 and none of DOC_009**.
+Narrowing DOC_010 to its cited pages is 121,002 characters down to 4,911, and
+an agent stage's wall time is essentially its token volume: tool time was 1.92s
+of 692s. The `redacted_text_sha256` still covers the FULL document, so a quote
+taken from a narrowed read verifies exactly as it would from a whole one, and
+`pages_omitted` tells you a read was narrowed.
+
+Narrow only after a lookup names the pages. Guessing a page range and missing
+the governing clause is a wrong analysis, which costs far more than the tokens
+it saves — when in doubt widen the range or read the document whole.
+- **It is derived and may be absent or stale.** No stage requires it and
+  nothing blocks on it. `NOT_FOUND` means fall back to
+  `search-document-text` and the chunks, not that the case has no clauses.
+
+Its tables matter for a reason worth knowing: a born-digital policy's
+embedded-text extraction flattens a table into a run of lines, so DOC_010
+p13's 지연이자율표 reaches you as `기 간 / 지 급 이 자 / 지급기일의 다음 날부터
+30일 이내 기간 / 보험계약대출이율 / ...` and which rate belongs to which
+period becomes positional guesswork. The index carries the rows intact. When
+a table's structure is load-bearing for a coverage or an amount, read it from
+the index and cite the page.
 
 **`matched_clause_ref` has two addressing forms; which one you use is decided by the document, not by preference.** Normalization is opt-in, so most policy documents have no clause contract:
 
@@ -65,16 +163,53 @@ This publication structures evidence; it does not make a clinical inference, cho
 
 **Checkpoint 4 — Requirement Matching.** Coverage + normalized policy clauses + claim fields → `requirement_matching_result.json`, grouped per coverage (`coverage_requirements: [{standardized_coverage_name, requirements: [...]}]`, joining on checkpoint 2's coverage names). Each requirement references the exact source condition with `{document_id, clause_uid, condition_uid, display_clause_id?}`; the immutable UIDs are mandatory and the display label is never a join key. Each requirement's `status` is `met` / `not_met` / `uncertain` — `met`/`not_met` must cite at least one evidence_reference; `uncertain` may have none, but only when evidence is genuinely absent, not as a shortcut.
 
-Each checkpoint writes via the DAO's `write_contract` (locked, schema-validated, run-state updated, backed up). On retry, resume from the last checkpoint that passed — a case-type failure does not mean redoing field extraction.
+**Write in two rounds, not four.** A turn costs roughly the same regardless of
+payload, so the number of times you stop to compose is the cost. On CASE_027
+the four contract-writing intervals were 124s, 66s, 55s and 103s — 348s of
+692s, each one composing JSON and re-establishing context. Group them:
 
-Before marking `claim_analysis` passed, require the structural medical gate:
+- **Round A — checkpoints 1 and 2.** Verify the quotes for both, then write
+  `extracted_claim_fields.json` and `coverage_result.json`.
+- **Round B — checkpoints 3 and 4.** Verify, then write `case_type_result.json`
+  and `requirement_matching_result.json` — in that order, because checkpoint 4
+  joins on checkpoint 2's coverage names and the medical-variable publication
+  copies checkpoint 3's `case_type`.
+
+**Do not merge the files themselves.** All four have real downstream consumers:
+across the 20 shipped screening reports, `source_refs` cite
+`extracted_claim_fields` 64 times, `requirement_matching_result` 52,
+`coverage_result` 37 and `case_type_result` 6 — and `draft-report` halts
+outright on a missing `template_id`, so that low count is one decisive field,
+not disuse. What merges is the composing, not the contracts.
+
+Each checkpoint writes via the DAO's `write_contract` (locked, schema-validated, run-state updated, backed up). On retry, resume from the last contract that was written — a case-type failure does not mean redoing field extraction. Resume granularity stays per CONTRACT, not per round: if round B fails after `case_type_result.json` is on disk, resume at checkpoint 4 alone. Check what already exists before redoing work.
+
+Before reporting the stage complete, run the structural medical gate:
 
 ```bash
 python tools/dao.py check-medical-reviews-clear CASE_ID
-python tools/dao.py snapshot-backup CASE_ID RUN_ID claim_analysis --held-by claim-analysis
 ```
 
-The clearance command must succeed before either completion or the stage snapshot. The DAO independently enforces the same rule. Review-item opening, referral decisions, and lifecycle transitions remain policy- or human-owned; this agent never fabricates them.
+A nonzero result is a blocked state: report it and stop. Do not mark the
+stage anything.
+
+**Do not run `snapshot-backup`.** An earlier version of this spec told you to,
+and that was wrong: `snapshot-backup` is a backward-compatible ALIAS for
+`finalize-stage` -- same function, same run-state write -- so calling it
+transitions `claim_analysis` to `passed` and moves a marker T13 reserves for
+the orchestrator. Observed on CASE_022, where an agent followed this spec and
+its briefing's "do not move markers" instruction simultaneously and could not
+satisfy both; it printed `OK: finalized claim_analysis -> passed`. The name is
+what misleads -- "snapshot" reads like a backup, and the snapshot is only half
+of what it does.
+
+The orchestrator finalizes, which produces the P10 snapshot as part of the
+same atomic step. You never need to ask for one separately. The DAO
+independently enforces medical clearance on that transition, so running the
+check yourself is about halting early with a clear reason, not about
+permitting the transition. Review-item opening, referral decisions, and
+lifecycle transitions remain policy- or human-owned; this agent never
+fabricates them.
 
 # A genuine cross-document conflict (not the primary/secondary labeling case above)
 
