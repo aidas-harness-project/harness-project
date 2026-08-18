@@ -87,6 +87,108 @@ A resolution entry must contain all of the following:
 
 After recording a resolution, implementation must still pass schema, semantic, DAO-boundary, regression, and guardrail tests before the associated behavior is enabled.
 
+## How the medical path is actually switched off, and how it would be switched on
+
+Recorded 2026-08-18 after CASE_047 (97p, 배상책임) ran the whole Phase 1 chain
+with medical publication refused. This section is the mechanical counterpart to
+the deferral table above: the table says *what must be approved*, this says
+*where the switches are and what each one does*. Approval is still the gate --
+none of these edits is authorised by this document.
+
+### The switch is one config file
+
+`config/medical/medical_structuring_v0.1.json`, read by
+`validate_medical_variables()` in `tools/medical_contracts.py`. Its shipped
+state:
+
+```json
+{
+  "config_version": "medical_structuring.v0.1",
+  "behavior_enabled": false,
+  "approval": null,
+  "enabled_case_types": [],
+  "variable_kinds": []
+}
+```
+
+Three independent conditions reject a publication, so flipping any one of them
+alone changes nothing:
+
+| Check | Code | Refusal text |
+|---|---|---|
+| `behavior_enabled` false **or** `approval` null | `medical_contracts.py:66` | `medical structuring behavior is disabled or lacks approval metadata` |
+| `case_type` not in `enabled_case_types` (empty list matches nothing) | `medical_contracts.py:74` | `case type '...' is not enabled by medical configuration` |
+| `config_version` mismatch between contract and loaded config | `medical_contracts.py:68` | `config_version '...' does not match loaded '...'` |
+
+Independence is the point: a stray `behavior_enabled: true` still fails on the
+null `approval`, and both together still fail on the empty case-type list.
+
+### A refusal here does not fail the stage
+
+`run_claim_analysis.py` carries `_DEFERRED_REFUSALS` (line 1357), matching the
+first two refusal texts above. When publication is refused for those reasons
+the stage records the refusal and continues:
+
+```json
+"medical_publication": {"published": false, "deferred_config_refusal": true, "detail": "..."},
+"status": "complete"
+```
+
+That is CASE_047's actual result. A configuration refusal and a genuine
+extraction failure are deliberately not the same outcome.
+
+Downstream stays consistent rather than blocked:
+
+- `dao.py read-medical-variables CASE_047` → `FAIL: medical variable contract or revision not found`
+- `dao.py check-medical-reviews-clear CASE_047` → `{"clear": true, "gate": "not_applicable"}`
+
+`not_applicable` is what let `consistency_check` and `screening_report` proceed
+on CASE_047. It also explains a question `screening-report` raised on that run:
+`extracted_claim_fields.json` carried no `projection_mode`, which its spec calls
+an error. With no medical revision ever published, that projection is
+*pre-canonical* rather than a corrupted canonical one — the `not_applicable`
+gate says the same thing — so proceeding with an explicit "no structured
+medical screening was performed" statement in the report was correct.
+
+### What enabling would require, in order
+
+Every step below is blocked on the deferral table above; the order is what makes
+each step verifiable rather than a bulk edit.
+
+1. **Resolve the naming deferrals first.** MED-DEF-001 (medical lead) and the
+   clinical-content deferrals it gates. Without a named approver, steps 2-4
+   write approval metadata that has no one behind it, which is precisely what
+   `approval: null` exists to prevent.
+2. **Populate the vocabulary.** `domains` has 8 entries, but `variable_kinds`
+   and `units` are both empty, so today the config could not describe a single
+   variable even if enabled. `validate_medical_variables()` checks every
+   observation's domain, kind and unit against these lists, so an
+   enabled-but-empty config would reject each variable individually instead of
+   refusing cleanly up front.
+3. **Scope the case types.** Add to `enabled_case_types` only the types whose
+   clinical content was actually approved. CASE_047 is 배상책임 — a liability
+   case whose medical content is 후유장해 rating, which is a different
+   approval question from 실손 treatment-cost screening.
+4. **Set `approval` and `behavior_enabled` together**, and record the same
+   approval in the Resolution log below. `config_version` must then match what
+   publishing contracts declare, or step 5 fails on the third check.
+5. **Re-run a case and read the receipt, not the log.** Publication success is
+   `medical_publication.published: true` in the driver result, and
+   `dao.py read-medical-variables CASE_ID` returning a contract. Note that
+   `check-medical-reviews-clear` will stop returning `not_applicable` and start
+   gating for real — a case that published medical variables can then block
+   downstream stages on medical review, which is the behaviour the disabled
+   path has been hiding.
+
+### What is NOT switched by this file
+
+`config/medical/` holds four other configs, each with its own flag and its own
+deferral row: `medical_referral_policy_v0.1.json` (`policy_enabled`),
+`medical_review_roles_v0.1.json` (`operations_enabled`),
+`medical_review_request_v0.1.json` (`requests_enabled`), and
+`medical_projection_v0.1.json`. Enabling structuring alone does not enable
+referral, human review lifecycle, or review-request packaging.
+
 ## Resolution log
 
 No clinical, operational, privacy, production, retrieval, or evaluation deferral is resolved as of 2026-07-23.

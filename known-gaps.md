@@ -45,7 +45,13 @@ policies remain disabled with no approved clinical thresholds, real-case scope, 
 actors, or operator tokens. The capability is therefore not operationally activated.
 The authoritative closure conditions are tracked in
 `docs/medical-appropriateness-screening-deferrals.md`; passing software tests does not
-close those clinical, privacy, identity, or deployment approvals.
+close those clinical, privacy, identity, or deployment approvals. That document's
+"How the medical path is actually switched off, and how it would be switched on"
+section (added 2026-08-18) records the mechanical side: which config file and which
+three independent checks reject a publication, why a configuration refusal leaves the
+stage `complete` rather than failed, and the order enabling would have to follow.
+Observed end to end on CASE_047, whose whole Phase 1 chain ran with medical
+publication refused and every downstream gate reporting `not_applicable`.
 
 ## 43. Policy reference-table reading order -- OPEN 2026-07-24
 
