@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "conflict_ledger.schema.json",
   "title": "_conflict_ledger.json -- cross-source conflict ledger v0.3",
-  "description": "One ledger per case, shared across every stage that can find the case's own sources disagreeing with each other. See harness-guardrails P6. Before any stage starts, the orchestrator checks whether any entry is pending (via the DAO's check_conflicts_clear query, not by reading this file directly) -- if so, it halts and lists every pending entry, old and new. A stage only proceeds once every entry is resolved or false_positive. Note: this ledger is for the case's OWN sources contradicting each other -- an insurer's claim disagreeing with case evidence (denial-validation, Phase 2) is a different kind of comparison and does not belong here.",
+  "description": "One ledger per case, shared across every stage that can find the case's own sources disagreeing with each other. See harness-guardrails P6. Before any stage starts, the orchestrator checks whether any entry is pending (via the DAO's check_conflicts_clear query, not by reading this file directly) -- if so, it halts and lists every pending entry, old and new. A stage only proceeds once every entry is resolved, false_positive, or deferred_to_report. Note: this ledger is for the case's OWN sources contradicting each other -- an insurer's claim disagreeing with case evidence (denial-validation, Phase 2) is a different kind of comparison and does not belong here.",
   "type": "object",
   "properties": {
     "ledger_version": { "const": "conflict_ledger.v0.3" },
@@ -89,7 +89,7 @@
       "additionalProperties": false,
       "properties": {
         "conflict_id": { "type": "string", "pattern": "^CONFLICT_[0-9]+$" },
-        "verdict": { "enum": ["resolved", "false_positive"] },
+        "verdict": { "enum": ["resolved", "false_positive", "deferred_to_report"] },
         "note": { "type": "string", "minLength": 1 }
       },
       "required": ["conflict_id", "verdict", "note"]
@@ -100,7 +100,7 @@
       "properties": {
         "action": { "enum": ["add", "set_verdict"] },
         "target_id": { "type": "string", "pattern": "^CONFLICT_[0-9]+$" },
-        "status": { "enum": ["pending", "resolved", "false_positive"] }
+        "status": { "enum": ["pending", "resolved", "false_positive", "deferred_to_report"] }
       },
       "required": ["action", "target_id", "status"]
     },
@@ -132,12 +132,12 @@
           }
         },
         "verdict": {
-          "enum": ["pending", "resolved", "false_positive"],
-          "description": "Every entry starts pending. Only a human sets resolved/false_positive."
+          "enum": ["pending", "resolved", "false_positive", "deferred_to_report"],
+          "description": "Every entry starts pending. Only a human moves it off pending. `resolved` and `false_positive` are ADJUDICATIONS -- somebody decided which reading holds, or decided there was never a disagreement. `deferred_to_report` is NOT an adjudication: the disagreement is real, stands un-withdrawn, and no value has been preferred over another; the decision is handed to the loss adjuster or physician by carrying the conflict into the screening report with its sources. It clears the finalize gate but, unlike the other two, is verified -- finalize-stage screening_report refuses unless every deferred entry appears in the report's `inconsistencies` by conflict_ref. Added 2026-08-18: CASE_047 recorded four real, un-withdrawn billing-vs-clinical disagreements as `resolved` because that was the only value that let the pipeline advance, and each resolution_note had to say in prose that the verdict field did not mean what it said. The report author then wrote a warning box reconciling the two. A verdict that must be contradicted by its own note is a missing enum value, not a judgement call."
         },
         "resolution_note": {
           "type": ["string", "null"],
-          "description": "Required when verdict is not pending -- what was decided and why."
+          "description": "Required when verdict is not pending -- what was decided and why. Under `deferred_to_report` nothing was decided, so this records WHY the decision belongs to a human reviewer and what they need in order to make it."
         },
         "resolved_at": {
           "type": ["string", "null"],
@@ -146,11 +146,11 @@
       },
       "required": ["conflict_id", "raised_by_stage", "field_or_topic", "sources", "verdict"],
       "if": {
-        "properties": { "verdict": { "enum": ["resolved", "false_positive"] } },
+        "properties": { "verdict": { "enum": ["resolved", "false_positive", "deferred_to_report"] } },
         "required": ["verdict"]
       },
       "then": {
-        "comment": "A resolved/false_positive entry MUST carry a non-empty resolution_note and a resolved_at -- the P6 audit trail. Prose-only before (fleet F7); a hand-edited or forked ledger could persist a resolution with no recorded reason.",
+        "comment": "Any entry off `pending` MUST carry a non-empty resolution_note and a resolved_at -- the P6 audit trail. Prose-only before (fleet F7); a hand-edited or forked ledger could persist a resolution with no recorded reason. For deferred_to_report the timestamp is when the deferral was recorded, not when anything was resolved.",
         "properties": {
           "resolution_note": { "type": "string", "minLength": 1 },
           "resolved_at": { "type": "string", "format": "date-time" }

@@ -102,7 +102,13 @@ Subcommands:
     add-conflict-entry CASE_ID --stage STAGE --topic TOPIC --sources-file PATH
         --held-by NAME --run-id RUN_ID
     set-conflict-verdict CASE_ID CONFLICT_ID VERDICT --note TEXT --held-by NAME --run-id RUN_ID
+        VERDICT is resolved | false_positive | deferred_to_report. The first two
+        are adjudications. deferred_to_report is not: the disagreement stands,
+        and the decision goes to the screening report's human reader -- which
+        finalize-stage screening_report then verifies was actually carried.
     check-conflicts-clear CASE_ID
+        Reports {clear, pending, deferred_to_report}. `clear` reflects pending
+        only; deferrals do not block, they oblige the screening report.
     read-human-review-ledger CASE_ID
     record-human-review CASE_ID --artifact-kind {policy_audit_finding|unpaged_physical_exclusion}
         --artifact-id DOC_ID --target-key KEY --decision {accepted_risk|verified|rejected}
@@ -7323,11 +7329,32 @@ def _finalize_stage(case_id, run_id, stage, held_by):
             if pending:
                 print(f"REFUSED: cannot finalize {stage!r} -- P6: the case has "
                       f"unresolved conflict ledger entries: {', '.join(pending)}")
-                print("  Every entry must read 'resolved' or 'false_positive' "
-                      "before a stage that reasons from the case's facts may "
-                      "finalize. Adjudicate with `dao.py set-conflict-verdict "
-                      "CASE_ID CONFLICT_ID {resolved|false_positive} --note ...` "
+                print("  Every entry must read 'resolved', 'false_positive' or "
+                      "'deferred_to_report' before a stage that reasons from the "
+                      "case's facts may finalize. Adjudicate with `dao.py "
+                      "set-conflict-verdict CASE_ID CONFLICT_ID "
+                      "{resolved|false_positive|deferred_to_report} --note ...` "
                       "-- a value is never silently discarded to close one.")
+                return None
+
+        # A deferral is a promise that the screening report will carry the
+        # disagreement to its human reader. Verified here, at the only stage
+        # that can keep it. Without this check `deferred_to_report` would just
+        # be `resolved` under a more honest name -- which is exactly the failure
+        # it exists to fix: on CASE_047 four real disagreements were filed as
+        # `resolved` and each note had to say in prose that the verdict did not
+        # mean what it said.
+        if stage == "screening_report":
+            missing = _uncarried_deferred_conflicts(case_id)
+            if missing:
+                print(f"REFUSED: cannot finalize 'screening_report' -- P6: "
+                      f"conflicts deferred to this report are not in it: "
+                      f"{', '.join(missing)}")
+                print("  Each deferred entry must appear in the report's "
+                      "`inconsistencies` with its `conflict_ref` set to that "
+                      "conflict_id, together with the disagreeing sources. "
+                      "Describing it in the report prose is not enough -- the "
+                      "binding is by id so it can be checked.")
                 return None
 
         if stage == "document_processing":
@@ -7734,11 +7761,53 @@ def pending_conflict_ids(case_id: str) -> list[str]:
     Validated, not merely read: "no pending verdicts" is only meaningful if the
     verdicts are the ones the ledger's own history records. A ledger that fails
     its chain raises rather than reporting clear, so P6 fails closed.
+
+    `deferred_to_report` is not pending: a human has disposed of it, by ruling
+    that the disagreement is real and belongs to the reader of the screening
+    report. It is still an OPEN factual question -- see `deferred_conflict_ids`,
+    which is what the screening_report finalize gate checks.
     """
     ledger = load_conflict_ledger(case_id)
     _validate_generic_ledger(ledger, case_id, "conflict_ledger.schema.json")
     return [c["conflict_id"] for c in ledger["conflicts"]
             if c.get("verdict") == "pending"]
+
+
+def _uncarried_deferred_conflicts(case_id: str) -> list[str]:
+    """Deferred conflicts the screening report does not carry by `conflict_ref`.
+
+    A missing report is not a pass. If nothing was deferred this returns empty
+    without reading the contract at all, so a case with no conflicts never
+    depends on the report's shape; but once a deferral exists, an absent or
+    unreadable screening_report.json means the promise demonstrably was not
+    kept, and every deferred id is reported as uncarried.
+    """
+    deferred = deferred_conflict_ids(case_id)
+    if not deferred:
+        return []
+    report = read_contract_data(case_id, "screening_report.json")
+    carried: set[str] = set()
+    if isinstance(report, dict):
+        for item in report.get("inconsistencies") or []:
+            if isinstance(item, dict):
+                ref = item.get("conflict_ref")
+                if isinstance(ref, str):
+                    carried.add(ref)
+    return [cid for cid in deferred if cid not in carried]
+
+
+def deferred_conflict_ids(case_id: str) -> list[str]:
+    """Conflicts a human deferred into the screening report, still un-adjudicated.
+
+    Separate from `pending_conflict_ids` because the two answer different
+    questions. Pending asks "may a stage run at all"; deferred asks "did the
+    report actually carry what it promised to carry". A deferral clears the
+    first and creates the second obligation.
+    """
+    ledger = load_conflict_ledger(case_id)
+    _validate_generic_ledger(ledger, case_id, "conflict_ledger.schema.json")
+    return [c["conflict_id"] for c in ledger["conflicts"]
+            if c.get("verdict") == "deferred_to_report"]
 
 
 # Stages a pending conflict blocks. consistency_check is deliberately absent:
@@ -7763,11 +7832,18 @@ CONFLICT_GATED_STAGES = frozenset({
 def cmd_check_conflicts_clear(args):
     try:
         pending = pending_conflict_ids(args.case_id)
+        deferred = deferred_conflict_ids(args.case_id)
     except ValueError as exc:
         print(json.dumps({"clear": False, "error": str(exc)}, ensure_ascii=False))
         return 1
     clear = not pending
-    print(json.dumps({"clear": clear, "pending": pending}))
+    # `deferred` rides alongside `clear` rather than changing it. The caller
+    # asking this question wants to know whether it may run; a deferral says
+    # yes. It is reported so the screening-report stage knows what it has
+    # inherited an obligation to carry -- and so a reader of this output is
+    # never left thinking a clear case had no disagreements.
+    print(json.dumps({"clear": clear, "pending": pending,
+                      "deferred_to_report": deferred}))
     return 0 if clear else 1
 
 
@@ -12104,7 +12180,9 @@ def build_parser():
 
     p = sub.add_parser("set-conflict-verdict")
     p.add_argument("case_id"); p.add_argument("conflict_id")
-    p.add_argument("verdict", choices=["resolved", "false_positive"]); p.add_argument("--note", required=True)
+    p.add_argument("verdict", choices=["resolved", "false_positive",
+                                       "deferred_to_report"])
+    p.add_argument("--note", required=True)
     p.add_argument("--operation-id", default=None,
                    help="Unique id binding this verdict into the ledger history. "
                         "Re-running with the same id is an idempotent no-op.")

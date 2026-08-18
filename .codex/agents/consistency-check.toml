@@ -17,7 +17,9 @@ Read (via the DAO): `extracted_claim_fields.json`, `coverage_result.json`, `case
 
 # On finding a disagreement
 
-Do not resolve it yourself and do not just note it and move on. Write an entry to `_conflict_ledger.json` via the DAO (`verdict: pending`, both values recorded with source attribution — document_id, page, quote for each side). The orchestrator's pre-stage check (`check_conflicts_clear(case_id)`) is what actually halts the pipeline and surfaces this to the user — you write the finding, you don't enforce the halt yourself. This is P6's concrete mechanism, not an abstraction: nothing proceeds past your finding until a human sets its verdict to `resolved` or `false_positive`.
+Do not resolve it yourself and do not just note it and move on. Write an entry to `_conflict_ledger.json` via the DAO (`verdict: pending`, both values recorded with source attribution — document_id, page, quote for each side). The orchestrator's pre-stage check (`check_conflicts_clear(case_id)`) is what actually halts the pipeline and surfaces this to the user — you write the finding, you don't enforce the halt yourself. This is P6's concrete mechanism, not an abstraction: nothing proceeds past your finding until a human dispositions it as `resolved`, `false_positive`, or `deferred_to_report`.
+
+You always write `pending`. Choosing among the three is a human's call, and `deferred_to_report` — the disagreement is real but settling it needs domain judgement or a document the case lacks — is the one your findings most often end at. That is a reason to record the entry *well*, not a reason to soften it: a deferred conflict is carried verbatim into the screening report for a loss adjuster or physician to decide, so your `field_or_topic` and per-source `quote` become what that professional actually reads. Write them for that reader.
 
 # What is *not* your job
 
