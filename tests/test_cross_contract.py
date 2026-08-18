@@ -1684,8 +1684,37 @@ def test_locate_quote_hint_only_searches_the_pages_it_is_handed():
     """The hint is embedded in a correction PROMPT, so it must never reach for
     a page of its own -- passing the redacted layer is what keeps masked PII
     out of the next model call. The function takes a mapping and reads nothing
-    else; this pins that it finds nothing outside it."""
-    assert _cross_contract.locate_quote_hint("환자성명 홍길동", {1: "환자성명"}, 1) == ""
+    else; this pins that it finds nothing outside it.
+
+    The quote shares no leading run with the served page, so neither the
+    page-location hint nor the assembled-quote hint has anything to report.
+    """
+    assert _cross_contract.locate_quote_hint("홍길동 환자성명", {1: "환자성명"}, 1) == ""
+
+
+def test_locate_quote_hint_shows_the_line_a_joined_quote_started_in():
+    """A Korean medical form is a ruled box: the 병명 label sits in one cell and
+    its value in the next. Reading it as prose produces a string that is true
+    about the document and absent from it, and `find_quote_pages` then reports
+    nothing -- the model is told its quote does not exist and given no way to
+    see why.
+
+    Measured on CASE_047 DOC_003 (2026-08-18), a 1-page 진단서 drawn entirely
+    as one table: three runs of the same input cited it two different ways and
+    failed twice, after the prompt's existing "do not join cells" rule. Each
+    cell verifies on its own, so quoting one is always available.
+    """
+    line = "│             │ 공황 장애                     │ 한국질병분류번호 │"
+    pages = {1: f"진 단 서\n{line}\n│ 병      명   │ 상세불명의 불안장애   │ F410 │"}
+
+    hint = _cross_contract.locate_quote_hint("공황 장애 상세불명의 불안장애", pages, 1)
+    assert "공황 장애" in hint, "the hint must show the line the join started in"
+    assert "한국질병분류번호" in hint, "and the delimiters the quote crossed"
+    assert "Quote ONE cell" in hint
+
+    # A wholly fabricated quote shares no leading run and still gets nothing --
+    # softening that case is what would turn a caught fabrication into a hint.
+    assert _cross_contract.locate_quote_hint("음주 상태였다고 기재됨", pages, 1) == ""
 
 
 def test_resolve_cited_page_corrects_only_an_unambiguous_page_number():

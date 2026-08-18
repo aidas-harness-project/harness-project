@@ -51,6 +51,12 @@ Subcommands:
         [--run-id RUN_ID] [--stage STAGE]
     patch-manifest-document CASE_ID DOC_ID --fields-file PATH --held-by NAME --run-id RUN_ID
         [--stage STAGE]
+    unsplit-bundle CASE_ID BUNDLE_ID --held-by NAME --run-id RUN_ID
+        --confirm-case-id CASE_ID
+        (removes a bundle's split children and restores it as splittable, so a
+         re-segmentation can propose different boundaries. Keeps the bundle's
+         OCR. Refused unless BUNDLE_ID is a superseded_bundle, and refused if a
+         child is itself a bundle or is referenced by another document.)
     promote-policy-document CASE_ID DOC_ID --policy-processing-role ROLE
         --disputed-by TEXT --held-by NAME --run-id RUN_ID
     write-page-text CASE_ID DOC_ID PAGE --text-file PATH --held-by NAME --run-id RUN_ID
@@ -4939,6 +4945,127 @@ def replace_manifest_documents(case_id: str, bundle_id: str, bundle_fields: dict
     return result
 
 
+def unsplit_bundle(case_id: str, bundle_id: str, held_by: str, run_id: str,
+                   confirm_case_id: str, purpose: str | None = None):
+    """Remove a bundle's split children and restore it as a splittable document.
+
+    The inverse of `replace_manifest_documents`, for ONE case: re-segmenting a
+    bundle whose boundaries turned out wrong. Neither existing path reaches it
+    -- `replace_manifest_documents` only appends, and
+    `reset_document_processing` refuses outright ("a segmented child cannot be
+    reconstructed from intake-owned fields alone"), which is correct for a COLD
+    reset of the whole stage but leaves no way to redo just the split.
+
+    Encountered on CASE_047 (2026-08-18): a fork inherited CASE_050's 55
+    children, a better rule proposed 30 different boundaries, and `split`
+    refused with `inconsistent_existing_split` because the two boundary sets do
+    not line up. Without this the only routes were re-running 97 OCR calls on a
+    fresh case, or accepting boundaries already known to be wrong.
+
+    Deliberately narrow, because this DELETES manifest entries:
+
+    * Only children of `bundle_id` go -- an entry whose `source_file_name` is
+      the bundle's file AND whose id is not the bundle's. Anything else in the
+      manifest is untouched, so a case with two bundles keeps the other one.
+    * Refused unless the bundle is actually a `superseded_bundle`. A document
+      that was never split has no children to remove, and asking to unsplit it
+      means the caller is confused about which document they are holding.
+    * Refused if any child carries work that removal would silently orphan --
+      a child that is itself a superseded bundle (nested split), or one whose
+      id is referenced by another document's `source_document_id`.
+    * `confirm_case_id` must equal `case_id`, the same destructive-scope
+      confirmation `reset_document_processing` takes.
+
+    The children's processed text under data/processed/ is NOT deleted: it is
+    keyed by document_id, the re-split assigns fresh ids, and leaving it costs
+    disk rather than correctness. The bundle's own pages -- the expensive part,
+    and the whole reason to unsplit rather than re-intake -- are untouched.
+    """
+    if confirm_case_id != case_id:
+        return False, f"REFUSED: --confirm-case-id must exactly equal {case_id}"
+    target = case_dir(case_id) / "document_manifest.json"
+    existing_lock = acquire_lock_blocking(
+        target, held_by, run_id, purpose or f"unsplit bundle {bundle_id}")
+    if existing_lock is not None:
+        return False, (f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+                       f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+    try:
+        if not target.exists():
+            return False, f"FAIL: no document_manifest.json for {case_id}"
+        manifest = json.loads(target.read_text(encoding="utf-8"))
+        documents = manifest["documents"]
+        bundle = next((d for d in documents if d["document_id"] == bundle_id), None)
+        if bundle is None:
+            return False, f"FAIL: bundle document_id {bundle_id} not found in document_manifest.json"
+        if bundle.get("downstream_disposition") != "superseded_bundle":
+            return False, (f"REFUSED: {bundle_id} is not a superseded_bundle "
+                           f"(downstream_disposition={bundle.get('downstream_disposition')!r}) "
+                           "-- it has no split children to remove")
+
+        bundle_file = bundle.get("file_name") or f"{bundle_id}.pdf"
+        children = [d for d in documents
+                    if d.get("source_file_name") == bundle_file
+                    and d["document_id"] != bundle_id]
+        if not children:
+            return False, f"REFUSED: no children of {bundle_id} found in the manifest"
+
+        child_ids = {d["document_id"] for d in children}
+        nested = sorted(d["document_id"] for d in children
+                        if d.get("downstream_disposition") == "superseded_bundle")
+        if nested:
+            return False, (f"REFUSED: {nested} are themselves superseded bundles; "
+                           "unsplit those first so their own children are not orphaned")
+        referenced = sorted(
+            d["document_id"] for d in documents
+            if d["document_id"] not in child_ids
+            and d.get("source_document_id") in child_ids)
+        if referenced:
+            return False, (f"REFUSED: {referenced} derive from children of {bundle_id} "
+                           "-- removing them would orphan those entries")
+
+        kept = [d for d in documents if d["document_id"] not in child_ids]
+        # The bundle becomes an ordinary un-split PDF again. Its OCR is kept
+        # (that is the point), so segmentation can propose from real page text
+        # exactly as it did before -- only the split verdict is withdrawn.
+        bundle["downstream_disposition"] = "automated_text_pipeline"
+        bundle["segmentation_status"] = "required"
+        # `segmentation_status: required` is a human bundle/non-bundle decision
+        # and the schema demands it be attributable (document_entry allOf[5]).
+        # Withdrawing a split IS that decision made again, so it is recorded
+        # against whoever ran this command rather than blanked -- clearing the
+        # attribution would fail validation, and back-dating it to the original
+        # reviewer would credit them with a call they did not make.
+        bundle["segmentation_reviewed_by"] = held_by
+        bundle["segmentation_reviewed_at"] = now_iso()
+        bundle["segmentation_review_note"] = (
+            f"split withdrawn by unsplit-bundle (run {run_id}); "
+            f"{len(child_ids)} child document(s) removed for re-segmentation")
+        # The approved proposal described the boundaries just removed, so it no
+        # longer describes this document; `propose` writes a fresh one.
+        bundle["segmentation_proposal_path"] = None
+        manifest["documents"] = kept
+        manifest["updated_at"] = now_iso()
+
+        errors = _schema_check(manifest, "document_manifest.schema.json")
+        if errors:
+            return False, "FAIL: schema validation errors for " + str(target) + " -- not written:\n" + \
+                "\n".join(f"  - {e}" for e in errors)
+        atomic_write_json(target, manifest)
+        return True, (f"PASS: removed {len(child_ids)} child document(s) of {bundle_id} "
+                      f"and restored it as splittable in {target}\n"
+                      f"  removed: {sorted(child_ids)}")
+    finally:
+        release_lock(target)
+
+
+def cmd_unsplit_bundle(args):
+    ok, message = unsplit_bundle(
+        args.case_id, args.bundle_id, args.held_by, args.run_id,
+        args.confirm_case_id, purpose=args.purpose)
+    print(message)
+    return 0 if ok else 1
+
+
 def cmd_replace_manifest_documents(args):
     bundle_fields = json.loads(Path(args.bundle_fields_file).read_text(encoding="utf-8"))
     new_documents = json.loads(Path(args.new_documents_file).read_text(encoding="utf-8"))
@@ -6124,6 +6251,95 @@ def cmd_set_ledger_status(args):
             return 1
         atomic_write_json(p, ledger)
         print(f"OK: {args.file_name} -> {args.status}")
+        return 0
+    finally:
+        release_lock(p)
+
+
+def cmd_repair_source_ledger_binding(args):
+    """Repair exactly one stale source-ledger request digest, under human audit.
+
+    This is intentionally narrower than a ledger editor: it changes no review
+    decision, request, result, timestamp, or baseline state. It repairs the
+    request digest and its matching copied baseline digest only when the named
+    operation's already-recorded request makes the entire ledger validate.
+    """
+    p = source_ledger_path(args.case_id)
+    existing_lock = acquire_lock_blocking(
+        p, args.held_by, args.run_id,
+        f"repair-source-ledger-binding {args.operation_id}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        ledger = load_json(p)
+        if ledger is None:
+            print(f"NOT_FOUND: {p}")
+            return 1
+        if ledger.get("case_id") != args.case_id:
+            print("ERROR: source ledger belongs to a different case")
+            return 1
+        operation = next((op for op in ledger.get("operations", [])
+                          if op.get("operation_id") == args.operation_id), None)
+        if operation is None:
+            print(f"NOT_FOUND: operation_id {args.operation_id!r}")
+            return 1
+        request = operation.get("request")
+        if not isinstance(request, dict) or request.get("case_id") != args.case_id \
+                or request.get("operation_id") != args.operation_id:
+            print("ERROR: repair refuses an operation whose request is not bound to this case and operation_id")
+            return 1
+        expected = hashlib.sha256(_canonical_json_bytes(request)).hexdigest()
+        old = operation.get("request_sha256")
+        if old == expected:
+            print("ERROR: operation request binding is already valid; no repair written")
+            return 1
+        if any(item.get("operation_id") == args.operation_id
+               for item in ledger.get("binding_repairs", [])):
+            print("ERROR: operation already has a binding-repair audit record")
+            return 1
+
+        boundary = ledger.get("history_boundary")
+        if not isinstance(boundary, dict) or not isinstance(boundary.get("baseline_state"), list):
+            print("ERROR: repair refuses a ledger without a valid history boundary shape")
+            return 1
+        old_baseline = boundary.get("baseline_sha256")
+        expected_baseline = hashlib.sha256(
+            _canonical_json_bytes(boundary["baseline_state"])).hexdigest()
+        # This command repairs one known transplant shape only: the same stale
+        # digest was copied into both independently-bound fields. A different
+        # boundary defect needs a separate audit path.
+        if old_baseline != old:
+            print("ERROR: repair refuses an independently-corrupt history boundary")
+            return 1
+        operation["request_sha256"] = expected
+        boundary["baseline_sha256"] = expected_baseline
+        try:
+            _validate_generic_ledger(ledger, args.case_id, "source_ledger.schema.json")
+        except ValueError as exc:
+            print(f"ERROR: repair refused because the ledger remains invalid: {exc}")
+            return 1
+        ledger.setdefault("binding_repairs", []).append({
+            "operation_id": args.operation_id,
+            "old_request_sha256": old,
+            "new_request_sha256": expected,
+            "old_baseline_sha256": old_baseline,
+            "new_baseline_sha256": expected_baseline,
+            "reviewer": args.reviewer,
+            "note": args.note,
+            "run_id": args.run_id,
+            "repaired_at": now_iso(),
+        })
+        ledger["updated_at"] = now_iso()
+        errors = _schema_check(ledger, "source_ledger.schema.json")
+        if errors:
+            print(f"FAIL: schema validation errors for {p} -- not written:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
+        atomic_write_json(p, ledger)
+        print(f"OK: repaired request binding for {args.operation_id}")
         return 0
     finally:
         release_lock(p)
@@ -11706,6 +11922,14 @@ def build_parser():
     p.add_argument("--purpose"); p.add_argument("--stage")
     p.set_defaults(fn=cmd_replace_manifest_documents)
 
+    p = sub.add_parser("unsplit-bundle")
+    p.add_argument("case_id"); p.add_argument("bundle_id")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.add_argument("--confirm-case-id", required=True,
+                   help="Destructive-scope confirmation; must exactly equal case_id")
+    p.add_argument("--purpose")
+    p.set_defaults(fn=cmd_unsplit_bundle)
+
     p = sub.add_parser("write-page-text")
     p.add_argument("case_id"); p.add_argument("doc_id"); p.add_argument("page", type=int)
     p.add_argument("--text-file", required=True)
@@ -11750,6 +11974,12 @@ def build_parser():
                         "and the same request is an idempotent no-op.")
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_set_ledger_status)
+
+    p = sub.add_parser("repair-source-ledger-binding")
+    p.add_argument("case_id"); p.add_argument("operation_id")
+    p.add_argument("--reviewer", required=True); p.add_argument("--note", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_repair_source_ledger_binding)
 
     p = sub.add_parser("check-source-ledger-clear"); p.add_argument("case_id")
     # Optional on purpose: this is a read-only query with existing callers, and

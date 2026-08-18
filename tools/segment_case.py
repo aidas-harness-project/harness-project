@@ -446,6 +446,16 @@ DOCUMENT_TITLE_RE = re.compile(
 # taken from one bundle encodes that bundle's word ending, not the form family.
 _MEDICAL_TITLE_RE = re.compile(
     r"(진단서|확인서|내역서?|명세서|소견서|의뢰서|처방전|기록지|기록|증명서|보고서"
+    r"|영수증|계산서"
+    # 영수증/계산서 were missing until 2026-08-18, and their absence did not
+    # merely fail to name a document -- it withheld the repeated-title merge
+    # rule entirely. `text_anchor_boundaries` reaches `key != previous_title`
+    # only when a title was recognised; an unrecognised one falls through to
+    # the judge, which is asked page by page and answers "new document" each
+    # time. Measured on CASE_050 (97p): pages 60-90 are 31 consecutive
+    # "( 외래 ) 진료비 계산서 · 영수증" pages that became 31 separate documents,
+    # each costing a judge call, and the case reached claim_analysis with 56
+    # documents whose single M1 call then timed out at 180s.
     r"|REPORT|SUMMARY)"
     r"\s*(?:\([^)]*\))?\s*(?:\d+\s*/\s*\d+)?"
     # A clinic stamps its own annotation beside the title ("원본대조필 인",
@@ -475,6 +485,29 @@ _MEDICAL_TITLE_SCAN_LINES = 5
 # that happens to end in one. The longest real title measured is
 # "후유장애 진단서(Mc Bride)" at 24 characters.
 _MEDICAL_TITLE_MAX_CHARS = 40
+
+# A repeated table header is read within the same window a form title is, since
+# a titled first page carries both (title on line 1, columns on line 3-4).
+_TABLE_HEADER_SCAN_LINES = 6
+# Fewer cells than this is a prose line that happens to contain a separator.
+_TABLE_HEADER_MIN_CELLS = 3
+# How many LEADING columns must agree to call two headers the same table. The
+# measured continuation pairs on CASE_047 agree on 8-9; the deliberate floor
+# below that leaves room for an OCR miss in the run while staying far above the
+# 0 scored at every real boundary. Set this to 1 and a two-column header would
+# fuse unrelated tables.
+_TABLE_HEADER_MIN_MATCH = 6
+
+# A form viewer sometimes appends page metadata or an issuance marker on the
+# same physical line as the printed title.  These are layout annotations, not
+# part of the title, and removing only these bounded end markers leaves the
+# length/prose guard below intact.  Measured on CASE_047 redacted children:
+# DOC_020 ends "진료비 세부산정내역  Page 1 / 1" and DOC_021/DOC_022 end
+# "진료비 계산서·영수증  [재발행]".
+_TITLE_LAYOUT_SUFFIX_RE = re.compile(
+    r"(?:\s+(?:Page\s+\d+\s*/\s*\d+|\[재발행\]))+\s*$",
+    re.IGNORECASE,
+)
 
 
 # Title suffixes that NAME A FORM, mapped to the document_type they determine.
@@ -538,6 +571,11 @@ def medical_form_title(line: str) -> str | None:
     """
     if not line:
         return None
+    # Retain the publisher's title but remove only known end-of-line viewer /
+    # issuance annotations before evaluating its shape.  This is deliberately
+    # not a general substring scan: body prose still reaches the same anchored
+    # title rule and length limit as before.
+    line = _TITLE_LAYOUT_SUFFIX_RE.sub("", line).strip()
     collapsed = re.sub(r"[\s·ㆍ・]+", "", line)
     # Length is judged on the collapsed form: a title and its stamp are often
     # separated by a wide run of spaces used as layout ("후유장애 진단서(Mc
@@ -704,7 +742,7 @@ def text_anchor_boundaries(pdf_path, page_count: int) -> dict[int, str | None] |
 
 def boundaries_from_page_texts(
     page_texts: list[str], *, medical: bool = False, judge=None,
-    undecided: list[int] | None = None,
+    undecided: list[int] | None = None, judged: list | None = None,
 ) -> dict[int, str | None] | None:
     """The same boundary rule over page text a caller already has.
 
@@ -735,8 +773,11 @@ def boundaries_from_page_texts(
         for text in page_texts
     ]
     if medical != "auto":
+        options = {"medical": medical, "judge": judge, "page_texts": page_texts}
+        if judged is not None:
+            options["judged"] = judged
         return _boundaries_from_page_lines(
-            lines, medical=medical, judge=judge, page_texts=page_texts)
+            lines, **options)
 
     # `propose` runs BEFORE classification -- document_type is per-document and
     # cannot be known until after the split -- so the rule cannot be chosen by
@@ -749,7 +790,10 @@ def boundaries_from_page_texts(
     # The results are NOT unioned. Merging would import the medical rule's
     # 5-line header window into policy text, where the strict first-line rule is
     # what measured precision 1.0000 across 173 boundaries.
-    policy = _boundaries_from_page_lines(lines, page_texts=page_texts)
+    policy_options = {"page_texts": page_texts}
+    if judged is not None:
+        policy_options["judged"] = judged
+    policy = _boundaries_from_page_lines(lines, **policy_options)
 
     # A 약관 bundle is settled HERE, before the medical pass runs at all.
     #
@@ -806,9 +850,13 @@ def boundaries_from_page_texts(
     # Only the medical pass consults the judge, so only it can leave a page
     # undecided; `undecided` is threaded here rather than collected by a second
     # call so the flags describe the very pass that produced these boundaries.
-    medical_result = _boundaries_from_page_lines(
-        lines, medical=True, judge=judge, page_texts=page_texts,
-        undecided=undecided)
+    medical_options = {
+        "medical": True, "judge": judge, "page_texts": page_texts,
+        "undecided": undecided,
+    }
+    if judged is not None:
+        medical_options["judged"] = judged
+    medical_result = _boundaries_from_page_lines(lines, **medical_options)
     if policy is None or medical_result is None:
         # None is "no verdict, fall through to vision" and is not comparable to
         # a boundary count; if either reader declined, so does this.
@@ -869,7 +917,8 @@ def _is_policy_bundle(boundaries: dict[int, str | None]) -> bool:
 
 
 def processed_boundaries_with_undecided(
-    case_id: str, doc_id: str, page_count: int, judge=None
+    case_id: str, doc_id: str, page_count: int, judge=None,
+    judged: list | None = None,
 ) -> tuple[dict[int, str | None] | None, list[int]]:
     """Boundaries AND the pages the judge could not settle, from ONE pass.
 
@@ -902,8 +951,10 @@ def processed_boundaries_with_undecided(
     # implementation of the boundary rules rather than a second copy that can
     # drift; `undecided` is threaded through to collect the flags from the very
     # pass that produced these boundaries.
-    boundaries = boundaries_from_page_texts(
-        texts, medical="auto", judge=judge, undecided=collected)
+    options = {"medical": "auto", "judge": judge, "undecided": collected}
+    if judged is not None:
+        options["judged"] = judged
+    boundaries = boundaries_from_page_texts(texts, **options)
     return boundaries, sorted(set(collected))
 
 
@@ -1039,6 +1090,7 @@ def undecided_pages(
 def _boundaries_from_page_lines(
     pages: list[list[str]], *, medical: bool = False, judge=None,
     page_texts: list[str] | None = None, undecided: list[int] | None = None,
+    judged: list | None = None,
 ) -> dict[int, str | None] | None:
     """Boundary set for pages already reduced to their content lines.
 
@@ -1087,9 +1139,33 @@ def _boundaries_from_page_lines(
             title = _medical_header_title(lines)
             key = _title_key(title)
             if title is not None and key is not None:
-                if key != previous_title:
+                # A repeated title alone does not settle this: CASE_907's
+                # 7-page statement reprints its title as a running header,
+                # while CASE_047's three statements each reprint theirs. The
+                # patient block is what separates them -- stated once per
+                # document, so a page carrying title AND patient block is a
+                # reissue, and a page carrying only the title continues.
+                # 영수증/계산서 are excluded by operator decision: a run of
+                # outpatient receipts is kept as ONE document even though each
+                # is separately issued and each reprints the patient block.
+                if key != previous_title or (
+                    _reprints_patient_block(lines)
+                    and not any(word in key for word in _MERGED_FORM_TITLES)
+                ):
                     boundaries[page] = title
                 previous_title = key
+                continue
+            # A titleless page that reprints the previous page's table header is
+            # that table running over, and the header is evidence the judge would
+            # be shown anyway. Settled here so a multi-page 진료비 세부내역서
+            # costs no calls: on CASE_047 DOC_001 this is 15 of the 34 judged
+            # pages. Only for a page with NO title -- a page carrying its own
+            # form name has already been decided above, and a generic heading
+            # (REPORT) still goes to the judge, since two studies printed with
+            # the same table are still two documents.
+            if title is None and _continues_table(
+                _table_header_cells(pages[index - 1]), _table_header_cells(lines)
+            ):
                 continue
             # Reaches the judge only when the rule genuinely cannot decide: a
             # generic form-KIND heading that says nothing about WHICH document
@@ -1106,6 +1182,8 @@ def _boundaries_from_page_lines(
                 if title is not None:
                     boundaries[page] = title
                 continue
+            if judged is not None:
+                judged.append(page)
             verdict = _judge_boundary(page_texts[index - 1], page_texts[index], judge)
             if verdict is None:
                 # Fail toward splitting. Over-splitting is undone by a human
@@ -1136,6 +1214,36 @@ def _boundaries_from_page_lines(
 # deciding this in general is the LLM tier's job, and this is the floor under it.
 _GENERIC_FORM_TITLES = frozenset({"report", "summary", "결과지", "판독지", "기록지"})
 
+# Field labels that make up a form's PATIENT BLOCK -- the identity header a
+# statement prints under its title. Used to tell a reissued form from the same
+# form running over, because the title alone cannot: both repeat it.
+#
+# Two real bundles disagree on what a repeated title means, so no title list
+# could settle this. CASE_907 DOC_005 p9-15 is ONE 7-page 진료비 세부산정내역
+# whose title is a running page header (the human baseline records a single
+# document; treating each reprint as a start scored precision 0.6250).
+# CASE_047 p16/23/30 are THREE separate 진료비 세부내역서. What separates them
+# is that a reissued form reprints its patient block under the title, while a
+# continuation page goes straight from the title to the column header -- the
+# patient identity is stated once per document, not once per page.
+#
+# Measured consequence of getting it wrong (CASE_047, 2026-08-18): merging the
+# three fused them into one 21-page DOC_012, and claim_analysis failed on it --
+# "quote is not present on page 3 -- that text appears on page(s) 10, 17" --
+# because the same header and item names recur at three offsets inside the
+# fused document. The over-merge cost a 591.8s M1 call that produced nothing.
+_PATIENT_BLOCK_LABELS = ("등록번호", "환자성명", "환자 성명", "환자등록번호",
+                         "환자구분", "진료기간")
+# How many of those labels must appear for a line to BE a patient block rather
+# than a table column that happens to be named one of them.
+_PATIENT_BLOCK_MIN_LABELS = 2
+
+# Forms kept as ONE document across a run of separately-issued copies, by
+# operator decision rather than by evidence: a case can carry dozens of
+# outpatient receipts and downstream wants them as one 진료비 record, not
+# thirty. They reprint the patient block like any reissued form, so they are
+# named here rather than detected.
+_MERGED_FORM_TITLES = ("영수증", "계산서")
 
 BOUNDARY_JUDGE_PROMPT_VERSION = "boundary_judge_v0.1"
 
@@ -1209,10 +1317,10 @@ def _judge_boundary(previous_text: str, current_text: str, judge) -> dict | None
         previous=previous_text[:_JUDGE_TEXT_LIMIT],
         current=current_text[:_JUDGE_TEXT_LIMIT],
     )
-    # Spanned because the LLM tier judges the SAME page pair twice today
-    # (processed_text_boundaries then processed_undecided_pages both reach
-    # here, with no memo between them). That is exactly 2x its cost, and this
-    # span is what turns that reading of the code into a measured number.
+    # Spanned so a retained trace records each model-backed boundary decision.
+    # The caller also appends the page number before this call, keeping the
+    # proposal's `model_calls` truthful even when a later rule result is not
+    # chosen as the boundary set.
     # Scoped to the call alone -- the parsing below is free, and widening the
     # span would only blur where the time actually goes.
     try:
@@ -1263,6 +1371,78 @@ def _title_key(title: str | None) -> str | None:
     if collapsed.lower() in _GENERIC_FORM_TITLES:
         return None
     return collapsed
+
+
+def _reprints_patient_block(lines: list[str]) -> bool:
+    """Whether this page restates the patient identity under its title.
+
+    A form states who it is about once per DOCUMENT. A page that repeats the
+    title AND the patient block is therefore a reissue of the form; one that
+    repeats only the title is the same document continuing onto another page.
+    Scanned within the title window, and requiring two labels so a table column
+    named 진료기간 cannot pass for the block.
+    """
+    for line in lines[1:_MEDICAL_TITLE_SCAN_LINES]:
+        collapsed = re.sub(r"\s+", "", line)
+        hits = sum(1 for label in _PATIENT_BLOCK_LABELS
+                   if re.sub(r"\s+", "", label) in collapsed)
+        if hits >= _PATIENT_BLOCK_MIN_LABELS:
+            return True
+    return False
+
+
+def _table_header_cells(lines: list[str]) -> list[str]:
+    """The column-name row in a page's header window, as normalised cells.
+
+    A tabular form (진료비 세부내역서, 세부산정내역) prints its column names on
+    the FIRST page only; every continuation page repeats just the header and
+    resumes the rows. Such a page has no form title, so the title rule cannot
+    decide it and it would otherwise cost a judge call each.
+
+    Identified structurally, not by vocabulary: three or more delimiter-split
+    cells, none of which begins with a digit. The digit test is what separates
+    the header from the data rows below it -- a data row starts with a date, an
+    amount or a numbered item code ("01.진찰료 | 2025-10-16 | ...").
+    """
+    best: list[str] = []
+    for line in lines[:_TABLE_HEADER_SCAN_LINES]:
+        cells = [re.sub(r"\s+", "", cell)
+                 for cell in re.split(r"[|\t]+|\s{2,}", line) if cell.strip()]
+        if len(cells) < _TABLE_HEADER_MIN_CELLS or any(
+            re.match(r"^[\d,./-]", cell) for cell in cells
+        ):
+            continue
+        # The patient block above the table is delimited the same way
+        # ("등록번호  환자성명  진료기간"), so the first qualifying line is not
+        # necessarily the column row -- take the WIDEST one in the window
+        # instead. Data rows are already excluded by the digit test above, so
+        # the widest survivor is the header rather than a row of values.
+        if len(cells) > len(best):
+            best = cells
+    return best
+
+
+def _continues_table(previous: list[str], current: list[str]) -> bool:
+    """Whether `current`'s table header is a reprint of `previous`'s.
+
+    Compared as a leading-cell run rather than for equality, because OCR reads
+    the same printed header differently on every page. Measured on CASE_047
+    DOC_001 (97p): the 진료비 세부내역서 runs agree on 8-9 leading columns
+    (항목·일자·코드·명칭·단가·수량·횟수·일수 ...) while diverging in the
+    merged 금액 columns to their right -- one page reads
+    "가산후총액 | 본인부담금 | 공단부담금", the next
+    "가산총액\\t금액 분류부담금\\t...". Requiring equality would have matched
+    none of the 15 continuation pairs; the leading run matched every one, and
+    scored 0 at all three real document boundaries (p22->23, p29->30, p36->37).
+    """
+    if len(previous) < _TABLE_HEADER_MIN_MATCH or len(current) < _TABLE_HEADER_MIN_MATCH:
+        return False
+    matched = 0
+    for before, after in zip(previous, current):
+        if before != after:
+            break
+        matched += 1
+    return matched >= _TABLE_HEADER_MIN_MATCH
 
 
 def _medical_header_title(lines: list[str]) -> str | None:
@@ -3827,8 +4007,10 @@ def _cmd_propose(args):
         # one -- so a bundle the title rules fully answer still constructs no
         # provider and renders no sheet.
         cli_judge = _LazyJudge(lambda: build_provider(parse_provider_config(args)))
+        judged_pages: list[int] = []
         anchored, anchored_undecided = processed_boundaries_with_undecided(
-            args.case_id, args.doc_id, page_count, judge=cli_judge)
+            args.case_id, args.doc_id, page_count, judge=cli_judge,
+            judged=judged_pages)
         source = "processed text"
         if anchored is None:
             anchored = text_anchor_boundaries(pdf_path, page_count)
@@ -3888,7 +4070,7 @@ def _cmd_propose(args):
                 "segment_count": len(proposal["segments"]),
                 "unassigned_pages": [],
                 "mode": "text_anchor",
-                "model_calls": 0,
+                "model_calls": len(judged_pages),
             }, ensure_ascii=False, indent=2))
             return 0
 

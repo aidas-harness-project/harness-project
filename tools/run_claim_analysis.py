@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -60,7 +61,7 @@ CONTRACT, SCHEMA = "extracted_claim_fields.json", "extracted_claim_fields.schema
 CONTRACT_CP2, SCHEMA_CP2 = "coverage_result.json", "coverage_result.schema.json"
 CONTRACT_CP3, SCHEMA_CP3 = "case_type_result.json", "case_type_result.schema.json"
 CONTRACT_CP4, SCHEMA_CP4 = "requirement_matching_result.json", "requirement_matching_result.schema.json"
-VERSION = "claim_analysis_driver.v0.3.1_2call"
+VERSION = "claim_analysis_driver.v0.3.2_2call"
 # Span/candidate unit ids for the two merged calls. Receipts stay per public
 # contract (UNIT/UNIT_CP2/UNIT_CP3/UNIT_CP4) so resume grain is unchanged.
 UNIT_M1, UNIT_M2 = "m1_extract_select", "m2_judge_type_requirements"
@@ -362,6 +363,97 @@ def _bind(value: Any, verified: Mapping[tuple, Mapping[str, Any]]) -> Any:
                   else _bind(child, verified)) for key, child in value.items()}
 
 
+# A billing document's line items are its bulk and none of them fill a slot.
+# The H-group asks for TOTALS (inpatient_expense_total, outpatient_expense_total,
+# offered_treatment_cost); a 진료비 세부내역서 answers all of them on its final
+# 합계 row, and a 영수증 on its ⑥-⑬ block. Everything between is one row per
+# procedure code -- "01.진찰료 | 2025-10-16 | AA156 | 초재진찰료-종합병원 |
+# 19,100 | ..." -- which no field consumes.
+#
+# Measured on CASE_047 (2026-08-18): receipts were 241,082 of M1's 258,047
+# input characters (93.4%), against 46,000-53,000 for every case that has ever
+# completed this stage (CASE_045 53,098; CASE_046 48,642; arm C 50,571). The
+# 258K run took 666.1s and failed; an earlier attempt at the same size stalled
+# with no response at all. Folding the line items puts the case back inside the
+# range the stage is known to work in.
+_BILLING_TYPES = frozenset({"receipt"})
+# Lines that carry a total, a form header, or a patient/identity field. Matched
+# on the ORIGINAL line so the surviving text is verbatim -- an evidence quote
+# taken from a kept line still verifies against the full document.
+_BILLING_KEEP_RE = re.compile(
+    r"합\s*계|총\s*액|[⑥⑦⑧⑨⑩⑪⑫⑬⑭]|납부|정\s*산\s*금|부가가치세"
+    r"|영수증|계산서|세부내역|세부산정|진료비"
+    r"|등록번호|환자\s*성명|환자성명|진료기간|병실|환자구분|보험구분|진료과목"
+    r"|보조유형|유형\s*/?\s*보조|사업자|요양기관|면허|발행")
+# A row of item data: starts with a numbered category ("01.진찰료") or is a
+# long delimiter-separated row whose second cell reads as a date.
+_BILLING_ITEM_RE = re.compile(r"^\s*\d{2}\s*[.．]")
+# The statutory notice a receipt prints on every copy: co-payment rate tables,
+# 국민건강보험법 article citations, "가셔야 할 곳" directions. Identical on all
+# 21 pages of CASE_047's DOC_044 and worth 30K characters there. It states the
+# law, never this claim, so no slot can be grounded in it.
+_BILLING_NOTICE_RE = re.compile(
+    r"^\s*(?:[※▶*]|\d+\s*[.．]\s*[\"“]?(?:상한액|질병군|환자가|입원|외래|본인))"
+    r"|국민건강보험법|의료급여법|시행령|시행규칙|별표|본인부담률|본인부담상한액"
+    r"|가셔야\s*할\s*곳|항목별\s*설명|비고란|안내\s*말씀")
+
+
+def _fold_billing_text(text: str) -> tuple[str, int]:
+    """Drop per-procedure rows from one page of a billing document.
+
+    Returns (folded_text, dropped_line_count). Kept lines are copied verbatim
+    and in order, so page structure and quotability are unchanged; only whole
+    item rows are removed, and a marker records that something was.
+    """
+    kept, dropped = [], 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            kept.append(line)
+            continue
+        # The notice test runs BEFORE the keep test: the statutory text quotes
+        # the very words the keep list looks for ("본인부담상한액", "진료비"),
+        # so checking keep first would retain the whole notice block.
+        if _BILLING_NOTICE_RE.search(stripped):
+            dropped += 1
+            continue
+        if _BILLING_KEEP_RE.search(stripped):
+            kept.append(line)
+            continue
+        if _BILLING_ITEM_RE.match(stripped) or stripped.count("|") >= 4 or stripped.count("\t") >= 4:
+            dropped += 1
+            continue
+        kept.append(line)
+    if dropped:
+        kept.append(f"[... {dropped} line item row(s) omitted; totals above are "
+                    "the figures this stage consumes]")
+    return "\n".join(kept), dropped
+
+
+def _fold_billing_documents(bundle: list[dict]) -> tuple[list[dict], dict]:
+    """Bundle with billing line items folded, plus a report of what was cut."""
+    folded, report = [], {"documents": {}, "before": 0, "after": 0}
+    for doc in bundle:
+        before = sum(len(page["text"]) for page in doc["pages"])
+        report["before"] += before
+        if doc.get("document_type") not in _BILLING_TYPES:
+            report["after"] += before
+            folded.append(doc)
+            continue
+        pages, dropped_total = [], 0
+        for page in doc["pages"]:
+            text, dropped = _fold_billing_text(page["text"])
+            dropped_total += dropped
+            pages.append({**page, "text": text})
+        after = sum(len(page["text"]) for page in pages)
+        report["after"] += after
+        if dropped_total:
+            report["documents"][doc["document_id"]] = {
+                "rows_omitted": dropped_total, "chars_before": before, "chars_after": after}
+        folded.append({**doc, "pages": pages})
+    return folded, report
+
+
 def _prompt(bundle: list[dict]) -> str:
     rendered = "\n\n".join(
         f"## {doc['document_id']} ({doc.get('document_type')})\n" + "\n".join(
@@ -399,7 +491,13 @@ value 에 담으십시오. 짧고 정확한 인용이 길고 부정확한 인용
 
 Evidence discipline: every field cites at least one evidence reference with document_id, page, and
 an EXACT quote from the supplied text. A fact that is redacted or absent records value null with
-review_required true, citing the page where it would appear. For a PERIOD slot
+review_required true, citing the page where it would appear. For a DATE slot whose date is only
+PARTIALLY known -- the document states a month or a year but not a full calendar date ("2025년
+10월경", "2025-10") -- record value null with review_required true and put the partial reading in
+`warnings` ("onset_date: 문서에 '2025년 10월경'까지만 기재"). A date value must be a complete
+YYYY-MM-DD or null: "2025-10" is refused by the schema, and the whole call is then rejected after
+it has already been paid for. Never pad a partial date to a full one (no "2025-10-01"). For a
+PERIOD slot
 (treatment_period, admission_period, or any *_period field) whose start date is redacted or
 unknown: OMIT the field entirely and state the known partial information (e.g. a stated duration
 like "약 8주") in `warnings` -- the period shape requires a real YYYY-MM-DD start_date, and the
@@ -1021,6 +1119,18 @@ def _clamp_selection(items: list, index_pages: Mapping[str, set]) -> dict:
     a document's highest indexed page is guaranteed readable and admits
     continuations; only an empty result is an error."""
     ceilings = {doc_id: max(pages) for doc_id, pages in index_pages.items() if pages}
+    # A case with no policy document has nothing to select from, and that is a
+    # recorded state rather than a failure: D5 (`dao.py
+    # declare-no-policy-documents`) lets such a case pass
+    # `policy_clause_processing`, so refusing here would block a case the DAO
+    # already cleared. Measured on CASE_047 (2026-08-18): 52 documents, zero
+    # insurance_policy, an empty `_document_index.json`, and M1 died on
+    # "selection returned no readable pages" after a 397.5s call had already
+    # produced good fields. The empty-selection error below still stands for a
+    # case that HAS policy pages -- that one means the model returned nothing
+    # usable, which is a real defect.
+    if not ceilings:
+        return {"pages": []}
     pages, seen, dropped = [], set(), []
     for item in items:
         key = (item["document_id"], item["page"])
@@ -1345,6 +1455,19 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
         if missing:
             raise RuntimeError("BLOCKED: redacted text missing for " + ", ".join(missing))
         bundle = [by_id[doc_id] for doc_id in doc_ids]
+        # Two bundles from here on, deliberately not one:
+        #   prompt_bundle -- billing line items folded, what the model READS
+        #   bundle        -- the full text, what every citation is CHECKED against
+        # Validation must keep the unfolded text. A quote the model built out of
+        # a folded row has to fail, and it only fails if the checker still holds
+        # the row; validating against the folded text would make an omitted line
+        # look like a line that never existed, turning a caught error into a
+        # silent one. Folding is an input-size measure, never an evidence one.
+        prompt_bundle, fold_report = _fold_billing_documents(bundle)
+        if fold_report["after"] < fold_report["before"]:
+            print(f"billing fold: {fold_report['before']:,} -> "
+                  f"{fold_report['after']:,} chars across "
+                  f"{len(fold_report['documents'])} document(s)", file=sys.stderr)
         index = _dao_json(["read-document-index", case_id, "--run-id", run_id],
                           allow_missing=True)
         if index is None:
@@ -1389,7 +1512,7 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
             driver_runtime.maybe_interrupt(STAGE, candidate_id)
             with driver_runtime.driver_span(case_id, run_id, "provider_wait", unit_id=UNIT_M1, items=1):
                 m1 = driver_runtime.structured_with_one_correction(
-                    provider=provider, prompt=_m1_prompt(bundle, listing),
+                    provider=provider, prompt=_m1_prompt(prompt_bundle, listing),
                     prompt_version=prompt_version, output_schema=_transport_schema_m1(),
                     validate=lambda value: _validate_m1(value, bundle, schema, index_pages))
             _persist_candidate(case_id, run_id, held_by, UNIT_M1, candidate_id,
@@ -1429,14 +1552,24 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
         by_doc = {}
         for item in selection["pages"]:
             by_doc.setdefault(item["document_id"], []).append(item["page"])
-        args = ["read-redacted-text-bundle", case_id]
-        for doc_id in sorted(by_doc):
-            page_list = ",".join(str(p) for p in sorted(set(by_doc[doc_id])))
-            args += ["--doc-id", doc_id, "--pages", f"{doc_id}={page_list}"]
-        args += ["--run-id", run_id]
-        with driver_runtime.driver_span(case_id, run_id, "dao_content_read", unit_id=UNIT_M2):
-            raw_pages = _dao_json(args)
-        served_bundle = raw_pages.get("documents", [])
+        if by_doc:
+            args = ["read-redacted-text-bundle", case_id]
+            for doc_id in sorted(by_doc):
+                page_list = ",".join(str(p) for p in sorted(set(by_doc[doc_id])))
+                args += ["--doc-id", doc_id, "--pages", f"{doc_id}={page_list}"]
+            args += ["--run-id", run_id]
+            with driver_runtime.driver_span(case_id, run_id, "dao_content_read", unit_id=UNIT_M2):
+                raw_pages = _dao_json(args)
+            served_bundle = raw_pages.get("documents", [])
+        else:
+            # A D5 no-policy case selects no pages, and
+            # `read-redacted-text-bundle` requires at least one --doc-id, so the
+            # read is skipped rather than issued empty. M2 still runs: CP2/CP3
+            # judge coverage and case type from CP1's fields, and CP4 matches
+            # requirements it can state without a clause -- a case with no 약관
+            # simply cannot ground one in a clause_ref, which the transport
+            # schema already permits (policy_doc_ids is empty).
+            served_bundle = []
         served = {(doc["document_id"], page["page"]): page["text"]
                   for doc in served_bundle for page in doc.get("pages", [])}
         known1 = _known_quote_set(cp1_contract)

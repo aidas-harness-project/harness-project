@@ -5,6 +5,8 @@ in later build steps with their own tests.
 """
 import hashlib
 import json
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -2981,6 +2983,24 @@ def test_form_title_accepts_the_내역_family():
     assert sc.medical_form_title("진료비 내역서(외래)")
 
 
+def test_form_title_ignores_measured_viewer_and_reissue_suffixes():
+    """CASE_047 DOC_020--022: layout suffixes are not title content.
+
+    The actual redacted forms put a page counter or an issuance marker after a
+    title on the same line.  Keep the conservative 40-character/prose guard;
+    only these exact end markers are removed before applying it.
+    """
+    assert sc.medical_form_title(
+        "진료비 세부산정내역                                                    Page 1 / 1"
+    ) == "진료비 세부산정내역"
+    assert sc.medical_form_title(
+        "[√]외래 [   ]입원([   ]퇴원[   ]중간) 진료비 계산서·영수증  [재발행]"
+    ) == "[√]외래 [   ]입원([   ]퇴원[   ]중간) 진료비 계산서·영수증"
+    assert sc.medical_form_title(
+        "[√]외래 [　]입원([　]퇴원[　]중간) 진료비 계산서·영수증  [재발행]"
+    ) == "[√]외래 [　]입원([　]퇴원[　]중간) 진료비 계산서·영수증"
+
+
 def test_a_stamp_suffix_does_not_turn_prose_into_a_title():
     """The relaxed anchor must not open the rule to body sentences."""
     assert sc.medical_form_title("위 진단서를 첨부하여 제출하였습니다") is None
@@ -3588,3 +3608,261 @@ def test_a_real_case_on_disk_diverts_propose_boundaries_from_the_vision_path():
     # is only meaningful under this condition.
     assert provider.calls == 2
     assert len(result["per_sheet"]) == 1
+
+
+# --- 영수증/계산서: recognised, merged, and never judged ---------------------
+
+_RECEIPT_PAGE = ("( 외래 ) 진료비 계산서 · 영수증\n보조유형 : 정상급여\n"
+                 "환자등록번호 | 환자 성명 | 진료기간\n진 찰 료 | 8,460")
+
+
+def test_a_run_of_receipts_is_one_document_and_costs_no_judge_call():
+    """영수증/계산서 take the ordinary repeated-title merge, and the reason to
+    recognise them at all is that the judge is what a missing title costs.
+
+    Measured on CASE_050 (97p, 2026-08-18) before 영수증 was in
+    `_MEDICAL_TITLE_RE`: the title returned None, so the deterministic branch
+    was skipped and each of the 31 consecutive receipt pages went to the LLM
+    tier -- 63 judge calls and a 649.5s Stage 2. The judge stub here is the
+    part that matters: `boundaries_from_page_texts` reaches it whenever
+    `_title_key` yields None, so a rule that suppresses the KEY (rather than
+    the title) does not avoid the call -- it re-routes into it. A later
+    re-propose that returned `model_calls: 0` had in fact made 126.
+    """
+    judged = []
+
+    def judge(*args, **kwargs):
+        judged.append(args)
+        return {"starts_new_document": True}
+
+    pages = [_RECEIPT_PAGE, _RECEIPT_PAGE, _RECEIPT_PAGE]
+    found = sc.boundaries_from_page_texts(pages, medical=True, judge=judge)
+    assert set(found) == {1}, "consecutive receipts are one document"
+    assert judged == [], "a titled receipt page must never reach the judge"
+
+
+def test_text_anchor_propose_reports_the_actual_injected_judge_calls(
+        monkeypatch, capsys):
+    """The CLI result is an execution-cost receipt, not a deterministic label.
+
+    Two untitled pages require two real calls to the injected judge.  This
+    exercises `_cmd_propose` through its processed-text path and asserts the
+    JSON it emits, so restoring the old literal `model_calls: 0` fails even
+    though the proposal boundaries themselves remain unchanged.
+    """
+    pages = [
+        "진 단 서\n환자의 성명",
+        "계속되는 진단 내용입니다",
+        "[자료 13] 위자료 산정기준표\n서울중앙지방법원 기준",
+    ]
+    judge = _FakeBoundaryJudge([
+        {"starts_new_document": False, "confidence": 0.9, "title": None},
+        {"starts_new_document": True, "confidence": 0.9,
+         "title": "위자료 산정기준표"},
+    ])
+
+    class _Document:
+        page_count = len(pages)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(sc, "_manifest_bundle", lambda *args: ({}, {
+        "file_path": "ignored.pdf", "source_file_name": "bundle.pdf",
+    }))
+    monkeypatch.setattr(sc, "_processed_page_texts", lambda *args: pages)
+    monkeypatch.setattr(sc, "_LazyJudge", lambda factory: judge)
+    monkeypatch.setattr(sc, "_write_proposal", lambda *args: Path("proposal.json"))
+    monkeypatch.setitem(sys.modules, "fitz", SimpleNamespace(open=lambda _: _Document()))
+
+    args = SimpleNamespace(
+        case_id="CASE_TESTONLY_9998", doc_id="DOC_001", grid="3x4",
+        crop_ratio=0.33, no_text_anchor=False, held_by="test", run_id="RUN_TEST",
+    )
+    assert sc._cmd_propose(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert len(judge.prompts) == 2
+    assert result["model_calls"] == 2
+
+
+def test_judge_calls_survive_when_the_other_auto_pass_wins(monkeypatch):
+    """`model_calls` is cost incurred, not calls behind returned boundaries.
+
+    The policy pass wins this constructed non-bundle, but the medical pass has
+    already sent two genuinely ambiguous page pairs to an injected judge.  The
+    page list must survive that discarded result; clearing it would recreate a
+    deceptively cheap proposal receipt.
+    """
+    pages = [
+        "첫 번째 보통약관",
+        "제목 없는 계속 페이지",
+        "두 번째 특별약관",
+    ]
+    judge = _FakeBoundaryJudge([
+        {"starts_new_document": False, "confidence": 0.9, "title": None},
+        {"starts_new_document": False, "confidence": 0.9, "title": None},
+    ])
+    # This isolates the discarded-pass branch. Real policy bundles return
+    # before the medical pass deliberately, so they correctly cost zero calls.
+    monkeypatch.setattr(sc, "_is_policy_bundle", lambda boundaries: False)
+    judged = []
+    found = sc.boundaries_from_page_texts(
+        pages, medical="auto", judge=judge, judged=judged)
+
+    assert set(found) == {1, 3}
+    assert len(judge.prompts) == 2
+    assert judged == [2, 3]
+
+
+def test_receipt_variants_that_name_a_different_visit_type_still_split():
+    """The merge is on the printed title, so 입원 / 입원중간금 / 외래 receipts
+    remain separate documents -- these are real CASE_050 page titles."""
+    pages = [
+        "(입원) 진료비 계산서 · 영수증\n진 찰 료 | 8,460",
+        "(입원중간금) 진료비 계산서 · 영수증\n진 찰 료 | 1,200",
+        _RECEIPT_PAGE,
+        _RECEIPT_PAGE,
+    ]
+    assert set(sc.boundaries_from_page_texts(pages, medical=True)) == {1, 2, 3}
+
+
+def test_a_multi_page_medical_form_still_merges():
+    """The merge rule itself is untouched -- 진료비 세부산정내역 runs over
+    several pages as ONE document, and must keep doing so."""
+    header = "진료비 세부산정내역\n항목 | 코드 | 금액"
+    pages = [header, header, "계속되는 표 내용입니다"]
+    assert set(sc.boundaries_from_page_texts(pages, medical=True)) == {1}
+
+
+# --- repeated table headers settle a continuation without a judge call -------
+
+class _StubJudge:
+    """The judge is a PROVIDER OBJECT, not a callable: `_judge_boundary` calls
+    `.classify_document(prompt, version)` on it. A bare-function stub is never
+    invoked, so it records nothing and makes every judged page look unjudged --
+    which is exactly how an earlier version of these tests passed while the run
+    it described was making 126 model calls."""
+
+    def __init__(self):
+        self.prompts = []
+
+    def classify_document(self, prompt, prompt_version):
+        self.prompts.append(prompt)
+        return {"starts_new_document": True}
+
+_TABLE_TITLE_PAGE = ("진료비 세부내역서\n등록번호   환자성명   진료기간\n"
+                     "항목 | 일자 | 코드 | 명칭 | 단가 | 수량 | 횟수 | 일수 | 가산후총액 | 금액\n"
+                     "01.진찰료 | 2025-10-16 | AA156 | 초진진찰료 | 19,100 | 1 | 1 | 1 | 19,100")
+# The same printed header, read differently by OCR on the next page -- tab
+# delimiters instead of pipes, and the merged 금액 columns split another way.
+_TABLE_CONT_PAGE = ("항목\t일자\t코드\t명칭\t단가\t수량\t횟수\t일수\t가산후총액\t본인부담금\t공단부담금\n"
+                    "02.투약료 | 2025-10-16 | AB201 | 아목시실린 | 1,091 | 1 | 1 | 1 | 1,091")
+
+
+def test_a_reprinted_table_header_continues_without_asking_the_judge():
+    """A tabular form prints its column names once and its continuation pages
+    repeat only the header, so those pages carry no form title and used to cost
+    a judge call each. Measured on CASE_047 DOC_001 (97p): 15 of 34 judged
+    pages were exactly this, and settling them here took the run to 19.
+    """
+    judged = []
+
+    def judge(*args, **kwargs):
+        judged.append(args)
+        return {"starts_new_document": True}
+
+    pages = [_TABLE_TITLE_PAGE, _TABLE_CONT_PAGE, _TABLE_CONT_PAGE]
+    found = sc.boundaries_from_page_texts(pages, medical=True,
+                                          judge=_StubJudge(), judged=judged)
+    assert set(found) == {1}, "continuation pages must not open a document"
+    assert judged == [], "a reprinted table header must not reach the judge"
+
+
+def test_the_header_match_tolerates_ocr_drift_in_the_trailing_columns():
+    """Equality would match nothing: the same printed header reads
+    '가산후총액 | 본인부담금 | 공단부담금' on one page and
+    '가산총액\t금액 분류부담금\t...' on the next. Only the LEADING run is
+    compared -- real CASE_047 pairs agree on 8-9 columns."""
+    left = sc._table_header_cells([
+        "항목 | 일자 | 코드 | 명칭 | 단가 | 수량 | 횟수 | 일수 | 가산후총액 | 본인부담금"])
+    right = sc._table_header_cells([
+        "항목\t일자\t코드\t명칭\t단가\t수량\t횟수\t일수\t가산총액\t금액 분류부담금"])
+    assert left[:8] == right[:8]
+    assert sc._continues_table(left, right)
+
+
+def test_a_data_row_is_not_mistaken_for_a_table_header():
+    """The header is told from the rows below it structurally -- a data row
+    starts with a numbered item code, a date or an amount."""
+    assert sc._table_header_cells([
+        "01.진찰료 | 2025-10-16 | AA156 | 초진진찰료 | 19,100 | 1 | 1 | 1"]) == []
+
+
+def test_two_unrelated_tables_are_not_fused_by_a_short_header():
+    """The leading-run floor is what stops a two-column header from merging
+    documents that merely both contain a table."""
+    assert not sc._continues_table(["항목", "금액"], ["항목", "금액"])
+
+
+def test_a_generic_heading_still_reaches_the_judge_despite_a_matching_table():
+    """Two studies printed with the same table are still two documents, so the
+    table rule must not pre-empt the judge for a page that HAS a heading.
+
+    `judged` is the list the proposal reports as `model_calls`, so asserting on
+    it asserts on the number a real run publishes."""
+    judged = []
+    header = "항목 | 일자 | 코드 | 명칭 | 단가 | 수량 | 횟수 | 일수 | 가산후총액 | 금액"
+    pages = [f"REPORT\n{header}\n01.a | 2025-10-16 | X | y | 1 | 1 | 1 | 1 | 1",
+             f"REPORT\n{header}\n02.b | 2025-10-17 | X | y | 2 | 1 | 1 | 1 | 2"]
+    sc.boundaries_from_page_texts(pages, medical=True, judge=_StubJudge(),
+                                  judged=judged)
+    assert judged == [2], "a titled page must still be judged"
+
+
+# --- per-issuance forms: a repeated title is a NEW document ------------------
+
+def test_two_detail_statements_with_the_same_title_stay_separate():
+    """진료비 세부내역서 is issued per billing run, so a second one is a second
+    document -- unlike a form whose title simply reprints on its own
+    continuation pages.
+
+    Measured on CASE_047 (2026-08-18): pages 16, 23 and 30 each open their own
+    statement, the repeated-title merge fused all three into one 21-page
+    DOC_012, and claim_analysis then failed on it -- "quote is not present on
+    page 3 -- that text appears on page(s) 10, 17" -- because the same header
+    and item names recur at three offsets inside the fused document. Deleting
+    the `_is_per_issuance` check collapses this to {1}.
+    """
+    titled = "진료비 세부내역서\n등록번호   환자성명   진료기간\n" + \
+             "항목 | 일자 | 코드 | 명칭 | 단가 | 수량 | 횟수 | 일수 | 가산후총액 | 금액\n" + \
+             "01.진찰료 | 2025-10-16 | AA156 | 초진진찰료 | 19,100 | 1 | 1 | 1 | 19,100"
+    assert set(sc.boundaries_from_page_texts([titled, titled], medical=True)) == {1, 2}
+
+
+def test_a_per_issuance_statement_still_keeps_its_own_continuation_pages():
+    """The exception is narrow: it separates two TITLED pages. A continuation
+    page carries no title, only the reprinted column header, so it still
+    belongs to the statement above it."""
+    judged = []
+    titled = "진료비 세부내역서\n등록번호   환자성명   진료기간\n" + \
+             "항목 | 일자 | 코드 | 명칭 | 단가 | 수량 | 횟수 | 일수 | 가산후총액 | 금액\n" + \
+             "01.진찰료 | 2025-10-16 | AA156 | 초진진찰료 | 19,100 | 1 | 1 | 1 | 19,100"
+    pages = [titled, _TABLE_CONT_PAGE, _TABLE_CONT_PAGE, titled]
+    found = sc.boundaries_from_page_texts(pages, medical=True,
+                                          judge=_StubJudge(), judged=judged)
+    assert set(found) == {1, 4}, "continuations stay, the second statement splits"
+    assert judged == [], "no judge call is needed for either decision"
+
+
+def test_receipts_are_still_merged_because_that_is_the_operator_decision():
+    """A receipt reprints the patient block like any reissued form, so the
+    evidence says "new document" -- it is merged anyway, by operator decision,
+    via `_MERGED_FORM_TITLES`. Asserting the block IS present keeps this test
+    honest about which of the two rules is doing the work."""
+    assert sc._reprints_patient_block(
+        [line.strip() for line in _RECEIPT_PAGE.splitlines() if line.strip()])
+    assert set(sc.boundaries_from_page_texts(
+        [_RECEIPT_PAGE, _RECEIPT_PAGE], medical=True)) == {1}

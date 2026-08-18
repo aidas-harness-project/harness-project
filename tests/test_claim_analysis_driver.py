@@ -762,3 +762,133 @@ def test_no_transport_schema_declares_a_union_type():
         ("m2", driver._transport_schema_m2(["DOC_009"])),
     ]:
         assert unions(schema) == [], f"{name} transport declares a union type"
+
+
+def test_prompt_tells_the_model_how_to_encode_a_partially_known_date():
+    """A date the document states only to the month has a legal encoding, and
+    the prompt has to name it. CASE_050 (2026-08-18) returned
+    `onset_date: "2025-10"`; the schema's date_field admits only a complete
+    YYYY-MM-DD or null, so the M1 call was rejected on validation after its
+    290.9s had already been spent. The PERIOD slot already carried this rule
+    (arm H's all-null period finding) -- the DATE slot did not.
+    """
+    prompt = driver._prompt([{
+        "document_id": "DOC_001", "document_type": "diagnosis_certificate",
+        "pages": [{"page": 1, "text": "발병일 2025년 10월경"}],
+    }])
+    # The rule names the failing shape, the legal alternative, and the warning
+    # channel -- a rule that says only "use null" loses the partial reading.
+    assert "2025-10" in prompt, "the refused shape is not shown"
+    assert "YYYY-MM-DD" in prompt
+    assert "warnings" in prompt
+    # And it forbids the other tempting repair: inventing a day.
+    assert "2025-10-01" in prompt, "padding a partial date is not forbidden"
+
+
+def test_date_and_period_partial_rules_are_both_present_and_distinct():
+    """Two different shapes with two different repairs: a date nulls out and
+    warns, a period is OMITTED entirely (its start_date is required). Collapsing
+    them into one instruction is how one of the two regressed before."""
+    prompt = driver._prompt([{
+        "document_id": "DOC_001", "document_type": "medical_record",
+        "pages": [{"page": 1, "text": "치료기간 약 8주"}],
+    }])
+    assert "DATE slot" in prompt and "PERIOD slot" in prompt
+    assert "OMIT the field entirely" in prompt
+
+
+# --- billing line items are folded out of the prompt, never out of evidence --
+
+_RECEIPT_PAGE = "\n".join([
+    "( 외래 ) 진료비 계산서 · 영수증",
+    "환자등록번호 | 환자 성명 | 진료기간",
+    "01.진찰료 | 2025-10-16 | AA156 | 초재진찰료-종합병원 | 19,100 | 1 | 1 | 1 | 19,100",
+    "02.투약료 | 2025-10-16 | AB201 | 아목시실린 | 1,091 | 1 | 1 | 1 | 1,091",
+    "합계 | ① 15,388 | ② 12,753 | ③ 0 | ④ 6,451",
+    "⑥ 진료비 총액 (①+②+③+④) | 34,592",
+    "⑬ 납부할 금액 ⑧-(⑨+⑩+⑪)+⑫ | 21,750",
+    "※ 상급종합병원 : 2인실 50%, 3인실 40% / 병원급 의료기관 입원료 : 2인실 40%",
+    "3. 상한액 초과금 : 「국민건강보험법 시행령」 별표 3 제1호에 따른 본인부담상한액",
+])
+
+
+def _billing_bundle():
+    return [{"document_id": "DOC_044", "document_type": "receipt",
+             "pages": [{"page": 1, "text": _RECEIPT_PAGE}]}]
+
+
+def test_folding_keeps_every_total_and_drops_the_line_items():
+    """The H-group consumes totals; a per-procedure row fills no slot.
+
+    Measured on CASE_047 (2026-08-18): receipts were 241,082 of M1's 258,047
+    input characters, against 46,000-53,000 for every case that has ever
+    completed this stage. That run took 666.1s and failed.
+    """
+    folded, report = driver._fold_billing_documents(_billing_bundle())
+    text = folded[0]["pages"][0]["text"]
+
+    for total in ("합계 | ① 15,388", "⑥ 진료비 총액", "34,592",
+                  "⑬ 납부할 금액", "21,750"):
+        assert total in text, f"a figure the stage consumes was dropped: {total}"
+    for item in ("AA156", "초재진찰료", "AB201", "아목시실린"):
+        assert item not in text, f"a line item survived the fold: {item}"
+    assert report["after"] < report["before"]
+    assert report["documents"]["DOC_044"]["rows_omitted"] >= 2
+
+
+def test_the_statutory_notice_is_dropped_even_though_it_names_kept_words():
+    """The notice quotes the very words the keep list looks for (진료비,
+    본인부담상한액), so it has to be tested BEFORE the keep test -- otherwise
+    30K characters of 국민건강보험법 text ride along on every receipt."""
+    folded, _ = driver._fold_billing_documents(_billing_bundle())
+    text = folded[0]["pages"][0]["text"]
+    assert "국민건강보험법" not in text
+    assert "상급종합병원 : 2인실" not in text
+
+
+def test_a_non_billing_document_is_returned_untouched():
+    """Folding is scoped to billing types; a 진단서 keeps every line."""
+    bundle = [{"document_id": "DOC_003", "document_type": "diagnosis_certificate",
+               "pages": [{"page": 1, "text": "진 단 서\n01.병명 | 공황 장애 | F410"}]}]
+    folded, report = driver._fold_billing_documents(bundle)
+    assert folded[0]["pages"][0]["text"] == bundle[0]["pages"][0]["text"]
+    assert report["documents"] == {}
+
+
+def test_kept_lines_stay_verbatim_so_a_quote_still_verifies():
+    """Kept lines are copied, not rewritten -- an evidence quote taken from one
+    must still match the FULL document the validator checks against."""
+    original = _billing_bundle()[0]["pages"][0]["text"]
+    folded, _ = driver._fold_billing_documents(_billing_bundle())
+    for line in folded[0]["pages"][0]["text"].splitlines():
+        if line.startswith("[..."):
+            continue
+        if line.strip():
+            assert line in original, f"fold rewrote a line: {line!r}"
+
+
+# --- a D5 no-policy case selects no pages, and that is not an error ---------
+
+def test_a_case_with_no_policy_index_selects_no_pages_instead_of_failing():
+    """D5 (`dao.py declare-no-policy-documents`) lets a case with no 약관 pass
+    `policy_clause_processing`, so claim_analysis must accept the same case.
+
+    Measured on CASE_047 (2026-08-18): 52 documents, zero insurance_policy, an
+    empty `_document_index.json`. M1 produced good fields in 397.5s and then
+    died on "selection returned no readable pages" -- the whole call wasted on
+    a state the DAO had already cleared.
+    """
+    assert driver._clamp_selection([], {}) == {"pages": []}
+    # Even if the model names pages, there is no index to clamp them against.
+    assert driver._clamp_selection(
+        [{"document_id": "DOC_009", "page": 3}], {}) == {"pages": []}
+
+
+def test_an_empty_selection_still_fails_when_the_case_has_policy_pages():
+    """The waiver is narrow: with policy pages available, an empty selection
+    means the model returned nothing usable, which is a real defect."""
+    with pytest.raises(ValueError, match="no readable pages"):
+        driver._clamp_selection([], {"DOC_009": {1, 2, 3}})
+    with pytest.raises(ValueError, match="no readable pages"):
+        driver._clamp_selection(
+            [{"document_id": "DOC_009", "page": 99}], {"DOC_009": {1, 2, 3}})
