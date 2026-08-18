@@ -562,3 +562,48 @@ def test_cli_entry_points_that_raise_spans_also_configure_tracing():
         "these CLI tools can reach instrumented code but never switch tracing "
         f"on, so their spans are discarded silently: {missing}"
     )
+
+
+# --- read-contract records WHICH contract, not just that a read happened -----
+
+def test_contract_name_is_an_allowed_io_attr_and_is_enum_capped():
+    """The read was already timed; what its span could not say was WHICH
+    contract, so a stage's declared inputs could not be checked against what it
+    actually opened.
+
+    Measured on CASE_047's consistency_check (2026-08-18): its output names
+    claim_analysis field slots (`accident_date`, `surgery_date`,
+    `admission_period`) while every `values_compared` entry quotes a source
+    document, and the trace could neither confirm nor refute that it read
+    `extracted_claim_fields.json`.
+
+    The value is a fixed contract filename from this repo -- same character as
+    `schema_name`, so it takes the same enum capping rather than free text.
+    """
+    assert "contract_name" in trace_mod._ALLOWED_ATTRS["io"]
+    assert "contract_name" in trace_mod._ENUM_ATTRS
+
+
+def test_a_contract_read_span_carries_the_filename(tmp_path, monkeypatch):
+    """End to end through the real span writer: the attr survives _clean_attrs
+    rather than being filtered out as an unknown key."""
+    import dao
+
+    monkeypatch.setattr(dao, "OUTPUTS", tmp_path / "outputs")
+    case_dir = tmp_path / "outputs" / "CASE_9400"
+    case_dir.mkdir(parents=True)
+    (case_dir / "extracted_claim_fields.json").write_text(
+        json.dumps({"case_id": "CASE_9400"}), encoding="utf-8")
+
+    trace_mod.configure("CASE_9400", "RUN_1", root=tmp_path / "trace")
+    args = type("Args", (), {"case_id": "CASE_9400", "run_id": "RUN_1",
+                             "filename": "extracted_claim_fields.json",
+                             "doc_id": None})()
+    assert dao.cmd_read_contract(args) == 0
+
+    spans = [json.loads(line)
+             for path in (tmp_path / "trace").rglob("*.jsonl")
+             for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    reads = [s for s in spans if s["op"] == "dao.read_contract"]
+    assert reads, "the read emitted no span"
+    assert reads[0]["attrs"]["contract_name"] == "extracted_claim_fields.json"

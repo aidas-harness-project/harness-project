@@ -1269,6 +1269,15 @@ def traced_read(op: str):
                 rc = fn(args)
                 try:
                     sp.set(exit_code=int(rc or 0), startup_s=_startup_seconds())
+                    # Which contract, when the command names one. `filename` is
+                    # a fixed name from this repo's contract set, and
+                    # `_ENUM_ATTRS` caps and strips it -- the same treatment
+                    # `schema_name` gets. Without it a read span says a stage
+                    # read SOMETHING, which cannot be checked against the
+                    # inputs the stage's spec declares.
+                    filename = getattr(args, "filename", None)
+                    if isinstance(filename, str) and filename:
+                        sp.set(contract_name=filename)
                 except Exception:  # noqa: BLE001 -- never break a read
                     pass
                 return rc
@@ -2267,6 +2276,16 @@ def cmd_read_ground_truth(args):
 
 @traced_read("dao.read_contract")
 def cmd_read_contract(args):
+    """Read one governed contract.
+
+    The span carries the contract's own filename as of 2026-08-18. The read was
+    already timed; what it could not say was WHICH contract, so a stage's
+    declared inputs could not be checked against what it actually opened.
+    Measured on CASE_047's consistency_check -- its output names claim_analysis
+    field slots (`accident_date`, `surgery_date`, `admission_period`) while
+    every `values_compared` entry quotes a source document, and the trace could
+    neither confirm nor refute that it read `extracted_claim_fields.json`.
+    """
     # The medical contracts are owned by purpose-built commands: the ledger and
     # the immutable revisions are never readable through the generic path, and
     # a target that is a symlink or carries extra hardlinks is refused rather
