@@ -5,9 +5,17 @@
   "description": "One completed sub-unit of a driver stage: the receipt fields that decide whether it may be reused, plus the validated provider result itself. A stage-level receipt records that a whole stage finished; this records that ONE document or bundle finished, so an interruption reruns only the unfinished unit. The payload is stored because a resume must not re-call the provider merely to recover a result the driver already validated. DAO-owned: issued only by write-driver-candidate, never through write-contract, so a driver cannot forge a completed unit for itself.",
   "type": "object",
   "properties": {
-    "case_id": { "$ref": "common_component_output.schema.json#/$defs/case_id" },
-    "run_id": { "type": "string", "pattern": "^RUN_[0-9]{8}_[0-9]+$" },
-    "stage": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+    "case_id": {
+      "$ref": "common_component_output.schema.json#/$defs/case_id"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^RUN_[0-9]{8}_[0-9]+$"
+    },
+    "stage": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+$"
+    },
     "unit_id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9_]+$",
@@ -18,27 +26,75 @@
       "pattern": "^[A-Za-z0-9_]+$",
       "description": "Identifies the sub-unit within the stage unit: one document for claim-analysis checkpoint 1, one insurer bundle for denial-response initial extraction."
     },
-    "input_fingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "input_fingerprint": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
     "input_digests": {
       "type": "object",
       "description": "Only the digests this ONE unit consumed. Scoping matters: a stage-wide digest set would invalidate every unit when any document's redacted text changes, which is exactly the over-invalidation this file exists to prevent.",
       "minProperties": 1,
-      "additionalProperties": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
     },
-    "prompt_version": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
-    "response_schema_version": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
-    "provider_name": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
-    "model_name": { "type": "string", "pattern": "^[A-Za-z0-9._:/-]+$" },
+    "prompt_version": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "response_schema_version": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "provider_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "model_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:/-]+$"
+    },
     "status": {
-      "enum": ["complete"],
+      "enum": [
+        "complete"
+      ],
       "description": "Only a completed, driver-validated unit is persisted. An interrupted unit leaves no candidate file at all, which is what makes its absence the resume signal."
     },
     "result": {
       "type": "object",
       "description": "The provider output for this unit, after the driver's own validation passed. Reused verbatim on resume."
     },
-    "recorded_at": { "type": "string", "format": "date-time" }
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "call_usage": {
+      "type": "array",
+      "description": "Provider-reported token counts, one entry per provider call (a run that needed P4's correction records both). Copied verbatim from the provider's own usage report, never derived -- a count this harness computed would be indistinguishable from one the provider measured. Diagnostic only: deliberately outside input_fingerprint, so recording it never changes whether a candidate can be reused.",
+      "items": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "number"
+        }
+      }
+    }
   },
-  "required": ["case_id", "run_id", "stage", "unit_id", "candidate_id", "input_fingerprint", "input_digests", "prompt_version", "response_schema_version", "provider_name", "model_name", "status", "result", "recorded_at"],
+  "required": [
+    "case_id",
+    "run_id",
+    "stage",
+    "unit_id",
+    "candidate_id",
+    "input_fingerprint",
+    "input_digests",
+    "prompt_version",
+    "response_schema_version",
+    "provider_name",
+    "model_name",
+    "status",
+    "result",
+    "recorded_at"
+  ],
   "additionalProperties": false
 }

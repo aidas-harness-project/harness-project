@@ -1511,12 +1511,15 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
         if m1 is None:
             driver_runtime.maybe_interrupt(STAGE, candidate_id)
             with driver_runtime.driver_span(case_id, run_id, "provider_wait", unit_id=UNIT_M1, items=1):
+                m1_usage: list = []
                 m1 = driver_runtime.structured_with_one_correction(
                     provider=provider, prompt=_m1_prompt(prompt_bundle, listing),
                     prompt_version=prompt_version, output_schema=_transport_schema_m1(),
-                    validate=lambda value: _validate_m1(value, bundle, schema, index_pages))
+                    validate=lambda value: _validate_m1(value, bundle, schema, index_pages),
+                    usage_out=m1_usage)
             _persist_candidate(case_id, run_id, held_by, UNIT_M1, candidate_id,
-                               digests, prompt_version, provider, m1)
+                               digests, prompt_version, provider, m1,
+                               call_usage=m1_usage)
         selection = m1["selection"]
         body = _verify_and_bind(case_id, run_id, UNIT, m1["cp1"])
         cp1_contract = _envelope(case_id, run_id, body, provider, prompt_version,
@@ -1589,6 +1592,7 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
         else:
             driver_runtime.maybe_interrupt(STAGE, "m2")
             with driver_runtime.driver_span(case_id, run_id, "provider_wait", unit_id=UNIT_M2, items=1):
+                m2_usage: list = []
                 sections = driver_runtime.structured_with_one_correction(
                     provider=provider,
                     prompt=_m2_prompt(fields_json, _render_pages(served_bundle),
@@ -1596,9 +1600,11 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
                     prompt_version=prompt_version,
                     output_schema=_transport_schema_m2(policy_doc_ids),
                     validate=lambda value: _validate_m2(value, served, known1, schemas,
-                                                        dao_verify, policy_doc_ids))
+                                                        dao_verify, policy_doc_ids),
+                    usage_out=m2_usage)
             _persist_candidate(case_id, run_id, held_by, UNIT_M2, "m2",
-                               digests_m2, prompt_version, provider, sections)
+                               digests_m2, prompt_version, provider, sections,
+                               call_usage=m2_usage)
 
         if cp2_contract is None:
             body = _verify_and_bind(case_id, run_id, UNIT_CP2, sections["coverage_section"])
@@ -1659,13 +1665,14 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
 
 def _persist_candidate(case_id: str, run_id: str, held_by: str, unit_id: str,
                        candidate_id: str, digests: Mapping[str, str],
-                       prompt_version: str, provider, result: Mapping[str, Any]) -> None:
+                       prompt_version: str, provider, result: Mapping[str, Any],
+                       call_usage: list | None = None) -> None:
     payload = driver_runtime.make_candidate(
         case_id=case_id, run_id=run_id, stage=STAGE, unit_id=unit_id,
         candidate_id=candidate_id, input_digests=digests,
         prompt_version=prompt_version, response_schema_version=VERSION,
         provider_name=provider.provider_name, model_name=provider.model_name,
-        result=result)
+        result=result, call_usage=call_usage)
     candidate_file = _temp_json(payload)
     try:
         _dao_write(["write-driver-candidate", case_id, "--stage", STAGE,

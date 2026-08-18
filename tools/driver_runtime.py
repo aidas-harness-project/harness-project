@@ -85,15 +85,22 @@ def make_candidate(*, case_id: str, run_id: str, stage: str, unit_id: str,
                    candidate_id: str, input_digests: Mapping[str, str],
                    prompt_version: str, response_schema_version: str,
                    provider_name: str, model_name: str,
-                   result: Mapping[str, Any]) -> dict:
+                   result: Mapping[str, Any],
+                   call_usage: list | None = None) -> dict:
     """Build one completed sub-unit payload for DAO `write-driver-candidate`.
 
     `input_digests` must name only what THIS unit consumed. A stage-wide digest
     set would make every unit's fingerprint change when any one document's
     redacted text changes, which would defeat the point of per-unit resume.
+
+    `call_usage` is the provider's own per-call token counts (see `call_usage`).
+    It is diagnostic only and deliberately outside `input_fingerprint`, so a
+    recorded count never changes whether a candidate can be reused.
     """
     digests = dict(sorted(input_digests.items()))
+    usage = [dict(entry) for entry in (call_usage or []) if entry]
     return {
+        **({"call_usage": usage} if usage else {}),
         "case_id": case_id,
         "run_id": run_id,
         "stage": stage,
@@ -179,17 +186,63 @@ def interrupt_at(stage: str, candidate_ids: Iterable[str]) -> Iterator[list[str]
         globals()["interruption_hook"] = previous
 
 
+def call_usage(result: Any) -> dict | None:
+    """The provider's own token counts for one call, or None if it reported none.
+
+    Copied verbatim from `raw_metadata['usage']`, never derived: a count this
+    driver computed would be indistinguishable from one the provider measured.
+    Only scalar counters are kept -- the nested per-model and per-iteration
+    breakdowns are the CLI's internals, and a prompt or document text can never
+    reach a usage field, so this stays safe to persist beside a candidate.
+
+    Why it is worth persisting: CASE_047's M1 ran the SAME input six times at
+    159.6 / 179.5 / 271.4 / 397.5 / 502.1 / 666.1s (2026-08-18). Input size,
+    document count and output size were each ruled out by measurement -- the
+    three cases compared had near-identical outputs (46-56 fields, 62-65
+    evidence references) and 5.6x different wall times. Cache hits and thinking
+    tokens are the remaining candidates and were simply not being recorded.
+    """
+    metadata = getattr(result, "raw_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return None
+    usage = metadata.get("usage")
+    if not isinstance(usage, Mapping):
+        return None
+    kept = {key: value for key, value in usage.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)}
+    details = usage.get("output_tokens_details")
+    if isinstance(details, Mapping):
+        thinking = details.get("thinking_tokens")
+        if isinstance(thinking, int):
+            kept["thinking_tokens"] = thinking
+    return kept or None
+
+
 def structured_with_one_correction(*, provider: Any, prompt: str, prompt_version: str,
                                   output_schema: Mapping[str, Any],
-                                  validate: Callable[[Mapping[str, Any]], T]) -> T:
+                                  validate: Callable[[Mapping[str, Any]], T],
+                                  usage_out: list | None = None) -> T:
     """Validate one structured response, then make exactly one correction call.
 
     Native provider schemas constrain JSON shape, but a stage's tighter
     candidate rules still require driver-owned validation.  This helper makes
     P4's single correction explicit without logging a prompt, source text, or
     model output.  A second failure is re-raised for the orchestrator to halt.
+
+    `usage_out`, when given, collects one `call_usage` mapping per provider
+    call -- so a run that needed the correction records BOTH calls rather than
+    reporting the pair as one. Caller-owned list, following the same
+    out-parameter idiom `undecided`/`judged` use in segmentation.
     """
+    def record(call_result):
+        if usage_out is None:
+            return
+        usage = call_usage(call_result)
+        if usage is not None:
+            usage_out.append(usage)
+
     result = provider.analyze_text_structured(prompt, prompt_version, output_schema)
+    record(result)
     if not isinstance(result.structured_output, dict):
         raise ValueError("provider returned no structured object")
     try:
@@ -200,6 +253,7 @@ def structured_with_one_correction(*, provider: Any, prompt: str, prompt_version
             "Return a corrected JSON object that satisfies the same schema."
         )
         retry = provider.analyze_text_structured(correction, prompt_version, output_schema)
+        record(retry)
         if not isinstance(retry.structured_output, dict):
             raise ValueError("provider correction returned no structured object") from first_error
         return validate(retry.structured_output)
