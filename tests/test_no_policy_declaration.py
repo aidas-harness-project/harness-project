@@ -179,3 +179,39 @@ def test_driver_processes_policy_documents_rather_than_taking_the_waiver(monkeyp
     result = driver.run(case_id=CASE, held_by="orchestrator", run_id=RUN)
     assert result["status"] == "noop"
     assert result["text_only_policy_count"] == 1
+
+
+def test_the_declaration_also_clears_the_downstream_canonical_policy_gate(tmp_path, monkeypatch):
+    """The waiver has to reach every gate that asks about the policy layer, not
+    just the policy stage's own completion check.
+
+    `_policy_layer_scheme_blockers` guards claim_analysis and everything below
+    it, and it refuses an empty policy scope on purpose -- "nothing to verify,
+    therefore verified" is the defect it closes. A declared case is the one
+    empty scope a person vouched for. Without this, CASE_047 (2026-08-18, 52
+    documents, no 약관) passed policy_clause_processing and could then never
+    finalize claim_analysis: cleared by one gate, refused by the next.
+    """
+    _case(tmp_path, monkeypatch, [
+        {"document_id": "DOC_002", "document_type": "diagnosis_certificate",
+         "downstream_disposition": "automated_text_pipeline"},
+    ])
+    blockers = dao._policy_layer_scheme_blockers(CASE, "finalizing 'claim_analysis'")
+    assert blockers and "policy layer that does not exist" in blockers[0]
+
+    assert dao.declare_no_policy_documents(
+        CASE, reviewer="pyun", note="corpus case ships without 약관",
+        held_by="orchestrator", run_id=RUN)[0]
+    assert dao._policy_layer_scheme_blockers(
+        CASE, "finalizing 'claim_analysis'") == []
+
+
+def test_an_undeclared_empty_policy_layer_still_blocks_downstream(tmp_path, monkeypatch):
+    """Silence is not a declaration: an empty scope with no recorded human
+    statement must still refuse, or skipped policy work passes as done."""
+    _case(tmp_path, monkeypatch, [
+        {"document_id": "DOC_002", "document_type": "diagnosis_certificate",
+         "downstream_disposition": "automated_text_pipeline"},
+    ])
+    blockers = dao._policy_layer_scheme_blockers(CASE, "finalizing 'claim_analysis'")
+    assert blockers, "an undeclared empty policy layer must not pass"

@@ -2764,6 +2764,18 @@ def _policy_layer_scheme_blockers(case_id: str, action: str) -> list[str]:
                 "verification state cannot be established"]
     doc_ids = _policy_layer_document_ids(case_id)
     if not doc_ids:
+        # An empty scope normally means "nothing to verify, therefore
+        # verified", which is the defect this gate closes. A recorded D5
+        # declaration is the one case where empty is a HUMAN statement about
+        # the case rather than an absence of work: it names a reviewer and a
+        # reason, and `declare_no_policy_documents` refuses it the moment the
+        # manifest types any document insurance_policy. `_policy_completion_
+        # blockers` already accepts it for the policy stage itself, so without
+        # the same allowance here a declared case passes
+        # policy_clause_processing and can then never finalize claim_analysis
+        # -- measured on CASE_047 (2026-08-18), 52 documents, no 약관.
+        if _no_policy_waiver(case_id) is not None:
+            return []
         return ["no automated insurance_policy document is registered -- "
                 f"{action} cannot rest on a policy layer that does not exist"]
     return _canonical_state_blockers(case_id, doc_ids, action)
