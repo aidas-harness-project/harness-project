@@ -378,9 +378,62 @@ def test_codex_cli_structured_text_adapter_fails_once_on_non_json(monkeypatch, t
         providers.CodexCliProvider(root=tmp_path).analyze_text_structured(
             "extract", "driver_extract_v1", {"type": "object"}
         )
-
     assert len(calls) == 1
 
+
+def test_codex_cli_structured_text_falls_back_for_dynamic_object_schema(monkeypatch, tmp_path):
+    """Codex strict mode cannot express dynamic contract field names."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        Path(cmd[cmd.index("--output-last-message") + 1]).write_text(
+            '{"fields": {}}', encoding="utf-8"
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    schema = {
+        "type": "object",
+        "properties": {
+            "fields": {"type": "object", "additionalProperties": {"type": "object"}},
+        },
+    }
+
+    result = providers.CodexCliProvider(root=tmp_path).analyze_text_structured(
+        "extract", "driver_extract_v1", schema
+    )
+
+    assert "--output-schema" not in captured["cmd"]
+    assert result.structured_output == {"fields": {}}
+    assert result.raw_metadata["structured_output_native"] is False
+
+
+def test_claude_structured_text_keeps_dynamic_contract_schema(monkeypatch, tmp_path):
+    """Claude may retain the same dynamic claim-fields contract natively."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        payload = {"structured_output": {"fields": {}}, "subtype": "success"}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+    schema = {
+        "type": "object",
+        "properties": {
+            "fields": {"type": "object", "additionalProperties": {"type": "object"}},
+        },
+    }
+    result = providers.ClaudeCliProvider(root=tmp_path).analyze_text_structured(
+        "extract", "driver_extract_v1", schema
+    )
+
+    sent_schema = json.loads(captured["cmd"][captured["cmd"].index("--json-schema") + 1])
+    assert sent_schema["properties"]["fields"]["additionalProperties"] == {"type": "object"}
+    assert captured["kwargs"]["input"] == "extract"
+    assert result.structured_output == {"fields": {}}
 
 def test_claude_cli_provider_always_passes_safe_mode(monkeypatch, tmp_path):
     """Regression (CASE_022 real run): claude -p with cwd=ROOT auto-loads the
@@ -542,7 +595,7 @@ def test_codex_cli_provider_reads_output_last_message(monkeypatch, tmp_path):
     result = provider.transcribe_image(Path("page.png"), "transcribe prompt", "ocr_extraction_v0.1")
 
     assert captured["cmd"][:7] == [
-        "codex", "exec", "transcribe prompt", "--skip-git-repo-check",
+        "codex", "exec", "-", "--skip-git-repo-check",
         "--sandbox", "read-only", "--model",
     ]
     assert captured["cmd"][7:11] == ["gpt-test", "--image", "page.png", "--output-last-message"]
@@ -552,6 +605,7 @@ def test_codex_cli_provider_reads_output_last_message(monkeypatch, tmp_path):
     assert captured["kwargs"]["timeout"] == 180
     assert captured["kwargs"]["encoding"] == "utf-8"
     assert captured["kwargs"]["errors"] == "replace"
+    assert captured["kwargs"]["input"] == "transcribe prompt"
     assert result.text == "transcribed text"
     assert result.provider_name == "codex-cli"
 

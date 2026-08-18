@@ -7,7 +7,7 @@ description: Orchestrator for the local Units 1-7 loss-adjustment harness. Use f
 
 Coordinates the authorized local pipeline across two phases to produce screening and draft reports through expert review. Evaluation is an unavailable external continuation that requires the deferred isolated Unit 11 service; never dispatch it or read ground truth locally. See `pipeline.md` for the full stage/agent table and I/O contracts.
 
-**Execution mode: sub-agent pipeline.** Every stage below is dispatched as a subagent call naming that agent's definition file (`.claude/agents/{name}.md`), with `model: opus`. All inter-agent data passes through the DAO as files — agent return values carry only a summary and warnings, never the actual contract data.
+**Execution mode: sub-agent and driver pipeline.** Agent-owned stages are dispatched as subagents; driver-owned stages run their named driver directly. In both cases, governed state passes through the DAO; agent return values carry only summaries and warnings, never contract data.
 
 ### What a dispatch briefing may contain
 
@@ -162,6 +162,17 @@ invoke the individual checkpoint tools in sequence — that is the serialization
 this removes. The driver never moves a run-state marker: `update-run-state` and
 `finalize-stage` stay yours (T13).
 
+**Claim analysis runs as one driver, not as an agent dispatch.** Run
+`python tools/run_claim_analysis.py CASE_ID --held-by claim-analysis --run-id
+RUN_ID --provider PROVIDER` after the ordinary gates and an orchestrator-owned
+`claim_analysis in_progress` transition. It executes the four public
+checkpoints in two structured provider calls (M1: field extraction plus policy
+page selection; M2: coverage, case type, and requirements), validates every
+citation through the DAO, publishes its driver receipts, and never finalizes
+the stage. Do not dispatch `claim-analysis` for this work. Before finalizing,
+the orchestrator still runs `check-medical-reviews-clear` after canonical
+medical variables publish, as required by the gate.
+
 **Do not cite an exact Stage 2 speedup ratio.** Earlier revisions of this skill
 quoted `897s` agent-led against `79s` driven, with `~510s` of model round trips.
 That is a **historical observation, not reproducible from retained timing
@@ -293,7 +304,7 @@ On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_f
 | 2 | Document Processing | `document-pipeline` | (a) bundle OCR (`--bundle-ocr`, no classification) → (b) bundle redaction → (c) **segmentation**: propose/approve/split, children inherit the bundle's pages → (d) per-child classification → (e) per-child redaction → (f) case-wide chunking. All under `document_processing`; segmentation sits *inside* because processing runs on both sides of it |
 | 3 | Indexing (adapter, optional) | (tool, no agent) | pass-through by default; no-op unless enabled |
 | 4 | Policy Clause Processing | (driver, no agent) | `run_policy_pipeline_driver.py` after the UID preflight. Normalization retired 2026-08-15, so there is no extraction to delegate; the driver records the manifest fingerprint and the orchestrator finalizes. Policy text stays fully processed, chunked and citable |
-| 5 | Claim Analysis | `claim-analysis` | (a) field extraction + medical-variable content derivation, (b) coverage ID, (c) case-type classification + canonical medical-variable publication, (d) requirement matching, then medical clearance before pass/snapshot. Tell it in the briefing whether `_document_index.json` exists (see below) |
+| 5 | Claim Analysis | (driver, no agent) | `run_claim_analysis.py`: (a) field extraction + policy-page selection, (b) coverage ID, (c) case-type classification + canonical medical-variable publication, (d) requirement matching. It requires `_document_index.json`; run medical clearance before pass/snapshot. |
 | 6 | Consistency Check | `consistency-check` | conflict-ledger-gated — any disagreement halts via `_conflict_ledger.json`, not an inline ad-hoc halt |
 | 7 | Screening Report | `screening-report` | consumes `denial-response`'s output as a dependency if an insurer-response document exists — not phase-gated |
 | 8 | Draft Report v1 | `draft-report` | same agent reused for v2 in Phase 2 |
@@ -312,22 +323,20 @@ insurer-response input exists but `denial_reason_result.json` is absent. Each
 concurrent member retains its own locks, attempt boundary, result handling, and
 downstream gate; a phase label is never a reason to delay a ready stage.
 
-**Name the document index in the briefing when one exists.** The policy driver
+**The claim-analysis driver requires the document index.** The policy driver
 writes `_document_index.json` -- every article in the case's policy documents
 under `clauses` (`{page, policy_name, article, heading}`) with its page and
 owning 약관, plus any table whose row/column structure was recovered from the
 PDF under `tables`. Confirm it is there
-(`dao.py read-document-index CASE_ID --run-id RUN_ID`), then tell
-`claim-analysis`, `denial-response` and `critic` to start clause lookup from
-it rather than scanning chunks. If the read returns `NOT_FOUND`, say nothing
-about it: a briefing that promises a file the case does not have is worse
-than one that omits it.
+(`dao.py read-document-index CASE_ID --run-id RUN_ID`). `run_claim_analysis.py`
+refuses without it; `denial-response` and `critic` should be told in their
+briefing to start clause lookup from it rather than scanning chunks. If the
+read returns `NOT_FOUND`, do not dispatch those agents with a promise that the
+file exists.
 
-This is one of the few things that genuinely belongs in a briefing. It is not
-contract state the agent should read for itself -- it is which TOOLS are
-prepared for this run, which only you know. The rule about keeping contract
-values out is unchanged: never list document types, page counts, or what the
-index contains.
+For agent briefings this is one of the few tool-availability facts that belongs
+in a briefing. The rule about keeping contract values out is unchanged: never
+list document types, page counts, or what the index contains.
 
 **It is not a gate and must not become one.** Nothing blocks on the index and
 no contract references it; an agent without one falls back to

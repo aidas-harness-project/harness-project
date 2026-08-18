@@ -445,6 +445,29 @@ def _cli_json_schema(output_schema: Mapping[str, Any]) -> dict[str, Any]:
     return prune(dict(output_schema))
 
 
+def _codex_native_schema_compatible(output_schema: Mapping[str, Any]) -> bool:
+    """Whether Codex's strict JSON-schema mode can express this contract.
+
+    Codex requires every object to close ``additionalProperties``.  Several
+    harness contracts deliberately use a dynamic object (for example claim
+    facts keyed by descriptive field name), which needs a *schema* in
+    ``additionalProperties``.  That is not representable in Codex strict mode.
+    The caller still validates the returned JSON against the complete local
+    contract, so this predicate selects native enforcement only where it is
+    faithful rather than narrowing a governed public schema to satisfy a CLI.
+    """
+    def visit(node: Any) -> bool:
+        if isinstance(node, Mapping):
+            if isinstance(node.get("additionalProperties"), Mapping):
+                return False
+            return all(visit(value) for value in node.values())
+        if isinstance(node, list):
+            return all(visit(value) for value in node)
+        return True
+
+    return visit(output_schema)
+
+
 def _child_safe_env(*, keep_prefixes: Sequence[str]) -> dict[str, str]:
     """A copy of os.environ with foreign provider secrets removed.
 
@@ -972,6 +995,7 @@ class CodexCliProvider(BaseProvider):
         timeout: int,
         image_paths: Sequence[Path] | None = None,
         output_schema: Mapping[str, Any] | None = None,
+        structured_fallback: bool = False,
     ) -> ProviderResult:
         scratch_dir = self.root / "_ocr_scratch"
         scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -1003,7 +1027,14 @@ class CodexCliProvider(BaseProvider):
                               separators=(",", ":"))
                     schema_path = Path(schema_file.name)
 
-            cmd = [self.command, "exec", prompt, "--skip-git-repo-check", "--sandbox", "read-only"]
+            # Feed the prompt on stdin rather than as a positional argument.
+            # Claim-analysis's two-call driver serves whole redacted case
+            # bundles, which can exceed Windows' CreateProcess command-line
+            # limit.  On that platform the resulting WinError 2 is
+            # indistinguishable from a missing executable at this layer.
+            # ``codex exec -`` is the documented stdin form and keeps the
+            # executable path/options short without changing model input.
+            cmd = [self.command, "exec", "-", "--skip-git-repo-check", "--sandbox", "read-only"]
             if self.model_name != "codex-cli":
                 cmd.extend(["--model", self.model_name])
             for image_path in image_paths or ():
@@ -1038,7 +1069,7 @@ class CodexCliProvider(BaseProvider):
             # A native schema call is either transport-valid or the driver's
             # one correction case. Retrying a malformed semantic response here
             # would silently exceed P4's correction boundary.
-            max_attempts = 1 if output_schema is not None else _CLAUDE_CLI_MAX_ATTEMPTS
+            max_attempts = 1 if (output_schema is not None or structured_fallback) else _CLAUDE_CLI_MAX_ATTEMPTS
             for attempt in range(max_attempts):
                 try:
                     with provider_slot("codex-cli"):
@@ -1048,6 +1079,7 @@ class CodexCliProvider(BaseProvider):
                             text=True,
                             encoding="utf-8",
                             errors="replace",
+                            input=prompt,
                             timeout=timeout,
                             cwd=str(self.root),
                             env=run_env,
@@ -1141,11 +1173,42 @@ class CodexCliProvider(BaseProvider):
         prompt_version: str,
         output_schema: Mapping[str, Any],
     ) -> ProviderResult:
-        return self._run(
+        if _codex_native_schema_compatible(output_schema):
+            return self._run(
+                prompt,
+                prompt_version=prompt_version,
+                timeout=compare_text_timeout(),
+                output_schema=output_schema,
+            )
+
+        # Do not distort a dynamic harness contract merely to fit Codex's
+        # closed-object response-format dialect.  The driver supplies an
+        # explicit JSON-only prompt and performs its own schema validation
+        # before any DAO candidate/contract write; its existing P4 correction
+        # boundary remains the semantic recovery path.
+        raw = self._run(
             prompt,
             prompt_version=prompt_version,
-            timeout=compare_text_timeout(),
-            output_schema=output_schema,
+            timeout=structured_text_timeout(),
+            structured_fallback=True,
+        )
+        try:
+            structured = json.loads(raw.text)
+        except json.JSONDecodeError as exc:
+            raise ProviderExecutionError(
+                "codex-cli fallback structured-output mode returned non-JSON output"
+            ) from exc
+        if not isinstance(structured, dict):
+            raise ProviderExecutionError(
+                "codex-cli fallback structured-output mode returned a non-object value"
+            )
+        metadata = dict(raw.raw_metadata)
+        metadata["structured_output_native"] = False
+        return self._result(
+            json.dumps(structured, ensure_ascii=False),
+            prompt_version,
+            metadata,
+            structured_output=structured,
         )
 
     def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:

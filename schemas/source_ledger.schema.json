@@ -22,6 +22,11 @@
     "operations": {
       "type": "array",
       "items": { "$ref": "#/$defs/operation" }
+    },
+    "binding_repairs": {
+      "type": "array",
+      "description": "DAO-authored audit records for a narrowly-authorized repair of a stale operation request digest.",
+      "items": { "$ref": "#/$defs/binding_repair" }
     }
   },
   "required": ["ledger_version", "case_id", "source_dir", "files", "history_boundary", "operations"],
@@ -94,6 +99,22 @@
         "status": { "enum": ["pending", "approved", "rejected"] }
       },
       "required": ["action", "target_id", "status"]
+    },
+    "binding_repair": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" },
+        "old_request_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "new_request_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "old_baseline_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "new_baseline_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "reviewer": { "type": "string", "minLength": 1 },
+        "note": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 },
+        "repaired_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["operation_id", "old_request_sha256", "new_request_sha256", "old_baseline_sha256", "new_baseline_sha256", "reviewer", "note", "run_id", "repaired_at"]
     },
     "ledger_entry": {
       "type": "object",

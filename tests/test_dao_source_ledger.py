@@ -79,6 +79,45 @@ def test_source_ledger_rejects_tampered_operation_receipt(
     assert dao.cmd_check_source_ledger_clear(make_args()) == 1
 
 
+def test_repair_source_ledger_binding_repairs_only_a_stale_digest(
+    isolated_dao, make_args
+):
+    _seed_ledger(isolated_dao, ["a.pdf"])
+    args = make_args(
+        file_name="a.pdf", status="approved", reviewer="human",
+        operation_id="ledger:test-repair-0001",
+    )
+    assert dao.cmd_set_ledger_status(args) == 0
+    ledger = dao.load_json(dao.source_ledger_path("CASE_009"))
+    operation = ledger["operations"][0]
+    old = operation["request_sha256"]
+    operation["request_sha256"] = "0" * 64
+    ledger["history_boundary"]["baseline_sha256"] = "0" * 64
+    dao.atomic_write_json(dao.source_ledger_path("CASE_009"), ledger)
+
+    repair = make_args(
+        operation_id="ledger:test-repair-0001", reviewer="human",
+        note="authorized repair of stale digest",
+    )
+    assert dao.cmd_repair_source_ledger_binding(repair) == 0
+    repaired = dao.load_json(dao.source_ledger_path("CASE_009"))
+    assert repaired["operations"][0]["request_sha256"] == old
+    assert repaired["binding_repairs"] == [{
+        "operation_id": "ledger:test-repair-0001",
+        "old_request_sha256": "0" * 64,
+        "new_request_sha256": old,
+        "old_baseline_sha256": "0" * 64,
+        "new_baseline_sha256": dao.hashlib.sha256(
+            dao._canonical_json_bytes(repaired["history_boundary"]["baseline_state"])
+        ).hexdigest(),
+        "reviewer": "human",
+        "note": "authorized repair of stale digest",
+        "run_id": repair.run_id,
+        "repaired_at": repaired["binding_repairs"][0]["repaired_at"],
+    }]
+    assert dao.cmd_check_source_ledger_clear(make_args()) == 0
+
+
 def test_source_ledger_rejects_schema_valid_forged_receipt(
     isolated_dao, make_args
 ):
