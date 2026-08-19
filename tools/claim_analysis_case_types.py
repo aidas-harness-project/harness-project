@@ -270,7 +270,12 @@ def assess_case_types(
             "conflicting_field_ids": sorted(conflicting),
             "filing_status": filing.get(case_type, "unknown"),
             "reason": reason,
-            "evidence_references": evidence if status == "applicable" else [],
+            # Both decided verdicts carry their basis. `not_applicable` needs
+            # it as much as `applicable` does -- it is an affirmative negative
+            # from a source, and the schema requires the quote that established
+            # it. Only `uncertain` shows none, because nothing decided it.
+            "evidence_references": (
+                evidence if status in {"applicable", "not_applicable"} else []),
         })
     return assessments
 

@@ -541,6 +541,168 @@ def resolve_opportunistic(
     return outcome
 
 
+class FieldProgress:
+    """One field's walk down its own priority ladder.
+
+    Holds the position (which rung, which document within it) so the scheduler
+    can ask "what do you need next?" without re-deriving the ladder, and holds
+    the partial result so a field that has found one trusted value but still
+    owes a comparison keeps its place.
+    """
+
+    __slots__ = ("plan", "field_row", "budget", "step_index", "doc_index",
+                 "trusted", "outcome", "done")
+
+    def __init__(self, plan, field_row, budget: int, outcome) -> None:
+        self.plan = plan
+        self.field_row = field_row
+        self.budget = budget
+        self.step_index = 0
+        self.doc_index = 0
+        self.trusted: dict | None = None
+        self.outcome = outcome
+        self.done = False
+
+    def next_document(self) -> tuple[str, str] | None:
+        """The next (document_id, kind) this field still wants to read.
+
+        None means the field is finished -- either it stopped, or its ladder
+        ran out. A finished field never contributes a document to the schedule,
+        which is what keeps a later-priority source from being opened for a
+        field that already stopped.
+        """
+        if self.done:
+            return None
+        while self.step_index < len(self.plan.steps):
+            step = self.plan.steps[self.step_index]
+            if self.doc_index < len(step.document_ids):
+                return (step.document_ids[self.doc_index],
+                        step.document_kinds[self.doc_index])
+            self.step_index += 1
+            self.doc_index = 0
+        return None
+
+    def advance(self) -> None:
+        self.doc_index += 1
+
+    def current_rank(self) -> int:
+        return self.plan.steps[self.step_index].priority_rank
+
+    def stop(self) -> None:
+        self.done = True
+
+
+def _finish(progress: FieldProgress) -> None:
+    """Settle a field whose walk has ended."""
+    outcome = progress.outcome
+    if progress.trusted is not None:
+        outcome.status = "asserted"
+        outcome.stop_reason = "trusted_value_found"
+        outcome.selected_ids = [progress.trusted["observation_id"]]
+        outcome.reason = (
+            "a trusted value was found in the highest available priority source")
+    elif outcome.observations and outcome.status == "unavailable":
+        # Only explicitly-absent readings survived: a source stated the thing
+        # is NOT present. That is a finding, not an empty search.
+        absent = [o for o in outcome.observations
+                  if o.get("value_state") == "explicitly_absent"]
+        if absent:
+            outcome.status = "explicitly_absent"
+            outcome.stop_reason = "explicitly_absent"
+            outcome.selected_ids = []
+            outcome.reason = (
+                "a routed source states this field is not present")
+    progress.done = True
+
+
+def _consume(
+    progress: FieldProgress,
+    document_id: str,
+    kind: str,
+    found: Mapping[str, Any] | None,
+    page_text: Mapping[tuple[str, int], str],
+    observation_ids,
+) -> None:
+    """Apply one document's answer for one field, and apply the stop rule.
+
+    This is the whole of the selective decision: a field that gets a trusted
+    value stops here, and stopping is what removes its remaining documents from
+    the schedule. A critical field spends its one comparison and then stops
+    too, whether or not the second source agreed.
+    """
+    outcome = progress.outcome
+    outcome.documents_read += 1
+    if not found:
+        return
+
+    presence = found.get("presence", "asserted")
+    page = found.get("page")
+    text = page_text.get((document_id, page))
+    if text is None:
+        return
+    reference = build_reference(document_id, page, found.get("quote", ""), text)
+    if reference is None:
+        # An unverifiable or ambiguous quote is dropped, never repaired.
+        return
+
+    if presence == "explicitly_absent":
+        # A stated absence is evidence, and it is recorded with the sentence
+        # that states it. It does not become a value, and it does not satisfy
+        # the search -- a later source may still assert one.
+        outcome.observations.append({
+            "observation_id": next(observation_ids),
+            "value_state": "explicitly_absent",
+            "reason": found.get("reason") or "the source states this is not present",
+            "source_document_kind": kind,
+            "source_priority_rank": progress.current_rank(),
+            "extraction_wave": progress.plan.wave,
+            "evidence_references": [reference],
+        })
+        return
+
+    if not selection.is_trusted_value(
+        from_priority_source=True,
+        has_exact_quote=True,
+        complete=bool(found.get("complete", True)),
+        unambiguous=bool(found.get("unambiguous", True)),
+    ):
+        return
+
+    observation = {
+        "observation_id": next(observation_ids),
+        "value_state": "asserted",
+        "value": found["value"],
+        "source_document_kind": kind,
+        # The rung of THIS field's route, not the read order.
+        "source_priority_rank": progress.current_rank(),
+        "extraction_wave": progress.plan.wave,
+        "evidence_references": [reference],
+    }
+    outcome.observations.append(observation)
+
+    if progress.trusted is None:
+        progress.trusted = observation
+        if progress.budget == 0:
+            # Ordinary field: the first trusted value ends the search, and
+            # every lower-priority document it would have opened is now never
+            # scheduled.
+            _finish(progress)
+        return
+
+    outcome.comparisons += 1
+    if _values_disagree(progress.trusted["value"], observation["value"]):
+        outcome.status = "conflict"
+        outcome.stop_reason = "conflict_found"
+        outcome.selected_ids = []
+        outcome.reason = (
+            "two independent priority sources state different values for this "
+            "field; both readings are preserved for consistency_check to verify")
+        progress.done = True
+        return
+    if outcome.comparisons >= progress.budget:
+        _finish(progress)
+
+
 def extract_all(
     *,
     config: Mapping[str, Any],
@@ -550,17 +712,25 @@ def extract_all(
     observation_ids,
     non_medical_reader=None,
 ) -> tuple[list[FieldExtractionOutcome], DocumentCache]:
-    """The whole read plan: one pass over documents, then resolve every field.
+    """Read only what an unresolved field actually asks for.
 
-    Order matters and is deliberate:
+    The loop is demand-driven, and that is the point of the whole design. Each
+    round asks every *still-open* field which document it wants next, groups
+    the answers so one provider call serves every field asking for the same
+    document, reads it once, and lets the stop rule settle whatever it can.
+    Fields that stop drop out, so their lower-priority sources are never
+    scheduled -- a case whose 진단서 answers everything never opens the
+    입퇴원요약 at all.
 
-    1. Plan A and B together, invert to (document -> fields).
-    2. Read each document ONCE, extracting every field it can answer.
-    3. Resolve A fields, then B, from the cache.
-    4. Opportunistic fields ride along on what is already open.
-    5. Only then evaluate the industrial filing route, which is conditional on
-       facts step 3 produced -- and which reads administrative sources, never
-       an additional medical document.
+    Three properties hold simultaneously, and none is incidental:
+
+    * **Priority order.** Rounds are ordered by the rung the asking fields sit
+      on, so a rank-1 source is always read before a rank-2 one.
+    * **One call per document per RUN.** The cache is consulted first, so a
+      document wanted by an A field and later by a B field is read once and
+      served from memory the second time.
+    * **Batching.** Fields asking for the same document in the same round share
+      one call, so reading a 진단서 extracts everything it can answer at once.
     """
     plans = (selection.plan_wave(config, documents, "A")
              + selection.plan_wave(config, documents, "B"))
@@ -568,28 +738,70 @@ def extract_all(
         row["field_id"] for row in config.get("fields") or []
         if selection.route_activation_condition(row, config) != "always"
     }
-    unconditional = [p for p in plans if p.field_id not in conditional]
-
     by_field_row = {row["field_id"]: row for row in config.get("fields") or []}
     kind_by_document = {ref.document_id: ref.kind for ref in documents}
-
     cache = DocumentCache(extract)
-    for document_id in selection.ordered_documents(unconditional):
-        field_ids = [
-            field_id for field_id, _ in
-            selection.document_field_map(unconditional).get(document_id, [])
-        ]
-        cache.read(document_id, kind_by_document.get(document_id),
-                   [by_field_row[f] for f in field_ids if f in by_field_row])
 
+    progress: list[FieldProgress] = []
     outcomes: list[FieldExtractionOutcome] = []
     by_field: dict[str, FieldExtractionOutcome] = {}
-    for plan in unconditional:
-        outcome = resolve_from_cache(
-            plan, by_field_row[plan.field_id], config, cache, page_text,
-            observation_ids)
+    for plan in plans:
+        if plan.field_id in conditional:
+            continue
+        field_row = by_field_row[plan.field_id]
+        outcome = FieldExtractionOutcome(
+            field_id=plan.field_id,
+            domain_code=plan.domain_code,
+            grade=field_row["medical_advisory_grade"],
+        )
         outcomes.append(outcome)
         by_field[plan.field_id] = outcome
+        if plan.skip_reason is not None:
+            # Nothing to read is UNAVAILABLE, not not_applicable: a pack that
+            # holds no document of this kind proves nothing about the case.
+            outcome.stop_reason = "sources_exhausted"
+            outcome.unavailable_reason = "source_document_missing"
+            outcome.reason = plan.skip_reason
+            continue
+        progress.append(FieldProgress(
+            plan, field_row,
+            selection.comparison_budget(field_row, config), outcome))
+
+    while True:
+        # Ask only the open fields. A field that stopped contributes nothing,
+        # which is exactly how its remaining documents stay unread.
+        wanted: dict[str, list[FieldProgress]] = {}
+        best_rank: dict[str, int] = {}
+        for item in progress:
+            nxt = item.next_document()
+            if nxt is None:
+                if not item.done:
+                    _finish(item)
+                continue
+            document_id, _kind = nxt
+            wanted.setdefault(document_id, []).append(item)
+            rank = item.current_rank()
+            if document_id not in best_rank or rank < best_rank[document_id]:
+                best_rank[document_id] = rank
+        if not wanted:
+            break
+
+        # Highest-priority rung first, so the stop rule still sees the most
+        # authoritative source before any fallback.
+        document_id = sorted(wanted, key=lambda d: (best_rank[d], d))[0]
+        askers = wanted[document_id]
+        kind = kind_by_document.get(document_id)
+        document = cache.read(
+            document_id, kind, [item.field_row for item in askers])
+        for item in askers:
+            _consume(item, document_id, kind,
+                     document.get(item.plan.field_id), page_text,
+                     observation_ids)
+            item.advance()
+
+    for item in progress:
+        if not item.done:
+            _finish(item)
 
     for field_row in selection.opportunistic_fields(config):
         plan = selection.plan_field(field_row, config, documents)

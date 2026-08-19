@@ -16,9 +16,13 @@ Two things this module refuses to do:
   dropped by the caller, never corrected. The exact range is what makes the
   value checkable, so a quote that cannot be located has no standing.
 
-Silence is a first-class answer here: `found: false` with no value is what a
-document that does not mention a field is supposed to produce, and the caller
-turns that into `unavailable`/`not_mentioned` rather than a guess.
+Silence is a first-class answer here, and so is a stated absence -- they are
+different answers. `not_mentioned` means the document said nothing and produces
+no observation at all; `explicitly_absent` means the document said the thing is
+NOT there, which is a finding and carries the sentence that states it. Folding
+the second into the first (as an earlier revision did, by returning
+`found: false` for both) makes a recorded negative finding indistinguishable
+from a gap in the records.
 """
 from __future__ import annotations
 
@@ -60,14 +64,17 @@ def output_schema(field_rows: Sequence[Mapping[str, Any]]) -> dict:
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "found": {"type": "boolean"},
+                    "presence": {
+                        "enum": ["asserted", "explicitly_absent", "not_mentioned"],
+                    },
                     "value": {},
                     "page": {"type": ["integer", "null"], "minimum": 1},
                     "quote": {"type": ["string", "null"]},
+                    "reason": {"type": ["string", "null"]},
                     "complete": {"type": "boolean"},
                     "unambiguous": {"type": "boolean"},
                 },
-                "required": ["found"],
+                "required": ["presence"],
             }
             for row in field_rows
         },
@@ -105,24 +112,32 @@ Extract exactly these fields:
 
 Rules, all of which matter more than filling the fields in:
 
-1. A field is found ONLY if this document states it. If the document does not
-   mention it, return {{"found": false}}. Silence is a correct answer and is
-   recorded as such -- do not guess, and do not carry a value over from your
-   general knowledge.
-2. Every found field needs `page` and `quote`. The quote must appear on that
-   page CHARACTER FOR CHARACTER. Do not normalise spacing, fix a typo, expand
-   an abbreviation, or translate. If you cannot reproduce it exactly, return
-   {{"found": false}}.
-3. Never infer the accident narrative from clinical content. A diagnosis, an
+1. Every field gets a `presence` verdict, and the three are different facts:
+   - "asserted"          this document states a value for the field.
+   - "explicitly_absent" this document states the thing is NOT present --
+                         "골절 소견 없음", "특이소견 없음", "수술 시행하지 않음".
+                         This is a FINDING, not a blank.
+   - "not_mentioned"     this document simply does not discuss the field.
+   Do not guess, and do not carry a value over from general knowledge.
+2. "asserted" needs `value`, `page`, and `quote`. "explicitly_absent" needs
+   `page` and `quote` too -- the quote is the sentence stating the absence --
+   plus a short `reason`; it carries NO `value`. "not_mentioned" carries none
+   of them: there is nothing to cite when a document says nothing.
+3. Every quote must appear on the page you name CHARACTER FOR CHARACTER. Do not
+   normalise spacing, fix a typo, expand an abbreviation, or translate. If you
+   cannot reproduce it exactly, downgrade to "not_mentioned" rather than
+   supplying an approximate quote.
+4. Never infer the accident narrative from clinical content. A diagnosis, an
    injured body part, or an operation name does NOT establish how the injury
    happened. Accident circumstances come only from a record that states them:
-   {", ".join(ACCIDENT_SOURCE_ORDER)}.
-4. `complete` is false when the document states only part of the value.
+   접수 사고내용, 초진기록, 응급실기록, 사고 경위가 직접 적힌 진단서, 사고 경위가 직접 적힌 기타 기록.
+5. `complete` is false when the document states only part of the value.
    `unambiguous` is false when the text could support more than one reading.
    Both default to true; set them false rather than picking one reading.
-5. A statement that something is NOT present ("골절 소견 없음") is not a value
-   for that field. Return {{"found": false}} and let the caller handle it -- do
-   not encode the absence as a value.
+6. A stated absence is NOT the boolean false. For a yes/no field, "수술을
+   시행하지 않았다" is `explicitly_absent` with that sentence quoted -- not
+   `asserted` with `value: false`. The distinction is what lets a reader tell a
+   recorded negative finding from a value someone computed.
 
 Return one JSON object keyed by field id, and nothing else.
 
@@ -135,13 +150,21 @@ def parse_result(
     structured: Mapping[str, Any] | None,
     field_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, dict]:
-    """Normalise one document read into {field_id: {value, page, quote, ...}}.
+    """Normalise one document read into {field_id: {presence, ...}}.
 
-    Anything that does not carry a value, a page, and a quote is dropped
-    outright: the caller verifies quotes against the served page text and a
-    partial answer cannot be verified. Dropping is safe -- the field simply
-    stays unresolved -- while keeping it would put an uncitable value into a
-    contract whose whole basis is citation.
+    Three outcomes survive, and they are not interchangeable:
+
+    * `asserted` -- a value with a citable page and quote.
+    * `explicitly_absent` -- no value, but the sentence stating the absence is
+      cited. The caller records it as a real observation; it does not satisfy
+      the field's search, because a later source may still assert a value.
+    * dropped -- `not_mentioned`, or a verdict missing what its own presence
+      requires. Silence produces nothing at all, and the caller turns the
+      absence of any reading into `unavailable`/`not_mentioned`.
+
+    Dropping the malformed cases is safe -- the field stays unresolved -- while
+    keeping them would put an uncitable claim into a contract whose entire
+    basis is citation.
     """
     if not structured:
         return {}
@@ -150,15 +173,33 @@ def parse_result(
     for field_id, payload in structured.items():
         if field_id not in known or not isinstance(payload, dict):
             continue
-        if not payload.get("found"):
+        presence = payload.get("presence")
+        # Back-compatible with the older boolean shape, so an in-flight
+        # provider result is read rather than silently discarded.
+        if presence is None and "found" in payload:
+            presence = "asserted" if payload.get("found") else "not_mentioned"
+        if presence not in {"asserted", "explicitly_absent"}:
             continue
-        value, page, quote = (payload.get("value"), payload.get("page"),
-                              payload.get("quote"))
-        if value is None or not isinstance(page, int) or not isinstance(quote, str):
+
+        page, quote = payload.get("page"), payload.get("quote")
+        if not isinstance(page, int) or not isinstance(quote, str) or not quote.strip():
             continue
-        if not quote.strip():
+
+        if presence == "explicitly_absent":
+            parsed[field_id] = {
+                "presence": "explicitly_absent",
+                "page": page,
+                "quote": quote,
+                "reason": (payload.get("reason")
+                           or "the source states this is not present"),
+            }
+            continue
+
+        value = payload.get("value")
+        if value is None:
             continue
         parsed[field_id] = {
+            "presence": "asserted",
             "value": value,
             "page": page,
             "quote": quote,
