@@ -74,6 +74,27 @@ material, not a live spec).
 
 **Trigger:** use the `loss-adjustment-pipeline` skill for case processing, reruns/updates, or evaluation requests. Simple questions about pipeline design can be answered directly from `pipeline.md`.
 
+**Load that skill BEFORE running any stage command -- not only when a request
+says "run the pipeline".** Advancing a case's run state IS case processing, even
+when it looks like a one-off `finalize-stage` or a single driver invocation. The
+skill is the executable orchestration contract; this file's tool list is a
+reference, not a runbook, and it deliberately does not carry stage order,
+preconditions, or the T13 dispatch lifecycle. **Which stages are driver-owned is
+recorded there and nowhere else** -- and the agent roster keeps advertising
+agents (`claim-analysis`, `policy-pipeline`) for stages whose agent path is
+retired, so an unread skill leaves no way to tell which is authoritative.
+Origin, 2026-08-19 on the CASE_302~321 corpus run: the assistant reconstructed
+the flow from this file plus prior sessions' leftovers, and in one sequence
+(a) dispatched the `claim-analysis` agent for a stage the skill marks
+"(driver, no agent)" with an explicit "Do not dispatch `claim-analysis`",
+(b) hand-finalized `policy_clause_processing` without running
+`run_policy_pipeline_driver.py`, and (c) skipped `run_policy_preflight.py`
+entirely. (a) and (b) were the same defect twice; (b) then blocked stage 5,
+because the policy driver is what WRITES the `_document_index.json` that
+`run_claim_analysis.py` requires -- a dependency stated in the skill's stage
+table. A stage marked `passed` whose driver never ran is worse than a failed
+one: it reports success and silently withholds a downstream input.
+
 **Changelog: `CHANGELOG.md`** -- the full dated history of every design change,
 defect, and measurement (moved from this file 2026-08-16; this file is injected into
 every subagent dispatch, and the history was ~90KB of per-dispatch context cost).

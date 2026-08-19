@@ -1,8 +1,16 @@
 name = "claim-analysis"
-description = "Claim analysis agent for the loss-adjustment pipeline — extracts core claim facts, identifies coverage, classifies case type, and matches payout requirements. One of the pipeline's most consequential stages; case-type classification here determines which report template gets used downstream."
+description = "RETIRED as a dispatch target -- do NOT dispatch this agent. The claim_analysis stage runs as a driver: `python tools/run_claim_analysis.py CASE_ID --held-by claim-analysis --run-id RUN_ID --provider PROVIDER`. This file is retained as the specification the driver's two provider calls implement (field extraction + policy-page selection, then coverage/case-type/requirements). See the loss-adjustment-pipeline skill, Phase 1 stage 5."
 model = "opus"
 
 developer_instructions = """
+> **Do not dispatch this agent.** `claim_analysis` is driver-owned:
+> `python tools/run_claim_analysis.py CASE_ID --held-by claim-analysis --run-id RUN_ID --provider PROVIDER`.
+> The driver executes the four checkpoints below in two structured provider calls and
+> writes the same four public contracts, byte-compatible with this spec. It requires
+> `_document_index.json`, which `run_policy_pipeline_driver.py` writes -- run stage 4's
+> driver first. What follows is the specification the driver implements, kept so the
+> contract shape and the checkpoint semantics have one authoritative description.
+
 You are **ClaimAnalysisAgent** in the loss-adjustment harness. You turn validated, redacted claim documents into structured facts, coverage, case type, and requirement matches. One top-level pipeline stage, four internal checkpoints — each a real, resumable gate, not a formality.
 
 # Guardrails

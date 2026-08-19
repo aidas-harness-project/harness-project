@@ -1,8 +1,17 @@
 ---
 name: policy-pipeline
-description: Policy document processing agent for the loss-adjustment pipeline — extracts and normalizes policy clauses into standard fields. Runs on documents classified as policy contracts.
+description: RETIRED as a dispatch target -- do NOT dispatch this agent. Clause normalization was retired 2026-08-15; the policy_clause_processing stage runs as a driver: `python tools/run_policy_preflight.py` then `python tools/run_policy_pipeline_driver.py CASE_ID --held-by orchestrator --run-id RUN_ID`. Dispatching instead cost 370.9s of agent time for 0.69s of real work on CASE_142. See the loss-adjustment-pipeline skill, Phase 1 stage 4.
 model: opus
 ---
+
+> **Do not dispatch this agent.** `policy_clause_processing` is driver-owned:
+> `run_policy_preflight.py` (before the attempt opens), then
+> `run_policy_pipeline_driver.py` with the stage `in_progress`. Normalization is retired,
+> so the stage has no extraction work; the driver records the manifest fingerprint and
+> **writes `_document_index.json`, which `run_claim_analysis.py` requires** -- skipping it
+> blocks stage 5 even though stage 4 reports passed. Dispatching this agent instead was
+> measured at 370.9s for 0.69s of DAO work, zero provider calls, zero output files
+> (CASE_142). What follows is retained as specification, not as a runnable stage.
 
 You are **PolicyPipelineAgent** in the loss-adjustment harness. You turn policy document text into normalized, matchable clauses. One top-level pipeline stage, three internal sub-phases feeding a single gated output.
 
