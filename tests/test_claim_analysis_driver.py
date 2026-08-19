@@ -589,6 +589,47 @@ def test_cp4_transport_pins_the_coverage_group_nesting():
         validator.validate(empty)
 
 
+def test_m2_transport_enforces_compact_requirement_evidence():
+    """P1 evidence remains required, but M2 must not repeat full narratives."""
+    from jsonschema import Draft202012Validator, ValidationError
+
+    validator = Draft202012Validator(driver._transport_schema_cp4())
+    shell = {"status": "success", "confidence": 0.9, "review_required": False,
+             "warnings": []}
+    requirement = {
+        "requirement_id": "REQ-1", "requirement_text": "보험사고 요건",
+        "status": "met", "evidence_references": [{
+            "document_id": "DOC_001", "page": 1, "quote": "사고 경위"
+        }],
+    }
+    body = {**shell, "coverage_requirements": [{
+        "standardized_coverage_name": "facility_owner_liability",
+        "requirements": [requirement],
+    }]}
+    validator.validate(body)
+
+    verbose = json.loads(json.dumps(body))
+    verbose["coverage_requirements"][0]["requirements"][0]["requirement_text"] = "가" * 241
+    with pytest.raises(ValidationError):
+        validator.validate(verbose)
+
+    repeated = json.loads(json.dumps(body))
+    repeated["coverage_requirements"][0]["requirements"][0]["evidence_references"] *= 3
+    with pytest.raises(ValidationError):
+        validator.validate(repeated)
+
+    too_many = json.loads(json.dumps(body))
+    too_many["coverage_requirements"][0]["requirements"] *= 13
+    with pytest.raises(ValidationError):
+        validator.validate(too_many)
+
+
+def test_m2_prompt_instructs_compact_no_policy_output():
+    prompt = driver._m2_prompt("{}", "", None, [])
+    assert "COMPACT OUTPUT IS REQUIRED" in prompt
+    assert "do not invent generic policy conditions" in prompt
+
+
 def test_cp1_corrects_an_unambiguous_citation_page_and_records_it():
     """Measured 2026-08-17: the model cited DOC_019's N1611 row on page 1
     while it sits on page 2. Where the page is knowably right, the driver
@@ -892,3 +933,62 @@ def test_an_empty_selection_still_fails_when_the_case_has_policy_pages():
     with pytest.raises(ValueError, match="no readable pages"):
         driver._clamp_selection(
             [{"document_id": "DOC_009", "page": 99}], {"DOC_009": {1, 2, 3}})
+
+
+def test_m2_transport_requires_at_least_one_evidence_reference():
+    """Compaction must not compress evidence to zero.
+
+    Every public contract requires >= 1 reference (coverage_result
+    `$defs/coverage`, case_type_result `allOf`, requirement_matching_result
+    `$defs/requirement/allOf/then`). A transport bounding only the TOP of the
+    range lets the model return `[]`, satisfy the transport, and fail the DAO
+    write after BOTH M1 and M2 are paid for -- what happened on CASE_305, where
+    the compaction prompt pushed CP3 to emit an empty array and the resulting
+    ValidationError killed the driver mid-run.
+
+    Reintroducing the defect (dropping `minItems` from
+    `_compact_evidence_references`) makes all three `pytest.raises` blocks fail,
+    so this asserts the constraint rather than restating the schema.
+    """
+    from jsonschema import Draft202012Validator, ValidationError
+
+    ref = {"document_id": "DOC_001", "page": 1, "quote": "사고 경위"}
+    shell = {"status": "success", "confidence": 0.9, "review_required": False,
+             "warnings": []}
+
+    # CP3 -- evidence_references at the section's top level.
+    v3 = Draft202012Validator(driver._transport_schema_cp3())
+    ct = {**shell, "case_type": "후유장해", "case_type_source": "inferred",
+          "template_id": "t1",
+          "report_profile": {"format_contract_version": "1", "family": "f",
+                             "claim_mechanism": "m", "mode": "mo",
+                             "support_status": "s"},
+          "evidence_references": [ref]}
+    v3.validate(ct)
+    with pytest.raises(ValidationError):
+        v3.validate({**ct, "evidence_references": []})
+
+    # CP2 -- per coverage.
+    v2 = Draft202012Validator(driver._transport_schema_cp2([]))
+    cov = {**shell, "coverages": [{"coverage_name": "상해후유장해",
+                                   "standardized_coverage_name": "disability",
+                                   "evidence_references": [ref]}]}
+    v2.validate(cov)
+    empty2 = json.loads(json.dumps(cov))
+    empty2["coverages"][0]["evidence_references"] = []
+    with pytest.raises(ValidationError):
+        v2.validate(empty2)
+
+    # CP4 -- per requirement.
+    v4 = Draft202012Validator(driver._transport_schema_cp4())
+    req = {**shell, "coverage_requirements": [{
+        "standardized_coverage_name": "disability",
+        "requirements": [{"requirement_id": "REQ-1",
+                          "requirement_text": "보험사고 요건",
+                          "status": "met",
+                          "evidence_references": [ref]}]}]}
+    v4.validate(req)
+    empty4 = json.loads(json.dumps(req))
+    empty4["coverage_requirements"][0]["requirements"][0]["evidence_references"] = []
+    with pytest.raises(ValidationError):
+        v4.validate(empty4)

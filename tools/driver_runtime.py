@@ -45,11 +45,22 @@ def make_receipt(*, case_id: str, run_id: str, stage: str, unit_id: str,
                  input_digests: Mapping[str, str], prompt_version: str,
                  response_schema_version: str, provider_name: str,
                  model_name: str, completed_contracts: list[str],
-                 status: str = "complete") -> dict:
-    """Build a receipt payload for DAO `write-driver-receipt` validation."""
+                 status: str = "complete",
+                 provider_usage: Mapping[str, Any] | None = None) -> dict:
+    """Build a receipt payload for DAO `write-driver-receipt` validation.
+
+    `provider_usage` is the provider's OWN token counts for this unit's call,
+    copied verbatim. It is optional because not every provider reports usage,
+    and an absent figure must stay distinguishable from an invented one -- the
+    same rule T13 applies to `record-dispatch`. Omitting it costs the ability to
+    explain a unit's wall time at all: across CASE_302~321 M1 ranged 117s-492s
+    and M2 64s-564s with nothing recorded to test an output-volume hypothesis
+    against, which left the question answerable only by speculation.
+    """
     if status not in {"complete", "in_progress"}:
         raise ValueError("status must be complete or in_progress")
     digests = dict(sorted(input_digests.items()))
+    receipt_usage = _normalize_usage(provider_usage)
     return {
         "case_id": case_id,
         "run_id": run_id,
@@ -64,7 +75,36 @@ def make_receipt(*, case_id: str, run_id: str, stage: str, unit_id: str,
         "completed_contracts": sorted(completed_contracts),
         "status": status,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
+        **({"provider_usage": receipt_usage} if receipt_usage else {}),
     }
+
+
+_USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens",
+               "cache_creation_input_tokens", "total_tokens")
+
+
+def _normalize_usage(usage: Mapping[str, Any] | None) -> dict[str, int]:
+    """Pull the integer token counts out of a provider usage mapping.
+
+    Copies only keys the receipt schema declares and only when the value is a
+    real non-boolean integer, so a provider that reports a partial or oddly
+    shaped usage block yields fewer fields rather than a fabricated zero.
+    `thinking_tokens` is nested under `output_tokens_details` in the claude-cli
+    envelope, so it is lifted explicitly.
+    """
+    if not isinstance(usage, Mapping):
+        return {}
+    out: dict[str, int] = {}
+    for key in _USAGE_KEYS:
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            out[key] = value
+    details = usage.get("output_tokens_details")
+    if isinstance(details, Mapping):
+        thinking = details.get("thinking_tokens")
+        if isinstance(thinking, int) and not isinstance(thinking, bool) and thinking >= 0:
+            out["thinking_tokens"] = thinking
+    return out
 
 
 def receipt_matches(receipt: Mapping[str, object], *, input_digests: Mapping[str, str],

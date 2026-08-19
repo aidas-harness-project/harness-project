@@ -61,7 +61,7 @@ CONTRACT, SCHEMA = "extracted_claim_fields.json", "extracted_claim_fields.schema
 CONTRACT_CP2, SCHEMA_CP2 = "coverage_result.json", "coverage_result.schema.json"
 CONTRACT_CP3, SCHEMA_CP3 = "case_type_result.json", "case_type_result.schema.json"
 CONTRACT_CP4, SCHEMA_CP4 = "requirement_matching_result.json", "requirement_matching_result.schema.json"
-VERSION = "claim_analysis_driver.v0.3.2_2call"
+VERSION = "claim_analysis_driver.v0.3.3_2call"
 # Span/candidate unit ids for the two merged calls. Receipts stay per public
 # contract (UNIT/UNIT_CP2/UNIT_CP3/UNIT_CP4) so resume grain is unchanged.
 UNIT_M1, UNIT_M2 = "m1_extract_select", "m2_judge_type_requirements"
@@ -724,6 +724,41 @@ _REVIEWER_CONDITIONAL = {
     "then": {"required": ["reviewer_role"]},
 }
 
+# M2's evidence is mandatory, but repeating a full clinical narrative and the
+# same citations inside every CP2/3/4 section made a no-policy CASE_302 response
+# reach 47,937 output tokens. These are transport limits only: the public
+# contracts stay backward compatible, while new provider output is concise by
+# construction and still carries enough exact source evidence for P1.
+_COMPACT_TEXT_MAX = 240
+_COMPACT_QUOTE_MAX = 320
+_COMPACT_EVIDENCE_MAX = 2
+
+
+def _compact_evidence_references(max_items: int = _COMPACT_EVIDENCE_MAX) -> dict:
+    # `minItems` is as load-bearing as `maxItems`: the PUBLIC contracts all
+    # require at least one reference (coverage_result `$defs/coverage`,
+    # case_type_result `allOf`, requirement_matching_result
+    # `$defs/requirement/allOf/then`), so a transport permitting an empty array
+    # lets the model satisfy the transport and then fail the DAO write after
+    # both calls are paid for. Measured on CASE_305: the compaction prompt
+    # pushed CP3 to emit `evidence_references: []`, the transport accepted it,
+    # and the public schema raised an unhandled ValidationError that killed the
+    # driver. P1 requires every field to trace to a quote -- "concise" must
+    # never compress to zero.
+    return {
+        "type": "array", "minItems": 1, "maxItems": max_items,
+        "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "document_id": {"type": "string"},
+                "page": {"type": "integer", "minimum": 1},
+                "quote": {"type": "string", "minLength": 1,
+                          "maxLength": _COMPACT_QUOTE_MAX},
+            },
+            "required": ["document_id", "page", "quote"],
+        },
+    }
+
 
 def _local_schema(schema_name: str, body_props: dict, body_required: list[str]) -> dict:
     """Authoritative local schema for one checkpoint's response body.
@@ -768,10 +803,16 @@ def _body_schema_cp4() -> dict:
     return _local_schema(SCHEMA_CP4, {"coverage_requirements": True}, ["coverage_requirements"])
 
 
-def _transport_shell(extra: dict, required: list[str]) -> dict:
+def _transport_shell(extra: dict, required: list[str], *, compact: bool = False) -> dict:
+    scalar_props = dict(_SCALAR_SHELL_PROPS)
+    if compact:
+        scalar_props["warnings"] = {
+            "type": "array", "maxItems": 6,
+            "items": {"type": "string", "maxLength": _COMPACT_TEXT_MAX},
+        }
     return {
         "type": "object", "additionalProperties": False,
-        "properties": {**_SCALAR_SHELL_PROPS, **extra},
+        "properties": {**scalar_props, **extra},
         "required": ["status", "confidence", "review_required", "warnings", *required],
     }
 
@@ -799,10 +840,16 @@ def _transport_schema_cp2(policy_doc_ids: list | None = None) -> dict:
     # the authoritative shape is the local body schema.
     coverage = {
         "type": "object",
-        "properties": {"matched_clause_ref": _clause_ref_shape(policy_doc_ids)},
+        "properties": {
+            "coverage_name": {"type": "string", "maxLength": _COMPACT_TEXT_MAX},
+            "standardized_coverage_name": {"type": "string", "maxLength": 120},
+            "matched_clause_ref": _clause_ref_shape(policy_doc_ids),
+            "evidence_references": _compact_evidence_references(),
+        },
     }
-    return _transport_shell({"coverages": {"type": "array", "items": coverage}},
-                            ["coverages"])
+    return _transport_shell({"coverages": {"type": "array", "maxItems": 12,
+                                             "items": coverage}},
+                            ["coverages"], compact=True)
 
 
 def _transport_schema_cp3() -> dict:
@@ -822,7 +869,8 @@ def _transport_schema_cp3() -> dict:
         "is_claim_case": {"type": "boolean"},
         "case_type_source": {"enum": ["adjuster_input", "inferred"]},
         "secondary_case_types": {"type": "array", "items": {"enum": _CASE_TYPES}},
-        "candidate_types": {"type": "array", "items": {"type": "object"}},
+        "candidate_types": {"type": "array", "maxItems": 3,
+                            "items": {"type": "object"}},
         # Union refused by ajv strict mode; nullability is enforced by the
         # public schema, which this transport never replaces.
         "template_id": {},
@@ -845,9 +893,9 @@ def _transport_schema_cp3() -> dict:
             "required": ["format_contract_version", "family", "claim_mechanism",
                          "mode", "support_status"],
         },
-        "evidence_references": {"type": "array", "items": {"type": "object"}},
+        "evidence_references": _compact_evidence_references(max_items=3),
     }, ["case_type", "case_type_source", "template_id", "report_profile",
-        "evidence_references"])
+        "evidence_references"], compact=True)
 
 
 def _clause_ref_shape(policy_doc_ids: list | None) -> dict:
@@ -896,16 +944,18 @@ def _transport_schema_cp4(policy_doc_ids: list | None = None) -> dict:
             "coverage_name": {"type": "string"},
             "standardized_coverage_name": {"type": "string"},
             "requirements": {
-                "type": "array", "minItems": 1,
+                "type": "array", "minItems": 1, "maxItems": 12,
                 "items": {
                     "type": "object",
                     "properties": {
                         "requirement_id": {"type": "string"},
-                        "requirement_text": {"type": "string"},
+                        "requirement_text": {"type": "string", "minLength": 1,
+                                             "maxLength": _COMPACT_TEXT_MAX},
                         "status": {"enum": ["met", "not_met", "uncertain"]},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                         "review_required": {"type": "boolean"},
                         "clause_ref": _clause_ref_shape(policy_doc_ids),
+                        "evidence_references": _compact_evidence_references(),
                     },
                     "required": ["requirement_id", "requirement_text", "status"],
                 },
@@ -913,8 +963,9 @@ def _transport_schema_cp4(policy_doc_ids: list | None = None) -> dict:
         },
         "required": ["standardized_coverage_name", "requirements"],
     }
-    return _transport_shell({"coverage_requirements": {"type": "array", "items": group}},
-                            ["coverage_requirements"])
+    return _transport_shell({"coverage_requirements": {"type": "array", "maxItems": 12,
+                                                         "items": group}},
+                            ["coverage_requirements"], compact=True)
 
 
 def _norm(text: str) -> str:
@@ -1230,6 +1281,14 @@ Evidence discipline for ALL sections: every evidence reference must quote a poli
 below or reuse an exact quote from the claim facts (same document, page, and quote);
 case_type_section may additionally reuse quotes from coverage_section's own evidence. Do not cite
 anything else.
+
+COMPACT OUTPUT IS REQUIRED: do not repeat a clinical history, a policy-absence explanation, or
+the same citation in every section. `requirement_text` is a short payout-condition label (at most
+240 characters), not an explanation. Put case-wide blockers once in that section's `warnings`
+(at most 6 short warnings), use at most two minimal exact evidence references per coverage or
+requirement, and combine duplicate/closely related checks where they have the same outcome. When
+POLICY PAGES is empty, do not invent generic policy conditions or clause text: state only the
+material fact-based checks and one concise warning that policy terms could not be verified.
 
 CLAIM FACTS (with their verified evidence quotes):
 {fields_json}
