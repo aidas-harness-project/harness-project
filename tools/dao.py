@@ -7757,7 +7757,7 @@ def cmd_add_conflict_entry(args):
                   f" operation_id {args.operation_id})")
             return 0
         completed_at = now_iso()
-        ledger["conflicts"].append({
+        entry = {
             "conflict_id": conflict_id,
             "raised_by_stage": args.stage,
             "field_or_topic": args.topic,
@@ -7765,7 +7765,14 @@ def cmd_add_conflict_entry(args):
             "verdict": "pending",
             "resolution_note": None,
             "resolved_at": None,
-        })
+        }
+        summary = getattr(args, "professional_summary", None)
+        if summary:
+            # Stored only when supplied. An entry created without one is a
+            # legacy-shaped entry, and downstream reports it from its sources
+            # rather than inventing a summary after the fact.
+            entry["professional_summary"] = summary
+        ledger["conflicts"].append(entry)
         _commit_ledger_operation(
             ledger, args, request, request_sha256,
             {"action": "add", "target_id": conflict_id, "status": "pending"},
@@ -12322,6 +12329,11 @@ def build_parser():
     p.add_argument("--operation-id", default=None,
                    help="Unique id binding this entry into the ledger history. "
                         "Re-running with the same id is an idempotent no-op.")
+    p.add_argument("--professional-summary", default=None,
+                   help="Neutral statement of the disagreement for the "
+                        "손해사정사/의사 who will act on it. Stored with the entry "
+                        "and carried verbatim into the screening report if the "
+                        "entry is later deferred.")
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_add_conflict_entry)
 

@@ -88,6 +88,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "professional_summary": {
+          "type": ["string", "null"],
+          "description": "A neutral statement of the disagreement, written for the 손해사정사/의사 who has to act on it: what each record says and what needs checking, without electing a winner. Authored by the consistency-check agent at the moment it confirmed the conflict, and carried verbatim into the screening report if the entry is later deferred -- so the professional reads the sentence written by whoever had the evidence in hand, not a downstream paraphrase. Null on entries created before this field existed; those are reported from their sources alone rather than given a summary after the fact."
+        },
         "conflict_id": { "type": "string", "pattern": "^CONFLICT_[0-9]+$" },
         "verdict": { "enum": ["resolved", "false_positive", "deferred_to_report"] },
         "note": { "type": "string", "minLength": 1 }
