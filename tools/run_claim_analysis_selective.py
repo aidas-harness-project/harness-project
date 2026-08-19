@@ -768,6 +768,10 @@ def extract_all(
     by_field_row = {row["field_id"]: row for row in config.get("fields") or []}
     kind_by_document = {ref.document_id: ref.kind for ref in documents}
     cache = DocumentCache(extract)
+    opportunistic = [
+        (field_row, selection.plan_field(field_row, config, documents))
+        for field_row in selection.opportunistic_fields(config)
+    ]
 
     progress: list[FieldProgress] = []
     outcomes: list[FieldExtractionOutcome] = []
@@ -838,8 +842,17 @@ def extract_all(
             and item.plan.field_id not in asking_ids
             and item.routes_to(document_id)
         ]
+        # Opportunistic fields never schedule a document, but they must be
+        # included in the only provider call for a document another field has
+        # already paid to open. Otherwise the later cache lookup cannot tell
+        # silence from a question that was never asked.
+        opportunistic_rows = [
+            field_row for field_row, plan in opportunistic
+            if any(document_id in step.document_ids for step in plan.steps)
+        ]
         field_rows = ([item.field_row for item in askers]
-                      + [item.field_row for item in latecomers])
+                      + [item.field_row for item in latecomers]
+                      + opportunistic_rows)
         document = cache.read(document_id, kind, field_rows)
         for item in askers:
             _consume(item, document_id, kind,
@@ -851,8 +864,7 @@ def extract_all(
         if not item.done:
             _finish(item)
 
-    for field_row in selection.opportunistic_fields(config):
-        plan = selection.plan_field(field_row, config, documents)
+    for field_row, plan in opportunistic:
         outcome = resolve_opportunistic(
             plan, field_row, cache, page_text, observation_ids)
         outcomes.append(outcome)
@@ -1368,14 +1380,23 @@ def run(
     manifest = _dao_json(["read-contract", case_id, "_document_manifest.json",
                           "--run-id", run_id])
     documents = classified_documents(manifest)
-    readable = [ref.document_id for ref in documents
-                if ref.kind is not None and not ref.ambiguous]
-    bundle = (_dao_json(["read-redacted-text-bundle", case_id]
-                        + [f"--doc-id={doc}" for doc in readable])
-              if readable else {"documents": []})
-    page_text = _page_text_index(bundle)
+    page_text: dict[tuple[str, int], str] = {}
+    loaded_pages: dict[str, list[dict]] = {}
 
-    extract = extraction.make_reader(provider, pages_by_document(bundle))
+    def load_document_pages(document_id: str) -> list[dict]:
+        """Fetch one document only after the field scheduler selects it."""
+        if document_id in loaded_pages:
+            return loaded_pages[document_id]
+        bundle = _dao_json([
+            "read-redacted-text-bundle", case_id,
+            f"--doc-id={document_id}", f"--run-id={run_id}",
+        ]) or {"documents": []}
+        pages = pages_by_document(bundle).get(document_id, [])
+        loaded_pages[document_id] = pages
+        page_text.update(_page_text_index(bundle))
+        return pages
+
+    extract = extraction.make_reader(provider, load_document_pages)
     observation_ids = _observation_id_sequence()
     # No `non_medical_reader`: nothing in this pipeline produces an
     # administrative filing source, so the route resolves `unavailable` with
@@ -1474,7 +1495,8 @@ def run(
         # The DAO recomputes this at write time and refuses a stale one.
         snapshot = _dao_json(
             ["policy-snapshot", case_id]
-            + [f"--document-id={doc}" for doc in cited])
+            + [f"--document-id={doc}" for doc in cited]
+            + ["--run-id", run_id])
         if snapshot is not None:
             result["upstream_policy_snapshot"] = snapshot
     trace = build_trace(

@@ -13,9 +13,12 @@ document even then.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 import claim_analysis_contracts as contracts
+import claim_analysis_extraction as extraction
 import claim_analysis_selection as selection
 import run_claim_analysis_selective as driver
 
@@ -132,6 +135,33 @@ def test_a_document_no_field_routes_to_is_not_opened() -> None:
     assert recorder.documents == []
 
 
+def test_provider_reader_accepts_a_lazy_page_loader() -> None:
+    loaded: list[str] = []
+
+    def load_pages(document_id):
+        loaded.append(document_id)
+        return [{"page": 1, "text": f"진단명: {QUOTE}"}]
+
+    class Provider:
+        def analyze_text_structured(self, prompt, prompt_version, schema):
+            assert QUOTE in prompt
+            return SimpleNamespace(structured_output={
+                "primary_diagnosis": {
+                    "presence": "asserted", "value": QUOTE,
+                    "page": 1, "quote": QUOTE,
+                },
+            }, text=None)
+
+    reader = extraction.make_reader(Provider(), load_pages)
+    result = reader("DOC_001", "diagnosis_certificate", [{
+        "field_id": "primary_diagnosis", "label": "Primary diagnosis",
+        "value_shape": "text",
+    }])
+
+    assert loaded == ["DOC_001"]
+    assert result["primary_diagnosis"]["value"] == QUOTE
+
+
 def test_higher_priority_documents_are_read_first() -> None:
     """The stop rule still needs the most authoritative source first."""
     plans = selection.plan_wave(_config(), _documents(), "A")
@@ -152,6 +182,32 @@ def test_opportunistic_field_opens_no_document_of_its_own() -> None:
     # opportunistic one alone.
     for document_id, fields in recorder.calls:
         assert not set(fields) <= set(opportunistic)
+
+
+def test_opportunistic_field_rides_the_only_call_for_an_open_document() -> None:
+    """The cache can only contain a field the provider was actually asked for."""
+    field_row = selection.opportunistic_fields(_config())[0]
+    field_id = field_row["field_id"]
+    document_id = "DOC_010"
+    documents = [selection.DocumentRef(document_id, "outpatient_record")]
+    plan = selection.plan_field(field_row, _config(), documents)
+    if not plan.steps:
+        pytest.skip("the opportunistic field does not route to this kind")
+
+    quote = "과거 동일 부위 골절 치료력 있음"
+    recorder = _Recorder({document_id: {field_id: {
+        "value": [quote], "page": 1, "quote": quote,
+    }}})
+    outcomes, _cache = _run(
+        recorder, documents=documents,
+        page_text={(document_id, 1): quote},
+    )
+
+    asked = dict(recorder.calls)[document_id]
+    assert field_id in asked
+    outcome = next(item for item in outcomes if item.field_id == field_id)
+    assert outcome.status == "asserted"
+    assert recorder.documents == [document_id]
 
 
 def test_opportunistic_value_records_its_own_route_rank() -> None:

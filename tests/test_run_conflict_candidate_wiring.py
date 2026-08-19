@@ -71,12 +71,14 @@ class Provider:
     model_name = "stub"
 
 
-def _install(monkeypatch, *, published: list, index=INDEX):
+def _install(monkeypatch, *, published: list, index=INDEX, dao_calls=None):
     """Stub the DAO subprocess edge; everything else is the real driver."""
     run_state = {"stages": [{"stage_name": "claim_analysis",
                              "status": "in_progress"}]}
 
     def fake_json(args, allow_missing=False):
+        if dao_calls is not None:
+            dao_calls.append(list(args))
         command = args[0]
         if command == "read-contract":
             name = args[2]
@@ -117,6 +119,8 @@ def _install(monkeypatch, *, published: list, index=INDEX):
 
     def fake_reader(provider, pages_by_document):
         def extract(document_id, kind, field_rows):
+            if callable(pages_by_document):
+                pages_by_document(document_id)
             wanted = {row["field_id"] for row in field_rows}
             if "primary_diagnosis" not in wanted:
                 return {}
@@ -200,6 +204,39 @@ def test_every_referenced_id_resolves_to_a_declared_candidate(published) -> None
         for requirement in link["requirements"]:
             for candidate_id in requirement.get("conflict_candidate_ids") or []:
                 assert candidate_id in declared
+
+
+# --------------------------------------------------------- read attribution --
+
+def test_run_fetches_each_selected_document_lazily_and_with_run_id(
+    monkeypatch,
+) -> None:
+    published: list = []
+    dao_calls: list[list[str]] = []
+    _install(monkeypatch, published=published, dao_calls=dao_calls)
+
+    driver.run(case_id=CASE_ID, run_id=RUN_ID, held_by="claim-analysis",
+               provider=Provider())
+
+    reads = [args for args in dao_calls
+             if args[0] == "read-redacted-text-bundle"]
+    assert reads
+    for args in reads:
+        document_ids = [arg for arg in args if arg.startswith("--doc-id=")]
+        assert len(document_ids) == 1
+        assert f"--run-id={RUN_ID}" in args
+
+
+def test_policy_snapshot_read_is_attributed_to_the_run(monkeypatch) -> None:
+    published: list = []
+    dao_calls: list[list[str]] = []
+    _install(monkeypatch, published=published, dao_calls=dao_calls)
+
+    driver.run(case_id=CASE_ID, run_id=RUN_ID, held_by="claim-analysis",
+               provider=Provider())
+
+    snapshot = next(args for args in dao_calls if args[0] == "policy-snapshot")
+    assert snapshot[-2:] == ["--run-id", RUN_ID]
 
 
 # ------------------------------------------------------- single ownership --

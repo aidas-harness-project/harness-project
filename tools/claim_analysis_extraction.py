@@ -27,7 +27,7 @@ from a gap in the records.
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 PROMPT_VERSION = "claim_analysis_selective_extraction.v0.1"
 
@@ -209,7 +209,13 @@ def parse_result(
     return parsed
 
 
-def make_reader(provider, pages_by_document: Mapping[str, Sequence[Mapping[str, Any]]]):
+def make_reader(
+    provider,
+    pages_by_document: (
+        Mapping[str, Sequence[Mapping[str, Any]]]
+        | Callable[[str], Sequence[Mapping[str, Any]]]
+    ),
+):
     """An `extract(document_id, kind, field_rows)` bound to a real provider.
 
     Returned as a closure so the driver's ordering logic stays testable with a
@@ -218,7 +224,11 @@ def make_reader(provider, pages_by_document: Mapping[str, Sequence[Mapping[str, 
 
     def extract(document_id: str, kind: str | None,
                 field_rows: Sequence[Mapping[str, Any]]) -> dict[str, dict]:
-        pages = pages_by_document.get(document_id) or []
+        pages = (
+            pages_by_document(document_id)
+            if callable(pages_by_document)
+            else pages_by_document.get(document_id)
+        ) or []
         if not pages or not field_rows:
             return {}
         prompt = build_prompt(document_id=document_id, document_kind=kind,

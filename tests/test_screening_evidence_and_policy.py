@@ -333,6 +333,23 @@ def test_a_duplicate_citation_is_not_emitted_twice() -> None:
     assert len(section["evidence_references"]) == 1
 
 
+def test_asserted_disability_assessment_is_recorded_in_claim_analysis() -> None:
+    checklist = [{
+        "document_kind": reporter.DISABILITY_DOCUMENT_KIND,
+        "document_ids": ["DOC_050"],
+    }]
+    facts = {"existing_disability_assessment": _fact(
+        "existing_disability_assessment", ["AMA 10%"], "AMA 10%",
+        document_id="DOC_050",
+    )}
+
+    result = reporter.existing_disability_documents(checklist, facts)
+
+    assert result["present"] is True
+    assert result["recorded_in_claim_analysis"] is True
+    assert result["evidence_references"][0]["document_id"] == "DOC_050"
+
+
 # ------------------------------------------------------- contract validity --
 
 def test_the_enriched_report_validates_against_its_schema() -> None:

@@ -282,7 +282,7 @@ def existing_disability_documents(
         "status_label": "보유" if document_ids else "미확인",
         "recorded_in_claim_analysis": (
             recorded is not None
-            and recorded.get("resolution_status") == "resolved"
+            and recorded.get("resolution_status") == "asserted"
         ),
         # Only when claim analysis actually read the form and asserted
         # something from it. Presence in the checklist is a fact about the
