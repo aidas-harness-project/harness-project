@@ -61,16 +61,23 @@ def policy_document_ids(manifest: Mapping[str, Any]) -> list[str]:
 def coverage_terms(claim_facts: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
     """(coverage_id, search term) pairs the case's own facts justify.
 
-    Derived from asserted facts only. An unresolved field suggests nothing, and
-    searching on a value the case never established would produce a link whose
-    basis is a guess.
+    Derived from facts the case actually established -- asserted OR conflicting.
+    An unresolved field suggests nothing, and searching on a value the case
+    never established would produce a link whose basis is a guess.
     """
-    asserted = {
+    # `conflict` counts alongside `asserted`, and that is the whole point of
+    # searching under disagreement: the case DID establish that this coverage
+    # is in play -- two sources say so, they just say different things about
+    # the value. Suppressing the search would withhold the clause a reviewer
+    # needs to judge the disagreement against, which is the opposite of what
+    # the conflict should cause. `unavailable` and `not_applicable` stay out:
+    # nothing was established there, so a link would rest on a guess.
+    established = {
         row["field_id"] for row in claim_facts
-        if row.get("resolution_status") == "asserted"
+        if row.get("resolution_status") in {"asserted", "conflict"}
     }
     return [(field_id, term) for field_id, term in COVERAGE_HINT_FIELDS
-            if field_id in asserted]
+            if field_id in established]
 
 
 def _clause_entries(index: Mapping[str, Any], doc_id: str) -> list[dict]:

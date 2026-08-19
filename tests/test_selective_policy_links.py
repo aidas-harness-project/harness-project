@@ -155,6 +155,33 @@ def test_a_conflicting_fact_still_gets_its_clause_linked() -> None:
     assert requirement["conflict_candidate_ids"] == ["CAC_0001"]
 
 
+def test_a_conflicting_fact_still_justifies_the_search_at_all() -> None:
+    """Caught by an end-to-end run, not by the unit tests above.
+
+    `build_policy_links` marks a conflicted requirement correctly -- but only
+    for coverages the search reached. Filtering the search itself to `asserted`
+    meant a case whose only diagnosis reading was in conflict produced NO link,
+    silently, which is the same suppression stated the other way round.
+    """
+    conflicted = [{"field_id": "primary_diagnosis",
+                   "resolution_status": "conflict"}]
+    assert linker.coverage_terms(conflicted) == [("primary_diagnosis", "진단")]
+
+    links = _build(claim_facts=conflicted,
+                   index=_index(["진단보험금의 지급사유"]),
+                   conflict_candidate_ids_by_field={
+                       "primary_diagnosis": ["CAC_0001"]})
+    assert len(links) == 1
+    assert links[0]["requirements"][0]["evidence_status"] == "conflict"
+
+
+@pytest.mark.parametrize("status", ["unavailable", "not_applicable",
+                                    "explicitly_absent"])
+def test_a_field_the_case_never_established_justifies_nothing(status: str) -> None:
+    assert linker.coverage_terms(
+        [{"field_id": "primary_diagnosis", "resolution_status": status}]) == []
+
+
 def test_no_link_asserts_coverage_or_a_payout() -> None:
     """Linking says what the claim is assessed against, never the outcome.
 
