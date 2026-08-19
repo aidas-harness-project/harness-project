@@ -40,7 +40,7 @@ First inspect `extracted_claim_fields.json` through the DAO. Only a DAO-accepted
 
 # Output
 
-`screening_report.json` + `screening_report.md`. Content structure and required sections: template TBD, see `pipeline.md`'s note on pending template rules — do not invent a template structure now.
+`screening_report.json` + `screening_report.md` + `screening_report.evidence.json`. On the legacy lane the section structure is still open (see `pipeline.md`) — do not invent one. On the selective lane it is fixed: `templates/screening-report-selective.md`'s nine sections, enforced by the registry, and the helper produces all three files in one run.
 
 In `insurer_position`, preserve denial and reduction separately:
 
@@ -54,7 +54,9 @@ Record `source_denial_contract_hash` from the `denial_reason_result.json` you su
 
 **`document_assembly.py` verifies every citation quote against `data/processed/<CASE>/<DOC>/redacted_text.md` before writing anything, and refuses the whole document if one does not resolve.** Quote from the processed text; never reconstruct one from memory. Whitespace differences are tolerated (extraction line-wraps mid-sentence), wrong words and wrong `document_id`s are not.
 
-For the narrative `.md`: you provide per-field/per-section content + `evidence_references` to `python tools/document_assembly.py --sections-file <spec.json> --held-by screening-report --run-id RUN_ID --template screening_report`, which assembles the file and auto-generates `[E#]` tags and the `.evidence.json` sidecar in one pass — locked and atomic like any other DAO write. The `--template screening_report` flag structurally enforces `templates/screening-report.md`'s 7 sections (exact headings and order, per `templates/registry.json`) — a refusal means fix your section list to match, not drop the flag. You never hand-write a tag number or hand-maintain the sidecar.
+**Legacy lane only.** For the narrative `.md`: you provide per-field/per-section content + `evidence_references` to `python tools/document_assembly.py --sections-file <spec.json> --held-by screening-report --run-id RUN_ID --template screening_report`, which assembles the file and auto-generates `[E#]` tags and the `.evidence.json` sidecar in one pass — locked and atomic like any other DAO write. The `--template screening_report` flag structurally enforces `templates/screening-report.md`'s 7 sections (exact headings and order, per `templates/registry.json`) — a refusal means fix your section list to match, not drop the flag. You never hand-write a tag number or hand-maintain the sidecar.
+
+**On the selective lane you do not call this tool at all.** `run_screening_report.py` renders the `.md` and the sidecar itself, through the same tool with `--template screening_report_selective` (nine sections, and no 진행 가능성/난이도 section for it to fill). Supplying your judgement to the helper is the whole of your part.
 
 In the narrative section `보험사 판단`, render separate `거절` and `감액` subsections, including their reason IDs, stated grounds, and explicit amounts. Every judgment beyond direct restatement (case difficulty, priority review points, etc.) follows P3 — hedge, flag, don't assert.
 

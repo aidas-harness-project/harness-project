@@ -39,9 +39,20 @@ The evidence to gather first, none of which the flag itself checks:
    wall time, and whether the fields the current path resolves are still
    resolved. Until that measurement exists, no speedup or recall claim about
    the selective path may be stated as fact.
-3. **The medical revision exists for the case.** The result binds to
-   `medical_variables.json` by digest, and the DAO refuses the write when that
-   revision cannot be resolved.
+3. **Policy and administrative inputs, where the case has them.** Clause
+   linking reads `_document_index.json` (built by `policy_clause_processing`)
+   and the filing fields read the intake declaration or filing record. All are
+   optional: a case without them records `not_found` / `unavailable` with the
+   reason, rather than failing.
+
+**No canonical medical revision is required.** An earlier revision of this file
+said the result binds to `medical_variables.json` by digest and that the DAO
+refuses the write without it. That has not been true since the lane became
+source-grounded: it publishes `authority: source_document_extraction` with
+`medical_projection_status: not_configured`, claims no canonical projection, and
+writes on cases that have no medical revision at all. A revision is recorded
+only as optional `medical_revision_context`, and only when a caller actually
+observed one -- declaring it is what makes the DAO verify the digest.
 
 ## What activation does NOT authorize
 

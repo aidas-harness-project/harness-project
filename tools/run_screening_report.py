@@ -41,6 +41,8 @@ COMPONENT = "screening-report"
 CONTRACT = "screening_report.json"
 SCHEMA = "screening_report_selective.schema.json"
 VERSION = "screening_report_selective.v0.1"
+TEMPLATE = "screening_report_selective"
+ASSEMBLY = ROOT / "tools" / "document_assembly.py"
 
 # Korean labels: this is a deliverable read by Korean-speaking professionals,
 # which is the documented exception to the English-only rule.
@@ -558,6 +560,180 @@ def require_open_attempt(case_id: str, run_id: str) -> None:
             "owns attempt state")
 
 
+# ------------------------------------------------------ markdown sections --
+
+def _bullet(label: str, value) -> str:
+    if value in (None, "", [], {}):
+        return f"- {label}: 확인 불가"
+    if isinstance(value, list):
+        return f"- {label}: {', '.join(str(item) for item in value)}"
+    return f"- {label}: {value}"
+
+
+def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
+    """The nine sections of the selective template, as document_assembly input.
+
+    Content only -- no `[E#]` tags. The tool generates those and the matching
+    sidecar from the `evidence_references` supplied here, so a tag and its
+    citation cannot drift apart; writing a tag by hand is what P1 forbids.
+
+    Every section is rendered even when empty, because the template enforces
+    exactly these nine in order, and because "이 항목은 확인되지 않았습니다" is
+    itself information for a reviewer -- a silently omitted section is
+    indistinguishable from one nobody looked at.
+    """
+    summary = report.get("case_summary") or {}
+    sections: list[dict] = []
+
+    # 1. accident and shared medical facts
+    period = summary.get("treatment_period") or {}
+    sections.append({
+        "heading": "1. 사고와 공통 의료정보",
+        "content": "\n".join([
+            _bullet("사고일", summary.get("accident_date")),
+            _bullet("주요 진단명", summary.get("main_diagnosis")),
+            _bullet("진단코드", summary.get("kcd_code")),
+            _bullet("치료기간", (f"{period.get('start_date')} ~ "
+                              f"{period.get('end_date') or '미종결'}")
+                    if period else None),
+        ]),
+        "evidence_references": [],
+    })
+
+    # 2. the four verdicts, side by side
+    rows = summary.get("case_type_assessment") or []
+    evidence = [
+        {"document_id": ref["document_id"], "page": ref["page"],
+         "quote": ref["quote"]}
+        for row in rows for ref in (row.get("evidence_references") or [])
+    ]
+    sections.append({
+        "heading": "2. 사건유형 병렬 판정",
+        "content": "\n".join(
+            f"- {row['case_type_label']}: {row['status_label']} — {row['basis']}"
+            for row in rows) or "- 판정 결과 없음",
+        "evidence_references": evidence,
+    })
+
+    # 3. filing status per type
+    sections.append({
+        "heading": "3. 유형별 추가정보와 접수 상태",
+        "content": "\n".join(
+            f"- {row['case_type_label']}: 접수 {row['filing_status_label']}"
+            for row in rows) or "- 접수 정보 없음",
+        "evidence_references": [],
+    })
+
+    # 4. which medical areas the records could establish
+    unconfirmed = report.get("unconfirmed_items") or []
+    disability = report.get("existing_disability_assessment") or {}
+    sections.append({
+        "heading": "4. 의료영역 확보 현황",
+        "content": "\n".join([
+            _bullet("확인된 핵심 의료정보", summary.get("main_diagnosis")),
+            _bullet("후유장해진단서/신체감정서",
+                    disability.get("status_label")),
+            _bullet("미확인 항목 수", len(unconfirmed) if unconfirmed else None),
+        ]),
+        "evidence_references": [],
+    })
+
+    # 5. required-document checklist
+    checklist = report.get("required_document_checklist") or []
+    sections.append({
+        "heading": "5. 필요서류 체크리스트",
+        "content": "\n".join(
+            f"- {row['document_label']}: {row['status_label']}"
+            f" ({', '.join(row['required_for_case_types'])})"
+            for row in checklist) or "- 체크리스트 없음",
+        "evidence_references": [],
+    })
+
+    # 6. verified conflicts, in consistency-check's own words
+    inconsistencies = report.get("inconsistencies") or []
+    conflict_evidence = [
+        {"document_id": source["document_id"], "page": source.get("page", 1),
+         "quote": source["quote"]}
+        for row in inconsistencies
+        for source in (row.get("source_values") or [])
+        if source.get("document_id") and source.get("quote")
+    ]
+    sections.append({
+        "heading": "6. 중요 충돌과 유형 판정 영향",
+        "content": "\n".join(
+            f"- [{row['field']}] {row['description']}"
+            for row in inconsistencies) or "- 검증된 충돌 없음",
+        "evidence_references": conflict_evidence,
+    })
+
+    # 7. what the records could not establish
+    sections.append({
+        "heading": "7. 주요 미확인 항목",
+        "content": "\n".join(
+            f"- {row['label']}: {row['reason']}" for row in unconfirmed
+        ) or "- 미확인 항목 없음",
+        "evidence_references": [],
+    })
+
+    # 8. linked clauses and requirement evidence status
+    links = report.get("policy_links") or []
+    sections.append({
+        "heading": "8. 관련 약관과 요건 자료상태",
+        "content": "\n".join(
+            f"- {link['coverage_name']}: {link['clause_link_status']}"
+            for link in links) or "- 연결된 약관 조항 없음",
+        "evidence_references": [],
+    })
+
+    # 9. the insurer's own decision
+    position = report.get("insurer_position") or {}
+    denial = position.get("denial") or {}
+    reduction = position.get("reduction") or {}
+    acceptance = position.get("acceptance") or {}
+    sections.append({
+        "heading": "9. 보험사 응답",
+        "content": "\n".join([
+            _bullet("거절", ", ".join(denial.get("reason_ids") or []) or None),
+            _bullet("감액", ", ".join(reduction.get("reason_ids") or []) or None),
+            _bullet("승인", ", ".join(
+                acceptance.get("accepted_coverage_ids") or []) or None),
+        ]),
+        "evidence_references": [],
+    })
+    return sections
+
+
+def render_markdown(
+    *, case_id: str, run_id: str, held_by: str, report: Mapping[str, Any],
+) -> str:
+    """Render the .md and its evidence sidecar through document_assembly.
+
+    Called rather than reimplemented: that tool verifies every citation quote
+    against the processed text and refuses the whole document if one does not
+    resolve, then writes the file and the sidecar atomically under a lock. A
+    hand-rolled renderer here would be a second, unverified way to produce the
+    deliverable.
+    """
+    output_path = f"outputs/{case_id}/screening_report.md"
+    spec = {"output_path": output_path,
+            "sections": markdown_sections(report)}
+    spec_file = _temp_json(spec)
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(ASSEMBLY),
+             "--sections-file", str(spec_file),
+             "--template", TEMPLATE,
+             "--held-by", held_by, "--run-id", run_id],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+        if proc.returncode:
+            raise RuntimeError(
+                "document assembly refused the screening report:\n"
+                + (proc.stdout or proc.stderr or "").strip())
+    finally:
+        spec_file.unlink(missing_ok=True)
+    return output_path
+
+
 def run(*, case_id: str, run_id: str, held_by: str) -> dict:
     """Assemble and publish the screening report.
 
@@ -618,10 +794,18 @@ def run(*, case_id: str, run_id: str, held_by: str) -> dict:
             raise RuntimeError((proc.stdout or proc.stderr or "").strip())
     finally:
         data_file.unlink(missing_ok=True)
+    # JSON first, then the narrative rendered FROM it. The order matters: the
+    # Markdown is a view of the contract that was already schema-validated and
+    # persisted, so the two cannot describe different findings.
+    markdown_path = render_markdown(
+        case_id=case_id, run_id=run_id, held_by=held_by, report=report)
+
     return {
         "inconsistencies": len(report["inconsistencies"]),
         "deferred_carried": len(deferred),
         "has_denial": report["insurer_position"]["has_denial"],
+        "report_path": markdown_path,
+        "evidence_sidecar": markdown_path.replace(".md", ".evidence.json"),
     }
 
 
