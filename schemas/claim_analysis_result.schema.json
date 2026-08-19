@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "claim_analysis_result.schema.json",
-  "title": "Canonical selective Claim Analysis result v0.1",
-  "description": "Compact downstream Claim Analysis view. medical_variables.json remains the sole authority for medical facts and extracted_claim_fields.json remains its sealed compatibility projection. This result binds to that medical revision, adds claim-native accident/type/policy facts, and carries local conflict candidates for consistency_check to verify before that stage creates any P6 ledger entry. Reading trace and performance telemetry live in claim_analysis_trace.json.",
+  "title": "Selective Claim Analysis result v0.1 (source-grounded)",
+  "description": "Compact downstream Claim Analysis view for the selective PoC lane. Its authority is SOURCE-GROUNDED EXTRACTION: every fact here is read from a case document and carries that document's exact quote and character range. It is NOT a projection of the canonical medical variables and must not be presented as one -- the PoC does not resolve field ids to canonical variable ids, so claiming projection authority would assert a binding that was never computed. medical_projection_status records that plainly. Conflict candidates stay candidates: consistency_check verifies them before any P6 ledger entry exists. Reading trace and performance telemetry live in claim_analysis_trace.json.",
   "allOf": [
     { "$ref": "common_component_output.schema.json" },
     {
@@ -11,7 +11,17 @@
         "component": { "const": "claim-analysis" },
         "schema_version": { "const": "claim_analysis_result.v0.1" },
         "config_version": { "const": "claim_analysis_routing.v0.1" },
-        "medical_revision": { "$ref": "medical_common.schema.json#/$defs/medical_variable_revision" },
+        "medical_projection_status": {
+          "const": "not_configured",
+          "description": "Whether a canonical medical projection governs this result. Pinned to not_configured for v0.1: config/medical/medical_projection_v0.1.json ships projection_enabled false with no field rules, so no field-to-variable mapping exists to project through. A constant rather than an enum because no other value is reachable in this version -- an enum would advertise a state the lane cannot occupy."
+        },
+        "medical_revision_context": {
+          "description": "OPTIONAL, and context only. When a canonical medical revision happens to exist for the case, a result may record which one was current while it ran. It is not the source of any value here and never confers canonical authority; omit it entirely rather than record a revision this result did not actually observe. Declaring it is what makes the DAO verify the digest.",
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/medical_revision_context" }
+          ]
+        },
         "claim_facts": {
           "type": "array",
           "items": { "$ref": "#/$defs/field_result" }
@@ -35,10 +45,22 @@
           "items": { "$ref": "#/$defs/conflict_candidate" }
         }
       },
-      "required": ["schema_version", "config_version", "medical_revision", "claim_facts", "case_type_assessment", "policy_links", "required_document_checklist", "conflict_candidates"]
+      "required": ["schema_version", "config_version", "medical_projection_status", "claim_facts", "case_type_assessment", "policy_links", "required_document_checklist", "conflict_candidates"]
     }
   ],
   "$defs": {
+    "medical_revision_context": {
+      "$comment": "Inlined rather than $ref'd to medical_common.schema.json#/$defs/medical_variable_revision on purpose. Pointing at the canonical definition would re-import canonical medical vocabulary into a contract that explicitly does not claim canonical authority, and would couple this lane to a schema it must not modify.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "run_id": { "type": "string", "minLength": 1 },
+        "schema_version": { "type": "string", "minLength": 1 },
+        "config_version": { "type": "string", "minLength": 1 }
+      },
+      "required": ["sha256", "run_id", "schema_version", "config_version"]
+    },
     "observation_id": { "type": "string", "pattern": "^CAO_[0-9]{4,}$" },
     "conflict_candidate_id": { "type": "string", "pattern": "^CAC_[0-9]{4,}$" },
     "exact_evidence_reference": {
@@ -76,11 +98,22 @@
       "additionalProperties": false,
       "properties": {
         "observation_id": { "$ref": "#/$defs/observation_id" },
-        "value_state": { "enum": ["asserted", "unknown", "not_applicable"] },
+        "value_state": {
+          "enum": ["asserted", "explicitly_absent", "unavailable", "not_applicable"],
+          "description": "What this single reading established. 'asserted' -- the source states a value. 'explicitly_absent' -- the source states the thing is NOT present (e.g. no acute fracture), which is a positive finding and needs its own quote. 'unavailable' -- nothing could be established. 'not_applicable' -- the case's own facts exclude the field. Silence is 'unavailable', never 'explicitly_absent': a document that says nothing has not denied anything."
+        },
         "value": { "$ref": "#/$defs/value" },
         "reason": { "type": "string", "minLength": 1 },
+        "unavailable_reason": {
+          "enum": ["not_mentioned", "source_document_missing", "unreadable", "outside_poc_scope", "conflict_unresolved"],
+          "description": "Why nothing could be established. Required on an unavailable reading so that 'no value' separates the case where no document mentioned it from the case where the document was never in the pack."
+        },
         "source_document_kind": { "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind" },
-        "source_priority_rank": { "type": "integer", "minimum": 1 },
+        "source_priority_rank": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The rung of the field's OWN route ladder this source sits on -- not the order the document happened to be opened in. An opportunistic reading records the rank its route assigns, so a value picked up from an already-open document is never mistaken for a higher-priority one."
+        },
         "extraction_wave": { "enum": ["A", "B", "opportunistic"] },
         "evidence_references": {
           "type": "array",
@@ -90,23 +123,40 @@
       "required": ["observation_id", "value_state", "extraction_wave", "evidence_references"],
       "oneOf": [
         {
+          "$comment": "asserted: a value, its source, and an exact quote.",
           "properties": {
             "value_state": { "const": "asserted" },
             "evidence_references": { "minItems": 1 }
           },
           "required": ["value", "source_document_kind", "source_priority_rank"],
-          "not": { "required": ["reason"] }
+          "not": { "anyOf": [{ "required": ["reason"] }, { "required": ["unavailable_reason"] }] }
         },
         {
-          "properties": { "value_state": { "enum": ["unknown", "not_applicable"] } },
+          "$comment": "explicitly_absent: no value, but the sentence asserting absence is quoted. Its scope is this field only -- an absence statement about one finding never travels to another field.",
+          "properties": {
+            "value_state": { "const": "explicitly_absent" },
+            "evidence_references": { "minItems": 1 }
+          },
+          "required": ["reason", "source_document_kind", "source_priority_rank"],
+          "not": { "anyOf": [{ "required": ["value"] }, { "required": ["unavailable_reason"] }] }
+        },
+        {
+          "$comment": "unavailable: nothing established, so there is nothing to cite.",
+          "properties": {
+            "value_state": { "const": "unavailable" },
+            "evidence_references": { "maxItems": 0 }
+          },
+          "required": ["reason", "unavailable_reason"],
+          "not": { "anyOf": [{ "required": ["value"] }, { "required": ["source_document_kind"] }, { "required": ["source_priority_rank"] }] }
+        },
+        {
+          "$comment": "not_applicable: excluded by the case's own facts, and the fact doing the excluding is quoted. Silence alone can never reach this state.",
+          "properties": {
+            "value_state": { "const": "not_applicable" },
+            "evidence_references": { "minItems": 1 }
+          },
           "required": ["reason"],
-          "not": {
-            "anyOf": [
-              { "required": ["value"] },
-              { "required": ["source_document_kind"] },
-              { "required": ["source_priority_rank"] }
-            ]
-          }
+          "not": { "anyOf": [{ "required": ["value"] }, { "required": ["unavailable_reason"] }] }
         }
       ]
     },
@@ -117,12 +167,19 @@
         "field_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
         "domain_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
         "priority_grade": { "enum": ["A", "B"] },
-        "authority": { "enum": ["medical_variables_projection", "claim_analysis_native"] },
-        "resolution_status": { "enum": ["resolved", "unknown", "conflict", "not_applicable"] },
-        "canonical_observation_ids": {
+        "authority": {
+          "enum": ["source_document_extraction", "claim_analysis_native"],
+          "description": "Where this field's content came from. 'source_document_extraction' -- read from a case document with an exact citation. 'claim_analysis_native' -- a claim-side finding this stage owns (accident circumstances, filing information, case-type triggers), reserved for the event_timeline domain. There is deliberately no projection value: this lane does not project canonical medical variables, and offering the label would invite claiming a binding it never computed."
+        },
+        "resolution_status": {
+          "enum": ["asserted", "explicitly_absent", "unavailable", "not_applicable", "conflict"],
+          "description": "The field's settled state after its read ladder ran. Mirrors the observation vocabulary, plus 'conflict' for two sources that assert different values."
+        },
+        "selected_observation_ids": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/observation_id" }
+          "items": { "$ref": "#/$defs/observation_id" },
+          "description": "The observation carrying the value this field reports. Exactly one when asserted; empty in every other state -- notably under conflict, where electing one reading would be choosing a winner this stage has no standing to choose."
         },
         "observations": {
           "type": "array",
@@ -133,68 +190,74 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/conflict_candidate_id" }
         },
-        "stop_reason": { "enum": ["trusted_value_found", "sources_exhausted", "conflict_found", "not_applicable"] },
-        "resolution_reason": { "type": "string", "minLength": 1 }
+        "stop_reason": { "enum": ["trusted_value_found", "sources_exhausted", "conflict_found", "not_applicable", "explicitly_absent"] },
+        "resolution_reason": { "type": "string", "minLength": 1 },
+        "unavailable_reason": {
+          "enum": ["not_mentioned", "source_document_missing", "unreadable", "outside_poc_scope", "conflict_unresolved"]
+        }
       },
-      "required": ["field_id", "domain_code", "priority_grade", "authority", "resolution_status", "canonical_observation_ids", "observations", "conflict_candidate_ids", "stop_reason"],
+      "required": ["field_id", "domain_code", "priority_grade", "authority", "resolution_status", "selected_observation_ids", "observations", "conflict_candidate_ids", "stop_reason"],
       "allOf": [
         {
-          "if": { "properties": { "resolution_status": { "const": "resolved" } }, "required": ["resolution_status"] },
+          "$comment": "asserted: exactly one selected observation, and an asserted reading exists to be selected.",
+          "if": { "properties": { "resolution_status": { "const": "asserted" } }, "required": ["resolution_status"] },
           "then": {
             "properties": {
-              "canonical_observation_ids": { "minItems": 1 },
-              "observations": { "minItems": 1 },
+              "selected_observation_ids": { "minItems": 1, "maxItems": 1 },
+              "observations": { "minItems": 1, "contains": { "properties": { "value_state": { "const": "asserted" } }, "required": ["value_state"] } },
               "conflict_candidate_ids": { "maxItems": 0 },
               "stop_reason": { "const": "trusted_value_found" }
             }
           }
         },
         {
-          "if": { "properties": { "resolution_status": { "const": "conflict" } }, "required": ["resolution_status"] },
+          "$comment": "explicitly_absent: a grounded absence reading, and no selected value.",
+          "if": { "properties": { "resolution_status": { "const": "explicitly_absent" } }, "required": ["resolution_status"] },
           "then": {
             "properties": {
-              "canonical_observation_ids": { "maxItems": 0 },
-              "observations": { "minItems": 2 },
-              "conflict_candidate_ids": { "minItems": 1 },
-              "stop_reason": { "const": "conflict_found" }
+              "selected_observation_ids": { "maxItems": 0 },
+              "observations": { "minItems": 1, "contains": { "properties": { "value_state": { "const": "explicitly_absent" } }, "required": ["value_state"] } },
+              "conflict_candidate_ids": { "maxItems": 0 },
+              "stop_reason": { "const": "explicitly_absent" }
             },
             "required": ["resolution_reason"]
           }
         },
         {
-          "if": { "properties": { "resolution_status": { "const": "unknown" } }, "required": ["resolution_status"] },
+          "$comment": "unavailable: no evidence anywhere, and the reason why is named.",
+          "if": { "properties": { "resolution_status": { "const": "unavailable" } }, "required": ["resolution_status"] },
           "then": {
             "properties": {
-              "canonical_observation_ids": { "maxItems": 0 },
-              "observations": {
-                "items": {
-                  "allOf": [
-                    { "$ref": "#/$defs/observation" },
-                    { "properties": { "value_state": { "const": "unknown" } } }
-                  ]
-                }
-              },
+              "selected_observation_ids": { "maxItems": 0 },
+              "observations": { "items": { "properties": { "value_state": { "const": "unavailable" } }, "required": ["value_state"] } },
               "conflict_candidate_ids": { "maxItems": 0 },
               "stop_reason": { "const": "sources_exhausted" }
             },
+            "required": ["resolution_reason", "unavailable_reason"]
+          }
+        },
+        {
+          "$comment": "not_applicable: at least one grounded observation carrying the excluding fact. Never reachable from silence -- that is what minItems plus the per-item evidence floor buys.",
+          "if": { "properties": { "resolution_status": { "const": "not_applicable" } }, "required": ["resolution_status"] },
+          "then": {
+            "properties": {
+              "selected_observation_ids": { "maxItems": 0 },
+              "observations": { "minItems": 1, "items": { "properties": { "value_state": { "const": "not_applicable" }, "evidence_references": { "minItems": 1 } }, "required": ["value_state"] } },
+              "conflict_candidate_ids": { "maxItems": 0 },
+              "stop_reason": { "const": "not_applicable" }
+            },
             "required": ["resolution_reason"]
           }
         },
         {
-          "if": { "properties": { "resolution_status": { "const": "not_applicable" } }, "required": ["resolution_status"] },
+          "$comment": "conflict: both readings kept, neither elected.",
+          "if": { "properties": { "resolution_status": { "const": "conflict" } }, "required": ["resolution_status"] },
           "then": {
             "properties": {
-              "canonical_observation_ids": { "maxItems": 0 },
-              "observations": {
-                "items": {
-                  "allOf": [
-                    { "$ref": "#/$defs/observation" },
-                    { "properties": { "value_state": { "const": "not_applicable" } } }
-                  ]
-                }
-              },
-              "conflict_candidate_ids": { "maxItems": 0 },
-              "stop_reason": { "const": "not_applicable" }
+              "selected_observation_ids": { "maxItems": 0 },
+              "observations": { "minItems": 2 },
+              "conflict_candidate_ids": { "minItems": 1 },
+              "stop_reason": { "const": "conflict_found" }
             },
             "required": ["resolution_reason"]
           }
@@ -206,7 +269,10 @@
       "additionalProperties": false,
       "properties": {
         "case_type": { "enum": ["personal_insurance", "traffic_accident", "industrial_accident", "liability"] },
-        "status": { "enum": ["supported", "not_supported", "uncertain"] },
+        "status": {
+          "enum": ["applicable", "not_applicable", "uncertain"],
+          "description": "Whether this case type is in scope for review, judged independently of the other three. 'applicable' -- an extracted fact affirmatively triggers it. 'not_applicable' -- ONLY where a source affirmatively states the negative. 'uncertain' -- everything else, including silence. Silence is never not_applicable: a record that does not mention a vehicle has not established that no vehicle was involved. Scoped to the selective lane; legacy case_type_result keeps its own supported/not_supported vocabulary."
+        },
         "triggered_field_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } },
         "conflicting_field_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } },
         "filing_status": { "enum": ["filed", "not_filed", "unknown"] },
@@ -219,12 +285,14 @@
       "required": ["case_type", "status", "triggered_field_ids", "conflicting_field_ids", "filing_status", "reason", "evidence_references"],
       "allOf": [
         {
-          "if": { "properties": { "status": { "const": "supported" } }, "required": ["status"] },
+          "$comment": "applicable needs a named trigger field and a quote -- the verdict must point at what produced it.",
+          "if": { "properties": { "status": { "const": "applicable" } }, "required": ["status"] },
           "then": { "properties": { "triggered_field_ids": { "minItems": 1 }, "evidence_references": { "minItems": 1 } } }
         },
         {
-          "if": { "properties": { "status": { "const": "uncertain" } }, "required": ["status"] },
-          "then": { "properties": { "conflicting_field_ids": { "minItems": 0 } } }
+          "$comment": "not_applicable requires affirmative negative evidence. Without this floor, silence could be filed as a decided verdict -- the exact failure the parallel judgment exists to prevent.",
+          "if": { "properties": { "status": { "const": "not_applicable" } }, "required": ["status"] },
+          "then": { "properties": { "evidence_references": { "minItems": 1 } } }
         }
       ]
     },

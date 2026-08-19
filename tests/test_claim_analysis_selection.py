@@ -202,14 +202,14 @@ def test_checklist_distinguishes_ambiguous_from_missing() -> None:
 
 # ------------------------------------------------------- case-type assess --
 
-def _asserted(field_id: str, value, *, status: str = "resolved") -> dict:
+def _asserted(field_id: str, value, *, status: str = "asserted") -> dict:
     return {
         "field_id": field_id,
         "domain_code": "event_timeline",
         "priority_grade": "B",
         "authority": "claim_analysis_native",
         "resolution_status": status,
-        "canonical_observation_ids": ["CAO_0001"],
+        "selected_observation_ids": ["CAO_0001"],
         "observations": [{
             "observation_id": "CAO_0001",
             "value_state": "asserted",
@@ -236,19 +236,19 @@ def test_four_types_are_judged_independently_and_may_all_apply() -> None:
     ]
     result = case_types.assess_case_types(facts)
     assert [row["case_type"] for row in result] == list(case_types.CASE_TYPES)
-    assert {row["status"] for row in result} == {"supported"}
+    assert {row["status"] for row in result} == {"applicable"}
 
 
-def test_silence_never_becomes_not_supported() -> None:
+def test_silence_never_becomes_not_applicable() -> None:
     result = case_types.assess_case_types([_asserted("injury_event_present", True)])
     by_type = {row["case_type"]: row for row in result}
-    assert by_type["personal_insurance"]["status"] == "supported"
+    assert by_type["personal_insurance"]["status"] == "applicable"
     for case_type in ("traffic_accident", "industrial_accident", "liability"):
         assert by_type[case_type]["status"] == "uncertain"
         assert by_type[case_type]["evidence_references"] == []
 
 
-def _unresolved(field_id: str, status: str) -> dict:
+def _unresolved(field_id: str, status: str = "unavailable") -> dict:
     """A field that WAS searched and came back without a value.
 
     Distinct from the field being absent from `claim_facts` altogether: this is
@@ -261,17 +261,46 @@ def _unresolved(field_id: str, status: str) -> dict:
         "priority_grade": "B",
         "authority": "claim_analysis_native",
         "resolution_status": status,
-        "canonical_observation_ids": [],
+        "selected_observation_ids": [],
         "observations": [],
         "conflict_candidate_ids": [],
-        "stop_reason": (
-            "sources_exhausted" if status == "unknown" else "not_applicable"
-        ),
+        "stop_reason": "sources_exhausted",
         "resolution_reason": "no source states the fact",
+        "unavailable_reason": "not_mentioned",
     }
 
 
-@pytest.mark.parametrize("status", ["unknown", "not_applicable"])
+def _field_not_applicable(field_id: str) -> dict:
+    """A field the case's own facts exclude, carrying the fact that excludes it.
+
+    Under the five-state contract `not_applicable` is a grounded verdict, not a
+    synonym for "nothing found" -- so this shape must cite evidence, unlike
+    `_unresolved`.
+    """
+    return {
+        "field_id": field_id,
+        "domain_code": "event_timeline",
+        "priority_grade": "B",
+        "authority": "claim_analysis_native",
+        "resolution_status": "not_applicable",
+        "selected_observation_ids": [],
+        "observations": [{
+            "observation_id": "CAO_0001",
+            "value_state": "not_applicable",
+            "reason": "the case facts exclude this field",
+            "extraction_wave": "B",
+            "evidence_references": [{
+                "document_id": "DOC_001", "page": 1,
+                "quote": "q", "start_char": 0, "end_char": 1,
+            }],
+        }],
+        "conflict_candidate_ids": [],
+        "stop_reason": "not_applicable",
+        "resolution_reason": "excluded by the case facts",
+    }
+
+
+@pytest.mark.parametrize("status", ["unavailable", "not_applicable"])
 @pytest.mark.parametrize("field_id,case_type", [
     ("vehicle_involvement", "traffic_accident"),
     ("facility_defect_or_third_party_responsibility", "liability"),
@@ -281,19 +310,21 @@ def _unresolved(field_id: str, status: str) -> dict:
 def test_an_exhausted_search_is_uncertain_not_a_negative_finding(
     status: str, field_id: str, case_type: str
 ) -> None:
-    result = case_types.assess_case_types([_unresolved(field_id, status)])
+    field = (_unresolved(field_id) if status == "unavailable"
+             else _field_not_applicable(field_id))
+    result = case_types.assess_case_types([field])
     by_type = {row["case_type"]: row for row in result}
     assert by_type[case_type]["status"] == "uncertain"
     assert by_type[case_type]["evidence_references"] == []
 
 
-def test_explicit_negative_is_the_only_route_to_not_supported() -> None:
+def test_explicit_negative_is_the_only_route_to_not_applicable() -> None:
     result = case_types.assess_case_types([
         _asserted("injury_event_present", True),
         _asserted("vehicle_involvement", False),
     ])
     by_type = {row["case_type"]: row for row in result}
-    assert by_type["traffic_accident"]["status"] == "not_supported"
+    assert by_type["traffic_accident"]["status"] == "not_applicable"
 
 
 def test_commute_and_business_trip_stay_uncertain_for_industrial_accident() -> None:

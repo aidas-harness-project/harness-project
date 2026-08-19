@@ -4516,35 +4516,68 @@ def cmd_write_contract(args):
                 print(f"  - {e}")
             return 1
         if schema_name == "claim_analysis_result.schema.json":
-            # Claim Analysis uses exact character ranges, not merely a quote
-            # that happens to occur somewhere in the document. Verify those
-            # ranges against the DAO-owned redacted page bundle before the
-            # contract can become downstream evidence.
+            # The selective lane validates on its OWN terms and never reaches
+            # the canonical medical-revision path below. That separation is the
+            # point: this contract's authority is source-grounded extraction,
+            # so requiring it to resolve a canonical revision would enforce a
+            # binding it deliberately does not claim -- and would block the
+            # lane entirely on cases that have no canonical revision at all.
+            # Falling through on a violation would be worse than either: it
+            # would answer "this result mislabelled its authority" with a
+            # complaint about a missing revision.
             from claim_analysis_contracts import (
                 exact_evidence_document_ids,
                 verify_exact_evidence_references,
             )
 
-            revision_ref = data["medical_revision"]
-            medical_variables, medical_error = _load_medical_revision(
-                args.case_id, revision_ref["sha256"]
-            )
-            if medical_error or medical_variables is None:
-                print(f"FAIL: claim-analysis medical authority could not be verified for {target}:")
-                print(f"  - {medical_error or 'medical revision is unavailable'}")
-                return 1
-            revision_mismatches = [
-                key for key in ("run_id", "schema_version", "config_version")
-                if medical_variables.get(key) != revision_ref.get(key)
-            ]
-            if revision_mismatches:
-                print(f"FAIL: claim-analysis medical revision metadata is stale for {target}:")
-                for key in revision_mismatches:
+            authority_violations = sorted({
+                field.get("authority")
+                for field in data.get("claim_facts") or []
+                if field.get("authority") not in {
+                    "source_document_extraction", "claim_analysis_native"
+                }
+            } - {None})
+            if authority_violations:
+                print(f"FAIL: claim-analysis authority is not source-grounded for {target}:")
+                for value in authority_violations:
                     print(
-                        f"  - {key}: result records {revision_ref.get(key)!r}, "
-                        f"revision contains {medical_variables.get(key)!r}"
+                        f"  - {value!r} is not a selective-lane authority. This lane "
+                        "publishes source_document_extraction or claim_analysis_native; "
+                        "it does not project canonical medical variables."
                     )
                 return 1
+            if data.get("medical_projection_status") != "not_configured":
+                print(f"FAIL: claim-analysis medical projection status is not 'not_configured' for {target}:")
+                print(
+                    f"  - recorded {data.get('medical_projection_status')!r}. v0.1 has no "
+                    "field-to-variable mapping to project through, so no other value is true."
+                )
+                return 1
+
+            # Context, not authority -- and only verified when the result chose
+            # to record it. An omitted context is not a defect; a recorded one
+            # that does not match the case's revision is.
+            revision_ref = data.get("medical_revision_context")
+            if revision_ref is not None:
+                medical_variables, medical_error = _load_medical_revision(
+                    args.case_id, revision_ref["sha256"]
+                )
+                if medical_error or medical_variables is None:
+                    print(f"FAIL: claim-analysis recorded a medical revision context that could not be resolved for {target}:")
+                    print(f"  - {medical_error or 'medical revision is unavailable'}")
+                    return 1
+                revision_mismatches = [
+                    key for key in ("run_id", "schema_version", "config_version")
+                    if medical_variables.get(key) != revision_ref.get(key)
+                ]
+                if revision_mismatches:
+                    print(f"FAIL: claim-analysis medical revision context is stale for {target}:")
+                    for key in revision_mismatches:
+                        print(
+                            f"  - {key}: result records {revision_ref.get(key)!r}, "
+                            f"revision contains {medical_variables.get(key)!r}"
+                        )
+                    return 1
 
             cited_doc_ids = exact_evidence_document_ids(data)
             page_text_by_key = {}
@@ -7922,12 +7955,49 @@ POST_MEDICAL_STAGES = {
 }
 
 
+def source_grounded_lane_only(case_id: str) -> bool:
+    """Whether this case ran the selective lane and has NO canonical revision.
+
+    The precedence question the medical gate has to answer for `claim_analysis`
+    is which lane produced the case's medical facts, and the order matters:
+
+    1. A canonical medical revision exists -> clearance is required, whether or
+       not a selective result also sits on disk. A published revision carries a
+       review obligation that a second, source-grounded reading of the same
+       documents does not discharge.
+    2. No canonical revision, but a validated selective v0.1 result -> the
+       obligation never attached. That result claims no canonical authority
+       (`medical_projection_status: not_configured`), so there is no canonical
+       conclusion for a reviewer to clear.
+    3. Neither -> unchanged, and still fail-closed. Absence of evidence about
+       which lane ran is not evidence that no review is owed.
+
+    Only case 2 returns True. This is NOT a clearance, an approval, or a
+    waiver, and must never be recorded as one -- it is the finding that this
+    case has no canonical medical conclusion for the gate to be about.
+    """
+    revision, error = _load_medical_revision(case_id, None)
+    if revision is not None and not error:
+        return False
+    try:
+        result = read_contract_data(case_id, "claim_analysis_result.json")
+    except Exception:
+        return False
+    if not isinstance(result, dict):
+        return False
+    return (
+        result.get("schema_version") == "claim_analysis_result.v0.1"
+        and result.get("medical_projection_status") == "not_configured"
+    )
+
+
 def _medical_clearance_required(
     state: dict,
     stage: str,
     status: str | None = None,
     *,
     snapshot: bool = False,
+    case_id: str | None = None,
 ) -> bool:
     """Whether this transition must prove medical clearance first.
 
@@ -7936,11 +8006,21 @@ def _medical_clearance_required(
     review yet" is exactly the condition the gate exists to catch, not an
     exemption from it. Every later stage is gated only once the case has
     adopted the flow.
+
+    The one carve-out is the source-grounded selective lane, and it is narrow
+    by construction: see `source_grounded_lane_only`, which requires the
+    absence of a canonical revision, not merely the presence of a selective
+    result. Without `case_id` the probe cannot run and the gate stays closed --
+    the safe direction.
     """
     if not _medical_gate_applies(state):
         return False
     if stage == "claim_analysis":
-        return snapshot or status == "passed"
+        if not (snapshot or status == "passed"):
+            return False
+        if case_id is not None and source_grounded_lane_only(case_id):
+            return False
+        return True
     if not state.get("medical_review_adopted", False):
         return False
     return stage in POST_MEDICAL_STAGES and (
@@ -7957,7 +8037,9 @@ def _require_transition_medical_clearance(
     *,
     snapshot: bool = False,
 ) -> None:
-    if not _medical_clearance_required(state, stage, status, snapshot=snapshot):
+    if not _medical_clearance_required(
+        state, stage, status, snapshot=snapshot, case_id=case_id
+    ):
         return
     from medical_review_ledger import require_clearance
 
@@ -8012,6 +8094,18 @@ def cmd_check_medical_reviews_clear(args):
             and not _medical_artifacts_present(args.case_id)):
         print(json.dumps({"clear": True, "gate": "not_applicable"},
                          sort_keys=True))
+        return 0
+
+    # Same alignment obligation, for the source-grounded lane. The transition
+    # gate skips `claim_analysis` when the case has a selective v0.1 result and
+    # NO canonical revision, so a check left blind to that would fail closed on
+    # a ledger the case was never required to have -- CASE_028's stall in a new
+    # costume. Reported as `not_required_source_grounded_lane`, never as
+    # cleared/approved/passed: nothing was reviewed and nothing was waived.
+    if source_grounded_lane_only(args.case_id):
+        print(json.dumps(
+            {"clear": True, "gate": "not_required_source_grounded_lane"},
+            sort_keys=True))
         return 0
 
     return cmd_check_clear(sys.modules[__name__], args)

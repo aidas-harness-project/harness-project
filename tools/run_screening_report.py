@@ -7,7 +7,8 @@ restating what those contracts already established with evidence.
 
 The operational report carries exactly what a 손사/의사 needs to triage:
 
-* core medical facts (as projections of the canonical medical revision),
+* core medical facts (read from case documents with exact citations --
+  this lane claims no canonical projection authority),
 * the four case types with 해당 / 불확실 / 비해당 and each verdict's direct basis,
 * 접수 여부 per type,
 * the per-type required-document checklist with 보유/미확인 status,
@@ -44,9 +45,9 @@ VERSION = "screening_report_selective.v0.1"
 # Korean labels: this is a deliverable read by Korean-speaking professionals,
 # which is the documented exception to the English-only rule.
 STATUS_LABEL = {
-    "supported": "해당",
+    "applicable": "해당",
     "uncertain": "불확실",
-    "not_supported": "비해당",
+    "not_applicable": "비해당",
 }
 CASE_TYPE_LABEL = {
     "personal_insurance": "개인보험",
@@ -108,19 +109,19 @@ def _temp_json(value: Any) -> Path:
     return Path(handle.name)
 
 
-def _canonical_value(field: Mapping[str, Any]) -> Any:
-    canonical = set(field.get("canonical_observation_ids") or [])
+def _selected_value(field: Mapping[str, Any]) -> Any:
+    selected = set(field.get("selected_observation_ids") or [])
     for observation in field.get("observations") or []:
-        if observation.get("observation_id") in canonical:
+        if observation.get("observation_id") in selected:
             return observation.get("value")
     return None
 
 
 def _first_value(facts: Mapping[str, Mapping[str, Any]], field_id: str) -> Any:
     field = facts.get(field_id)
-    if field is None or field.get("resolution_status") != "resolved":
+    if field is None or field.get("resolution_status") != "asserted":
         return None
-    return _canonical_value(field)
+    return _selected_value(field)
 
 
 def _as_text(value: Any) -> str | None:
@@ -230,7 +231,7 @@ def unconfirmed_section(
     for field_id, field in facts.items():
         if field_id not in searched:
             continue
-        if field.get("resolution_status") != "unknown":
+        if field.get("resolution_status") != "unavailable":
             continue
         rows.append({
             "field_id": field_id,
@@ -285,13 +286,12 @@ def build_report(
         # side rather than one collapsed "case type" string.
         "case_type_assessment": case_type_section(assessments),
         "medical_authority": {
-            "source": "medical_variables.json",
-            "medical_revision_sha256": (
-                claim_analysis.get("medical_revision", {}).get("sha256")
-            ),
+            "source": "source_document_extraction",
+            "medical_projection_status": claim_analysis.get(
+                "medical_projection_status", "not_configured"),
             "note": (
-                "의료 사실은 canonical medical revision의 projection이며 본 "
-                "보고서에서 새로 생성하지 않았습니다."
+                "의료 사실은 사건 문서 원문에서 정확한 근거와 함께 추출한 값입니다. "
+                "canonical 의료 체계의 권위를 주장하지 않습니다."
             ),
         },
     }

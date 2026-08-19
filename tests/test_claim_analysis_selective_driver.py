@@ -119,7 +119,7 @@ def test_search_stops_at_the_first_trusted_value_in_priority_order() -> None:
         plan, field_row, config, extract, page_text,
         driver._observation_id_sequence())
 
-    assert outcome.status == "resolved"
+    assert outcome.status == "asserted"
     assert outcome.stop_reason == "trusted_value_found"
     # primary_diagnosis is critical, so exactly ONE comparison is bought --
     # the third-priority document is never opened.
@@ -148,7 +148,7 @@ def test_a_non_critical_field_never_opens_a_second_source() -> None:
     outcome = driver.resolve_field(
         plan, field_row, config, extract, page_text,
         driver._observation_id_sequence())
-    assert outcome.status == "resolved"
+    assert outcome.status == "asserted"
     assert [doc for _, doc in calls] == ["DOC_001"]
 
 
@@ -178,7 +178,7 @@ def test_two_disagreeing_sources_preserve_both_and_elect_no_canonical() -> None:
 
     assert outcome.status == "conflict"
     assert outcome.stop_reason == "conflict_found"
-    assert outcome.canonical_ids == []
+    assert outcome.selected_ids == []
     assert len(outcome.observations) == 2
     assert {o["value"] for o in outcome.observations} == {
         "우측 요골 골절", "좌측 요골 골절"
@@ -204,7 +204,7 @@ def test_silence_in_a_source_is_not_a_conflict() -> None:
         plan, field_row, config, extract,
         {("DOC_001", 1): "진단명: 우측 요골 골절"},
         driver._observation_id_sequence())
-    assert outcome.status == "resolved"
+    assert outcome.status == "asserted"
 
 
 def test_the_comparison_budget_holds_across_priority_groups() -> None:
@@ -259,7 +259,7 @@ def test_a_silent_source_does_not_consume_the_comparison_budget() -> None:
         plan, field_row, config, extract, page_text,
         driver._observation_id_sequence())
     assert [doc for _, doc in calls] == ["D1", "D2", "D3"]
-    assert outcome.status == "resolved"
+    assert outcome.status == "asserted"
     assert outcome.comparisons == 1
 
 
@@ -278,7 +278,8 @@ def test_a_quote_absent_from_the_page_is_dropped_never_repaired() -> None:
         plan, field_row, config, extract,
         {("DOC_001", 1): "진단명: 우측 요골 골절"},
         driver._observation_id_sequence())
-    assert outcome.status == "unknown"
+    assert outcome.status == "unavailable"
+    assert outcome.unavailable_reason == "not_mentioned"
     assert outcome.observations == []
 
 
@@ -293,9 +294,9 @@ def _resolved_outcome(field_id: str, domain: str, value, grade="A") -> driver.Fi
     observation_id = next(_OBSERVATION_IDS)
     outcome = driver.FieldExtractionOutcome(
         field_id=field_id, domain_code=domain, grade=grade)
-    outcome.status = "resolved"
+    outcome.status = "asserted"
     outcome.stop_reason = "trusted_value_found"
-    outcome.canonical_ids = [observation_id]
+    outcome.selected_ids = [observation_id]
     outcome.observations = [{
         "observation_id": observation_id,
         "value_state": "asserted",
@@ -312,7 +313,7 @@ def _resolved_outcome(field_id: str, domain: str, value, grade="A") -> driver.Fi
     return outcome
 
 
-def test_built_result_validates_against_the_canonical_schema() -> None:
+def test_built_result_validates_against_the_selective_schema() -> None:
     config = _config()
     outcomes = [
         _resolved_outcome("primary_diagnosis", "diagnosis", "우측 요골 골절"),
@@ -322,13 +323,19 @@ def test_built_result_validates_against_the_canonical_schema() -> None:
         case_id="CASE_9001", run_id="RUN_20260819_1", outcomes=outcomes,
         config=config,
         documents=[selection.DocumentRef("DOC_001", "diagnosis_certificate")],
-        medical_revision=_revision(),
+        medical_revision_context=None,
     )
     assert _errors(result, "claim_analysis_result.schema.json") == []
     assert len(result["case_type_assessment"]) == 4
 
 
-def test_medical_domain_facts_are_published_as_projections_not_native() -> None:
+def test_medical_domain_facts_are_published_as_source_extraction_not_projection() -> None:
+    """A medical value read from a document is labelled as what it is.
+
+    The lane resolves no field id to a canonical variable id, so calling this
+    a projection would claim a binding nothing computed. `event_timeline`
+    stays claim-native: accident circumstances are this stage's own finding.
+    """
     config = _config()
     outcomes = [
         _resolved_outcome("primary_diagnosis", "diagnosis", "골절"),
@@ -336,9 +343,9 @@ def test_medical_domain_facts_are_published_as_projections_not_native() -> None:
     ]
     result = driver.build_result(
         case_id="CASE_9001", run_id="RUN_20260819_1", outcomes=outcomes,
-        config=config, documents=[], medical_revision=_revision())
+        config=config, documents=[], medical_revision_context=None)
     by_field = {row["field_id"]: row for row in result["claim_facts"]}
-    assert by_field["primary_diagnosis"]["authority"] == "medical_variables_projection"
+    assert by_field["primary_diagnosis"]["authority"] == "source_document_extraction"
     assert by_field["injury_event_present"]["authority"] == "claim_analysis_native"
 
 
@@ -364,7 +371,7 @@ def test_conflict_becomes_a_candidate_and_never_a_ledger_entry() -> None:
 
     result = driver.build_result(
         case_id="CASE_9001", run_id="RUN_20260819_1", outcomes=[outcome],
-        config=config, documents=[], medical_revision=_revision())
+        config=config, documents=[], medical_revision_context=None)
 
     assert _errors(result, "claim_analysis_result.schema.json") == []
     assert len(result["conflict_candidates"]) == 1
@@ -373,11 +380,11 @@ def test_conflict_becomes_a_candidate_and_never_a_ledger_entry() -> None:
     assert candidate["field_id"] == "primary_diagnosis"
     assert len(candidate["observation_ids"]) == 2
     fact = result["claim_facts"][0]
-    assert fact["canonical_observation_ids"] == []
+    assert fact["selected_observation_ids"] == []
     assert fact["conflict_candidate_ids"] == [candidate["conflict_candidate_id"]]
 
 
-def test_unknown_field_retains_no_asserted_observation() -> None:
+def test_unavailable_field_retains_no_asserted_observation() -> None:
     config = _config()
     outcome = driver.FieldExtractionOutcome(
         field_id="primary_diagnosis", domain_code="diagnosis", grade="A")
@@ -395,9 +402,9 @@ def test_unknown_field_retains_no_asserted_observation() -> None:
     }]
     result = driver.build_result(
         case_id="CASE_9001", run_id="RUN_20260819_1", outcomes=[outcome],
-        config=config, documents=[], medical_revision=_revision())
+        config=config, documents=[], medical_revision_context=None)
     assert _errors(result, "claim_analysis_result.schema.json") == []
-    assert result["claim_facts"][0]["observations"][0]["value_state"] == "unknown"
+    assert result["claim_facts"][0]["observations"][0]["value_state"] == "unavailable"
 
 
 def test_c_grade_override_field_publishes_as_b_not_c() -> None:
@@ -436,7 +443,7 @@ def test_trace_is_separate_from_the_result_and_validates() -> None:
     # The authority contract must not carry reading telemetry.
     result = driver.build_result(
         case_id="CASE_9001", run_id="RUN_20260819_1", outcomes=outcomes,
-        config=config, documents=[], medical_revision=_revision())
+        config=config, documents=[], medical_revision_context=None)
     assert "documents" not in result and "field_stops" not in result
 
 

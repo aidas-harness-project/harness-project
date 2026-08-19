@@ -43,7 +43,10 @@
       "additionalProperties": false,
       "properties": {
         "waves": { "const": ["A", "B"] },
-        "read_document_once_per_wave": { "const": true },
+        "read_document_once_per_run": {
+          "const": true,
+          "description": "A document is handed to the provider at most once across the WHOLE Claim Analysis run, not once per wave. The A and B plans are computed together, one read extracts every field that document is responsible for, and the structured result is cached; wave B and the critical-field comparison read the cache rather than paying for the document again. Waves therefore order the stop rule's priority, not the number of reads."
+        },
         "parallel_within_wave": { "const": true },
         "stop_on_first_trusted_value": { "const": true },
         "trusted_value_requirements": {
@@ -54,7 +57,7 @@
         "missing_mention_is_conflict": { "const": false },
         "direct_conflict_canonical_value": { "const": null }
       },
-      "required": ["waves", "read_document_once_per_wave", "parallel_within_wave", "stop_on_first_trusted_value", "trusted_value_requirements", "critical_field_additional_comparison_limit", "missing_mention_is_conflict", "direct_conflict_canonical_value"]
+      "required": ["waves", "read_document_once_per_run", "parallel_within_wave", "stop_on_first_trusted_value", "trusted_value_requirements", "critical_field_additional_comparison_limit", "missing_mention_is_conflict", "direct_conflict_canonical_value"]
     },
     "document_kinds": {
       "type": "array",
@@ -171,9 +174,17 @@
         "additionalProperties": false,
         "properties": {
           "route_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "source_kind": {
+            "enum": ["medical_document", "administrative_or_intake"],
+            "description": "What kind of source this route reads. 'medical_document' routes rank medical form kinds in priority_groups. 'administrative_or_intake' routes read filing records or the intake declaration instead -- material that is NOT a medical form, and deliberately is not registered in medical_document_kind: adding an administrative form to that enum would contaminate Stage 2's classification contract, which types medical records."
+          },
+          "activation_condition": {
+            "enum": ["always", "industrial_accident_filed_or_applicable"],
+            "description": "When the route is live. 'always' is every ordinary route. A conditional route opens NO document until its condition holds -- 'industrial_accident_filed_or_applicable' requires that industrial-accident filing is confirmed, or that the industrial_accident case type came back applicable. Absent that trigger the route contributes nothing and costs no read."
+          },
           "priority_groups": {
             "type": "array",
-            "minItems": 1,
+            "minItems": 0,
             "items": {
               "type": "array",
               "minItems": 1,
@@ -181,10 +192,37 @@
               "items": { "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind" }
             }
           },
+          "non_medical_sources": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "enum": ["industrial_accident_filing_record", "intake_declaration"] },
+            "description": "Ordered non-medical sources for an administrative_or_intake route."
+          },
           "allow_intake_source": { "type": "boolean" },
-          "read_only_if_already_open": { "type": "boolean" }
+          "read_only_if_already_open": {
+            "type": "boolean",
+            "description": "false means the route may open a source that is not already in the cache. An administrative route sets this false: once its trigger fires it is allowed to read the filing record it needs. That permission is scoped to its own non_medical_sources -- it never opens an additional MEDICAL document -- and the read still counts against the one-provider-call-per-document budget."
+          }
         },
-        "required": ["route_id", "priority_groups", "allow_intake_source", "read_only_if_already_open"]
+        "required": ["route_id", "source_kind", "activation_condition", "priority_groups", "allow_intake_source", "read_only_if_already_open"],
+        "allOf": [
+          {
+            "$comment": "A medical route ranks medical kinds and names no non-medical source.",
+            "if": { "properties": { "source_kind": { "const": "medical_document" } }, "required": ["source_kind"] },
+            "then": {
+              "properties": { "priority_groups": { "minItems": 1 } },
+              "not": { "required": ["non_medical_sources"] }
+            }
+          },
+          {
+            "$comment": "An administrative route carries no medical priority ladder at all -- that is what keeps it from opening a medical document.",
+            "if": { "properties": { "source_kind": { "const": "administrative_or_intake" } }, "required": ["source_kind"] },
+            "then": {
+              "properties": { "priority_groups": { "maxItems": 0 } },
+              "required": ["non_medical_sources"]
+            }
+          }
+        ]
       }
     },
     "case_type_rules": {

@@ -130,7 +130,7 @@ def _run_claim_analysis(config):
                 plan, field_row, config, extract, PAGES, ids))
     result = claim_driver.build_result(
         case_id="CASE_9001", run_id="RUN_20260819_1", outcomes=outcomes,
-        config=config, documents=documents, medical_revision=MEDICAL_REVISION)
+        config=config, documents=documents, medical_revision_context=None)
     return result, outcomes, read_documents, documents
 
 
@@ -172,7 +172,7 @@ def test_a_real_disagreement_survives_as_a_candidate_with_both_readings() -> Non
         if row["field_id"] == "primary_diagnosis"
     )
     assert fact["resolution_status"] == "conflict"
-    assert fact["canonical_observation_ids"] == []
+    assert fact["selected_observation_ids"] == []
     values = {row["value"] for row in fact["observations"]}
     assert values == {"우측 요골 골절", "좌측 요골 골절"}
 
@@ -282,7 +282,7 @@ def test_a_fabricated_quote_is_dropped_before_it_can_be_published() -> None:
     outcome = claim_driver.resolve_field(
         plan, field_row, config, lying_extract, PAGES,
         claim_driver._observation_id_sequence())
-    assert outcome.status == "unknown"
+    assert outcome.status == "unavailable"
     assert outcome.observations == []
 
 
@@ -332,7 +332,7 @@ def test_dangling_observation_id_is_refused_by_the_semantic_validator() -> None:
     )
     if fact["resolution_status"] != "resolved":
         pytest.skip("fixture did not resolve this field")
-    fact["canonical_observation_ids"] = ["CAO_9999"]
+    fact["selected_observation_ids"] = ["CAO_9999"]
     errors = _errors(result, "claim_analysis_result.schema.json")
     assert any("not owned by the field" in error for error in errors), errors
 
@@ -381,7 +381,8 @@ def test_extracted_claim_fields_stays_the_medical_projection() -> None:
 
     `medical_repository` publishes `extracted_claim_fields.json` as the sealed
     deterministic projection of `medical_variables.json`. The selective result
-    binds to the same revision rather than becoming a second writer of it.
+    never becomes a second writer of it, and -- separately -- never claims that
+    projection authority for itself: it publishes source-grounded readings.
     """
     import medical_repository
 
@@ -390,7 +391,10 @@ def test_extracted_claim_fields_stays_the_medical_projection() -> None:
 
     config = _config()
     result, _, _, _ = _run_claim_analysis(config)
-    assert result["medical_revision"]["sha256"] == MEDICAL_REVISION["sha256"]
+    assert result["medical_projection_status"] == "not_configured"
+    assert "medical_revision" not in result
     for fact in result["claim_facts"]:
-        if fact["domain_code"] in claim_driver.MEDICAL_DOMAINS:
-            assert fact["authority"] == "medical_variables_projection"
+        expected = ("claim_analysis_native"
+                    if fact["domain_code"] in claim_driver.NATIVE_DOMAINS
+                    else "source_document_extraction")
+        assert fact["authority"] == expected

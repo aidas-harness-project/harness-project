@@ -397,7 +397,7 @@ def _canonical_observation(number: int, value: str, quote: str) -> dict:
     }
 
 
-def _canonical_result() -> dict:
+def _selective_result() -> dict:
     quote = "우측 요골 골절"
     evidence = {
         "document_id": "DOC_001", "page": 1, "quote": quote,
@@ -410,7 +410,7 @@ def _canonical_result() -> dict:
         supported = case_type == "personal_insurance"
         case_types.append({
             "case_type": case_type,
-            "status": "supported" if supported else "uncertain",
+            "status": "applicable" if supported else "uncertain",
             "triggered_field_ids": ["injury_event_present"] if supported else [],
             "conflicting_field_ids": [],
             "filing_status": "unknown",
@@ -424,19 +424,14 @@ def _canonical_result() -> dict:
         "status": "success",
         "schema_version": "claim_analysis_result.v0.1",
         "config_version": "claim_analysis_routing.v0.1",
-        "medical_revision": {
-            "sha256": "a" * 64,
-            "run_id": "RUN_20260819_1",
-            "schema_version": "medical_variables.v0.1",
-            "config_version": "medical_structuring.v0.1",
-        },
+        "medical_projection_status": "not_configured",
         "claim_facts": [{
             "field_id": "primary_diagnosis",
             "domain_code": "diagnosis",
             "priority_grade": "A",
-            "authority": "medical_variables_projection",
-            "resolution_status": "resolved",
-            "canonical_observation_ids": ["CAO_0001"],
+            "authority": "source_document_extraction",
+            "resolution_status": "asserted",
+            "selected_observation_ids": ["CAO_0001"],
             "observations": [_canonical_observation(1, "우측 요골 골절", "우측 요골 골절")],
             "conflict_candidate_ids": [],
             "stop_reason": "trusted_value_found",
@@ -454,16 +449,16 @@ def _canonical_result() -> dict:
     }
 
 
-def test_compact_canonical_claim_analysis_result_validates() -> None:
-    assert _errors(_canonical_result(), "claim_analysis_result.schema.json") == []
+def test_compact_selective_claim_analysis_result_validates() -> None:
+    assert _errors(_selective_result(), "claim_analysis_result.schema.json") == []
 
 
-def test_conflict_keeps_both_observations_and_forbids_a_canonical_value() -> None:
-    result = _canonical_result()
+def test_conflict_keeps_both_observations_and_forbids_a_selected_value() -> None:
+    result = _selective_result()
     field = result["claim_facts"][0]
     field.update({
         "resolution_status": "conflict",
-        "canonical_observation_ids": [],
+        "selected_observation_ids": [],
         "observations": [
             _canonical_observation(1, "우측 요골 골절", "우측 요골 골절"),
             _canonical_observation(2, "좌측 요골 골절", "좌측 요골 골절"),
@@ -482,35 +477,38 @@ def test_conflict_keeps_both_observations_and_forbids_a_canonical_value() -> Non
     assert _errors(result, "claim_analysis_result.schema.json") == []
 
     bad = deepcopy(result)
-    bad["claim_facts"][0]["canonical_observation_ids"] = ["CAO_0001"]
+    bad["claim_facts"][0]["selected_observation_ids"] = ["CAO_0001"]
     assert _errors(bad, "claim_analysis_result.schema.json") != []
 
 
 def test_claim_analysis_semantics_reject_unknown_assertion_duplicates_and_dangling_ids() -> None:
-    unknown = _canonical_result()
+    unknown = _selective_result()
     field = unknown["claim_facts"][0]
     field.update({
-        "resolution_status": "unknown",
-        "canonical_observation_ids": [],
+        "resolution_status": "unavailable",
+        "selected_observation_ids": [],
         "conflict_candidate_ids": [],
         "stop_reason": "sources_exhausted",
         "resolution_reason": "No trusted source was available.",
+        "unavailable_reason": "not_mentioned",
     })
+    # The retained observation still asserts a value, which an unavailable
+    # field may not carry -- that mismatch is the defect this asserts on.
     assert _errors(unknown, "claim_analysis_result.schema.json") != []
 
-    duplicate_types = _canonical_result()
+    duplicate_types = _selective_result()
     duplicate_types["case_type_assessment"] = [
         deepcopy(duplicate_types["case_type_assessment"][0]) for _ in range(4)
     ]
     assert _errors(duplicate_types, "claim_analysis_result.schema.json") != []
 
-    dangling = _canonical_result()
-    dangling["claim_facts"][0]["canonical_observation_ids"] = ["CAO_9999"]
+    dangling = _selective_result()
+    dangling["claim_facts"][0]["selected_observation_ids"] = ["CAO_9999"]
     assert _errors(dangling, "claim_analysis_result.schema.json") != []
 
 
 def test_conflict_candidate_must_reference_observations_owned_by_its_field() -> None:
-    result = _canonical_result()
+    result = _selective_result()
     result["conflict_candidates"] = [{
         "conflict_candidate_id": "CAC_0001",
         "field_id": "primary_diagnosis",
@@ -525,7 +523,7 @@ def test_conflict_candidate_must_reference_observations_owned_by_its_field() -> 
 def test_exact_evidence_verifier_checks_the_claimed_character_range() -> None:
     from claim_analysis_contracts import verify_exact_evidence_references
 
-    result = _canonical_result()
+    result = _selective_result()
     assert verify_exact_evidence_references(
         result, lambda doc_id, page: "우측 요골 골절"
     ) == []
@@ -539,7 +537,7 @@ def test_exact_evidence_verifier_checks_the_claimed_character_range() -> None:
 def test_dao_refuses_claim_analysis_result_with_a_false_exact_range(
     isolated_dao, make_args, monkeypatch, tmp_path
 ) -> None:
-    result = _canonical_result()
+    result = _selective_result()
     data_file = tmp_path / "claim-analysis.json"
     data_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(dao, "_load_medical_revision", lambda case_id, sha: ({
@@ -569,10 +567,23 @@ def test_dao_refuses_claim_analysis_result_with_a_false_exact_range(
     ).exists()
 
 
-def test_dao_refuses_claim_analysis_result_with_an_unresolvable_medical_revision(
+def test_dao_refuses_a_declared_medical_revision_context_that_cannot_resolve(
     isolated_dao, make_args, monkeypatch, tmp_path
 ) -> None:
-    result = _canonical_result()
+    """A recorded context must be real. Declaring it is what invites the check.
+
+    The lane may omit `medical_revision_context` entirely -- it claims no
+    canonical authority. What it may not do is name a revision the case does
+    not have, which would dress a source-grounded reading in canonical
+    provenance.
+    """
+    result = _selective_result()
+    result["medical_revision_context"] = {
+        "sha256": "a" * 64,
+        "run_id": "RUN_20260819_1",
+        "schema_version": "medical_variables.v0.1",
+        "config_version": "medical_structuring.v0.1",
+    }
     data_file = tmp_path / "claim-analysis.json"
     data_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(
@@ -581,7 +592,76 @@ def test_dao_refuses_claim_analysis_result_with_an_unresolvable_medical_revision
     )
     monkeypatch.setattr(
         dao, "read_redacted_text_bundle_data",
-        lambda *args: pytest.fail("evidence must not be read before authority resolves"),
+        lambda *args: pytest.fail("evidence must not be read before the context resolves"),
+    )
+    args = make_args(
+        case_id="CASE_9001",
+        run_id="RUN_20260819_1",
+        filename="claim_analysis_result.json",
+        data_file=str(data_file),
+        schema_name="claim_analysis_result.schema.json",
+    )
+
+    assert dao.cmd_write_contract(args) == 1
+    assert not (
+        isolated_dao / "outputs" / "CASE_9001" / "claim_analysis_result.json"
+    ).exists()
+
+
+def test_dao_never_requires_a_medical_revision_for_the_selective_lane(
+    isolated_dao, make_args, monkeypatch, tmp_path
+) -> None:
+    """No canonical revision on the case must not block the write.
+
+    This is the separation the lane exists to have: a source-grounded result
+    stands on its own citations. If the absence of a canonical revision refused
+    the write, the lane could never run on a case that has no medical review --
+    which is most of them.
+    """
+    result = _selective_result()
+    assert "medical_revision_context" not in result
+    data_file = tmp_path / "claim-analysis.json"
+    data_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(
+        dao, "_load_medical_revision",
+        lambda case_id, sha: pytest.fail(
+            "the selective lane must not consult the canonical revision"),
+    )
+    monkeypatch.setattr(
+        dao, "read_redacted_text_bundle_data",
+        lambda case_id, doc_ids: {"documents": [{
+            "document_id": "DOC_001",
+            "pages": [{"page": 1, "text": "우측 요골 골절"}],
+        }]},
+    )
+    args = make_args(
+        case_id="CASE_9001",
+        run_id="RUN_20260819_1",
+        filename="claim_analysis_result.json",
+        data_file=str(data_file),
+        schema_name="claim_analysis_result.schema.json",
+    )
+
+    assert dao.cmd_write_contract(args) == 0
+
+
+def test_dao_rejects_a_projection_authority_without_consulting_any_revision(
+    isolated_dao, make_args, monkeypatch, tmp_path
+) -> None:
+    """A projection label is refused ON ITS OWN TERMS, with no fall-through.
+
+    The old path answered a mislabelled authority with a complaint about a
+    missing medical revision -- an error message about the wrong thing. The
+    label is the defect, so the label is what the refusal names.
+    """
+    result = _selective_result()
+    result["claim_facts"][0]["authority"] = "medical_variables_projection"
+    data_file = tmp_path / "claim-analysis.json"
+    data_file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(
+        dao, "_load_medical_revision",
+        lambda case_id, sha: pytest.fail(
+            "a mislabelled authority must not fall through to the revision check"),
     )
     args = make_args(
         case_id="CASE_9001",

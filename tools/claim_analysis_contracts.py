@@ -80,6 +80,32 @@ def validate_routing_config_semantics(config: dict) -> list[str]:
                     errors.append(
                         f"source route {route.get('route_id')!r} must not read cost kind {kind!r}"
                     )
+        # An administrative route's whole safety property is that it holds no
+        # medical ladder: that is what makes "opens no medical document" a
+        # structural fact rather than a runtime promise. A conditional route
+        # must also name a real condition -- a route gated on "always" is not
+        # conditional, and one gated on a condition nothing evaluates would
+        # never fire.
+        route_id = route.get("route_id")
+        source_kind = route.get("source_kind")
+        condition = route.get("activation_condition")
+        if source_kind == "administrative_or_intake":
+            if route.get("priority_groups"):
+                errors.append(
+                    f"source route {route_id!r} is administrative and must rank no medical kinds"
+                )
+            if not route.get("non_medical_sources"):
+                errors.append(
+                    f"source route {route_id!r} is administrative and must name its non-medical sources"
+                )
+        elif source_kind == "medical_document" and route.get("non_medical_sources"):
+            errors.append(
+                f"source route {route_id!r} is a medical route and must not name non-medical sources"
+            )
+        if condition != "always" and source_kind != "administrative_or_intake":
+            errors.append(
+                f"source route {route_id!r}: only an administrative route may be conditionally activated"
+            )
 
     for duplicate in _duplicates(row.get("field_id") for row in fields):
         errors.append(f"fields: duplicate field_id {duplicate!r}")
@@ -187,10 +213,10 @@ def validate_claim_analysis_result_semantics(data: dict, config: dict) -> list[s
             errors.append(f"field {field_id!r}: duplicate observation_id {duplicate!r}")
         owned = set(ids)
         field_observations[field_id] = owned
-        for canonical_id in field.get("canonical_observation_ids") or []:
-            if canonical_id not in owned:
+        for selected_id in field.get("selected_observation_ids") or []:
+            if selected_id not in owned:
                 errors.append(
-                    f"field {field_id!r}: canonical observation {canonical_id!r} is not owned by the field"
+                    f"field {field_id!r}: selected observation {selected_id!r} is not owned by the field"
                 )
 
     candidates = data.get("conflict_candidates") or []

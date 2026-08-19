@@ -14,10 +14,13 @@ What it owns:
 
 What it deliberately does NOT own:
 
-* **Medical authority.** `medical_variables.json` stays the sole authority for
-  medical facts. Every medical-domain field here is published with
-  `authority: medical_variables_projection` and binds to the revision digest;
-  this driver never invents a medical fact outside that revision.
+* **Canonical medical authority.** This lane does not claim it. Every field is
+  read from a case document and published as `source_document_extraction` with
+  that document's exact quote and character range. It is NOT a projection of
+  `medical_variables.json`: the PoC resolves no field id to a canonical
+  variable id, so calling the output a projection would assert a binding that
+  was never computed. `medical_projection_status: not_configured` says so in
+  the contract itself.
 * **Conflict adjudication.** A disagreement becomes a `conflict_candidate` with
   both observations preserved and no canonical value. It is NOT written to the
   P6 ledger here -- `consistency_check` verifies candidates and owns ledger
@@ -55,14 +58,13 @@ TRACE_CONTRACT = "claim_analysis_trace.json"
 TRACE_SCHEMA = "claim_analysis_trace.schema.json"
 VERSION = "claim_analysis_selective.v0.1"
 
-# Domains whose facts are medical and therefore projections of the canonical
-# medical revision rather than claim-native findings. `event_timeline` is the
-# claim-native one: accident circumstances are a claim fact, not a clinical
-# variable.
-MEDICAL_DOMAINS = frozenset({
-    "diagnosis", "diagnosis_basis", "treatment", "clinical_course_outcome",
-    "prior_history_influences", "complications_new_problems", "disability",
-})
+# The one domain whose findings this stage owns as claim-side facts: accident
+# circumstances, filing information, and case-type triggers. Everything else is
+# read out of a medical document and published as source_document_extraction.
+# Kept as an allow-list of the native domain rather than a list of medical ones
+# so a domain added later defaults to "extracted from a document", which is the
+# claim that needs no extra standing.
+NATIVE_DOMAINS = frozenset({"event_timeline"})
 
 
 # --------------------------------------------------------------- DAO edge --
@@ -180,21 +182,27 @@ def build_reference(
 # ------------------------------------------------------------ extraction --
 
 class FieldExtractionOutcome:
-    """One field's resolved state after its read ladder ran."""
+    """One field's settled state after its read ladder ran.
+
+    Defaults to `unavailable`/`not_mentioned`: before any source has spoken,
+    the honest verdict is that nothing was established, and the reason is that
+    nothing mentioned it. A field only leaves that state by evidence.
+    """
 
     __slots__ = ("field_id", "domain_code", "grade", "status", "observations",
-                 "canonical_ids", "stop_reason", "reason", "documents_read",
-                 "comparisons")
+                 "selected_ids", "stop_reason", "reason", "unavailable_reason",
+                 "documents_read", "comparisons")
 
     def __init__(self, *, field_id: str, domain_code: str, grade: str) -> None:
         self.field_id = field_id
         self.domain_code = domain_code
         self.grade = grade
-        self.status = "unknown"
+        self.status = "unavailable"
         self.observations: list[dict] = []
-        self.canonical_ids: list[str] = []
+        self.selected_ids: list[str] = []
         self.stop_reason = "sources_exhausted"
         self.reason = "no source in the routed priority order stated this field"
+        self.unavailable_reason = "not_mentioned"
         self.documents_read = 0
         self.comparisons = 0
 
@@ -236,8 +244,15 @@ def resolve_field(
         grade=field_row["medical_advisory_grade"],
     )
     if plan.skip_reason is not None:
-        outcome.status = "not_applicable"
-        outcome.stop_reason = "not_applicable"
+        # A field with nothing to read is UNAVAILABLE, not not_applicable.
+        # `not_applicable` says the case's own facts exclude the field, and it
+        # owes a quote proving that; "this pack contains no document of the
+        # kind this field routes to" proves nothing about the case -- it is a
+        # gap in the records. Filing it as not_applicable would convert a
+        # missing document into a decided finding.
+        outcome.status = "unavailable"
+        outcome.stop_reason = "sources_exhausted"
+        outcome.unavailable_reason = "source_document_missing"
         outcome.reason = plan.skip_reason
         return outcome
 
@@ -287,7 +302,7 @@ def resolve_field(
                     # Both readings are preserved and NEITHER becomes canonical.
                     outcome.status = "conflict"
                     outcome.stop_reason = "conflict_found"
-                    outcome.canonical_ids = []
+                    outcome.selected_ids = []
                     outcome.reason = (
                         "two independent priority sources state different "
                         "values for this field; both readings are preserved "
@@ -299,9 +314,9 @@ def resolve_field(
             break
 
     if trusted is not None:
-        outcome.status = "resolved"
+        outcome.status = "asserted"
         outcome.stop_reason = "trusted_value_found"
-        outcome.canonical_ids = [trusted["observation_id"]]
+        outcome.selected_ids = [trusted["observation_id"]]
         outcome.reason = "a trusted value was found in the highest available priority source"
     return outcome
 
@@ -327,28 +342,37 @@ def field_result(
     authority: str,
     conflict_candidate_ids: Sequence[str] = (),
 ) -> dict:
+    """One field's published state, under the five-state contract.
+
+    The states are not interchangeable and the schema will not let them blur:
+    `asserted` elects exactly one observation, `explicitly_absent` needs the
+    quote that states the absence, `unavailable` carries a reason and no
+    evidence at all, `not_applicable` needs the case fact that excludes the
+    field, and `conflict` keeps both readings and elects neither.
+    """
     result = {
         "field_id": outcome.field_id,
         "domain_code": outcome.domain_code,
         "priority_grade": priority_grade,
         "authority": authority,
         "resolution_status": outcome.status,
-        "canonical_observation_ids": list(outcome.canonical_ids),
+        "selected_observation_ids": list(outcome.selected_ids),
         "observations": list(outcome.observations),
         "conflict_candidate_ids": list(conflict_candidate_ids),
         "stop_reason": outcome.stop_reason,
     }
-    if outcome.status != "resolved":
+    if outcome.status != "asserted":
         result["resolution_reason"] = outcome.reason
-    if outcome.status in {"unknown", "not_applicable"}:
-        # The schema requires every retained observation to match the field's
-        # own unresolved state, so an asserted reading cannot hide under an
-        # "unknown" verdict.
-        state = outcome.status
+    if outcome.status == "unavailable":
+        # Nothing was established, so nothing may be cited. Any reading picked
+        # up along the way is rewritten to carry the same verdict -- an
+        # asserted value cannot survive underneath an "unavailable" field.
+        result["unavailable_reason"] = outcome.unavailable_reason
         result["observations"] = [{
             "observation_id": observation["observation_id"],
-            "value_state": state,
+            "value_state": "unavailable",
             "reason": outcome.reason,
+            "unavailable_reason": outcome.unavailable_reason,
             "extraction_wave": observation["extraction_wave"],
             "evidence_references": [],
         } for observation in outcome.observations]
@@ -356,9 +380,15 @@ def field_result(
 
 
 def authority_for(domain_code: str) -> str:
+    """Where a field's content came from -- never a projection claim.
+
+    A medical-domain value here was read from a document in this case, not
+    projected from the canonical medical revision. Labelling it a projection
+    would describe work this lane does not do.
+    """
     return (
-        "medical_variables_projection" if domain_code in MEDICAL_DOMAINS
-        else "claim_analysis_native"
+        "claim_analysis_native" if domain_code in NATIVE_DOMAINS
+        else "source_document_extraction"
     )
 
 
@@ -383,7 +413,7 @@ def build_result(
     outcomes: Sequence[FieldExtractionOutcome],
     config: Mapping[str, Any],
     documents: Sequence[selection.DocumentRef],
-    medical_revision: Mapping[str, Any],
+    medical_revision_context: Mapping[str, Any] | None = None,
     policy_links: Sequence[Mapping[str, Any]] = (),
     filing_status_by_type: Mapping[str, str] | None = None,
     model_name: str = "deterministic",
@@ -445,13 +475,20 @@ def build_result(
         "source_grounded": True,
         "schema_version": "claim_analysis_result.v0.1",
         "config_version": config["config_version"],
-        "medical_revision": dict(medical_revision),
+        # Fixed for v0.1: no field-to-variable mapping exists to project
+        # through, so no other value would be true.
+        "medical_projection_status": "not_configured",
         "claim_facts": claim_facts,
         "case_type_assessment": assessments,
         "policy_links": list(policy_links),
         "required_document_checklist": checklist,
         "conflict_candidates": conflict_candidates,
     }
+    if medical_revision_context is not None:
+        # Context only, and recorded solely because the caller observed it.
+        # Declaring it is what makes the DAO verify the digest; omitting it
+        # asserts nothing rather than asserting a revision this run never saw.
+        result["medical_revision_context"] = dict(medical_revision_context)
     if result["review_required"]:
         # Only meaningful alongside review_required; the conflict candidates are
         # a 손해사정사's call to verify, which is consistency_check's input.
@@ -497,11 +534,11 @@ def build_trace(
             "documents_presence_only": presence_only,
             "a_stop_fields": sum(
                 1 for outcome in outcomes
-                if outcome.grade == "A" and outcome.status == "resolved"
+                if outcome.grade == "A" and outcome.status == "asserted"
             ),
             "b_fallback_fields": sum(
                 1 for outcome in outcomes
-                if outcome.grade != "A" and outcome.status == "resolved"
+                if outcome.grade != "A" and outcome.status == "asserted"
             ),
             "provider_calls": provider_calls,
             "input_tokens": input_tokens,

@@ -34,9 +34,9 @@ def _fact(field_id: str, domain: str, value, *, status="resolved") -> dict:
         "field_id": field_id,
         "domain_code": domain,
         "priority_grade": "A",
-        "authority": "medical_variables_projection",
+        "authority": "source_document_extraction",
         "resolution_status": status,
-        "canonical_observation_ids": ["CAO_0001"] if status == "resolved" else [],
+        "selected_observation_ids": ["CAO_0001"] if status == "asserted" else [],
         "observations": [{
             "observation_id": "CAO_0001",
             "value_state": "asserted",
@@ -48,10 +48,10 @@ def _fact(field_id: str, domain: str, value, *, status="resolved") -> dict:
                 "document_id": "DOC_001", "page": 1, "quote": "q",
                 "start_char": 0, "end_char": 1,
             }],
-        }] if status == "resolved" else [],
+        }] if status == "asserted" else [],
         "conflict_candidate_ids": [],
         "stop_reason": (
-            "trusted_value_found" if status == "resolved" else "sources_exhausted"
+            "trusted_value_found" if status == "asserted" else "sources_exhausted"
         ),
     }
     if status != "resolved":
@@ -63,14 +63,14 @@ def _assessment(case_type, status, *, filing="unknown", evidence=True) -> dict:
     return {
         "case_type": case_type,
         "status": status,
-        "triggered_field_ids": ["injury_event_present"] if status == "supported" else [],
+        "triggered_field_ids": ["injury_event_present"] if status == "applicable" else [],
         "conflicting_field_ids": [],
         "filing_status": filing,
         "reason": f"{case_type} basis",
         "evidence_references": [{
             "document_id": "DOC_001", "page": 1, "quote": "근거",
             "start_char": 0, "end_char": 2,
-        }] if (status == "supported" and evidence) else [],
+        }] if (status == "applicable" and evidence) else [],
     }
 
 
@@ -78,19 +78,15 @@ def _claim_analysis(*, facts=None, assessments=None, checklist=None) -> dict:
     return {
         "case_id": "CASE_9001",
         "run_id": "RUN_20260819_1",
-        "medical_revision": {
-            "sha256": "b" * 64, "run_id": "RUN_20260819_1",
-            "schema_version": "medical_variables.v0.1",
-            "config_version": "medical_structuring.v0.1",
-        },
+        "medical_projection_status": "not_configured",
         "claim_facts": facts if facts is not None else [
             _fact("primary_diagnosis", "diagnosis", "우측 요골 골절"),
         ],
         "case_type_assessment": assessments if assessments is not None else [
-            _assessment("personal_insurance", "supported"),
+            _assessment("personal_insurance", "applicable"),
             _assessment("traffic_accident", "uncertain"),
             _assessment("industrial_accident", "uncertain"),
-            _assessment("liability", "not_supported"),
+            _assessment("liability", "not_applicable"),
         ],
         "required_document_checklist": checklist if checklist is not None else [],
         "conflict_candidates": [],
@@ -191,7 +187,7 @@ def test_unconfirmed_items_list_searched_fields_that_came_back_empty() -> None:
     report = reporter.build_report(
         case_id="CASE_9001", run_id="RUN_20260819_1",
         claim_analysis=_claim_analysis(facts=[
-            _fact("primary_diagnosis", "diagnosis", None, status="unknown"),
+            _fact("primary_diagnosis", "diagnosis", None, status="unavailable"),
             _fact("accident_date", "event_timeline", "2026-03-02"),
         ]),
         consistency=_consistency(), config=_config())
@@ -200,14 +196,22 @@ def test_unconfirmed_items_list_searched_fields_that_came_back_empty() -> None:
     assert "accident_date" not in field_ids
 
 
-def test_medical_facts_are_labelled_as_a_revision_projection() -> None:
+def test_medical_facts_are_labelled_as_source_extraction_not_projection() -> None:
+    """The report must not describe these facts as canonical projections.
+
+    A screening reader decides how much weight to give a value partly from
+    where it came from. Presenting a document reading as a projection of the
+    canonical medical revision would overstate its provenance to the one
+    audience acting on it.
+    """
     report = reporter.build_report(
         case_id="CASE_9001", run_id="RUN_20260819_1",
         claim_analysis=_claim_analysis(), consistency=_consistency(),
         config=_config())
     authority = report["case_summary"]["medical_authority"]
-    assert authority["source"] == "medical_variables.json"
-    assert authority["medical_revision_sha256"] == "b" * 64
+    assert authority["source"] == "source_document_extraction"
+    assert authority["medical_projection_status"] == "not_configured"
+    assert "projection" not in authority["note"]
 
 
 # ------------------------------------------------------------ conflicts --
