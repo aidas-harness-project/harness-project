@@ -205,3 +205,10 @@ def test_stage2_scratch_is_never_under_outputs() -> None:
 def test_top_level_provider_reaches_segmentation_propose() -> None:
     src = (TOOLS / "run_stage2.py").read_text(encoding="utf-8")
     assert 'propose_argv += ["--provider", provider]' in src
+
+
+def test_segmentation_precedes_any_classification() -> None:
+    """Bundles must be P8-cleared/redacted and split before type inference."""
+    src = (TOOLS / "run_stage2.py").read_text(encoding="utf-8")
+    assert src.index("# ---- phase 3: segmentation") < src.index(
+        "# ---- phase 4: classify split children")

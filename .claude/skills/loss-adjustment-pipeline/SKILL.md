@@ -272,7 +272,7 @@ stated honestly instead of merely assumed.
    the ledger you already had to satisfy, so when D2 eventually goes away this check simply
    always passes. Pass `--run-id` — without it the check still works but records nothing.
 
-**OCR the bundle first.** `propose` resolves its evidence in the order processed text → the PDF's own embedded layer → vision, and the deterministic paths are both better and cheaper than vision. Only the first reaches a scan, which is most of this corpus, so a `required` bundle takes this sequence:
+**OCR and redact the bundle first.** A governed `propose` requires complete redacted processed text plus a P8-cleared OCR result; it must fail closed rather than fall back to raw-PDF vision. The deterministic title path is both better and cheaper, and it is the only normal pipeline path for a `required` bundle:
 
 1. `run_checkpoint1.py CASE_ID BUNDLE_ID <pdf> --bundle-ocr` — OCR only, no classification (`document_type` is per-document; one label cannot be right for a bundle).
 2. `redact_document.py CASE_ID BUNDLE_ID` — segmentation reads the REDACTED text, so pre-redaction page text never leaves the capability gate. Titles survive redaction (verified on CASE_112's 217 split children), so nothing needed for boundaries is lost.
@@ -283,7 +283,7 @@ Measured on CASE_908/DOC_005, a 19-page scan with zero embedded text: precision 
 
 Titles are the boundary signal on both paths — `...보통약관`/`...특별약관`/`...특약` for policy, form names (진단서, 수 술 기 록, 진료비 세부산정내역) for medical, matched through a 5-line header window because a statutory header or field labels often precede the title. A page the deterministic rule cannot settle — a generic heading like `REPORT`, or no title at all — goes to the LLM tier, which reads that page and the one before it. An unusable verdict splits and is flagged for review: over-splitting is undone by a human merge at the approval gate, over-merging fuses two documents into one `document_type` and propagates downstream.
 
-On the vision fallback, `propose` automatically rechecks crop-ambiguous `needs_full_page` pages full-page when the 25% spend cap is not saturated; `--refine` is a separate, opt-in pass over long segments that may have been confidently over-merged. Both use the owner-set title rule: own title → new document, no title after full-page inspection → continuation, unreadable → human review.
+The contact-sheet/vision code is retained only as a diagnostic tuning seam; it cannot create an approvable governed proposal. A saturated or unresolved `needs_full_page` result is not split-ready: retune the crop/grid and create a new proposal instead of increasing the call cap to paper over the failure.
 
 **The human gate is the boundary approval**, and it is the only one: `split` refuses until a human approves the `segmentation_proposal_{DOC}.json` (case-level `approved` AND every segment `approved`/`edited` AND no unassigned page). A reviewer sees the proposed ranges and the title line each cut is made on — real evidence — instead of answering "is this a bundle?" from a filename before anything has been read. `run_checkpoint1.py` still refuses one thing before any provider or PDF work: a retained `superseded_bundle`, since reading it again would duplicate every page its children already own.
 

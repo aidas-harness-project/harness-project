@@ -3311,6 +3311,18 @@ def split_readiness_errors(proposal: dict) -> list[str]:
             f"{len(unassigned)} page(s) are still unassigned and must be resolved "
             f"before splitting: {unassigned[:20]}{'...' if len(unassigned) > 20 else ''}"
         )
+    unresolved = proposal.get("needs_full_page") or []
+    fallback = (proposal.get("method") or {}).get("full_page_fallback") or {}
+    if fallback.get("saturated"):
+        errors.append(
+            "full-page fallback is saturated; retune the crop/grid and create a "
+            "new proposal before splitting"
+        )
+    if unresolved:
+        errors.append(
+            f"{len(unresolved)} page(s) still need a full-page review before "
+            f"splitting: {unresolved[:20]}{'...' if len(unresolved) > 20 else ''}"
+        )
     segments = proposal.get("segments", [])
     if not segments:
         errors.append("proposal has no segments to split")
@@ -3949,6 +3961,52 @@ def _manifest_bundle(case_id, doc_id):
     return manifest, None
 
 
+_SEGMENTATION_P8_CLEAR_STATUSES = frozenset({"agreed", "disagreed_resolved"})
+
+
+def segmentation_prerequisite_errors(bundle: dict, page_count: int) -> list[str]:
+    """Return the prerequisites that keep a bundle out of normal segmentation.
+
+    Segmentation is downstream of bundle OCR and redaction. It must not
+    compensate for a P8 block by looking at raw contact sheets: that would turn
+    an extraction hard gate into a routing preference. The vision implementation
+    remains a pure-function/diagnostic seam, but the governed ``propose`` command
+    cannot enter it without P8-cleared redacted text.
+    """
+    errors: list[str] = []
+    doc_id = bundle.get("document_id", "<unknown>")
+    if bundle.get("downstream_disposition") == "superseded_bundle":
+        errors.append(f"{doc_id} is already a superseded bundle")
+    if bundle.get("ocr_status") != "completed":
+        errors.append(f"{doc_id} OCR is {bundle.get('ocr_status')!r}, not 'completed'")
+    status = bundle.get("cross_validation_status")
+    if status not in _SEGMENTATION_P8_CLEAR_STATUSES:
+        errors.append(
+            f"{doc_id} P8 cross-validation is {status!r}; human resolution is "
+            "required before segmentation"
+        )
+
+    redacted_path = bundle.get("redacted_text_path")
+    if not isinstance(redacted_path, str) or not redacted_path:
+        errors.append(f"{doc_id} has no redacted_text_path")
+        return errors
+    path = ROOT / redacted_path
+    if not path.exists():
+        errors.append(f"{doc_id} redacted text is missing: {redacted_path}")
+        return errors
+    try:
+        pages = _split_page_markers(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        errors.append(f"{doc_id} redacted text could not be read: {exc}")
+        return errors
+    if len(pages) != page_count:
+        errors.append(
+            f"{doc_id} redacted text covers {len(pages)} page(s), not all "
+            f"{page_count} bundle page(s)"
+        )
+    return errors
+
+
 def _stderr(msg):
     print(msg, file=sys.stderr)
 
@@ -3993,6 +4051,20 @@ def _cmd_propose(args):
     import fitz
     with fitz.open(pdf_path) as document:
         page_count = document.page_count
+
+    prerequisites = segmentation_prerequisite_errors(bundle, page_count)
+    if prerequisites:
+        print(json.dumps({
+            "status": "blocked_segmentation_prerequisite",
+            "case_id": args.case_id,
+            "document_id": args.doc_id,
+            "errors": prerequisites,
+            "note": (
+                "Segmentation requires complete, P8-cleared bundle OCR and "
+                "redacted text. It will not fall back to raw-PDF vision."
+            ),
+        }, ensure_ascii=False, indent=2))
+        return 2
 
     # Deterministic path, tried before ANY sheet render or provider construction:
     # a born-digital bundle needs neither. Kept here rather than only inside

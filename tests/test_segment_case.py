@@ -1327,6 +1327,15 @@ def test_split_readiness_blocks_on_unassigned_pages():
     assert any("unassigned" in e for e in errors)
 
 
+def test_split_readiness_blocks_saturated_or_unresolved_full_page_fallback():
+    prop = _proposal([_seg(0, 1, 12, status="approved")], review_status="approved")
+    prop["needs_full_page"] = [5]
+    prop["method"]["full_page_fallback"] = {"saturated": True}
+    errors = sc.split_readiness_errors(prop)
+    assert any("saturated" in error for error in errors)
+    assert any("full-page review" in error for error in errors)
+
+
 def test_split_readiness_blocks_on_a_pending_or_rejected_segment():
     prop = _proposal([_seg(0, 1, 5, status="approved"), _seg(1, 6, 12, status="pending")],
                      review_status="approved")
@@ -1346,6 +1355,30 @@ def test_split_readiness_passes_a_clean_approved_proposal():
     prop = _proposal([_seg(0, 1, 5, status="approved"), _seg(1, 6, 12, status="edited")],
                      review_status="approved")
     assert sc.split_readiness_errors(prop) == []
+
+
+def test_segmentation_prerequisites_require_p8_clear_complete_redacted_text(tmp_path):
+    bundle = {
+        "document_id": "DOC_001",
+        "ocr_status": "completed",
+        "cross_validation_status": "agreed",
+        "redacted_text_path": "data/processed/CASE_900/DOC_001/redacted_text.md",
+    }
+    text = tmp_path / bundle["redacted_text_path"]
+    text.parent.mkdir(parents=True)
+    text.write_text(
+        "<<<PAGE page=1>>>\nfirst\n<<<PAGE page=2>>>\nsecond\n",
+        encoding="utf-8",
+    )
+    original_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        assert sc.segmentation_prerequisite_errors(bundle, 2) == []
+        bundle["cross_validation_status"] = "disagreed_pending_review"
+        errors = sc.segmentation_prerequisite_errors(bundle, 2)
+    finally:
+        sc.ROOT = original_root
+    assert any("human resolution" in error for error in errors)
 
 
 def test_next_document_index_continues_past_the_highest_existing_id():
@@ -3674,6 +3707,7 @@ def test_text_anchor_propose_reports_the_actual_injected_judge_calls(
         "file_path": "ignored.pdf", "source_file_name": "bundle.pdf",
     }))
     monkeypatch.setattr(sc, "_processed_page_texts", lambda *args: pages)
+    monkeypatch.setattr(sc, "segmentation_prerequisite_errors", lambda *args: [])
     monkeypatch.setattr(sc, "_LazyJudge", lambda factory: judge)
     monkeypatch.setattr(sc, "_write_proposal", lambda *args: Path("proposal.json"))
     monkeypatch.setitem(sys.modules, "fitz", SimpleNamespace(open=lambda _: _Document()))
