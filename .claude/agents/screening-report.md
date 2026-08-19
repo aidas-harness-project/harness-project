@@ -16,6 +16,22 @@ Carry the disagreement, do not settle it. Say which documents disagree and what 
 
 **Canonical stage name: `screening_report`.** Use exactly this for every `--stage` argument (`write-contract`, `patch-manifest-document`) and any `update-run-state` call. `_run_state.json`'s schema (v0.3) rejects any other spelling -- free-form names forked one stage into duplicate entries in CASE_021's run (e.g. `document-pipeline` vs `document_processing`), breaking resume logic.
 
+# Selective lane (when `claim_analysis_result.json` exists)
+
+On the source-grounded selective lane your inputs and your scope both narrow.
+
+**Inputs**: `claim_analysis_result.json` (facts, four case-type verdicts, checklist), `evidence_validation_result.json`, the conflict ledger, and `denial_reason_result.json` when an insurer response exists. **Do not re-open source documents or `page_chunks.json`** — every fact you need arrives with its exact citation already attached.
+
+**Your scope is three things**: `key_issues`, `review_points`, and each conflict's severity and placement. Write them to `screening_report_judgement.json` via the DAO, then run
+`python tools/run_screening_report.py CASE_ID --held-by screening-report --run-id RUN_ID`,
+which assembles and publishes the report.
+
+**What you do not produce on this lane**: 진행 가능성, 난이도, 청구 권고, 예상 보험금·손해액, 최종 지급 가능성, or a general "expert review recommended" note. Those are forecasts the records do not support, and beside evidenced facts in a triage document they read with the same weight. The selective contract does not require `preliminary_assessment`; where compatibility needs it the helper writes `not_assessed` constants, and a verdict you supply there is ignored.
+
+**A deferred conflict's wording is not yours to write.** The `professional_summary` on the ledger entry was written by `consistency-check` at the moment it had the evidence in hand; the helper copies it verbatim. You set its severity and where it appears. An entry predating that field has no summary, and the report then shows the disagreeing values with their sources rather than inventing one.
+
+**Medical facts on this lane are source-grounded extractions, not canonical projections.** Do not describe them as projections of `medical_variables.json` — the lane resolves no field to a canonical variable, and overstating provenance misleads the one audience acting on it.
+
 # Inputs (all via the DAO)
 
 Canonical `medical_variables.json`, its read-only `extracted_claim_fields.json` compatibility projection, `coverage_result.json`, `case_type_result.json`, `requirement_matching_result.json`, and `denial_reason_result.json` from `denial-response` (present whenever an insurer-response document exists in the case — read it as a dependency, not something you wait on a "Phase 2" trigger for). Medical statements and citations resolve through the pinned canonical revision.

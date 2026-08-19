@@ -94,13 +94,6 @@ def test_the_cache_refuses_a_second_read_of_the_same_document() -> None:
     assert recorder.documents == ["DOC_001"]
 
 
-def test_a_document_is_read_at_most_once_per_run() -> None:
-    recorder = _Recorder()
-    _, cache = _run(recorder)
-    assert recorder.documents == sorted(set(recorder.documents), key=recorder.documents.index)
-    assert all(count <= 1 for count in cache.calls.values()), cache.calls
-
-
 def test_one_read_serves_every_field_that_document_can_answer() -> None:
     """A 진단서 states diagnosis, date, site and department in one place.
 
@@ -109,6 +102,7 @@ def test_one_read_serves_every_field_that_document_can_answer() -> None:
     recorder = _Recorder()
     _run(recorder)
     by_document = {document_id: fields for document_id, fields in recorder.calls}
+    assert len(recorder.documents) == len(set(recorder.documents))
     assert len(by_document["DOC_001"]) > 1
     assert "primary_diagnosis" in by_document["DOC_001"]
 

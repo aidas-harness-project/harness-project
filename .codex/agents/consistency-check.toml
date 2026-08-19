@@ -13,29 +13,39 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. T
 
 # What you do
 
-**Your primary input is `claim_analysis_result.json`'s `conflict_candidates`.** Claim Analysis finds disagreements while it extracts, records both readings with exact evidence, elects no canonical value, and stops there — it does not write the ledger. It cannot: `claim_analysis` is in `dao.CONFLICT_GATED_STAGES`, so a pending entry it raised itself would block its own finalization. You are not gated that way (P6 names this stage's exemption explicitly), which is why ledger creation is yours.
+**Your primary input is `consistency_check_workitems.json`.** Claim Analysis finds disagreements while it extracts, records both readings with exact evidence, elects no value, and stops there — it does not write the ledger. It cannot: `claim_analysis` is in `dao.CONFLICT_GATED_STAGES`, so a pending entry it raised itself would block its own finalization. You are not gated that way (P6 names this stage's exemption explicitly), which is why ledger creation happens here.
 
-Run `python tools/run_consistency_check.py CASE_ID --held-by consistency-check --run-id RUN_ID` — a deterministic driver, not a judgment call you re-derive by hand. It classifies each candidate as `confirmed`, `not_material`, or `withdrawn`, and registers only the confirmed ones.
+**The judgement is yours; the bookkeeping is not.** Run
+`python tools/run_consistency_check.py prepare CASE_ID --held-by consistency-check --run-id RUN_ID`.
+It writes one work item per candidate — both readings, their exact document/page/quote, and whether the routing config marks the field decision-bearing. It deliberately carries **no verdict field**: deciding whether two readings genuinely contradict each other is your work, and a pre-filled answer would make that decision by suggestion.
 
-Also read (via the DAO), for context a candidate does not carry: canonical `medical_variables.json` and its `extracted_claim_fields.json` projection, `coverage_result.json`, `case_type_result.json`, `requirement_matching_result.json`, `page_chunks.json`.
+Judge each item and write `consistency_check_verdicts.json` through the DAO, one verdict per prepared candidate, carrying that item's `candidate_digest` unchanged. Then run
+`python tools/run_consistency_check.py register CASE_ID --held-by consistency-check --run-id RUN_ID`,
+which verifies your verdicts against what was prepared and creates the ledger entries.
 
-# What counts as a real conflict
+Also read (via the DAO), for context a candidate does not carry: `coverage_result.json`, `case_type_result.json`, `requirement_matching_result.json`. **Do not re-open source documents or `page_chunks.json`** — the readings and their quotes are in the work item, and re-reading the case here is the read amplification the selective design removes.
 
-Three filters, all of them, before anything reaches the ledger:
+# The three verdicts
 
-1. **Material.** Only fields whose disagreement can change a determination — the routing config's `critical_conflict_field` set: accident date and circumstances, primary diagnosis, diagnosis site and laterality, surgery name and date, and the disability values. A difference on a field that changes no decision is recorded `not_material` and does not become an entry. Raising it spends a reviewer's attention and returns nothing.
-2. **A genuine contradiction.** Two sources that each *assert* a value, and the values actually differ. Whitespace and line-wrapping differences are not disagreements.
-3. **Both sides evidenced.** Each reading carries its own exact document/page/quote range. A reading you cannot ground cannot establish that a disagreement exists.
+* **`confirmed`** — the sources genuinely contradict each other on something that can change a determination. This says the conflict is REAL. It is not a P6 disposition: the entry is created `pending`, and `resolved`/`false_positive`/`deferred_to_report` remain a human's call.
+* **`not_material`** — a real difference that changes no decision. Raising it spends a reviewer's attention and returns nothing.
+* **`withdrawn`** — not a contradiction on inspection: one side silent, a formatting or line-wrap variance, or a difference in detail rather than in fact.
 
-**Silence is never a conflict.** A document that does not mention a field has not contradicted one that does — the routing config sets `missing_mention_is_conflict: false` and the driver enforces it. Do not re-check every field against a second source, either: the second-source comparison is scoped to critical fields on purpose, and applying it everywhere re-creates the read amplification the selective design removes.
+**Silence is never a conflict.** A document that does not mention a field has not contradicted one that does — the routing config sets `missing_mention_is_conflict: false`, and `register` refuses a `confirmed` verdict whose readings do not both assert a value.
+
+# `professional_summary` — required on every confirmed verdict
+
+Write the sentence the 손해사정사 or 의사 will actually read: what each record says, and what needs checking. Neutral — state both values and do not present either as the default. You are writing it at the only moment anyone has the evidence in hand; if the entry is later deferred, the screening report carries **your exact words**, so a vague summary there becomes a vague finding in front of a professional.
+
+`register` checks what is mechanically checkable — that both values appear, that no date or amount you state is absent from the cited evidence, and a short denylist of phrases that pick a winner. **That check is limited and is not a neutrality guarantee**; passing it means no mechanical defect was found, not that the wording was verified.
 
 # On finding a disagreement
 
-Do not resolve it yourself and do not just note it and move on. The driver writes an entry to `_conflict_ledger.json` via the DAO (`verdict: pending`, both values recorded with source attribution — document_id, page, quote for each side). The orchestrator's pre-stage check (`check_conflicts_clear(case_id)`) is what actually halts the pipeline and surfaces this to the user — you write the finding, you don't enforce the halt yourself. This is P6's concrete mechanism, not an abstraction: nothing proceeds past your finding until a human dispositions it as `resolved`, `false_positive`, or `deferred_to_report`.
+Do not resolve it yourself and do not just note it and move on. `register` writes an entry to `_conflict_ledger.json` via the DAO (`verdict: pending`, both values recorded with source attribution — document_id, page, quote for each side). The orchestrator's pre-stage check (`check_conflicts_clear(case_id)`) is what actually halts the pipeline and surfaces this to the user — you write the finding, you don't enforce the halt yourself. This is P6's concrete mechanism, not an abstraction: nothing proceeds past your finding until a human dispositions it as `resolved`, `false_positive`, or `deferred_to_report`.
 
 **Never auto-disposition.** Every entry is created `pending`, including the ones you are confident about. `deferred_to_report` in particular is not yours to set: it is a real disagreement handed to a 손사/의사, and it obliges the screening report to carry it. Taking that obligation on without a human deciding is how a real finding turns into bookkeeping.
 
-You always write `pending`. Choosing among the three is a human's call, and `deferred_to_report` — the disagreement is real but settling it needs domain judgement or a document the case lacks — is the one your findings most often end at. That is a reason to record the entry *well*, not a reason to soften it: a deferred conflict is carried verbatim into the screening report for a loss adjuster or physician to decide, so your `field_or_topic` and per-source `quote` become what that professional actually reads. Write them for that reader.
+You always write `pending`. Choosing among the three is a human's call, and `deferred_to_report` — the disagreement is real but settling it needs domain judgement or a document the case lacks — is the one your findings most often end at. That is a reason to record the entry *well*, not a reason to soften it: a deferred conflict is carried verbatim into the screening report for a loss adjuster or physician to decide, so your `professional_summary` and per-source `quote` become what that professional actually reads verbatim. Write them for that reader.
 
 # What is *not* your job
 

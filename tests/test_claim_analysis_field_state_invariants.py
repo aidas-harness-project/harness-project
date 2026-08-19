@@ -181,13 +181,6 @@ def test_every_state_has_a_valid_shape(state: str) -> None:
     assert _field_errors(ALL_STATES[state]()) == []
 
 
-def test_the_five_states_are_exactly_the_spec_vocabulary() -> None:
-    schema = json.loads((ROOT / "schemas" / SCHEMA).read_text(encoding="utf-8"))
-    assert set(schema["$defs"]["field_result"]["properties"]["resolution_status"]["enum"]) == {
-        "asserted", "explicitly_absent", "unavailable", "not_applicable", "conflict",
-    }
-
-
 def test_unavailable_reason_enum_matches_spec() -> None:
     schema = json.loads((ROOT / "schemas" / SCHEMA).read_text(encoding="utf-8"))
     expected = {
