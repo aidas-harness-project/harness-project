@@ -39,11 +39,31 @@ The evidence to gather first, none of which the flag itself checks:
    wall time, and whether the fields the current path resolves are still
    resolved. Until that measurement exists, no speedup or recall claim about
    the selective path may be stated as fact.
-3. **Policy and administrative inputs, where the case has them.** Clause
-   linking reads `_document_index.json` (built by `policy_clause_processing`)
-   and the filing fields read the intake declaration or filing record. All are
-   optional: a case without them records `not_found` / `unavailable` with the
-   reason, rather than failing.
+3. **Policy input, where the case has it.** Clause linking reads
+   `_document_index.json` (built by `policy_clause_processing`). It is
+   **optional on this lane** — unlike the legacy driver, which refuses without
+   it — so a case with no processed policy records `policy_links` as
+   `not_found` with the reason rather than failing. Only the candidate clauses'
+   own pages are read, selected from the index, never the whole 약관 bundle.
+
+**Industrial-accident filing is deferred, not implemented.** An earlier
+revision of this file said "the filing fields read the intake declaration or
+filing record". No such record exists: nothing in this repository produces one,
+there is no schema for it, no DAO subcommand writes it, and the fine-grained
+classifier has no administrative document kind. The reader that named two such
+filenames has been removed rather than left in place looking like a working
+integration.
+
+The consequence to expect on a real case, and to not mistake for a defect:
+
+- `filing_status` is `unknown` for every case type, on every case;
+- the three filing fields resolve `unavailable` with
+  `unavailable_reason: outside_poc_scope`, naming the missing producer rather
+  than a missing document;
+- the industrial case *type* can still be `applicable` from the accident facts.
+  That is a different question, and the two must not be conflated — being hurt
+  at work says nothing about whether a claim was filed. `not_filed` stays
+  reachable only from a source that states it.
 
 **No canonical medical revision is required.** An earlier revision of this file
 said the result binds to `medical_variables.json` by digest and that the DAO

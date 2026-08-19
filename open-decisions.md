@@ -351,3 +351,48 @@ always was.
 7. **Not every pair is meaningful.** 자동차보험×실손 or 개인보험×실손 may not
    correspond to real practice. Decide whether to constrain valid combinations
    (a matrix) or accept any pair and let the template lookup fail.
+
+## 9. Industrial-accident filing has no producer (selective lane, deferred 2026-08-20)
+
+Three fields in the selective Claim Analysis routing config ask an
+administrative question rather than a clinical one:
+
+- `industrial_accident_filing_basis` -- was a 산재 claim filed, and on what basis
+- `industrial_accident_approval_status` -- was it approved
+- `industrial_accident_approved_diagnosis` -- for which 상병
+
+**Nothing in this repository produces that information.** There is no schema for
+a filing declaration, no DAO subcommand that writes one, no intake step that
+records one, and `medical_document_kind` has no administrative form kind (adding
+one would put an administrative document into Stage 2's *medical* classification
+contract, which is the wrong axis).
+
+An earlier implementation read `_intake_declaration.json` and
+`_industrial_accident_filing.json`. Neither is written anywhere; the tests
+passed because their fixtures created the file contents and handed them straight
+to the reader. That reader has been removed. A phantom contract is worse than a
+gap: it reports `unavailable` on every real case while the code and its tests
+suggest a working integration, so nobody goes looking for the missing half.
+
+**Current behaviour, and the correct one until a producer exists:** filing
+status is `unknown` for every case type, and the three fields resolve
+`unavailable` / `outside_poc_scope` -- naming the missing producer, not a
+missing document. The case is not missing a file; the pipeline is missing a
+stage.
+
+**The rule that must survive whoever builds this.** Filing is never inferred
+from the accident. "Injured at work" makes the industrial case *type*
+applicable and says nothing about whether a claim was filed or approved; those
+are separate facts with separate sources. `not_filed` is reachable only from a
+source that states it -- silence is `unknown`, permanently.
+
+**What building it properly requires**, all in one change: a schema, DAO
+validation, a named writer, a real path from intake or from a classified
+administrative document, exact-quote verification like every other citation, a
+consumer, and an end-to-end test. Partial versions of this list are how the
+phantom appeared in the first place.
+
+Open question for whoever picks it up: does the filing record belong at intake
+(a person records what the claimant supplied) or at Stage 2 (an administrative
+document is classified and read)? That choice decides who owns the writer, and
+it is a workflow question rather than a technical one.

@@ -265,7 +265,13 @@ def test_a_triggered_route_with_no_source_is_unavailable_not_absent() -> None:
     by_field = {outcome.field_id: outcome for outcome in outcomes}
     for field_id in _filing_fields():
         assert by_field[field_id].status == "unavailable"
-        assert by_field[field_id].unavailable_reason == "source_document_missing"
+        # `outside_poc_scope`, not `source_document_missing`: no stage in this
+        # pipeline produces a filing declaration, so the case is not missing a
+        # document -- the pipeline is missing a producer. Recording it as a
+        # records gap would send someone hunting for a file nobody was ever
+        # going to write. See test_industrial_filing_deferred.py.
+        assert by_field[field_id].unavailable_reason == "outside_poc_scope"
+        assert by_field[field_id].reason == driver.FILING_ROUTE_DEFERRED_REASON
 
 
 def test_the_filing_route_opens_no_medical_document() -> None:

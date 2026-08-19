@@ -306,7 +306,7 @@ The contact-sheet/vision code is retained only as a diagnostic tuning seam; it c
 | 2 | Document Processing | `document-pipeline` | (a) bundle OCR (`--bundle-ocr`, no classification) → (b) bundle redaction → (c) **segmentation**: propose/approve/split, children inherit the bundle's pages → (d) per-child classification → (e) per-child redaction → (f) case-wide chunking. All under `document_processing`; segmentation sits *inside* because processing runs on both sides of it |
 | 3 | Indexing (adapter, optional) | (tool, no agent) | pass-through by default; no-op unless enabled |
 | 4 | Policy Clause Processing | (driver, no agent) | `run_policy_pipeline_driver.py` after the UID preflight. Normalization retired 2026-08-15, so there is no extraction to delegate; the driver records the manifest fingerprint and the orchestrator finalizes. Policy text stays fully processed, chunked and citable |
-| 5 | Claim Analysis | (driver, no agent) | `run_claim_analysis.py`: (a) field extraction + policy-page selection, (b) coverage ID, (c) case-type classification + canonical medical-variable publication, (d) requirement matching. It requires `_document_index.json`; run medical clearance before pass/snapshot. **When `config/claim_analysis/claim_analysis_routing_v0.1.json` has `behavior_enabled: true`, run `run_claim_analysis_selective.py` instead** — the source-grounded selective spine. Reading is **demand-driven**: each round asks only the still-unresolved fields which document they need next, batches everyone wanting the same one into a single call, and a field that finds a trusted value drops out, so its lower-priority sources are never opened (a document is still read at most once per RUN). It publishes `authority: source_document_extraction` with `medical_projection_status: not_configured` (no canonical projection, and **no canonical medical revision required**), links clauses from `_document_index.json` through the same DAO policy verification the legacy contracts use, reads industrial filing/approval only from intake or filing records (silence stays `unknown`, never `not_filed`), and records conflict *candidates* only — it never writes the P6 ledger. The legacy entry point exits 2 and names it rather than running the old spine. On that lane the medical clearance gate applies only when a canonical revision exists: see §8 precedence in `dao.source_grounded_lane_only`, and never record the carve-out as cleared/approved. |
+| 5 | Claim Analysis | (driver, no agent) | `run_claim_analysis.py`: (a) field extraction + policy-page selection, (b) coverage ID, (c) case-type classification + canonical medical-variable publication, (d) requirement matching. It requires `_document_index.json`; run medical clearance before pass/snapshot. **When `config/claim_analysis/claim_analysis_routing_v0.1.json` has `behavior_enabled: true`, run `run_claim_analysis_selective.py` instead** — the source-grounded selective spine. Reading is **demand-driven**: each round asks only the still-unresolved fields which document they need next, batches everyone wanting the same one into a single call, and a field that finds a trusted value drops out, so its lower-priority sources are never opened (a document is still read at most once per RUN). It publishes `authority: source_document_extraction` with `medical_projection_status: not_configured` (no canonical projection, and **no canonical medical revision required**), links clauses from `_document_index.json` (**optional here** -- no index means `policy_links` come back `not_found` with a reason, not a blocked stage) through the same DAO policy verification the legacy contracts use, reading only the candidate clauses' own pages rather than the whole 약관 bundle; leaves the industrial filing/approval fields `unavailable`/`outside_poc_scope` because **no stage in this pipeline produces a filing declaration** (deferred -- filing status therefore stays `unknown` on every case, and is never inferred from how the accident happened); and records conflict *candidates* only — it never writes the P6 ledger. The legacy entry point exits 2 and names it rather than running the old spine. On that lane the medical clearance gate applies only when a canonical revision exists: see §8 precedence in `dao.source_grounded_lane_only`, and never record the carve-out as cleared/approved. |
 | 6 | Consistency Check | `consistency-check` | conflict-ledger-gated — any disagreement halts via `_conflict_ledger.json`. On the selective lane this stage is **agent-owned with a deterministic helper on both sides**: `run_consistency_check.py prepare` builds work items carrying both readings and their evidence (no verdict field), the agent judges each `confirmed`/`not_material`/`withdrawn` and writes a neutral `professional_summary` on every confirmed one, then `run_consistency_check.py register` verifies the verdicts against what was prepared (candidate digest) and creates the entries. Every entry is `pending`; never auto-`deferred_to_report` |
 | 7 | Screening Report | `screening-report` | consumes `denial-response`'s output as a dependency if an insurer-response document exists — not phase-gated. On the selective lane the agent supplies only `key_issues`, `review_points`, and per-conflict severity/placement (via `screening_report_judgement.json`); `run_screening_report.py` then produces all three artifacts — `screening_report.json`, `screening_report.md`, and the evidence sidecar — rendering the narrative through `document_assembly.py --template screening_report_selective` (nine sections). It produces **no** 진행 가능성/난이도/지급 가능성, and copies a deferred conflict's `professional_summary` verbatim from the ledger |
 | 8 | Draft Report v1 | `draft-report` | same agent reused for v2 in Phase 2 |
@@ -325,16 +325,33 @@ insurer-response input exists but `denial_reason_result.json` is absent. Each
 concurrent member retains its own locks, attempt boundary, result handling, and
 downstream gate; a phase label is never a reason to delay a ready stage.
 
-**The claim-analysis driver requires the document index.** The policy driver
-writes `_document_index.json` -- every article in the case's policy documents
-under `clauses` (`{page, policy_name, article, heading}`) with its page and
-owning 약관, plus any table whose row/column structure was recovered from the
-PDF under `tables`. Confirm it is there
-(`dao.py read-document-index CASE_ID --run-id RUN_ID`). `run_claim_analysis.py`
-refuses without it; `denial-response` and `critic` should be told in their
-briefing to start clause lookup from it rather than scanning chunks. If the
-read returns `NOT_FOUND`, do not dispatch those agents with a promise that the
-file exists.
+**The legacy claim-analysis driver requires the document index; the selective
+lane does not.** The two lanes differ here and the difference is deliberate, so
+do not carry a habit from one into the other:
+
+- **Legacy (`run_claim_analysis.py`) -- a hard gate.** M1's page selection is
+  built on the index, so the driver raises `BLOCKED: _document_index.json is
+  required for M1's page selection` and the stage does not run.
+- **Selective (`run_claim_analysis_selective.py`) -- an optional input.** It
+  reads the index with `allow_missing`, and a case without one simply produces
+  `policy_links` whose status is `not_found`, each carrying the reason. The
+  stage completes normally: a case with no processed policy has no clause to
+  link, and that is the honest result rather than a failure. It is also why
+  the index is never a precondition to check before dispatching this lane.
+
+The policy driver writes `_document_index.json` -- every article in the case's
+policy documents under `clauses` (`{page, policy_name, article, heading}`) with
+its page and owning 약관, plus any table whose row/column structure was
+recovered from the PDF under `tables`. Confirm it is there
+(`dao.py read-document-index CASE_ID --run-id RUN_ID`) before the legacy lane;
+`denial-response` and `critic` should be told in their briefing to start clause
+lookup from it rather than scanning chunks. If the read returns `NOT_FOUND`, do
+not dispatch those agents with a promise that the file exists.
+
+The index is a **derived** artifact, not a contract: `build-document-index`
+writes it under the lock but outside `write-contract`, nothing gates on it, and
+it is recomputable from processed text. That is what makes an optional
+dependency on it coherent.
 
 For agent briefings this is one of the few tool-availability facts that belongs
 in a briefing. The rule about keeping contract values out is unchanged: never

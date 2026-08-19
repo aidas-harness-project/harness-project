@@ -116,6 +116,42 @@ def find_clause(
     return None, hits
 
 
+def candidate_pages(
+    *,
+    claim_facts: Sequence[Mapping[str, Any]],
+    manifest: Mapping[str, Any],
+    index: Mapping[str, Any] | None,
+) -> dict[str, list[int]]:
+    """The policy pages a link verification could actually need, per document.
+
+    Selection happens against the INDEX -- headings and policy names, already
+    derived -- so the pages are known before any text is read. Only these pages
+    are then fetched, which is the whole point: a policy bundle is the largest
+    thing in a case, and verifying a clause quote needs the page that clause
+    sits on, not the document.
+
+    Every coverage term contributes the pages of every clause it hits, matched
+    or merely candidate. A candidate is included because promotion to `matched`
+    is decided by whether the quote verifies, and that decision needs the page.
+    """
+    if index is None:
+        return {}
+    doc_ids = policy_document_ids(manifest)
+    if not doc_ids:
+        return {}
+
+    pages: dict[str, set[int]] = {}
+    for _coverage_id, term in coverage_terms(claim_facts):
+        match, candidates = find_clause(index, doc_ids, term)
+        for clause in ([match] if match is not None else []) + candidates:
+            page = clause.get("page")
+            document_id = clause.get("document_id")
+            if isinstance(page, int) and isinstance(document_id, str):
+                pages.setdefault(document_id, set()).add(page)
+    return {document_id: sorted(found)
+            for document_id, found in sorted(pages.items())}
+
+
 def build_policy_links(
     *,
     claim_facts: Sequence[Mapping[str, Any]],
