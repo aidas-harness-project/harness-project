@@ -556,3 +556,92 @@ def require_open_attempt(case_id: str, run_id: str) -> None:
         raise RuntimeError(
             "BLOCKED: screening_report must be in_progress; the orchestrator "
             "owns attempt state")
+
+
+def run(*, case_id: str, run_id: str, held_by: str) -> dict:
+    """Assemble and publish the screening report.
+
+    Gate order matters: P6 first. A pending conflict means the case has an
+    unadjudicated disagreement, and a triage document written over one tells a
+    professional the case is ready when it is not.
+    """
+    require_open_attempt(case_id, run_id)
+    conflicts = _dao_json(["check-conflicts-clear", case_id])
+    pending = (conflicts or {}).get("pending") or []
+    if pending:
+        raise RuntimeError(
+            "BLOCKED: P6 -- the case has unresolved conflict ledger entries: "
+            + ", ".join(pending))
+    deferred = (conflicts or {}).get("deferred_to_report") or []
+
+    claim_analysis = _dao_json(
+        ["read-contract", case_id, "claim_analysis_result.json",
+         "--run-id", run_id])
+    consistency = _dao_json(
+        ["read-contract", case_id, "evidence_validation_result.json",
+         "--run-id", run_id], allow_missing=True) or {"checks": []}
+    denial = _dao_json(
+        ["read-contract", case_id, "denial_reason_result.json",
+         "--run-id", run_id], allow_missing=True)
+    judgement = _dao_json(
+        ["read-contract", case_id, "screening_report_judgement.json",
+         "--run-id", run_id], allow_missing=True)
+
+    ledger = _dao_json(["read-conflict-ledger", case_id], allow_missing=True) or {}
+    entries = {row["conflict_id"]: row for row in ledger.get("conflicts") or []}
+
+    config = json.loads(
+        (ROOT / "config" / "claim_analysis" /
+         "claim_analysis_routing_v0.1.json").read_text(encoding="utf-8"))
+
+    report = build_report(
+        case_id=case_id, run_id=run_id, claim_analysis=claim_analysis,
+        consistency=consistency, config=config, conflict_entries=entries,
+        deferred_conflict_ids=deferred, denial_reasons=denial,
+        agent_judgement=judgement,
+    )
+    if denial:
+        # A derived contract must record which reason set it was built from;
+        # the DAO refuses the write otherwise, and would refuse it again later
+        # if that set changed underneath.
+        import _cross_contract
+        report["source_denial_contract_hash"] = _cross_contract.upstream_hash(denial)
+
+    data_file = _temp_json(report)
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(DAO), "write-contract", case_id, CONTRACT,
+             "--data-file", str(data_file), "--schema-name", SCHEMA,
+             "--held-by", held_by, "--run-id", run_id, "--stage", STAGE],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+        if proc.returncode:
+            raise RuntimeError((proc.stdout or proc.stderr or "").strip())
+    finally:
+        data_file.unlink(missing_ok=True)
+    return {
+        "inconsistencies": len(report["inconsistencies"]),
+        "deferred_carried": len(deferred),
+        "has_denial": report["insurer_position"]["has_denial"],
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("case_id")
+    parser.add_argument("--held-by", required=True)
+    parser.add_argument("--run-id", required=True)
+    args = parser.parse_args(argv)
+    try:
+        print(json.dumps(run(case_id=args.case_id, run_id=args.run_id,
+                             held_by=args.held_by),
+                         ensure_ascii=False, sort_keys=True))
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

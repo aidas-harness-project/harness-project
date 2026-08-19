@@ -198,6 +198,67 @@ def plan_field(
     return plan
 
 
+def route_activation_condition(
+    field_row: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> str:
+    """The activation condition of the route this field is on."""
+    route_id = field_row.get("source_route_id")
+    if route_id is None:
+        return "always"
+    route = _by_route_id(config).get(route_id) or {}
+    return route.get("activation_condition", "always")
+
+
+def route_source_kind(
+    field_row: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> str:
+    route_id = field_row.get("source_route_id")
+    if route_id is None:
+        return "medical_document"
+    route = _by_route_id(config).get(route_id) or {}
+    return route.get("source_kind", "medical_document")
+
+
+def document_field_map(
+    plans: Sequence[FieldPlan],
+) -> dict[str, list[tuple[str, int]]]:
+    """Invert the per-field ladders into (document -> fields it can answer).
+
+    This is what makes one read serve many fields. Planning A and B together
+    and inverting the result means a document is opened once for every field it
+    is on the ladder for, instead of once per field per wave. The rank travels
+    with the field, so a value picked up here still records the rung of ITS OWN
+    route rather than the order the document happened to be opened in.
+    """
+    by_document: dict[str, list[tuple[str, int]]] = {}
+    for plan in plans:
+        for step in plan.steps:
+            for document_id in step.document_ids:
+                entries = by_document.setdefault(document_id, [])
+                if not any(field_id == plan.field_id for field_id, _ in entries):
+                    entries.append((plan.field_id, step.priority_rank))
+    return by_document
+
+
+def ordered_documents(plans: Sequence[FieldPlan]) -> list[str]:
+    """Documents in the order the priority ladders reach them.
+
+    Rank 1 sources first, so the stop rule still sees the most authoritative
+    document before any fallback, even though the reads are now organised by
+    document rather than by field.
+    """
+    ranked: dict[str, int] = {}
+    for plan in plans:
+        for step in plan.steps:
+            for document_id in step.document_ids:
+                current = ranked.get(document_id)
+                if current is None or step.priority_rank < current:
+                    ranked[document_id] = step.priority_rank
+    return [doc for doc, _ in sorted(ranked.items(), key=lambda kv: (kv[1], kv[0]))]
+
+
 def plan_wave(
     config: Mapping[str, Any],
     documents: Sequence[DocumentRef],

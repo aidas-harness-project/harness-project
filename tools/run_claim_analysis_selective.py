@@ -35,6 +35,7 @@ re-verifies exact ranges and the medical revision at write time.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -44,6 +45,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import claim_analysis_case_types as case_types_mod
+import claim_analysis_extraction as extraction
+import trace as trace_mod
+from llm_providers import add_provider_args, build_provider, parse_provider_config
 import claim_analysis_selection as selection
 import medical_document_routing as routing
 
@@ -321,6 +325,330 @@ def resolve_field(
     return outcome
 
 
+class DocumentCache:
+    """Every provider read of a document, kept for the rest of the run.
+
+    The budget is one provider call per document per RUN, not per wave. Wave A
+    and wave B plans are computed together and inverted to (document -> fields),
+    so opening a document extracts every field it is on the ladder for at once;
+    wave B and the critical-field comparison then read this cache. A wave
+    boundary orders the stop rule's priority -- it does not buy a second read.
+
+    `calls` is what the trace publishes, so "at most once" is a recorded number
+    rather than a claim about the code.
+    """
+
+    def __init__(self, extract) -> None:
+        self._extract = extract
+        self._results: dict[str, dict[str, Any]] = {}
+        self.calls: dict[str, int] = {}
+        self.order: list[str] = []
+
+    def read(
+        self,
+        document_id: str,
+        kind: str | None,
+        field_rows: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Structured result for this document, reading it at most once."""
+        if document_id in self._results:
+            return self._results[document_id]
+        found = self._extract(document_id, kind, list(field_rows)) or {}
+        self._results[document_id] = found
+        self.calls[document_id] = self.calls.get(document_id, 0) + 1
+        self.order.append(document_id)
+        return found
+
+    def cached(self, document_id: str) -> dict[str, Any] | None:
+        return self._results.get(document_id)
+
+    def was_read(self, document_id: str) -> bool:
+        return document_id in self._results
+
+
+def industrial_trigger_active(
+    outcomes: Mapping[str, "FieldExtractionOutcome"],
+    assessments: Sequence[Mapping[str, Any]] = (),
+) -> bool:
+    """Whether the industrial-accident filing route may open anything.
+
+    Two independent triggers, per the routing config's
+    `industrial_accident_filed_or_applicable`: an explicit work-activity fact
+    already extracted, or the industrial_accident case type coming back
+    applicable. Absent both, the route contributes nothing and costs no read --
+    which is the point of gating it rather than always running it.
+    """
+    for assessment in assessments:
+        if (assessment.get("case_type") == "industrial_accident"
+                and assessment.get("status") == "applicable"):
+            return True
+    outcome = outcomes.get("work_activity_context")
+    if outcome is not None and outcome.status == "asserted":
+        for observation in outcome.observations:
+            if observation.get("value") == "work_activity":
+                return True
+    return False
+
+
+def resolve_from_cache(
+    plan: selection.FieldPlan,
+    field_row: Mapping[str, Any],
+    config: Mapping[str, Any],
+    cache: DocumentCache,
+    page_text: Mapping[tuple[str, int], str],
+    observation_ids,
+) -> FieldExtractionOutcome:
+    """Walk one field's priority ladder against the document cache.
+
+    Identical stop rule to before -- first trusted value wins, a critical field
+    buys one extra independent source -- but every read here is a cache lookup:
+    the documents were opened once, up front, for every field they can answer.
+    """
+    outcome = FieldExtractionOutcome(
+        field_id=plan.field_id,
+        domain_code=plan.domain_code,
+        grade=field_row["medical_advisory_grade"],
+    )
+    if plan.skip_reason is not None:
+        outcome.status = "unavailable"
+        outcome.stop_reason = "sources_exhausted"
+        outcome.unavailable_reason = "source_document_missing"
+        outcome.reason = plan.skip_reason
+        return outcome
+
+    budget = selection.comparison_budget(field_row, config)
+    trusted: dict | None = None
+
+    for step in plan.steps:
+        for document_id, kind in zip(step.document_ids, step.document_kinds):
+            if trusted is not None and outcome.comparisons >= budget:
+                break
+            document = cache.cached(document_id)
+            if document is None:
+                continue
+            found = document.get(plan.field_id)
+            outcome.documents_read += 1
+            if not found:
+                continue
+            text = page_text.get((document_id, found.get("page")))
+            if text is None:
+                continue
+            reference = build_reference(
+                document_id, found["page"], found["quote"], text)
+            if reference is None:
+                # An unverifiable or ambiguous quote is dropped, never repaired.
+                continue
+            if not selection.is_trusted_value(
+                from_priority_source=True,
+                has_exact_quote=True,
+                complete=bool(found.get("complete", True)),
+                unambiguous=bool(found.get("unambiguous", True)),
+            ):
+                continue
+            observation = {
+                "observation_id": next(observation_ids),
+                "value_state": "asserted",
+                "value": found["value"],
+                "source_document_kind": kind,
+                # The rung of THIS field's route, not the read order.
+                "source_priority_rank": step.priority_rank,
+                "extraction_wave": plan.wave,
+                "evidence_references": [reference],
+            }
+            outcome.observations.append(observation)
+            if trusted is None:
+                trusted = observation
+                if budget == 0:
+                    break
+            else:
+                outcome.comparisons += 1
+                if _values_disagree(trusted["value"], observation["value"]):
+                    outcome.status = "conflict"
+                    outcome.stop_reason = "conflict_found"
+                    outcome.selected_ids = []
+                    outcome.reason = (
+                        "two independent priority sources state different "
+                        "values for this field; both readings are preserved "
+                        "for consistency_check to verify"
+                    )
+                    return outcome
+                break
+        if trusted is not None and outcome.comparisons >= budget:
+            break
+
+    if trusted is not None:
+        outcome.status = "asserted"
+        outcome.stop_reason = "trusted_value_found"
+        outcome.selected_ids = [trusted["observation_id"]]
+        outcome.reason = "a trusted value was found in the highest available priority source"
+    return outcome
+
+
+def resolve_opportunistic(
+    plan: selection.FieldPlan,
+    field_row: Mapping[str, Any],
+    cache: DocumentCache,
+    page_text: Mapping[tuple[str, int], str],
+    observation_ids,
+) -> FieldExtractionOutcome:
+    """An opportunistic field: ride along, never pay for a read.
+
+    Two constraints, both from the routing config. The value may only come from
+    a document ALREADY read, and only from one on this field's own route -- an
+    open document that the field does not route to is not a source for it. The
+    recorded rank is the route's, so a ride-along is never mistaken for a
+    higher-priority reading.
+    """
+    outcome = FieldExtractionOutcome(
+        field_id=plan.field_id,
+        domain_code=plan.domain_code,
+        grade=field_row["medical_advisory_grade"],
+    )
+    outcome.unavailable_reason = "not_mentioned"
+    outcome.reason = (
+        "no already-open document on this field's route stated it, and an "
+        "opportunistic field never opens one of its own"
+    )
+    for step in plan.steps:
+        for document_id, kind in zip(step.document_ids, step.document_kinds):
+            if not cache.was_read(document_id):
+                continue
+            found = (cache.cached(document_id) or {}).get(plan.field_id)
+            if not found:
+                continue
+            text = page_text.get((document_id, found.get("page")))
+            if text is None:
+                continue
+            reference = build_reference(
+                document_id, found["page"], found["quote"], text)
+            if reference is None:
+                continue
+            observation = {
+                "observation_id": next(observation_ids),
+                "value_state": "asserted",
+                "value": found["value"],
+                "source_document_kind": kind,
+                "source_priority_rank": step.priority_rank,
+                "extraction_wave": "opportunistic",
+                "evidence_references": [reference],
+            }
+            outcome.observations.append(observation)
+            outcome.status = "asserted"
+            outcome.stop_reason = "trusted_value_found"
+            outcome.selected_ids = [observation["observation_id"]]
+            outcome.reason = "picked up from a document already open on this field's route"
+            return outcome
+    return outcome
+
+
+def extract_all(
+    *,
+    config: Mapping[str, Any],
+    documents: Sequence[selection.DocumentRef],
+    extract,
+    page_text: Mapping[tuple[str, int], str],
+    observation_ids,
+    non_medical_reader=None,
+) -> tuple[list[FieldExtractionOutcome], DocumentCache]:
+    """The whole read plan: one pass over documents, then resolve every field.
+
+    Order matters and is deliberate:
+
+    1. Plan A and B together, invert to (document -> fields).
+    2. Read each document ONCE, extracting every field it can answer.
+    3. Resolve A fields, then B, from the cache.
+    4. Opportunistic fields ride along on what is already open.
+    5. Only then evaluate the industrial filing route, which is conditional on
+       facts step 3 produced -- and which reads administrative sources, never
+       an additional medical document.
+    """
+    plans = (selection.plan_wave(config, documents, "A")
+             + selection.plan_wave(config, documents, "B"))
+    conditional = {
+        row["field_id"] for row in config.get("fields") or []
+        if selection.route_activation_condition(row, config) != "always"
+    }
+    unconditional = [p for p in plans if p.field_id not in conditional]
+
+    by_field_row = {row["field_id"]: row for row in config.get("fields") or []}
+    kind_by_document = {ref.document_id: ref.kind for ref in documents}
+
+    cache = DocumentCache(extract)
+    for document_id in selection.ordered_documents(unconditional):
+        field_ids = [
+            field_id for field_id, _ in
+            selection.document_field_map(unconditional).get(document_id, [])
+        ]
+        cache.read(document_id, kind_by_document.get(document_id),
+                   [by_field_row[f] for f in field_ids if f in by_field_row])
+
+    outcomes: list[FieldExtractionOutcome] = []
+    by_field: dict[str, FieldExtractionOutcome] = {}
+    for plan in unconditional:
+        outcome = resolve_from_cache(
+            plan, by_field_row[plan.field_id], config, cache, page_text,
+            observation_ids)
+        outcomes.append(outcome)
+        by_field[plan.field_id] = outcome
+
+    for field_row in selection.opportunistic_fields(config):
+        plan = selection.plan_field(field_row, config, documents)
+        outcome = resolve_opportunistic(
+            plan, field_row, cache, page_text, observation_ids)
+        outcomes.append(outcome)
+        by_field[field_row["field_id"]] = outcome
+
+    # Conditional routes last: their trigger is a fact the pass above produced.
+    if conditional:
+        active = industrial_trigger_active(by_field)
+        for field_id in sorted(conditional):
+            field_row = by_field_row[field_id]
+            outcome = FieldExtractionOutcome(
+                field_id=field_id,
+                domain_code=field_row["domain_code"],
+                grade=field_row["medical_advisory_grade"],
+            )
+            if not active:
+                outcome.status = "unavailable"
+                outcome.stop_reason = "sources_exhausted"
+                outcome.unavailable_reason = "not_mentioned"
+                outcome.reason = (
+                    "no industrial-accident filing or applicable verdict was "
+                    "established, so the filing route never activated"
+                )
+                outcomes.append(outcome)
+                continue
+            found = non_medical_reader(field_row) if non_medical_reader else None
+            if not found:
+                outcome.status = "unavailable"
+                outcome.stop_reason = "sources_exhausted"
+                outcome.unavailable_reason = "source_document_missing"
+                outcome.reason = (
+                    "the filing route activated but the case holds neither an "
+                    "intake declaration nor a filing record stating this field"
+                )
+                outcomes.append(outcome)
+                continue
+            observation = {
+                "observation_id": next(observation_ids),
+                "value_state": "asserted",
+                "value": found["value"],
+                "source_document_kind": found.get(
+                    "source_document_kind", "other_medical"),
+                "source_priority_rank": 1,
+                "extraction_wave": "B",
+                "evidence_references": [found["evidence_reference"]],
+            }
+            outcome.status = "asserted"
+            outcome.stop_reason = "trusted_value_found"
+            outcome.observations = [observation]
+            outcome.selected_ids = [observation["observation_id"]]
+            outcome.reason = "stated by an industrial-accident filing source"
+            outcomes.append(outcome)
+
+    return outcomes, cache
+
+
 def _observation_id_sequence(start: int = 1):
     counter = start
     while True:
@@ -596,3 +924,108 @@ def require_enabled(config: Mapping[str, Any]) -> None:
             "BLOCKED: selective claim analysis is disabled "
             "(behavior_enabled=false). Activation requires a recorded "
             "`activation` block in the routing config.")
+
+
+# ------------------------------------------------------------------- run --
+
+def pages_by_document(bundle: Mapping[str, Any]) -> dict[str, list[dict]]:
+    return {
+        document["document_id"]: list(document.get("pages") or [])
+        for document in bundle.get("documents") or []
+    }
+
+
+def run(
+    *,
+    case_id: str,
+    run_id: str,
+    held_by: str,
+    provider,
+    medical_revision_context: Mapping[str, Any] | None = None,
+) -> dict:
+    """The whole stage: plan, read once per document, resolve, publish.
+
+    Reads and writes go through the DAO. Run state is not touched -- T13 keeps
+    update-run-state and finalize-stage with the orchestrator, so this refuses
+    to start unless the orchestrator already opened the attempt.
+    """
+    config = routing.load_routing_config()
+    require_enabled(config)
+    require_open_attempt(case_id, run_id)
+
+    manifest = _dao_json(["read-contract", case_id, "_document_manifest.json",
+                          "--run-id", run_id])
+    documents = classified_documents(manifest)
+    readable = [ref.document_id for ref in documents
+                if ref.kind is not None and not ref.ambiguous]
+    bundle = (_dao_json(["read-redacted-text-bundle", case_id]
+                        + [f"--doc-id={doc}" for doc in readable])
+              if readable else {"documents": []})
+    page_text = _page_text_index(bundle)
+
+    extract = extraction.make_reader(provider, pages_by_document(bundle))
+    observation_ids = _observation_id_sequence()
+    outcomes, cache = extract_all(
+        config=config, documents=documents, extract=extract,
+        page_text=page_text, observation_ids=observation_ids)
+
+    dispositions = []
+    presence_only = selection.presence_only_kinds(config)
+    for ref in documents:
+        if ref.kind in presence_only:
+            disposition = "presence_only"
+        elif cache.was_read(ref.document_id):
+            disposition = "read"
+        else:
+            disposition = "not_read"
+        dispositions.append({
+            "document_id": ref.document_id,
+            "document_kind": ref.kind,
+            "disposition": disposition,
+            "provider_calls": cache.calls.get(ref.document_id, 0),
+        })
+
+    result = build_result(
+        case_id=case_id, run_id=run_id, outcomes=outcomes, config=config,
+        documents=documents, medical_revision_context=medical_revision_context,
+        model_name=getattr(provider, "model_name", "unknown"),
+    )
+    trace = build_trace(
+        case_id=case_id, run_id=run_id, config=config, outcomes=outcomes,
+        document_dispositions=dispositions,
+        provider_calls=sum(cache.calls.values()),
+    )
+    publish(case_id=case_id, run_id=run_id, held_by=held_by,
+            result=result, trace=trace)
+    return {
+        "documents_considered": len(dispositions),
+        "documents_read": sum(1 for row in dispositions
+                              if row["disposition"] == "read"),
+        "provider_calls": sum(cache.calls.values()),
+        "conflict_candidates": len(result["conflict_candidates"]),
+        "asserted_fields": sum(1 for row in result["claim_facts"]
+                               if row["resolution_status"] == "asserted"),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("case_id")
+    parser.add_argument("--held-by", required=True)
+    parser.add_argument("--run-id", required=True)
+    add_provider_args(parser)
+    args = parser.parse_args(argv)
+    trace_mod.configure_from_args(args)
+    try:
+        provider = build_provider(parse_provider_config(args))
+        print(json.dumps(run(case_id=args.case_id, run_id=args.run_id,
+                             held_by=args.held_by, provider=provider),
+                         ensure_ascii=False, sort_keys=True))
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
