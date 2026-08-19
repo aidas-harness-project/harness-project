@@ -378,6 +378,14 @@ def industrial_trigger_active(
     already extracted, or the industrial_accident case type coming back
     applicable. Absent both, the route contributes nothing and costs no read --
     which is the point of gating it rather than always running it.
+
+    The accepted values come from `case_types.WORK_SUPPORTING`, the same set
+    the case-type verdict uses, and are deliberately not restated here. They
+    had drifted: the verdict accepted `work_activity` and `on_duty` while this
+    gate accepted only the first, so a case recorded as `on_duty` could be
+    ruled 산재 `applicable` by one rule and denied the administrative route by
+    the other. Two independent copies of one policy is how that happens; one
+    constant is why it cannot happen again.
     """
     for assessment in assessments:
         if (assessment.get("case_type") == "industrial_accident"
@@ -386,7 +394,7 @@ def industrial_trigger_active(
     outcome = outcomes.get("work_activity_context")
     if outcome is not None and outcome.status == "asserted":
         for observation in outcome.observations:
-            if observation.get("value") == "work_activity":
+            if observation.get("value") in case_types_mod.WORK_SUPPORTING:
                 return True
     return False
 
@@ -552,7 +560,7 @@ class FieldProgress:
     """
 
     __slots__ = ("plan", "field_row", "budget", "step_index", "doc_index",
-                 "trusted", "outcome", "done")
+                 "trusted", "outcome", "done", "rank_by_document")
 
     def __init__(self, plan, field_row, budget: int, outcome) -> None:
         self.plan = plan
@@ -563,6 +571,24 @@ class FieldProgress:
         self.trusted: dict | None = None
         self.outcome = outcome
         self.done = False
+        # Every document anywhere on this field's ladder, with the rung it sits
+        # on. Used to answer "may this field legitimately be extracted from
+        # this document?" for a document being opened NOW on someone else's
+        # behalf -- which is a different question from "is this the document
+        # the field wants next?".
+        self.rank_by_document: dict[str, int] = {}
+        for step in plan.steps:
+            for document_id in step.document_ids:
+                self.rank_by_document.setdefault(
+                    document_id, step.priority_rank)
+
+    def routes_to(self, document_id: str) -> bool:
+        """Whether this field may ever be read from `document_id`.
+
+        A field is only ever extracted from a document its own route ranks --
+        an open document it does not route to is not a source for it.
+        """
+        return document_id in self.rank_by_document
 
     def next_document(self) -> tuple[str, str] | None:
         """The next (document_id, kind) this field still wants to read.
@@ -792,8 +818,29 @@ def extract_all(
         document_id = sorted(wanted, key=lambda d: (best_rank[d], d))[0]
         askers = wanted[document_id]
         kind = kind_by_document.get(document_id)
-        document = cache.read(
-            document_id, kind, [item.field_row for item in askers])
+
+        # The document is opened once and never again, so this one call must
+        # ask for everything it will EVER be asked for. `askers` are the fields
+        # whose ladder points here now; `latecomers` are still-open fields that
+        # rank this document further down their own ladder and would otherwise
+        # arrive after the only call was already made -- finding a cache entry
+        # that never contained their field and recording `unavailable` for a
+        # fact the document plainly states.
+        #
+        # Extracting for them costs no extra provider call: they ride the call
+        # that was happening anyway. What they do NOT get is early adoption --
+        # their answer is held in the cache and consumed only when their own
+        # ladder reaches this rung, so priority order is unaffected.
+        asking_ids = {item.plan.field_id for item in askers}
+        latecomers = [
+            item for item in progress
+            if not item.done
+            and item.plan.field_id not in asking_ids
+            and item.routes_to(document_id)
+        ]
+        field_rows = ([item.field_row for item in askers]
+                      + [item.field_row for item in latecomers])
+        document = cache.read(document_id, kind, field_rows)
         for item in askers:
             _consume(item, document_id, kind,
                      document.get(item.plan.field_id), page_text,
@@ -833,13 +880,17 @@ def extract_all(
                 continue
             found = non_medical_reader(field_row) if non_medical_reader else None
             if not found:
+                # The trigger fired but there is no administrative source to
+                # read -- and while none is produced anywhere, this is the only
+                # branch reachable. `outside_poc_scope` rather than
+                # `source_document_missing`: the case is not missing a
+                # document, the pipeline is missing a producer, and recording
+                # it as a records gap would send someone looking for a file
+                # nobody was ever going to write.
                 outcome.status = "unavailable"
                 outcome.stop_reason = "sources_exhausted"
-                outcome.unavailable_reason = "source_document_missing"
-                outcome.reason = (
-                    "the filing route activated but the case holds neither an "
-                    "intake declaration nor a filing record stating this field"
-                )
+                outcome.unavailable_reason = "outside_poc_scope"
+                outcome.reason = FILING_ROUTE_DEFERRED_REASON
                 outcomes.append(outcome)
                 continue
             observation = {
@@ -874,6 +925,31 @@ def _candidate_id_sequence(start: int = 1):
     while True:
         yield f"CAC_{counter:04d}"
         counter += 1
+
+
+def assign_conflict_candidate_ids(
+    outcomes: Sequence[FieldExtractionOutcome],
+) -> dict[str, list[str]]:
+    """Conflict candidate ids, decided ONCE for the whole run.
+
+    Two artifacts need these ids and they must be the same ids: the result's
+    `conflict_candidates` list, and the `conflict_candidate_ids` on any policy
+    requirement resting on a disputed fact. Generating them independently in
+    two places produced the defect this function exists to remove -- the policy
+    side was handed an empty list, so a requirement whose underlying fact was
+    in dispute published `evidence_status: supported` and cited nothing.
+
+    Ordering is deterministic by construction: `outcomes` is built in plan
+    order, so CAC_0001 is always the same field for the same inputs. Nothing
+    downstream may mint an id of its own -- `build_result` takes this mapping
+    rather than reproducing it.
+    """
+    candidate_ids = _candidate_id_sequence()
+    assigned: dict[str, list[str]] = {}
+    for outcome in outcomes:
+        if outcome.status == "conflict":
+            assigned[outcome.field_id] = [next(candidate_ids)]
+    return assigned
 
 
 def field_result(
@@ -957,11 +1033,19 @@ def build_result(
     medical_revision_context: Mapping[str, Any] | None = None,
     policy_links: Sequence[Mapping[str, Any]] = (),
     filing_status_by_type: Mapping[str, str] | None = None,
+    conflict_candidate_ids_by_field: Mapping[str, Sequence[str]] | None = None,
     model_name: str = "deterministic",
     prompt_version: str = VERSION,
 ) -> dict:
     by_field = {row["field_id"]: row for row in config.get("fields") or []}
-    candidate_ids = _candidate_id_sequence()
+    # Single ownership: the ids were decided by `assign_conflict_candidate_ids`
+    # before policy linking, so both artifacts cite the same ones. The fallback
+    # is for callers that assemble a result with no policy layer at all; it
+    # runs the same deterministic assignment, never a second numbering
+    # alongside one already handed out.
+    assigned = dict(conflict_candidate_ids_by_field
+                    if conflict_candidate_ids_by_field is not None
+                    else assign_conflict_candidate_ids(outcomes))
 
     claim_facts: list[dict] = []
     conflict_candidates: list[dict] = []
@@ -969,7 +1053,12 @@ def build_result(
         field_row = by_field[outcome.field_id]
         attached: list[str] = []
         if outcome.status == "conflict":
-            candidate_id = next(candidate_ids)
+            candidate_id = (list(assigned.get(outcome.field_id) or [None]) or [None])[0]
+            if candidate_id is None:
+                raise RuntimeError(
+                    f"no conflict candidate id was assigned for conflicting "
+                    f"field {outcome.field_id!r}; ids are assigned once per run "
+                    "and reused, never minted here")
             attached.append(candidate_id)
             conflict_candidates.append({
                 "conflict_candidate_id": candidate_id,
@@ -1139,110 +1228,95 @@ def require_enabled(config: Mapping[str, Any]) -> None:
             "`activation` block in the routing config.")
 
 
-def _policy_page_text(case_id: str, manifest: Mapping[str, Any]) -> dict:
-    """Processed text for the case's policy documents only.
+def _policy_page_text(
+    case_id: str,
+    pages_by_document: Mapping[str, Sequence[int]],
+    *,
+    run_id: str | None = None,
+) -> dict:
+    """Processed text for exactly the policy pages a clause check needs.
 
-    Read separately from the medical bundle because the two serve different
-    questions and the policy documents are large; pulling them into the medical
-    read would hand a policy bundle to the extraction prompt.
+    Not the policy documents -- the PAGES. The index has already said which
+    page each candidate clause sits on, so the read is narrowed with
+    `--pages DOC=n,m` and never pulls a whole 약관 bundle. That matters for a
+    reason beyond tidiness: a policy bundle is routinely the largest artifact
+    in a case (on CASE_027 two of them were 81% of the stage's input while five
+    pages were cited), and a whole-bundle read makes the trace unable to say
+    how much of it the stage actually needed.
+
+    `--run-id` is passed so the read is attributed to this run rather than
+    landing in unattributed time, which is what makes "how much policy text did
+    verification cost?" an answerable question instead of an estimate.
+
+    An empty selection reads nothing at all: with no candidate clause there is
+    no quote to verify, so there is no page worth fetching.
     """
-    doc_ids = policy_link_builder.policy_document_ids(manifest)
-    if not doc_ids:
+    wanted = {document_id: list(pages)
+              for document_id, pages in (pages_by_document or {}).items()
+              if pages}
+    if not wanted:
         return {}
-    bundle = _dao_json(["read-redacted-text-bundle", case_id]
-                       + [f"--doc-id={doc}" for doc in doc_ids],
-                       allow_missing=True)
+    args = ["read-redacted-text-bundle", case_id]
+    for document_id, pages in sorted(wanted.items()):
+        args.append(f"--doc-id={document_id}")
+        args.append(f"--pages={document_id}=" + ",".join(
+            str(page) for page in sorted(pages)))
+    if run_id:
+        args.append(f"--run-id={run_id}")
+    bundle = _dao_json(args, allow_missing=True)
     return _page_text_index(bundle or {"documents": []})
 
 
 # ------------------------------------------- intake / administrative reads --
+#
+# **DEFERRED, and deliberately not implemented.** The three industrial-accident
+# filing fields need an administrative source: whether a 산재 claim was filed,
+# whether it was approved, and for which 상병. No stage in this repository
+# produces one. There is no schema for such a declaration, no DAO subcommand
+# that writes it, no `medical_document_kind` for an administrative form (and
+# adding one would pollute Stage 2's classification contract), and no intake
+# step that records it.
+#
+# An earlier revision read two filenames -- `_intake_declaration.json` and
+# `_industrial_accident_filing.json` -- that nothing anywhere creates. Tests
+# passed because their fixtures wrote the files themselves. That is a phantom
+# contract: code shaped like an integration, with no producer at the other end,
+# reporting a capability the pipeline does not have. Removed rather than left
+# in place, because a reader cannot tell a phantom from a real seam.
+#
+# Until a real producer exists, the honest result is `unknown`:
+#
+# * filing status stays `unknown` for every case type, and
+# * the three filing fields resolve `unavailable` with a reason naming the
+#   missing input rather than a missing document.
+#
+# What must NOT happen in the meantime, and is the reason this is a comment
+# rather than a heuristic: filing is never inferred from the accident. "Injured
+# at work" makes the industrial case type applicable and says nothing whatever
+# about whether a claim was filed. `not_filed` remains reachable only from a
+# source that states it -- silence is `unknown`, permanently.
+#
+# Building it properly means one change carrying all of: a schema, DAO
+# validation, a named writer, a real path from intake or a classified
+# administrative document, exact-quote verification, a consumer, and an E2E
+# test. See `open-decisions.md`.
 
-INTAKE_CONTRACT = "_intake_declaration.json"
-FILING_CONTRACT = "_industrial_accident_filing.json"
-
-# Filing status is a fact somebody recorded, never one inferred from how the
-# accident happened. "Injured at work" says nothing about whether a claim was
-# filed, and treating it as if it did would manufacture an administrative fact
-# out of a clinical one.
-FILING_FIELD_SOURCES = {
-    "industrial_accident_filing_basis": "filing_basis",
-    "industrial_accident_approval_status": "approval_status",
-    "industrial_accident_approved_diagnosis": "approved_diagnosis",
-}
+FILING_ROUTE_DEFERRED_REASON = (
+    "the industrial-accident filing route has no producer in this pipeline: "
+    "no stage records filing, approval, or approved diagnosis, so the status "
+    "is unknown rather than absent (deferred, see open-decisions.md)"
+)
 
 
-def read_filing_sources(case_id: str, run_id: str) -> dict:
-    """Administrative filing material for the case, or {} when there is none.
+def filing_status_by_case_type() -> dict[str, str]:
+    """Per-case-type filing status: empty while no producer exists.
 
-    Both contracts are optional and read through the DAO like everything else.
-    Their absence is a fact about the records -- the caller reports
-    `unavailable`/`source_document_missing`, never `not_filed`.
+    An empty mapping means every type reports `unknown`, which is what
+    `assess_case_types` already does for a type it is given nothing about.
+    Returning `not_filed` here would assert that no claim was filed -- a fact
+    nobody recorded.
     """
-    sources: dict = {}
-    for contract in (INTAKE_CONTRACT, FILING_CONTRACT):
-        payload = _dao_json(
-            ["read-contract", case_id, contract, "--run-id", run_id],
-            allow_missing=True)
-        if isinstance(payload, dict):
-            sources[contract] = payload
-    return sources
-
-
-def filing_status_from_sources(sources: Mapping[str, Any]) -> dict[str, str]:
-    """Per-case-type filing status, taken only from what a source states.
-
-    Anything unstated stays `unknown`. Silence is never promoted to
-    `not_filed`: nobody recorded that no claim was filed, so asserting it would
-    be this stage inventing an administrative finding.
-    """
-    status: dict[str, str] = {}
-    for payload in sources.values():
-        declared = payload.get("filing_status_by_case_type")
-        if not isinstance(declared, dict):
-            continue
-        for case_type, value in declared.items():
-            if value in {"filed", "not_filed", "unknown"}:
-                status[case_type] = value
-    return status
-
-
-def make_filing_reader(sources: Mapping[str, Any]):
-    """A `non_medical_reader(field_row)` over the administrative contracts.
-
-    Returns None whenever the material does not state the field, which the
-    caller records as unavailable. It never opens a medical document -- the
-    route that calls this ranks no medical kinds at all.
-    """
-
-    def reader(field_row: Mapping[str, Any]) -> dict | None:
-        key = FILING_FIELD_SOURCES.get(field_row["field_id"])
-        if key is None:
-            return None
-        for payload in sources.values():
-            entry = payload.get(key)
-            if not isinstance(entry, dict):
-                continue
-            value, quote = entry.get("value"), entry.get("quote")
-            document_id, page = entry.get("document_id"), entry.get("page")
-            if value is None or not isinstance(quote, str) or not quote.strip():
-                continue
-            if not isinstance(document_id, str) or not isinstance(page, int):
-                continue
-            return {
-                "value": value,
-                "source_document_kind": entry.get(
-                    "source_document_kind", "other_medical"),
-                "evidence_reference": {
-                    "document_id": document_id,
-                    "page": page,
-                    "quote": quote,
-                    "start_char": int(entry.get("start_char", 0)),
-                    "end_char": int(entry.get("end_char", len(quote))),
-                },
-            }
-        return None
-
-    return reader
+    return {}
 
 
 def make_quote_verifier(page_text: Mapping[tuple[str, int], str]):
@@ -1303,26 +1377,58 @@ def run(
 
     extract = extraction.make_reader(provider, pages_by_document(bundle))
     observation_ids = _observation_id_sequence()
-    filing_sources = read_filing_sources(case_id, run_id)
+    # No `non_medical_reader`: nothing in this pipeline produces an
+    # administrative filing source, so the route resolves `unavailable` with
+    # the deferred reason rather than reading a file that does not exist.
     outcomes, cache = extract_all(
         config=config, documents=documents, extract=extract,
-        page_text=page_text, observation_ids=observation_ids,
-        non_medical_reader=make_filing_reader(filing_sources))
+        page_text=page_text, observation_ids=observation_ids)
 
+    # The shape here is the trace schema's, not a convenient one: `disposition`
+    # has no `not_read` member (an unread document is `skipped`), `wave` and
+    # `reason` and `field_ids` are required, and the kind field is
+    # `medical_document_kind`. The previous shape (`document_kind`,
+    # `provider_calls`, `disposition: not_read`) failed validation on all four
+    # counts, so every real trace write would have been refused -- invisible in
+    # tests, because they assembled the dict and asserted on it without ever
+    # validating it against the schema it is written under.
     dispositions = []
     presence_only = selection.presence_only_kinds(config)
+    fields_by_document = selection.document_field_map(
+        selection.plan_wave(config, documents, "A")
+        + selection.plan_wave(config, documents, "B"))
     for ref in documents:
+        routed = sorted({field_id for field_id, _rank
+                         in fields_by_document.get(ref.document_id, [])})
         if ref.kind in presence_only:
-            disposition = "presence_only"
+            disposition, wave = "presence_only", "not_read"
+            reason = ("a cost document: its presence answers the checklist, "
+                      "and it is never opened for content")
+        elif ref.ambiguous:
+            disposition, wave = "ambiguous", "not_read"
+            reason = "Stage 2 could not resolve a form kind, so it is not routed"
         elif cache.was_read(ref.document_id):
             disposition = "read"
+            wave = "A" if any(
+                outcome.grade == "A" and outcome.field_id in set(routed)
+                for outcome in outcomes) else "B"
+            reason = (f"opened once for {len(routed)} routed field(s)"
+                      if routed else "opened for a routed field")
+        elif ref.kind is None:
+            disposition, wave = "skipped", "not_read"
+            reason = "no medical classification, so no route reaches it"
         else:
-            disposition = "not_read"
+            disposition, wave = "skipped", "not_read"
+            reason = ("every field routed here stopped at a higher-priority "
+                      "source before reaching it" if routed else
+                      "no field routes to this document kind")
         dispositions.append({
             "document_id": ref.document_id,
-            "document_kind": ref.kind,
             "disposition": disposition,
-            "provider_calls": cache.calls.get(ref.document_id, 0),
+            "wave": wave,
+            "reason": reason,
+            "field_ids": routed,
+            **({"medical_document_kind": ref.kind} if ref.kind else {}),
         })
 
     # Policy linking reads the layer `policy_clause_processing` already built.
@@ -1335,13 +1441,22 @@ def run(
          "resolution_status": outcome.status}
         for outcome in outcomes
     ]
-    conflicts_by_field = {
-        outcome.field_id: [] for outcome in outcomes
-        if outcome.status == "conflict"
-    }
+    # Decided once, here, and handed to BOTH consumers. Previously this map
+    # was built with empty lists, so every requirement resting on a disputed
+    # fact published `supported` and cited no candidate -- the disagreement
+    # existed in `conflict_candidates` and was invisible where a reviewer
+    # judging the clause would look for it.
+    conflicts_by_field = assign_conflict_candidate_ids(outcomes)
+    # Pages first, text second. The index names the candidate clauses and the
+    # page each sits on, so only those pages are fetched -- never the whole
+    # policy bundle, which was the previous behaviour and made the stage's real
+    # policy-read cost unmeasurable.
+    policy_pages = policy_link_builder.candidate_pages(
+        claim_facts=interim, manifest=manifest, index=index)
+    policy_text = _policy_page_text(case_id, policy_pages, run_id=run_id)
     policy_links = policy_link_builder.build_policy_links(
         claim_facts=interim, manifest=manifest, index=index,
-        verify_quote=make_quote_verifier(_policy_page_text(case_id, manifest)),
+        verify_quote=make_quote_verifier(policy_text),
         conflict_candidate_ids_by_field=conflicts_by_field,
     )
 
@@ -1350,7 +1465,8 @@ def run(
         documents=documents, medical_revision_context=medical_revision_context,
         model_name=getattr(provider, "model_name", "unknown"),
         policy_links=policy_links,
-        filing_status_by_type=filing_status_from_sources(filing_sources),
+        filing_status_by_type=filing_status_by_case_type(),
+        conflict_candidate_ids_by_field=conflicts_by_field,
     )
     cited = policy_link_builder.referenced_documents(policy_links)
     if cited:
@@ -1366,6 +1482,11 @@ def run(
         document_dispositions=dispositions,
         provider_calls=sum(cache.calls.values()),
     )
+    # Recorded so the policy-verification read scope is a number in the trace
+    # rather than something a reader has to infer from the code.
+    trace["metrics"]["policy_pages_read"] = sum(
+        len(pages) for pages in policy_pages.values())
+    trace["metrics"]["policy_documents_touched"] = len(policy_pages)
     publish(case_id=case_id, run_id=run_id, held_by=held_by,
             result=result, trace=trace)
     return {
