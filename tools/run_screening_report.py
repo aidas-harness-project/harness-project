@@ -126,6 +126,67 @@ def _first_value(facts: Mapping[str, Mapping[str, Any]], field_id: str) -> Any:
     return _selected_value(field)
 
 
+def _selected_evidence(field: Mapping[str, Any]) -> list[dict]:
+    """The exact citations behind the observation this field actually elected.
+
+    Only the SELECTED observation's references: an `asserted` field elects
+    exactly one reading, and the discarded ones are not evidence for the value
+    that was published. Trimmed to the three fields the narrative needs --
+    `start_char`/`end_char` stay upstream, where the DAO re-verifies them.
+    """
+    selected = set(field.get("selected_observation_ids") or [])
+    references: list[dict] = []
+    for observation in field.get("observations") or []:
+        if observation.get("observation_id") not in selected:
+            continue
+        for reference in observation.get("evidence_references") or []:
+            if not reference.get("document_id") or not reference.get("quote"):
+                continue
+            references.append({
+                "document_id": reference["document_id"],
+                "page": reference.get("page", 1),
+                "quote": reference["quote"],
+            })
+    return references
+
+
+def fact_evidence(
+    facts: Mapping[str, Mapping[str, Any]],
+    summary_fields: Mapping[str, str],
+) -> dict:
+    """Upstream evidence for each case-summary value that HAS one.
+
+    Keyed by the summary field so the narrative can cite per value rather than
+    per section: a section printing four facts of which two are grounded must
+    carry those two citations and invent nothing for the others.
+
+    A field with no asserted value contributes no key at all. That absence is
+    what the narrative renders as "확인 불가" -- it is never filled with a
+    citation borrowed from a neighbouring fact, which is exactly the
+    fabrication P1 exists to prevent.
+    """
+    evidence: dict[str, list[dict]] = {}
+    for summary_key, field_id in summary_fields.items():
+        field = facts.get(field_id)
+        if field is None or field.get("resolution_status") != "asserted":
+            continue
+        references = _selected_evidence(field)
+        if references:
+            evidence[summary_key] = references
+    return evidence
+
+
+# The case-summary values the narrative prints, and the claim fact each is read
+# from. One place, so the value and its citation cannot come from different
+# fields.
+SUMMARY_FACT_FIELDS = {
+    "accident_date": "accident_date",
+    "main_diagnosis": "primary_diagnosis",
+    "kcd_code": "diagnosis_code",
+    "treatment_period": "treatment_period",
+}
+
+
 def _as_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -166,6 +227,17 @@ def case_type_section(assessments: Sequence[Mapping[str, Any]]) -> list[dict]:
             "filing_status": assessment.get("filing_status", "unknown"),
             "filing_status_label": FILING_LABEL.get(
                 assessment.get("filing_status", "unknown"), "확인 불가"),
+            # Only ever what an upstream source recorded. While no stage
+            # produces a filing declaration, this is empty on every case and
+            # the status stays 확인 불가 -- which is the honest reading, not a
+            # gap to fill by inferring filing from how the accident happened.
+            "filing_evidence_references": [
+                {"document_id": reference["document_id"],
+                 "page": reference.get("page", 1),
+                 "quote": reference["quote"]}
+                for reference in assessment.get("filing_evidence_references") or []
+                if reference.get("document_id") and reference.get("quote")
+            ],
         })
     return rows
 
@@ -212,6 +284,16 @@ def existing_disability_documents(
             recorded is not None
             and recorded.get("resolution_status") == "resolved"
         ),
+        # Only when claim analysis actually read the form and asserted
+        # something from it. Presence in the checklist is a fact about the
+        # pack, not a quotable statement, so a case that merely HAS the
+        # document carries no citation here.
+        "evidence_references": (
+            _selected_evidence(recorded)
+            if recorded is not None
+            and recorded.get("resolution_status") == "asserted"
+            else []
+        ),
     }
 
 
@@ -242,6 +324,73 @@ def unconfirmed_section(
                 "resolution_reason", "자료에서 확인되지 않음"),
         })
     return sorted(rows, key=lambda row: row["field_id"])
+
+
+LINK_STATUS_LABEL = {
+    "matched": "조항 확인",
+    "candidate": "후보 조항",
+    "not_found": "조항 미확인",
+}
+REQUIREMENT_STATUS_LABEL = {
+    "supported": "자료 있음",
+    "contradicted": "자료와 상충",
+    "unknown": "자료 없음",
+    "uncertain": "불확실",
+    "conflict": "충돌 검토 필요",
+}
+
+
+def policy_links_section(links: Sequence[Mapping[str, Any]]) -> list[dict]:
+    """The clauses claim analysis linked, restated for a reader.
+
+    Copied, not recomputed. `matched` keeps its exact `clause_ref` so the
+    narrative can cite the clause text; `candidate` and `not_found` keep the
+    reason they are uncertain, because a reviewer needs to know whether the
+    policy was searched and came back ambiguous or was never there at all.
+
+    `conflict_candidate_ids` travel unchanged: a requirement resting on a
+    disputed fact must still point at that dispute after the hop, or the
+    screening report would present a clean requirement over a disagreement the
+    case actually recorded.
+    """
+    rows: list[dict] = []
+    for link in links:
+        status = link.get("clause_link_status", "not_found")
+        row = {
+            "coverage_id": link.get("coverage_id", ""),
+            "coverage_name": link.get("coverage_name", ""),
+            "clause_link_status": status,
+            "clause_link_status_label": LINK_STATUS_LABEL.get(status, status),
+            "uncertainty_reason": link.get("uncertainty_reason"),
+            "requirements": [],
+        }
+        reference = link.get("clause_ref")
+        if status == "matched" and isinstance(reference, dict):
+            row["clause_ref"] = {
+                "document_id": reference["document_id"],
+                "page": reference.get("page", 1),
+                "quote": reference["quote"],
+            }
+        for requirement in link.get("requirements") or []:
+            requirement_status = requirement.get("evidence_status", "unknown")
+            row["requirements"].append({
+                "requirement_id": requirement.get("requirement_id", ""),
+                "requirement_text": requirement.get("requirement_text", ""),
+                "evidence_status": requirement_status,
+                "evidence_status_label": REQUIREMENT_STATUS_LABEL.get(
+                    requirement_status, requirement_status),
+                "conflict_candidate_ids": list(
+                    requirement.get("conflict_candidate_ids") or []),
+                "reason": requirement.get("reason", ""),
+                "evidence_references": [
+                    {"document_id": item["document_id"],
+                     "page": item.get("page", 1), "quote": item["quote"]}
+                    for item in requirement.get("evidence_references") or []
+                    if item.get("document_id") and item.get("quote")
+                ],
+            })
+        rows.append(row)
+    return rows
 
 
 def build_report(
@@ -305,6 +454,11 @@ def build_report(
         # Additive, and the point of this report: the four verdicts side by
         # side rather than one collapsed "case type" string.
         "case_type_assessment": case_type_section(assessments),
+        # Per-value citations for the scalar facts above. The narrative reads
+        # these to attach evidence to the exact values it prints, so a
+        # displayed diagnosis is checkable and an unestablished one is visibly
+        # unestablished rather than silently uncited.
+        "fact_evidence": fact_evidence(facts, SUMMARY_FACT_FIELDS),
         "medical_authority": {
             "source": "source_document_extraction",
             "medical_projection_status": claim_analysis.get(
@@ -428,6 +582,12 @@ def build_report(
             "rationale_evidence_references": [],
         },
         # Additive operational sections.
+        # Carried through from claim analysis rather than re-derived. This
+        # report links no clauses of its own: it shows the ones the analysis
+        # already established, with their status and their uncertainty, and
+        # adds no coverage or payout verdict on top.
+        "policy_links": policy_links_section(
+            claim_analysis.get("policy_links") or []),
         "required_document_checklist": checklist_section(checklist),
         "existing_disability_assessment": existing_disability_documents(
             checklist, facts),
@@ -517,10 +677,12 @@ def insurer_position(denial_reasons: Mapping[str, Any] | None) -> dict:
         "denial": {
             "reason_ids": denial_ids,
             "total_amount": _total_amount(reasons, "denial"),
+            "evidence_references": _decision_evidence(reasons, "denial"),
         },
         "reduction": {
             "reason_ids": reduction_ids,
             "total_amount": _total_amount(reasons, "reduction"),
+            "evidence_references": _decision_evidence(reasons, "reduction"),
         },
     }
     if accepted:
@@ -531,8 +693,31 @@ def insurer_position(denial_reasons: Mapping[str, Any] | None) -> dict:
             "accepted_coverage_ids": [
                 row["accepted_coverage_id"] for row in accepted
             ],
+            "evidence_references": _dedupe_references([
+                reference
+                for row in accepted
+                for reference in row.get("evidence_references") or []
+            ]),
         }
     return position
+
+
+def _decision_evidence(
+    reasons: Sequence[Mapping[str, Any]],
+    decision_type: str,
+) -> list[dict]:
+    """What the insurer itself wrote, for the reasons of one decision type.
+
+    Copied from the denial contract; nothing here reads a source document. A
+    reason with no citation contributes none rather than borrowing the one
+    next to it -- the reason code still shows, and the missing basis is
+    visible as a missing citation.
+    """
+    return _dedupe_references([
+        reference
+        for reason in reasons if reason.get("decision_type") == decision_type
+        for reference in reason.get("evidence_references") or []
+    ])
 
 
 def _total_amount(reasons: Sequence[Mapping[str, Any]], decision_type: str):
@@ -562,6 +747,25 @@ def require_open_attempt(case_id: str, run_id: str) -> None:
 
 # ------------------------------------------------------ markdown sections --
 
+def _dedupe_references(references: Sequence[Mapping[str, Any]]) -> list[dict]:
+    """Same citation once per section, in first-seen order.
+
+    Two facts read off one sentence produce the same reference twice; the
+    assembly tool would then emit two tags for one quote, which reads as two
+    independent corroborations of a single source.
+    """
+    seen: set[tuple] = set()
+    unique: list[dict] = []
+    for reference in references:
+        key = (reference.get("document_id"), reference.get("page"),
+               reference.get("quote"))
+        if key in seen or not key[0] or not key[2]:
+            continue
+        seen.add(key)
+        unique.append({"document_id": key[0], "page": key[1], "quote": key[2]})
+    return unique
+
+
 def _bullet(label: str, value) -> str:
     if value in (None, "", [], {}):
         return f"- {label}: 확인 불가"
@@ -583,21 +787,34 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
     indistinguishable from one nobody looked at.
     """
     summary = report.get("case_summary") or {}
+    evidence_by_fact = summary.get("fact_evidence") or {}
     sections: list[dict] = []
 
     # 1. accident and shared medical facts
+    #
+    # Values and citations are collected together, so the section carries the
+    # evidence for exactly the values it printed. A value the records did not
+    # establish renders as 확인 불가 and contributes no citation -- it never
+    # borrows one from the fact printed next to it.
     period = summary.get("treatment_period") or {}
+    printed = [
+        ("사고일", "accident_date", summary.get("accident_date")),
+        ("주요 진단명", "main_diagnosis", summary.get("main_diagnosis")),
+        ("진단코드", "kcd_code", summary.get("kcd_code")),
+        ("치료기간", "treatment_period",
+         (f"{period.get('start_date')} ~ {period.get('end_date') or '미종결'}")
+         if period else None),
+    ]
     sections.append({
         "heading": "1. 사고와 공통 의료정보",
-        "content": "\n".join([
-            _bullet("사고일", summary.get("accident_date")),
-            _bullet("주요 진단명", summary.get("main_diagnosis")),
-            _bullet("진단코드", summary.get("kcd_code")),
-            _bullet("치료기간", (f"{period.get('start_date')} ~ "
-                              f"{period.get('end_date') or '미종결'}")
-                    if period else None),
+        "content": "\n".join(
+            _bullet(label, value) for label, _key, value in printed),
+        "evidence_references": _dedupe_references([
+            reference
+            for _label, key, value in printed
+            if value not in (None, "", [], {}, "확인 불가")
+            for reference in evidence_by_fact.get(key) or []
         ]),
-        "evidence_references": [],
     })
 
     # 2. the four verdicts, side by side
@@ -616,26 +833,43 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
     })
 
     # 3. filing status per type
+    #
+    # Filing is an administrative fact somebody recorded, so it carries the
+    # evidence of that record when one exists. A type whose status is 확인 불가
+    # contributes none -- there was no record to cite, which is the finding.
     sections.append({
         "heading": "3. 유형별 추가정보와 접수 상태",
         "content": "\n".join(
             f"- {row['case_type_label']}: 접수 {row['filing_status_label']}"
             for row in rows) or "- 접수 정보 없음",
-        "evidence_references": [],
+        "evidence_references": _dedupe_references([
+            reference
+            for row in rows if row.get("filing_status") in {"filed", "not_filed"}
+            for reference in row.get("filing_evidence_references") or []
+        ]),
     })
 
     # 4. which medical areas the records could establish
+    #
+    # The diagnosis printed here is the same value section 1 prints, so it
+    # carries the same citation rather than a second reading of it. The
+    # disability form's evidence is its presence in the pack, which the
+    # checklist records by document id.
     unconfirmed = report.get("unconfirmed_items") or []
     disability = report.get("existing_disability_assessment") or {}
+    diagnosis_value = summary.get("main_diagnosis")
     sections.append({
         "heading": "4. 의료영역 확보 현황",
         "content": "\n".join([
-            _bullet("확인된 핵심 의료정보", summary.get("main_diagnosis")),
+            _bullet("확인된 핵심 의료정보", diagnosis_value),
             _bullet("후유장해진단서/신체감정서",
                     disability.get("status_label")),
             _bullet("미확인 항목 수", len(unconfirmed) if unconfirmed else None),
         ]),
-        "evidence_references": [],
+        "evidence_references": _dedupe_references(
+            (evidence_by_fact.get("main_diagnosis") or [])
+            if diagnosis_value not in (None, "", "확인 불가") else []
+        ) + _dedupe_references(disability.get("evidence_references") or []),
     })
 
     # 5. required-document checklist
@@ -676,16 +910,47 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
     })
 
     # 8. linked clauses and requirement evidence status
+    #
+    # A matched link names its clause and cites the clause text; a candidate or
+    # not_found link states why it is uncertain and cites nothing, because
+    # naming a clause the processed text does not confirm is the fabricated
+    # reference this lane refuses. The report adds no coverage verdict on top
+    # of either -- which clause applies is the reviewer's question, and this
+    # section exists to put the clause in front of them.
     links = report.get("policy_links") or []
+    link_lines: list[str] = []
+    link_references: list[dict] = []
+    for link in links:
+        label = link.get("clause_link_status_label", link.get(
+            "clause_link_status", ""))
+        line = f"- {link.get('coverage_name') or link.get('coverage_id')}: {label}"
+        reference = link.get("clause_ref")
+        if link.get("clause_link_status") == "matched" and isinstance(reference, dict):
+            line += (f" — {reference['document_id']} p.{reference.get('page')} "
+                     f"{reference['quote']}")
+            link_references.append(reference)
+        elif link.get("uncertainty_reason"):
+            line += f" — {link['uncertainty_reason']}"
+        for requirement in link.get("requirements") or []:
+            status = requirement.get(
+                "evidence_status_label", requirement.get("evidence_status", ""))
+            line += f"\n  - {requirement.get('requirement_text', '')}: {status}"
+            candidates = requirement.get("conflict_candidate_ids") or []
+            if candidates:
+                line += f" (충돌 후보 {', '.join(candidates)})"
+            link_references.extend(requirement.get("evidence_references") or [])
+        link_lines.append(line)
     sections.append({
         "heading": "8. 관련 약관과 요건 자료상태",
-        "content": "\n".join(
-            f"- {link['coverage_name']}: {link['clause_link_status']}"
-            for link in links) or "- 연결된 약관 조항 없음",
-        "evidence_references": [],
+        "content": "\n".join(link_lines) or "- 연결된 약관 조항 없음",
+        "evidence_references": _dedupe_references(link_references),
     })
 
     # 9. the insurer's own decision
+    #
+    # The grounds the insurer itself stated, cited to the response document.
+    # Without them a reader sees reason codes and has no way to check what the
+    # insurer actually wrote.
     position = report.get("insurer_position") or {}
     denial = position.get("denial") or {}
     reduction = position.get("reduction") or {}
@@ -698,7 +963,10 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
             _bullet("승인", ", ".join(
                 acceptance.get("accepted_coverage_ids") or []) or None),
         ]),
-        "evidence_references": [],
+        "evidence_references": _dedupe_references(
+            list(denial.get("evidence_references") or [])
+            + list(reduction.get("evidence_references") or [])
+            + list(acceptance.get("evidence_references") or [])),
     })
     return sections
 

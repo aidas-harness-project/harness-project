@@ -72,6 +72,13 @@
         },
         "medical_projection_status": {
           "const": "not_configured"
+        },
+        "policy_links": {
+          "type": "array",
+          "description": "Copied from `claim_analysis_result.policy_links`. Present so section 8 of the narrative and the evidence sidecar can name the clauses the case actually links to; previously the report dropped them and the section read '연결된 약관 조항 없음' on every case.",
+          "items": {
+            "$ref": "#/$defs/screening_policy_link"
+          }
         }
       },
       "required": [
@@ -145,6 +152,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "fact_evidence": {
+          "$ref": "#/$defs/fact_evidence"
         }
       },
       "required": [
@@ -189,6 +199,13 @@
                 "null"
               ],
               "description": "Sum of stated accepted amounts, or null when no figure is stated. An amount the insurer merely NOTIFIED is still recorded here -- payment_status on the source contract carries whether it was actually paid, and this field must never be read as proof of payment."
+            },
+            "evidence_references": {
+              "type": "array",
+              "description": "What the insurer itself wrote, copied from the denial contract. Empty when the response stated no locatable grounds -- never a licence to supply one.",
+              "items": {
+                "$ref": "#/$defs/screening_evidence_reference"
+              }
             }
           },
           "required": [
@@ -363,6 +380,13 @@
           ],
           "minimum": 0,
           "description": "Total denied or reduced amount when explicitly available; null when the source does not state enough amounts to total safely."
+        },
+        "evidence_references": {
+          "type": "array",
+          "description": "What the insurer itself wrote, copied from the denial contract. Empty when the response stated no locatable grounds -- never a licence to supply one.",
+          "items": {
+            "$ref": "#/$defs/screening_evidence_reference"
+          }
         }
       },
       "required": [
@@ -570,6 +594,127 @@
       },
       "required": [
         "recommended_template_id"
+      ]
+    },
+    "screening_evidence_reference": {
+      "type": "object",
+      "description": "One exact citation carried forward from an upstream contract. The screening report never mints these: each is copied from the claim analysis result, the denial contract, or the conflict ledger entry that already established it, so a quote here resolves in the processed text exactly as it did there.",
+      "properties": {
+        "document_id": {
+          "type": "string"
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "quote": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "document_id",
+        "page",
+        "quote"
+      ]
+    },
+    "fact_evidence": {
+      "type": "object",
+      "description": "Per-fact evidence for the case summary's scalar values. Keyed by the summary field it grounds (accident_date, main_diagnosis, kcd_code, treatment_period), so a section that prints a value can carry exactly the citation for that value and no other.",
+      "additionalProperties": {
+        "type": "array",
+        "description": "Exact upstream evidence for the value(s) this entry states. An empty array means the records did not establish it -- never that a citation was omitted, and never a licence to invent one.",
+        "items": {
+          "$ref": "#/$defs/screening_evidence_reference"
+        }
+      }
+    },
+    "screening_policy_requirement": {
+      "type": "object",
+      "properties": {
+        "requirement_id": {
+          "type": "string"
+        },
+        "requirement_text": {
+          "type": "string"
+        },
+        "evidence_status": {
+          "enum": [
+            "supported",
+            "contradicted",
+            "unknown",
+            "conflict",
+            "uncertain"
+          ]
+        },
+        "conflict_candidate_ids": {
+          "type": "array",
+          "description": "Conflict candidate ids from the claim analysis result, carried unchanged. They are the link between a requirement and the disagreement a reviewer must judge it against.",
+          "items": {
+            "type": "string",
+            "pattern": "^CAC_[0-9]+$"
+          }
+        },
+        "reason": {
+          "type": "string"
+        },
+        "evidence_references": {
+          "type": "array",
+          "description": "Exact upstream evidence for the value(s) this entry states. An empty array means the records did not establish it -- never that a citation was omitted, and never a licence to invent one.",
+          "items": {
+            "$ref": "#/$defs/screening_evidence_reference"
+          }
+        }
+      },
+      "required": [
+        "requirement_id",
+        "evidence_status"
+      ]
+    },
+    "screening_policy_link": {
+      "type": "object",
+      "description": "One coverage term linked to the policy layer that `policy_clause_processing` already built. A link says which clause the claim would be assessed against; it never states that the claim is covered, and this report adds no coverage or payout verdict of its own.",
+      "properties": {
+        "coverage_id": {
+          "type": "string"
+        },
+        "coverage_name": {
+          "type": "string"
+        },
+        "clause_link_status": {
+          "enum": [
+            "matched",
+            "candidate",
+            "not_found"
+          ]
+        },
+        "clause_ref": {
+          "description": "Present only for `matched`. A candidate or not_found link carries `uncertainty_reason` instead, because naming a clause it could not confirm is the fabricated reference this lane refuses.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/screening_evidence_reference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uncertainty_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requirements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/screening_policy_requirement"
+          }
+        }
+      },
+      "required": [
+        "coverage_id",
+        "clause_link_status"
       ]
     }
   }
