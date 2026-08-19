@@ -46,6 +46,7 @@ from typing import Any, Mapping, Sequence
 
 import claim_analysis_case_types as case_types_mod
 import claim_analysis_extraction as extraction
+import claim_analysis_policy_links as policy_link_builder
 import trace as trace_mod
 from llm_providers import add_provider_args, build_provider, parse_provider_config
 import claim_analysis_selection as selection
@@ -1138,6 +1139,131 @@ def require_enabled(config: Mapping[str, Any]) -> None:
             "`activation` block in the routing config.")
 
 
+def _policy_page_text(case_id: str, manifest: Mapping[str, Any]) -> dict:
+    """Processed text for the case's policy documents only.
+
+    Read separately from the medical bundle because the two serve different
+    questions and the policy documents are large; pulling them into the medical
+    read would hand a policy bundle to the extraction prompt.
+    """
+    doc_ids = policy_link_builder.policy_document_ids(manifest)
+    if not doc_ids:
+        return {}
+    bundle = _dao_json(["read-redacted-text-bundle", case_id]
+                       + [f"--doc-id={doc}" for doc in doc_ids],
+                       allow_missing=True)
+    return _page_text_index(bundle or {"documents": []})
+
+
+# ------------------------------------------- intake / administrative reads --
+
+INTAKE_CONTRACT = "_intake_declaration.json"
+FILING_CONTRACT = "_industrial_accident_filing.json"
+
+# Filing status is a fact somebody recorded, never one inferred from how the
+# accident happened. "Injured at work" says nothing about whether a claim was
+# filed, and treating it as if it did would manufacture an administrative fact
+# out of a clinical one.
+FILING_FIELD_SOURCES = {
+    "industrial_accident_filing_basis": "filing_basis",
+    "industrial_accident_approval_status": "approval_status",
+    "industrial_accident_approved_diagnosis": "approved_diagnosis",
+}
+
+
+def read_filing_sources(case_id: str, run_id: str) -> dict:
+    """Administrative filing material for the case, or {} when there is none.
+
+    Both contracts are optional and read through the DAO like everything else.
+    Their absence is a fact about the records -- the caller reports
+    `unavailable`/`source_document_missing`, never `not_filed`.
+    """
+    sources: dict = {}
+    for contract in (INTAKE_CONTRACT, FILING_CONTRACT):
+        payload = _dao_json(
+            ["read-contract", case_id, contract, "--run-id", run_id],
+            allow_missing=True)
+        if isinstance(payload, dict):
+            sources[contract] = payload
+    return sources
+
+
+def filing_status_from_sources(sources: Mapping[str, Any]) -> dict[str, str]:
+    """Per-case-type filing status, taken only from what a source states.
+
+    Anything unstated stays `unknown`. Silence is never promoted to
+    `not_filed`: nobody recorded that no claim was filed, so asserting it would
+    be this stage inventing an administrative finding.
+    """
+    status: dict[str, str] = {}
+    for payload in sources.values():
+        declared = payload.get("filing_status_by_case_type")
+        if not isinstance(declared, dict):
+            continue
+        for case_type, value in declared.items():
+            if value in {"filed", "not_filed", "unknown"}:
+                status[case_type] = value
+    return status
+
+
+def make_filing_reader(sources: Mapping[str, Any]):
+    """A `non_medical_reader(field_row)` over the administrative contracts.
+
+    Returns None whenever the material does not state the field, which the
+    caller records as unavailable. It never opens a medical document -- the
+    route that calls this ranks no medical kinds at all.
+    """
+
+    def reader(field_row: Mapping[str, Any]) -> dict | None:
+        key = FILING_FIELD_SOURCES.get(field_row["field_id"])
+        if key is None:
+            return None
+        for payload in sources.values():
+            entry = payload.get(key)
+            if not isinstance(entry, dict):
+                continue
+            value, quote = entry.get("value"), entry.get("quote")
+            document_id, page = entry.get("document_id"), entry.get("page")
+            if value is None or not isinstance(quote, str) or not quote.strip():
+                continue
+            if not isinstance(document_id, str) or not isinstance(page, int):
+                continue
+            return {
+                "value": value,
+                "source_document_kind": entry.get(
+                    "source_document_kind", "other_medical"),
+                "evidence_reference": {
+                    "document_id": document_id,
+                    "page": page,
+                    "quote": quote,
+                    "start_char": int(entry.get("start_char", 0)),
+                    "end_char": int(entry.get("end_char", len(quote))),
+                },
+            }
+        return None
+
+    return reader
+
+
+def make_quote_verifier(page_text: Mapping[tuple[str, int], str]):
+    """Bind a clause quote to served processed text, or refuse it.
+
+    A clause reference that cannot be located verbatim is dropped by the
+    caller. This is the same rule the medical side uses, applied to the policy
+    layer: the exact range is what makes a citation checkable, so a quote with
+    no range has no standing.
+    """
+
+    def verify(document_id: str, page: int, quote: str) -> dict | None:
+        text = page_text.get((document_id, page))
+        if text is None or not quote:
+            return None
+        return build_reference(document_id, page, quote, text)
+
+    return verify
+
+
+
 # ------------------------------------------------------------------- run --
 
 def pages_by_document(bundle: Mapping[str, Any]) -> dict[str, list[dict]]:
@@ -1177,9 +1303,11 @@ def run(
 
     extract = extraction.make_reader(provider, pages_by_document(bundle))
     observation_ids = _observation_id_sequence()
+    filing_sources = read_filing_sources(case_id, run_id)
     outcomes, cache = extract_all(
         config=config, documents=documents, extract=extract,
-        page_text=page_text, observation_ids=observation_ids)
+        page_text=page_text, observation_ids=observation_ids,
+        non_medical_reader=make_filing_reader(filing_sources))
 
     dispositions = []
     presence_only = selection.presence_only_kinds(config)
@@ -1197,11 +1325,42 @@ def run(
             "provider_calls": cache.calls.get(ref.document_id, 0),
         })
 
+    # Policy linking reads the layer `policy_clause_processing` already built.
+    # A missing index is not an error here -- it means the case has no
+    # processed policy to link against, which the links record as not_found.
+    index = _dao_json(["read-document-index", case_id, "--run-id", run_id],
+                      allow_missing=True)
+    interim = [
+        {"field_id": outcome.field_id,
+         "resolution_status": outcome.status}
+        for outcome in outcomes
+    ]
+    conflicts_by_field = {
+        outcome.field_id: [] for outcome in outcomes
+        if outcome.status == "conflict"
+    }
+    policy_links = policy_link_builder.build_policy_links(
+        claim_facts=interim, manifest=manifest, index=index,
+        verify_quote=make_quote_verifier(_policy_page_text(case_id, manifest)),
+        conflict_candidate_ids_by_field=conflicts_by_field,
+    )
+
     result = build_result(
         case_id=case_id, run_id=run_id, outcomes=outcomes, config=config,
         documents=documents, medical_revision_context=medical_revision_context,
         model_name=getattr(provider, "model_name", "unknown"),
+        policy_links=policy_links,
+        filing_status_by_type=filing_status_from_sources(filing_sources),
     )
+    cited = policy_link_builder.referenced_documents(policy_links)
+    if cited:
+        # An artifact that cites the policy layer records which version of it.
+        # The DAO recomputes this at write time and refuses a stale one.
+        snapshot = _dao_json(
+            ["policy-snapshot", case_id]
+            + [f"--document-id={doc}" for doc in cited])
+        if snapshot is not None:
+            result["upstream_policy_snapshot"] = snapshot
     trace = build_trace(
         case_id=case_id, run_id=run_id, config=config, outcomes=outcomes,
         document_dispositions=dispositions,
@@ -1217,6 +1376,10 @@ def run(
         "conflict_candidates": len(result["conflict_candidates"]),
         "asserted_fields": sum(1 for row in result["claim_facts"]
                                if row["resolution_status"] == "asserted"),
+        "policy_links": len(policy_links),
+        "policy_links_matched": sum(
+            1 for link in policy_links
+            if link["clause_link_status"] == "matched"),
     }
 
 

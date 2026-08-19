@@ -3474,6 +3474,26 @@ def _downstream_policy_ref_errors(
             for index, coverage in enumerate(data.get("coverages") or [])
             if coverage.get("matched_clause_ref") is not None
         ]
+    elif schema_name == "claim_analysis_result.schema.json":
+        # The selective lane cites clauses through policy_links, and a citation
+        # is a citation: it owes the same canonical-UID state, the same
+        # policy-stage-passed check, and the same upstream snapshot as the
+        # legacy contracts below. Registering it HERE rather than building a
+        # second verifier is the whole point -- a lane with its own weaker
+        # checking would be a second way to reference the policy layer, which
+        # is how a stale or fabricated clause reference gets in.
+        refs = [
+            (f"policy_links[{link_index}].clause_ref", link.get("clause_ref"))
+            for link_index, link in enumerate(data.get("policy_links") or [])
+            if link.get("clause_ref") is not None
+        ]
+        refs += [
+            (f"policy_links[{link_index}].requirements[{req_index}].clause_ref",
+             requirement.get("clause_ref"))
+            for link_index, link in enumerate(data.get("policy_links") or [])
+            for req_index, requirement in enumerate(link.get("requirements") or [])
+            if requirement.get("clause_ref") is not None
+        ]
     elif schema_name == "requirement_matching_result.schema.json":
         refs = [
             (f"coverage_requirements[{coverage_index}].requirements"

@@ -4,13 +4,21 @@
   "title": "Selective Claim Analysis result v0.1 (source-grounded)",
   "description": "Compact downstream Claim Analysis view for the selective PoC lane. Its authority is SOURCE-GROUNDED EXTRACTION: every fact here is read from a case document and carries that document's exact quote and character range. It is NOT a projection of the canonical medical variables and must not be presented as one -- the PoC does not resolve field ids to canonical variable ids, so claiming projection authority would assert a binding that was never computed. medical_projection_status records that plainly. Conflict candidates stay candidates: consistency_check verifies them before any P6 ledger entry exists. Reading trace and performance telemetry live in claim_analysis_trace.json.",
   "allOf": [
-    { "$ref": "common_component_output.schema.json" },
+    {
+      "$ref": "common_component_output.schema.json"
+    },
     {
       "type": "object",
       "properties": {
-        "component": { "const": "claim-analysis" },
-        "schema_version": { "const": "claim_analysis_result.v0.1" },
-        "config_version": { "const": "claim_analysis_routing.v0.1" },
+        "component": {
+          "const": "claim-analysis"
+        },
+        "schema_version": {
+          "const": "claim_analysis_result.v0.1"
+        },
+        "config_version": {
+          "const": "claim_analysis_routing.v0.1"
+        },
         "medical_projection_status": {
           "const": "not_configured",
           "description": "Whether a canonical medical projection governs this result. Pinned to not_configured for v0.1: config/medical/medical_projection_v0.1.json ships projection_enabled false with no field rules, so no field-to-variable mapping exists to project through. A constant rather than an enum because no other value is reachable in this version -- an enum would advertise a state the lane cannot occupy."
@@ -18,34 +26,93 @@
         "medical_revision_context": {
           "description": "OPTIONAL, and context only. When a canonical medical revision happens to exist for the case, a result may record which one was current while it ran. It is not the source of any value here and never confers canonical authority; omit it entirely rather than record a revision this result did not actually observe. Declaring it is what makes the DAO verify the digest.",
           "oneOf": [
-            { "type": "null" },
-            { "$ref": "#/$defs/medical_revision_context" }
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/medical_revision_context"
+            }
           ]
         },
         "claim_facts": {
           "type": "array",
-          "items": { "$ref": "#/$defs/field_result" }
+          "items": {
+            "$ref": "#/$defs/field_result"
+          }
         },
         "case_type_assessment": {
           "type": "array",
           "minItems": 4,
           "maxItems": 4,
-          "items": { "$ref": "#/$defs/case_type_assessment" }
+          "items": {
+            "$ref": "#/$defs/case_type_assessment"
+          }
         },
         "policy_links": {
           "type": "array",
-          "items": { "$ref": "#/$defs/policy_link" }
+          "items": {
+            "$ref": "#/$defs/policy_link"
+          }
         },
         "required_document_checklist": {
           "type": "array",
-          "items": { "$ref": "#/$defs/checklist_item" }
+          "items": {
+            "$ref": "#/$defs/checklist_item"
+          }
         },
         "conflict_candidates": {
           "type": "array",
-          "items": { "$ref": "#/$defs/conflict_candidate" }
+          "items": {
+            "$ref": "#/$defs/conflict_candidate"
+          }
+        },
+        "upstream_policy_snapshot": {
+          "type": "object",
+          "description": "The policy-layer snapshot this artifact was derived from (Part 11I). Required whenever the artifact carries at least one policy reference: a downstream result is an assertion about what the policy layer said when it was written, so it records which bytes it read. The DAO recomputes this at write time and refuses a mismatch; `dao.py policy-snapshot` prints the current value. Per-document digests cover the normalized contract, boundary inventory, reference tables, processed source text, manifest entry (page_map included) and governing parent coverage -- the same set the document's audit binds to.",
+          "properties": {
+            "documents": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "document_id": {
+                    "$ref": "common_component_output.schema.json#/$defs/document_id"
+                  },
+                  "digest_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "document_id",
+                  "digest_sha256"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "snapshot_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "documents",
+            "snapshot_sha256"
+          ],
+          "additionalProperties": false
         }
       },
-      "required": ["schema_version", "config_version", "medical_projection_status", "claim_facts", "case_type_assessment", "policy_links", "required_document_checklist", "conflict_candidates"]
+      "required": [
+        "schema_version",
+        "config_version",
+        "medical_projection_status",
+        "claim_facts",
+        "case_type_assessment",
+        "policy_links",
+        "required_document_checklist",
+        "conflict_candidates"
+      ]
     }
   ],
   "$defs": {
@@ -54,42 +121,113 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "run_id": { "type": "string", "minLength": 1 },
-        "schema_version": { "type": "string", "minLength": 1 },
-        "config_version": { "type": "string", "minLength": 1 }
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "config_version": {
+          "type": "string",
+          "minLength": 1
+        }
       },
-      "required": ["sha256", "run_id", "schema_version", "config_version"]
+      "required": [
+        "sha256",
+        "run_id",
+        "schema_version",
+        "config_version"
+      ]
     },
-    "observation_id": { "type": "string", "pattern": "^CAO_[0-9]{4,}$" },
-    "conflict_candidate_id": { "type": "string", "pattern": "^CAC_[0-9]{4,}$" },
+    "observation_id": {
+      "type": "string",
+      "pattern": "^CAO_[0-9]{4,}$"
+    },
+    "conflict_candidate_id": {
+      "type": "string",
+      "pattern": "^CAC_[0-9]{4,}$"
+    },
     "exact_evidence_reference": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
-        "document_type": { "$ref": "common_component_output.schema.json#/$defs/document_type" },
-        "page": { "type": "integer", "minimum": 1 },
-        "quote": { "type": "string", "pattern": "\\S" },
-        "start_char": { "type": "integer", "minimum": 0 },
-        "end_char": { "type": "integer", "minimum": 1 }
+        "document_id": {
+          "$ref": "common_component_output.schema.json#/$defs/document_id"
+        },
+        "document_type": {
+          "$ref": "common_component_output.schema.json#/$defs/document_type"
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "quote": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "start_char": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_char": {
+          "type": "integer",
+          "minimum": 1
+        }
       },
-      "required": ["document_id", "page", "quote", "start_char", "end_char"]
+      "required": [
+        "document_id",
+        "page",
+        "quote",
+        "start_char",
+        "end_char"
+      ]
     },
     "value": {
       "oneOf": [
-        { "type": "string", "minLength": 1 },
-        { "type": "number" },
-        { "type": "boolean" },
-        { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
         {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "start": { "type": "string", "format": "date" },
-            "end": { "type": ["string", "null"], "format": "date" }
+            "start": {
+              "type": "string",
+              "format": "date"
+            },
+            "end": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date"
+            }
           },
-          "required": ["start", "end"]
+          "required": [
+            "start",
+            "end"
+          ]
         }
       ]
     },
@@ -97,66 +235,185 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "observation_id": { "$ref": "#/$defs/observation_id" },
+        "observation_id": {
+          "$ref": "#/$defs/observation_id"
+        },
         "value_state": {
-          "enum": ["asserted", "explicitly_absent", "unavailable", "not_applicable"],
+          "enum": [
+            "asserted",
+            "explicitly_absent",
+            "unavailable",
+            "not_applicable"
+          ],
           "description": "What this single reading established. 'asserted' -- the source states a value. 'explicitly_absent' -- the source states the thing is NOT present (e.g. no acute fracture), which is a positive finding and needs its own quote. 'unavailable' -- nothing could be established. 'not_applicable' -- the case's own facts exclude the field. Silence is 'unavailable', never 'explicitly_absent': a document that says nothing has not denied anything."
         },
-        "value": { "$ref": "#/$defs/value" },
-        "reason": { "type": "string", "minLength": 1 },
+        "value": {
+          "$ref": "#/$defs/value"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
         "unavailable_reason": {
-          "enum": ["not_mentioned", "source_document_missing", "unreadable", "outside_poc_scope", "conflict_unresolved"],
+          "enum": [
+            "not_mentioned",
+            "source_document_missing",
+            "unreadable",
+            "outside_poc_scope",
+            "conflict_unresolved"
+          ],
           "description": "Why nothing could be established. Required on an unavailable reading so that 'no value' separates the case where no document mentioned it from the case where the document was never in the pack."
         },
-        "source_document_kind": { "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind" },
+        "source_document_kind": {
+          "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind"
+        },
         "source_priority_rank": {
           "type": "integer",
           "minimum": 1,
           "description": "The rung of the field's OWN route ladder this source sits on -- not the order the document happened to be opened in. An opportunistic reading records the rank its route assigns, so a value picked up from an already-open document is never mistaken for a higher-priority one."
         },
-        "extraction_wave": { "enum": ["A", "B", "opportunistic"] },
+        "extraction_wave": {
+          "enum": [
+            "A",
+            "B",
+            "opportunistic"
+          ]
+        },
         "evidence_references": {
           "type": "array",
-          "items": { "$ref": "#/$defs/exact_evidence_reference" }
+          "items": {
+            "$ref": "#/$defs/exact_evidence_reference"
+          }
         }
       },
-      "required": ["observation_id", "value_state", "extraction_wave", "evidence_references"],
+      "required": [
+        "observation_id",
+        "value_state",
+        "extraction_wave",
+        "evidence_references"
+      ],
       "oneOf": [
         {
           "$comment": "asserted: a value, its source, and an exact quote.",
           "properties": {
-            "value_state": { "const": "asserted" },
-            "evidence_references": { "minItems": 1 }
+            "value_state": {
+              "const": "asserted"
+            },
+            "evidence_references": {
+              "minItems": 1
+            }
           },
-          "required": ["value", "source_document_kind", "source_priority_rank"],
-          "not": { "anyOf": [{ "required": ["reason"] }, { "required": ["unavailable_reason"] }] }
+          "required": [
+            "value",
+            "source_document_kind",
+            "source_priority_rank"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "reason"
+                ]
+              },
+              {
+                "required": [
+                  "unavailable_reason"
+                ]
+              }
+            ]
+          }
         },
         {
           "$comment": "explicitly_absent: no value, but the sentence asserting absence is quoted. Its scope is this field only -- an absence statement about one finding never travels to another field.",
           "properties": {
-            "value_state": { "const": "explicitly_absent" },
-            "evidence_references": { "minItems": 1 }
+            "value_state": {
+              "const": "explicitly_absent"
+            },
+            "evidence_references": {
+              "minItems": 1
+            }
           },
-          "required": ["reason", "source_document_kind", "source_priority_rank"],
-          "not": { "anyOf": [{ "required": ["value"] }, { "required": ["unavailable_reason"] }] }
+          "required": [
+            "reason",
+            "source_document_kind",
+            "source_priority_rank"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "value"
+                ]
+              },
+              {
+                "required": [
+                  "unavailable_reason"
+                ]
+              }
+            ]
+          }
         },
         {
           "$comment": "unavailable: nothing established, so there is nothing to cite.",
           "properties": {
-            "value_state": { "const": "unavailable" },
-            "evidence_references": { "maxItems": 0 }
+            "value_state": {
+              "const": "unavailable"
+            },
+            "evidence_references": {
+              "maxItems": 0
+            }
           },
-          "required": ["reason", "unavailable_reason"],
-          "not": { "anyOf": [{ "required": ["value"] }, { "required": ["source_document_kind"] }, { "required": ["source_priority_rank"] }] }
+          "required": [
+            "reason",
+            "unavailable_reason"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "value"
+                ]
+              },
+              {
+                "required": [
+                  "source_document_kind"
+                ]
+              },
+              {
+                "required": [
+                  "source_priority_rank"
+                ]
+              }
+            ]
+          }
         },
         {
           "$comment": "not_applicable: excluded by the case's own facts, and the fact doing the excluding is quoted. Silence alone can never reach this state.",
           "properties": {
-            "value_state": { "const": "not_applicable" },
-            "evidence_references": { "minItems": 1 }
+            "value_state": {
+              "const": "not_applicable"
+            },
+            "evidence_references": {
+              "minItems": 1
+            }
           },
-          "required": ["reason"],
-          "not": { "anyOf": [{ "required": ["value"] }, { "required": ["unavailable_reason"] }] }
+          "required": [
+            "reason"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "value"
+                ]
+              },
+              {
+                "required": [
+                  "unavailable_reason"
+                ]
+              }
+            ]
+          }
         }
       ]
     },
@@ -164,102 +421,292 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "field_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
-        "domain_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
-        "priority_grade": { "enum": ["A", "B"] },
+        "field_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "domain_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "priority_grade": {
+          "enum": [
+            "A",
+            "B"
+          ]
+        },
         "authority": {
-          "enum": ["source_document_extraction", "claim_analysis_native"],
+          "enum": [
+            "source_document_extraction",
+            "claim_analysis_native"
+          ],
           "description": "Where this field's content came from. 'source_document_extraction' -- read from a case document with an exact citation. 'claim_analysis_native' -- a claim-side finding this stage owns (accident circumstances, filing information, case-type triggers), reserved for the event_timeline domain. There is deliberately no projection value: this lane does not project canonical medical variables, and offering the label would invite claiming a binding it never computed."
         },
         "resolution_status": {
-          "enum": ["asserted", "explicitly_absent", "unavailable", "not_applicable", "conflict"],
+          "enum": [
+            "asserted",
+            "explicitly_absent",
+            "unavailable",
+            "not_applicable",
+            "conflict"
+          ],
           "description": "The field's settled state after its read ladder ran. Mirrors the observation vocabulary, plus 'conflict' for two sources that assert different values."
         },
         "selected_observation_ids": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/observation_id" },
+          "items": {
+            "$ref": "#/$defs/observation_id"
+          },
           "description": "The observation carrying the value this field reports. Exactly one when asserted; empty in every other state -- notably under conflict, where electing one reading would be choosing a winner this stage has no standing to choose."
         },
         "observations": {
           "type": "array",
-          "items": { "$ref": "#/$defs/observation" }
+          "items": {
+            "$ref": "#/$defs/observation"
+          }
         },
         "conflict_candidate_ids": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/conflict_candidate_id" }
+          "items": {
+            "$ref": "#/$defs/conflict_candidate_id"
+          }
         },
-        "stop_reason": { "enum": ["trusted_value_found", "sources_exhausted", "conflict_found", "not_applicable", "explicitly_absent"] },
-        "resolution_reason": { "type": "string", "minLength": 1 },
+        "stop_reason": {
+          "enum": [
+            "trusted_value_found",
+            "sources_exhausted",
+            "conflict_found",
+            "not_applicable",
+            "explicitly_absent"
+          ]
+        },
+        "resolution_reason": {
+          "type": "string",
+          "minLength": 1
+        },
         "unavailable_reason": {
-          "enum": ["not_mentioned", "source_document_missing", "unreadable", "outside_poc_scope", "conflict_unresolved"]
+          "enum": [
+            "not_mentioned",
+            "source_document_missing",
+            "unreadable",
+            "outside_poc_scope",
+            "conflict_unresolved"
+          ]
         }
       },
-      "required": ["field_id", "domain_code", "priority_grade", "authority", "resolution_status", "selected_observation_ids", "observations", "conflict_candidate_ids", "stop_reason"],
+      "required": [
+        "field_id",
+        "domain_code",
+        "priority_grade",
+        "authority",
+        "resolution_status",
+        "selected_observation_ids",
+        "observations",
+        "conflict_candidate_ids",
+        "stop_reason"
+      ],
       "allOf": [
         {
           "$comment": "asserted: exactly one selected observation, and an asserted reading exists to be selected.",
-          "if": { "properties": { "resolution_status": { "const": "asserted" } }, "required": ["resolution_status"] },
+          "if": {
+            "properties": {
+              "resolution_status": {
+                "const": "asserted"
+              }
+            },
+            "required": [
+              "resolution_status"
+            ]
+          },
           "then": {
             "properties": {
-              "selected_observation_ids": { "minItems": 1, "maxItems": 1 },
-              "observations": { "minItems": 1, "contains": { "properties": { "value_state": { "const": "asserted" } }, "required": ["value_state"] } },
-              "conflict_candidate_ids": { "maxItems": 0 },
-              "stop_reason": { "const": "trusted_value_found" }
+              "selected_observation_ids": {
+                "minItems": 1,
+                "maxItems": 1
+              },
+              "observations": {
+                "minItems": 1,
+                "contains": {
+                  "properties": {
+                    "value_state": {
+                      "const": "asserted"
+                    }
+                  },
+                  "required": [
+                    "value_state"
+                  ]
+                }
+              },
+              "conflict_candidate_ids": {
+                "maxItems": 0
+              },
+              "stop_reason": {
+                "const": "trusted_value_found"
+              }
             }
           }
         },
         {
           "$comment": "explicitly_absent: a grounded absence reading, and no selected value.",
-          "if": { "properties": { "resolution_status": { "const": "explicitly_absent" } }, "required": ["resolution_status"] },
+          "if": {
+            "properties": {
+              "resolution_status": {
+                "const": "explicitly_absent"
+              }
+            },
+            "required": [
+              "resolution_status"
+            ]
+          },
           "then": {
             "properties": {
-              "selected_observation_ids": { "maxItems": 0 },
-              "observations": { "minItems": 1, "contains": { "properties": { "value_state": { "const": "explicitly_absent" } }, "required": ["value_state"] } },
-              "conflict_candidate_ids": { "maxItems": 0 },
-              "stop_reason": { "const": "explicitly_absent" }
+              "selected_observation_ids": {
+                "maxItems": 0
+              },
+              "observations": {
+                "minItems": 1,
+                "contains": {
+                  "properties": {
+                    "value_state": {
+                      "const": "explicitly_absent"
+                    }
+                  },
+                  "required": [
+                    "value_state"
+                  ]
+                }
+              },
+              "conflict_candidate_ids": {
+                "maxItems": 0
+              },
+              "stop_reason": {
+                "const": "explicitly_absent"
+              }
             },
-            "required": ["resolution_reason"]
+            "required": [
+              "resolution_reason"
+            ]
           }
         },
         {
           "$comment": "unavailable: no evidence anywhere, and the reason why is named.",
-          "if": { "properties": { "resolution_status": { "const": "unavailable" } }, "required": ["resolution_status"] },
+          "if": {
+            "properties": {
+              "resolution_status": {
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "resolution_status"
+            ]
+          },
           "then": {
             "properties": {
-              "selected_observation_ids": { "maxItems": 0 },
-              "observations": { "items": { "properties": { "value_state": { "const": "unavailable" } }, "required": ["value_state"] } },
-              "conflict_candidate_ids": { "maxItems": 0 },
-              "stop_reason": { "const": "sources_exhausted" }
+              "selected_observation_ids": {
+                "maxItems": 0
+              },
+              "observations": {
+                "items": {
+                  "properties": {
+                    "value_state": {
+                      "const": "unavailable"
+                    }
+                  },
+                  "required": [
+                    "value_state"
+                  ]
+                }
+              },
+              "conflict_candidate_ids": {
+                "maxItems": 0
+              },
+              "stop_reason": {
+                "const": "sources_exhausted"
+              }
             },
-            "required": ["resolution_reason", "unavailable_reason"]
+            "required": [
+              "resolution_reason",
+              "unavailable_reason"
+            ]
           }
         },
         {
           "$comment": "not_applicable: at least one grounded observation carrying the excluding fact. Never reachable from silence -- that is what minItems plus the per-item evidence floor buys.",
-          "if": { "properties": { "resolution_status": { "const": "not_applicable" } }, "required": ["resolution_status"] },
+          "if": {
+            "properties": {
+              "resolution_status": {
+                "const": "not_applicable"
+              }
+            },
+            "required": [
+              "resolution_status"
+            ]
+          },
           "then": {
             "properties": {
-              "selected_observation_ids": { "maxItems": 0 },
-              "observations": { "minItems": 1, "items": { "properties": { "value_state": { "const": "not_applicable" }, "evidence_references": { "minItems": 1 } }, "required": ["value_state"] } },
-              "conflict_candidate_ids": { "maxItems": 0 },
-              "stop_reason": { "const": "not_applicable" }
+              "selected_observation_ids": {
+                "maxItems": 0
+              },
+              "observations": {
+                "minItems": 1,
+                "items": {
+                  "properties": {
+                    "value_state": {
+                      "const": "not_applicable"
+                    },
+                    "evidence_references": {
+                      "minItems": 1
+                    }
+                  },
+                  "required": [
+                    "value_state"
+                  ]
+                }
+              },
+              "conflict_candidate_ids": {
+                "maxItems": 0
+              },
+              "stop_reason": {
+                "const": "not_applicable"
+              }
             },
-            "required": ["resolution_reason"]
+            "required": [
+              "resolution_reason"
+            ]
           }
         },
         {
           "$comment": "conflict: both readings kept, neither elected.",
-          "if": { "properties": { "resolution_status": { "const": "conflict" } }, "required": ["resolution_status"] },
+          "if": {
+            "properties": {
+              "resolution_status": {
+                "const": "conflict"
+              }
+            },
+            "required": [
+              "resolution_status"
+            ]
+          },
           "then": {
             "properties": {
-              "selected_observation_ids": { "maxItems": 0 },
-              "observations": { "minItems": 2 },
-              "conflict_candidate_ids": { "minItems": 1 },
-              "stop_reason": { "const": "conflict_found" }
+              "selected_observation_ids": {
+                "maxItems": 0
+              },
+              "observations": {
+                "minItems": 2
+              },
+              "conflict_candidate_ids": {
+                "minItems": 1
+              },
+              "stop_reason": {
+                "const": "conflict_found"
+              }
             },
-            "required": ["resolution_reason"]
+            "required": [
+              "resolution_reason"
+            ]
           }
         }
       ]
@@ -268,31 +715,108 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "case_type": { "enum": ["personal_insurance", "traffic_accident", "industrial_accident", "liability"] },
+        "case_type": {
+          "enum": [
+            "personal_insurance",
+            "traffic_accident",
+            "industrial_accident",
+            "liability"
+          ]
+        },
         "status": {
-          "enum": ["applicable", "not_applicable", "uncertain"],
+          "enum": [
+            "applicable",
+            "not_applicable",
+            "uncertain"
+          ],
           "description": "Whether this case type is in scope for review, judged independently of the other three. 'applicable' -- an extracted fact affirmatively triggers it. 'not_applicable' -- ONLY where a source affirmatively states the negative. 'uncertain' -- everything else, including silence. Silence is never not_applicable: a record that does not mention a vehicle has not established that no vehicle was involved. Scoped to the selective lane; legacy case_type_result keeps its own supported/not_supported vocabulary."
         },
-        "triggered_field_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } },
-        "conflicting_field_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } },
-        "filing_status": { "enum": ["filed", "not_filed", "unknown"] },
-        "reason": { "type": "string", "minLength": 1 },
+        "triggered_field_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          }
+        },
+        "conflicting_field_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          }
+        },
+        "filing_status": {
+          "enum": [
+            "filed",
+            "not_filed",
+            "unknown"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
         "evidence_references": {
           "type": "array",
-          "items": { "$ref": "#/$defs/exact_evidence_reference" }
+          "items": {
+            "$ref": "#/$defs/exact_evidence_reference"
+          }
         }
       },
-      "required": ["case_type", "status", "triggered_field_ids", "conflicting_field_ids", "filing_status", "reason", "evidence_references"],
+      "required": [
+        "case_type",
+        "status",
+        "triggered_field_ids",
+        "conflicting_field_ids",
+        "filing_status",
+        "reason",
+        "evidence_references"
+      ],
       "allOf": [
         {
           "$comment": "applicable needs a named trigger field and a quote -- the verdict must point at what produced it.",
-          "if": { "properties": { "status": { "const": "applicable" } }, "required": ["status"] },
-          "then": { "properties": { "triggered_field_ids": { "minItems": 1 }, "evidence_references": { "minItems": 1 } } }
+          "if": {
+            "properties": {
+              "status": {
+                "const": "applicable"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "triggered_field_ids": {
+                "minItems": 1
+              },
+              "evidence_references": {
+                "minItems": 1
+              }
+            }
+          }
         },
         {
           "$comment": "not_applicable requires affirmative negative evidence. Without this floor, silence could be filed as a decided verdict -- the exact failure the parallel judgment exists to prevent.",
-          "if": { "properties": { "status": { "const": "not_applicable" } }, "required": ["status"] },
-          "then": { "properties": { "evidence_references": { "minItems": 1 } } }
+          "if": {
+            "properties": {
+              "status": {
+                "const": "not_applicable"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "evidence_references": {
+                "minItems": 1
+              }
+            }
+          }
         }
       ]
     },
@@ -300,18 +824,71 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "requirement_id": { "type": "string", "pattern": "^REQ-[0-9]+$" },
-        "requirement_text": { "type": "string", "minLength": 1 },
-        "evidence_status": { "enum": ["supported", "contradicted", "unknown", "conflict"] },
-        "conflict_candidate_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/conflict_candidate_id" } },
-        "reason": { "type": "string", "minLength": 1 },
-        "evidence_references": { "type": "array", "items": { "$ref": "#/$defs/exact_evidence_reference" } }
+        "requirement_id": {
+          "type": "string",
+          "pattern": "^REQ-[0-9]+$"
+        },
+        "requirement_text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_status": {
+          "enum": [
+            "supported",
+            "contradicted",
+            "unknown",
+            "conflict"
+          ]
+        },
+        "conflict_candidate_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/conflict_candidate_id"
+          }
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/exact_evidence_reference"
+          }
+        },
+        "clause_ref": {
+          "$ref": "#/$defs/exact_evidence_reference",
+          "description": "The specific clause text stating this requirement, when one was located. Verified by the DAO on the same terms as the coverage-level clause_ref: canonical UID state, policy-stage-passed, and snapshot freshness."
+        }
       },
-      "required": ["requirement_id", "requirement_text", "evidence_status", "conflict_candidate_ids", "reason", "evidence_references"],
+      "required": [
+        "requirement_id",
+        "requirement_text",
+        "evidence_status",
+        "conflict_candidate_ids",
+        "reason",
+        "evidence_references"
+      ],
       "allOf": [
         {
-          "if": { "properties": { "evidence_status": { "const": "conflict" } }, "required": ["evidence_status"] },
-          "then": { "properties": { "conflict_candidate_ids": { "minItems": 1 } } }
+          "if": {
+            "properties": {
+              "evidence_status": {
+                "const": "conflict"
+              }
+            },
+            "required": [
+              "evidence_status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "conflict_candidate_ids": {
+                "minItems": 1
+              }
+            }
+          }
         }
       ]
     },
@@ -319,22 +896,78 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "coverage_id": { "type": "string", "minLength": 1 },
-        "coverage_name": { "type": "string", "minLength": 1 },
-        "clause_link_status": { "enum": ["matched", "candidate", "not_found"] },
-        "clause_ref": { "$ref": "#/$defs/exact_evidence_reference" },
-        "uncertainty_reason": { "type": "string", "minLength": 1 },
-        "requirements": { "type": "array", "items": { "$ref": "#/$defs/requirement_evidence" } }
+        "coverage_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coverage_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "clause_link_status": {
+          "enum": [
+            "matched",
+            "candidate",
+            "not_found"
+          ]
+        },
+        "clause_ref": {
+          "$ref": "#/$defs/exact_evidence_reference"
+        },
+        "uncertainty_reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requirements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/requirement_evidence"
+          }
+        }
       },
-      "required": ["coverage_id", "coverage_name", "clause_link_status", "requirements"],
+      "required": [
+        "coverage_id",
+        "coverage_name",
+        "clause_link_status",
+        "requirements"
+      ],
       "allOf": [
         {
-          "if": { "properties": { "clause_link_status": { "const": "matched" } }, "required": ["clause_link_status"] },
-          "then": { "required": ["clause_ref"] }
+          "if": {
+            "properties": {
+              "clause_link_status": {
+                "const": "matched"
+              }
+            },
+            "required": [
+              "clause_link_status"
+            ]
+          },
+          "then": {
+            "required": [
+              "clause_ref"
+            ]
+          }
         },
         {
-          "if": { "properties": { "clause_link_status": { "enum": ["candidate", "not_found"] } }, "required": ["clause_link_status"] },
-          "then": { "required": ["uncertainty_reason"] }
+          "if": {
+            "properties": {
+              "clause_link_status": {
+                "enum": [
+                  "candidate",
+                  "not_found"
+                ]
+              }
+            },
+            "required": [
+              "clause_link_status"
+            ]
+          },
+          "then": {
+            "required": [
+              "uncertainty_reason"
+            ]
+          }
         }
       ]
     },
@@ -342,38 +975,83 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "document_kind": { "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind" },
-        "status": { "enum": ["available", "missing", "ambiguous", "not_applicable"] },
+        "document_kind": {
+          "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind"
+        },
+        "status": {
+          "enum": [
+            "available",
+            "missing",
+            "ambiguous",
+            "not_applicable"
+          ]
+        },
         "required_for_case_types": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "enum": ["personal_insurance", "traffic_accident", "industrial_accident", "liability"] }
+          "items": {
+            "enum": [
+              "personal_insurance",
+              "traffic_accident",
+              "industrial_accident",
+              "liability"
+            ]
+          }
         },
         "document_ids": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "$ref": "common_component_output.schema.json#/$defs/document_id" }
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/document_id"
+          }
         },
-        "reason": { "type": "string", "minLength": 1 }
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
       },
-      "required": ["document_kind", "status", "required_for_case_types", "document_ids", "reason"]
+      "required": [
+        "document_kind",
+        "status",
+        "required_for_case_types",
+        "document_ids",
+        "reason"
+      ]
     },
     "conflict_candidate": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "conflict_candidate_id": { "$ref": "#/$defs/conflict_candidate_id" },
-        "field_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "conflict_candidate_id": {
+          "$ref": "#/$defs/conflict_candidate_id"
+        },
+        "field_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
         "observation_ids": {
           "type": "array",
           "minItems": 2,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/observation_id" }
+          "items": {
+            "$ref": "#/$defs/observation_id"
+          }
         },
-        "reason": { "type": "string", "minLength": 1 },
-        "consistency_status": { "const": "pending_consistency_check" }
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "consistency_status": {
+          "const": "pending_consistency_check"
+        }
       },
-      "required": ["conflict_candidate_id", "field_id", "observation_ids", "reason", "consistency_status"]
+      "required": [
+        "conflict_candidate_id",
+        "field_id",
+        "observation_ids",
+        "reason",
+        "consistency_status"
+      ]
     }
   }
 }
