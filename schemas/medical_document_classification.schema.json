@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "medical_document_classification.schema.json",
+  "title": "Fine-grained medical document classification v0.1",
+  "description": "An additive Stage 2 classification layered under the broad document_type taxonomy. It records the form kind and extraction roles without changing legacy document_type values. A missing block means the fine-grained classifier has not run; it must not be interpreted as not_medical.",
+  "$defs": {
+    "medical_document_kind": {
+      "enum": [
+        "diagnosis_certificate",
+        "initial_visit_record",
+        "outpatient_record",
+        "progress_record",
+        "final_visit_record",
+        "surgery_procedure_record",
+        "imaging_interpretation",
+        "major_test_result",
+        "admission_discharge_summary",
+        "emergency_record",
+        "disability_assessment",
+        "prescription_treatment_history",
+        "nursing_routine_record",
+        "medical_expense_receipt",
+        "medical_expense_itemization",
+        "pharmacy_payment_confirmation",
+        "other_medical"
+      ]
+    },
+    "medical_role": {
+      "enum": [
+        "accident_context_source",
+        "diagnosis_source",
+        "diagnostic_evidence_source",
+        "treatment_source",
+        "clinical_course_source",
+        "prior_history_source",
+        "complication_source",
+        "disability_source",
+        "required_document_presence_only"
+      ]
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "$ref": "#/$defs/medical_document_kind" },
+        "confidence": { "$ref": "common_component_output.schema.json#/$defs/confidence" }
+      },
+      "required": ["kind", "confidence"]
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "medical_document_classification.v0.1" },
+        "status": {
+          "enum": ["deterministic_title", "llm_classified", "ambiguous", "not_medical"]
+        },
+        "kind": {
+          "oneOf": [
+            { "$ref": "#/$defs/medical_document_kind" },
+            { "type": "null" }
+          ]
+        },
+        "roles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/medical_role" }
+        },
+        "candidates": {
+          "type": "array",
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/candidate" }
+        },
+        "ambiguity_reason": { "type": "string", "minLength": 1 },
+        "evidence_references": {
+          "type": "array",
+          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+        }
+      },
+      "required": ["schema_version", "status", "kind", "roles", "candidates", "evidence_references"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "enum": ["deterministic_title", "llm_classified"] } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "kind": { "$ref": "#/$defs/medical_document_kind" },
+              "roles": { "minItems": 1 },
+              "evidence_references": { "minItems": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "ambiguous" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "kind": { "type": "null" },
+              "roles": { "maxItems": 0 },
+              "candidates": { "minItems": 1 },
+              "evidence_references": { "minItems": 1 }
+            },
+            "required": ["ambiguity_reason"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "not_medical" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "kind": { "type": "null" },
+              "roles": { "maxItems": 0 },
+              "candidates": { "maxItems": 0 }
+            },
+            "not": { "required": ["ambiguity_reason"] }
+          }
+        }
+      ]
+    }
+  }
+}

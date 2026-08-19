@@ -59,6 +59,13 @@ def _mock_classify(monkeypatch, doc_type="insurer_response", label="보험사 �
     monkeypatch.setattr(rc1, "classify_document", fake_classify)
 
 
+def _enable_medical_routing(monkeypatch):
+    config = json.loads(json.dumps(rc1._medical_routing.load_routing_config()))
+    config["behavior_enabled"] = True
+    monkeypatch.setattr(rc1._medical_routing, "load_routing_config", lambda: config)
+    return config
+
+
 class FakeClassifier:
     provider_name = "openai-api"
     model_name = "gpt-test"
@@ -1077,6 +1084,105 @@ def test_a_form_naming_title_classifies_without_calling_the_model(tmp_path, monk
         (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
     assert written["classification_source"] == "printed_form_title"
     assert "진 단 서" in written["evidence_references"][0]["quote"]
+
+
+def test_enabled_medical_routing_classifies_a_form_title_without_model(tmp_path, monkeypatch):
+    _child_with_inherited_pages(tmp_path)
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    dao.atomic_write_json(out_dir / "segmentation_proposal_DOC_005.json", {
+        "review_status": "approved", "method": {"mode": "text_anchor"},
+        "segments": [{"page_start": 1, "page_end": 1,
+                      "provisional_type_label": "진 단 서"}],
+    })
+    _enable_medical_routing(monkeypatch)
+    monkeypatch.setattr(
+        rc1, "classify_document",
+        lambda *a, **k: pytest.fail("a fine-grained form title needs no model call"))
+
+    rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline",
+        run_id="RUN_20260805_002")
+
+    written = json.loads(
+        (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
+    medical = written["medical_classification"]
+    assert medical["status"] == "deterministic_title"
+    assert medical["kind"] == "diagnosis_certificate"
+    assert medical["evidence_references"] == [{"page": 1, "quote": "진 단 서"}]
+
+
+def test_enabled_medical_routing_marks_inherited_policy_without_fake_quote(tmp_path, monkeypatch):
+    _child_with_inherited_pages(tmp_path)
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    manifest_path = out_dir / "document_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["documents"].insert(0, {
+        "document_id": "DOC_005", "file_name": "DOC_005.pdf",
+        "file_path": "data/raw/CASE_009/DOC_005.pdf",
+        "file_format": "pdf", "file_size_bytes": 100,
+        "ocr_status": "not_applicable", "segmentation_status": "completed",
+        "segmentation_proposal_path":
+            "outputs/CASE_009/segmentation_proposal_DOC_005.json",
+        "downstream_disposition": "superseded_bundle",
+    })
+    dao.atomic_write_json(manifest_path, manifest)
+    dao.atomic_write_json(out_dir / "segmentation_proposal_DOC_005.json", {
+        "review_status": "approved", "method": {"mode": "text_anchor"},
+        "segments": [{"page_start": 1, "page_end": 1,
+                      "provisional_type_label": "상해보험 특별약관"}],
+    })
+    _enable_medical_routing(monkeypatch)
+    monkeypatch.setattr(
+        rc1, "classify_document",
+        lambda *a, **k: pytest.fail("an inherited policy needs no model call"))
+
+    rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline",
+        run_id="RUN_20260805_002")
+
+    written = json.loads(
+        (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
+    assert written["evidence_references"] == [{"page": 1, "quote": "상해보험 특별약관"}]
+    medical = written["medical_classification"]
+    assert medical["status"] == "not_medical"
+    assert medical["evidence_references"] == [{"page": 1, "quote": "상해보험 특별약관"}]
+    assert "classification response contained no quote" not in json.dumps(written)
+
+
+def test_enabled_medical_routing_calls_model_once_for_ambiguous_title(tmp_path, monkeypatch):
+    _child_with_inherited_pages(tmp_path)
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    dao.atomic_write_json(out_dir / "segmentation_proposal_DOC_005.json", {
+        "review_status": "approved", "method": {"mode": "text_anchor"},
+        "segments": [{"page_start": 1, "page_end": 1,
+                      "provisional_type_label": "REPORT"}],
+    })
+    config = _enable_medical_routing(monkeypatch)
+    calls = []
+
+    def fake_classify(text, classifier=None, routing_config=None):
+        calls.append(text)
+        assert routing_config is config
+        return {
+            "predicted_document_type": "imaging_report",
+            "document_type_label": "영상판독지",
+            "confidence": 0.9,
+            "quote": "진 단 서",
+            "medical_document_kind": "imaging_interpretation",
+            "medical_kind_candidates": [],
+            "medical_ambiguity_reason": None,
+        }
+
+    monkeypatch.setattr(rc1, "classify_document", fake_classify)
+    rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline",
+        run_id="RUN_20260805_002")
+
+    assert len(calls) == 1
+    written = json.loads(
+        (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
+    assert written["medical_classification"]["status"] == "llm_classified"
+    assert written["medical_classification"]["kind"] == "imaging_interpretation"
 
 
 def test_a_genre_naming_title_still_calls_the_model(tmp_path, monkeypatch):

@@ -4515,6 +4515,59 @@ def cmd_write_contract(args):
             for e in errors:
                 print(f"  - {e}")
             return 1
+        if schema_name == "claim_analysis_result.schema.json":
+            # Claim Analysis uses exact character ranges, not merely a quote
+            # that happens to occur somewhere in the document. Verify those
+            # ranges against the DAO-owned redacted page bundle before the
+            # contract can become downstream evidence.
+            from claim_analysis_contracts import (
+                exact_evidence_document_ids,
+                verify_exact_evidence_references,
+            )
+
+            revision_ref = data["medical_revision"]
+            medical_variables, medical_error = _load_medical_revision(
+                args.case_id, revision_ref["sha256"]
+            )
+            if medical_error or medical_variables is None:
+                print(f"FAIL: claim-analysis medical authority could not be verified for {target}:")
+                print(f"  - {medical_error or 'medical revision is unavailable'}")
+                return 1
+            revision_mismatches = [
+                key for key in ("run_id", "schema_version", "config_version")
+                if medical_variables.get(key) != revision_ref.get(key)
+            ]
+            if revision_mismatches:
+                print(f"FAIL: claim-analysis medical revision metadata is stale for {target}:")
+                for key in revision_mismatches:
+                    print(
+                        f"  - {key}: result records {revision_ref.get(key)!r}, "
+                        f"revision contains {medical_variables.get(key)!r}"
+                    )
+                return 1
+
+            cited_doc_ids = exact_evidence_document_ids(data)
+            page_text_by_key = {}
+            if cited_doc_ids:
+                try:
+                    bundle = read_redacted_text_bundle_data(args.case_id, cited_doc_ids)
+                except ValueError as exc:
+                    print(f"FAIL: claim-analysis evidence could not be verified for {target}:")
+                    print(f"  - {exc}")
+                    return 1
+                page_text_by_key = {
+                    (document["document_id"], page["page"]): page["text"]
+                    for document in bundle["documents"]
+                    for page in document["pages"]
+                }
+            evidence_errors = verify_exact_evidence_references(
+                data, lambda doc_id, page: page_text_by_key.get((doc_id, page))
+            )
+            if evidence_errors:
+                print(f"FAIL: claim-analysis exact evidence errors for {target}:")
+                for error in evidence_errors:
+                    print(f"  - {error}")
+                return 1
         if schema_name in _POLICY_LAYER_SCHEMAS:
             # P0-3, and deliberately BEFORE the binding/UID checks: those two
             # are scoped to canonical_v1 documents and return [] for anything

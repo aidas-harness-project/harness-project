@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "claim_analysis_result.schema.json",
+  "title": "Canonical selective Claim Analysis result v0.1",
+  "description": "Compact downstream Claim Analysis view. medical_variables.json remains the sole authority for medical facts and extracted_claim_fields.json remains its sealed compatibility projection. This result binds to that medical revision, adds claim-native accident/type/policy facts, and carries local conflict candidates for consistency_check to verify before that stage creates any P6 ledger entry. Reading trace and performance telemetry live in claim_analysis_trace.json.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "component": { "const": "claim-analysis" },
+        "schema_version": { "const": "claim_analysis_result.v0.1" },
+        "config_version": { "const": "claim_analysis_routing.v0.1" },
+        "medical_revision": { "$ref": "medical_common.schema.json#/$defs/medical_variable_revision" },
+        "claim_facts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/field_result" }
+        },
+        "case_type_assessment": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/case_type_assessment" }
+        },
+        "policy_links": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/policy_link" }
+        },
+        "required_document_checklist": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/checklist_item" }
+        },
+        "conflict_candidates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/conflict_candidate" }
+        }
+      },
+      "required": ["schema_version", "config_version", "medical_revision", "claim_facts", "case_type_assessment", "policy_links", "required_document_checklist", "conflict_candidates"]
+    }
+  ],
+  "$defs": {
+    "observation_id": { "type": "string", "pattern": "^CAO_[0-9]{4,}$" },
+    "conflict_candidate_id": { "type": "string", "pattern": "^CAC_[0-9]{4,}$" },
+    "exact_evidence_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "document_id": { "$ref": "common_component_output.schema.json#/$defs/document_id" },
+        "document_type": { "$ref": "common_component_output.schema.json#/$defs/document_type" },
+        "page": { "type": "integer", "minimum": 1 },
+        "quote": { "type": "string", "pattern": "\\S" },
+        "start_char": { "type": "integer", "minimum": 0 },
+        "end_char": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["document_id", "page", "quote", "start_char", "end_char"]
+    },
+    "value": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "start": { "type": "string", "format": "date" },
+            "end": { "type": ["string", "null"], "format": "date" }
+          },
+          "required": ["start", "end"]
+        }
+      ]
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "observation_id": { "$ref": "#/$defs/observation_id" },
+        "value_state": { "enum": ["asserted", "unknown", "not_applicable"] },
+        "value": { "$ref": "#/$defs/value" },
+        "reason": { "type": "string", "minLength": 1 },
+        "source_document_kind": { "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind" },
+        "source_priority_rank": { "type": "integer", "minimum": 1 },
+        "extraction_wave": { "enum": ["A", "B", "opportunistic"] },
+        "evidence_references": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/exact_evidence_reference" }
+        }
+      },
+      "required": ["observation_id", "value_state", "extraction_wave", "evidence_references"],
+      "oneOf": [
+        {
+          "properties": {
+            "value_state": { "const": "asserted" },
+            "evidence_references": { "minItems": 1 }
+          },
+          "required": ["value", "source_document_kind", "source_priority_rank"],
+          "not": { "required": ["reason"] }
+        },
+        {
+          "properties": { "value_state": { "enum": ["unknown", "not_applicable"] } },
+          "required": ["reason"],
+          "not": {
+            "anyOf": [
+              { "required": ["value"] },
+              { "required": ["source_document_kind"] },
+              { "required": ["source_priority_rank"] }
+            ]
+          }
+        }
+      ]
+    },
+    "field_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "field_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "domain_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "priority_grade": { "enum": ["A", "B"] },
+        "authority": { "enum": ["medical_variables_projection", "claim_analysis_native"] },
+        "resolution_status": { "enum": ["resolved", "unknown", "conflict", "not_applicable"] },
+        "canonical_observation_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/observation_id" }
+        },
+        "observations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/observation" }
+        },
+        "conflict_candidate_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/conflict_candidate_id" }
+        },
+        "stop_reason": { "enum": ["trusted_value_found", "sources_exhausted", "conflict_found", "not_applicable"] },
+        "resolution_reason": { "type": "string", "minLength": 1 }
+      },
+      "required": ["field_id", "domain_code", "priority_grade", "authority", "resolution_status", "canonical_observation_ids", "observations", "conflict_candidate_ids", "stop_reason"],
+      "allOf": [
+        {
+          "if": { "properties": { "resolution_status": { "const": "resolved" } }, "required": ["resolution_status"] },
+          "then": {
+            "properties": {
+              "canonical_observation_ids": { "minItems": 1 },
+              "observations": { "minItems": 1 },
+              "conflict_candidate_ids": { "maxItems": 0 },
+              "stop_reason": { "const": "trusted_value_found" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "resolution_status": { "const": "conflict" } }, "required": ["resolution_status"] },
+          "then": {
+            "properties": {
+              "canonical_observation_ids": { "maxItems": 0 },
+              "observations": { "minItems": 2 },
+              "conflict_candidate_ids": { "minItems": 1 },
+              "stop_reason": { "const": "conflict_found" }
+            },
+            "required": ["resolution_reason"]
+          }
+        },
+        {
+          "if": { "properties": { "resolution_status": { "const": "unknown" } }, "required": ["resolution_status"] },
+          "then": {
+            "properties": {
+              "canonical_observation_ids": { "maxItems": 0 },
+              "observations": {
+                "items": {
+                  "allOf": [
+                    { "$ref": "#/$defs/observation" },
+                    { "properties": { "value_state": { "const": "unknown" } } }
+                  ]
+                }
+              },
+              "conflict_candidate_ids": { "maxItems": 0 },
+              "stop_reason": { "const": "sources_exhausted" }
+            },
+            "required": ["resolution_reason"]
+          }
+        },
+        {
+          "if": { "properties": { "resolution_status": { "const": "not_applicable" } }, "required": ["resolution_status"] },
+          "then": {
+            "properties": {
+              "canonical_observation_ids": { "maxItems": 0 },
+              "observations": {
+                "items": {
+                  "allOf": [
+                    { "$ref": "#/$defs/observation" },
+                    { "properties": { "value_state": { "const": "not_applicable" } } }
+                  ]
+                }
+              },
+              "conflict_candidate_ids": { "maxItems": 0 },
+              "stop_reason": { "const": "not_applicable" }
+            },
+            "required": ["resolution_reason"]
+          }
+        }
+      ]
+    },
+    "case_type_assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "case_type": { "enum": ["personal_insurance", "traffic_accident", "industrial_accident", "liability"] },
+        "status": { "enum": ["supported", "not_supported", "uncertain"] },
+        "triggered_field_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } },
+        "conflicting_field_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } },
+        "filing_status": { "enum": ["filed", "not_filed", "unknown"] },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence_references": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/exact_evidence_reference" }
+        }
+      },
+      "required": ["case_type", "status", "triggered_field_ids", "conflicting_field_ids", "filing_status", "reason", "evidence_references"],
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "supported" } }, "required": ["status"] },
+          "then": { "properties": { "triggered_field_ids": { "minItems": 1 }, "evidence_references": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "uncertain" } }, "required": ["status"] },
+          "then": { "properties": { "conflicting_field_ids": { "minItems": 0 } } }
+        }
+      ]
+    },
+    "requirement_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requirement_id": { "type": "string", "pattern": "^REQ-[0-9]+$" },
+        "requirement_text": { "type": "string", "minLength": 1 },
+        "evidence_status": { "enum": ["supported", "contradicted", "unknown", "conflict"] },
+        "conflict_candidate_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/conflict_candidate_id" } },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence_references": { "type": "array", "items": { "$ref": "#/$defs/exact_evidence_reference" } }
+      },
+      "required": ["requirement_id", "requirement_text", "evidence_status", "conflict_candidate_ids", "reason", "evidence_references"],
+      "allOf": [
+        {
+          "if": { "properties": { "evidence_status": { "const": "conflict" } }, "required": ["evidence_status"] },
+          "then": { "properties": { "conflict_candidate_ids": { "minItems": 1 } } }
+        }
+      ]
+    },
+    "policy_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "coverage_id": { "type": "string", "minLength": 1 },
+        "coverage_name": { "type": "string", "minLength": 1 },
+        "clause_link_status": { "enum": ["matched", "candidate", "not_found"] },
+        "clause_ref": { "$ref": "#/$defs/exact_evidence_reference" },
+        "uncertainty_reason": { "type": "string", "minLength": 1 },
+        "requirements": { "type": "array", "items": { "$ref": "#/$defs/requirement_evidence" } }
+      },
+      "required": ["coverage_id", "coverage_name", "clause_link_status", "requirements"],
+      "allOf": [
+        {
+          "if": { "properties": { "clause_link_status": { "const": "matched" } }, "required": ["clause_link_status"] },
+          "then": { "required": ["clause_ref"] }
+        },
+        {
+          "if": { "properties": { "clause_link_status": { "enum": ["candidate", "not_found"] } }, "required": ["clause_link_status"] },
+          "then": { "required": ["uncertainty_reason"] }
+        }
+      ]
+    },
+    "checklist_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "document_kind": { "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind" },
+        "status": { "enum": ["available", "missing", "ambiguous", "not_applicable"] },
+        "required_for_case_types": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["personal_insurance", "traffic_accident", "industrial_accident", "liability"] }
+        },
+        "document_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "common_component_output.schema.json#/$defs/document_id" }
+        },
+        "reason": { "type": "string", "minLength": 1 }
+      },
+      "required": ["document_kind", "status", "required_for_case_types", "document_ids", "reason"]
+    },
+    "conflict_candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "conflict_candidate_id": { "$ref": "#/$defs/conflict_candidate_id" },
+        "field_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "observation_ids": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/observation_id" }
+        },
+        "reason": { "type": "string", "minLength": 1 },
+        "consistency_status": { "const": "pending_consistency_check" }
+      },
+      "required": ["conflict_candidate_id", "field_id", "observation_ids", "reason", "consistency_status"]
+    }
+  }
+}

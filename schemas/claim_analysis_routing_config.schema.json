@@ -1,0 +1,258 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "claim_analysis_routing_config.schema.json",
+  "title": "Claim Analysis selective-reading and routing configuration v0.1",
+  "description": "Versioned design contract for the traumatic-injury PoC. It separates medical-advisory priority from PoC extraction activation, routes each field to ordered document kinds, and keeps cost documents presence-only. behavior_enabled remains false until the governed runtime integration is approved.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "claim_analysis_routing_config.v0.1" },
+    "config_version": { "const": "claim_analysis_routing.v0.1" },
+    "behavior_enabled": { "type": "boolean" },
+    "activation": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "approved_by": { "type": "string", "minLength": 1 },
+            "authority_role": { "type": "string", "minLength": 1 },
+            "approved_at": { "type": "string", "format": "date-time" },
+            "scope": { "type": "string", "minLength": 1 }
+          },
+          "required": ["approved_by", "authority_role", "approved_at", "scope"]
+        }
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "case_scope": { "const": "traumatic_injury_poc" },
+        "automatic_grade_ceiling": { "const": "B" },
+        "disease_handling": { "const": "basic_diagnosis_only" },
+        "cancer_module": { "const": "deferred" },
+        "amount_calculation": { "const": "out_of_scope" },
+        "final_eligibility": { "const": "out_of_scope" }
+      },
+      "required": ["case_scope", "automatic_grade_ceiling", "disease_handling", "cancer_module", "amount_calculation", "final_eligibility"]
+    },
+    "extraction_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "waves": { "const": ["A", "B"] },
+        "read_document_once_per_wave": { "const": true },
+        "parallel_within_wave": { "const": true },
+        "stop_on_first_trusted_value": { "const": true },
+        "trusted_value_requirements": {
+          "type": "array",
+          "const": ["priority_source", "exact_quote", "complete", "unambiguous"]
+        },
+        "critical_field_additional_comparison_limit": { "const": 1 },
+        "missing_mention_is_conflict": { "const": false },
+        "direct_conflict_canonical_value": { "const": null }
+      },
+      "required": ["waves", "read_document_once_per_wave", "parallel_within_wave", "stop_on_first_trusted_value", "trusted_value_requirements", "critical_field_additional_comparison_limit", "missing_mention_is_conflict", "direct_conflict_canonical_value"]
+    },
+    "document_kinds": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind" },
+          "default_roles": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "$ref": "medical_document_classification.schema.json#/$defs/medical_role" }
+          },
+          "claim_analysis_read_mode": { "enum": ["content", "presence_only"] }
+        },
+        "required": ["kind", "default_roles", "claim_analysis_read_mode"],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "medical_expense_receipt",
+                    "medical_expense_itemization",
+                    "pharmacy_payment_confirmation"
+                  ]
+                }
+              },
+              "required": ["kind"]
+            },
+            "then": {
+              "properties": {
+                "default_roles": { "const": ["required_document_presence_only"] },
+                "claim_analysis_read_mode": { "const": "presence_only" }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "domains": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "label": { "type": "string", "minLength": 1 },
+          "effective_first_required_grade": { "enum": ["A", "B"] }
+        },
+        "required": ["code", "label", "effective_first_required_grade"]
+      }
+    },
+    "fields": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "field_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "domain_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "label": { "type": "string", "minLength": 1 },
+          "medical_advisory_grade": { "enum": ["A", "B", "C", "D"] },
+          "extraction_wave": { "enum": ["A", "B", "opportunistic", "deferred"] },
+          "activation_basis": { "enum": ["advisory_priority", "routing_override", "consistency_override", "intake_only", "deferred"] },
+          "value_shape": { "enum": ["boolean", "code", "date", "enum", "number", "period", "text", "text_list"] },
+          "cardinality": { "enum": ["single", "multi"] },
+          "source_route_id": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]*$" },
+          "critical_conflict_field": { "type": "boolean" },
+          "notes": { "type": "string", "minLength": 1 }
+        },
+        "required": ["field_id", "domain_code", "label", "medical_advisory_grade", "extraction_wave", "activation_basis", "value_shape", "cardinality", "source_route_id", "critical_conflict_field"],
+        "allOf": [
+          {
+            "if": {
+              "properties": { "medical_advisory_grade": { "const": "D" } },
+              "required": ["medical_advisory_grade"]
+            },
+            "then": {
+              "properties": {
+                "extraction_wave": { "const": "deferred" },
+                "activation_basis": { "const": "deferred" },
+                "source_route_id": { "type": "null" }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "medical_advisory_grade": { "const": "C" },
+                "extraction_wave": { "enum": ["A", "B"] }
+              },
+              "required": ["medical_advisory_grade", "extraction_wave"]
+            },
+            "then": {
+              "properties": {
+                "extraction_wave": { "const": "B" },
+                "activation_basis": { "enum": ["routing_override", "consistency_override"] }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "source_routes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "route_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "priority_groups": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind" }
+            }
+          },
+          "allow_intake_source": { "type": "boolean" },
+          "read_only_if_already_open": { "type": "boolean" }
+        },
+        "required": ["route_id", "priority_groups", "allow_intake_source", "read_only_if_already_open"]
+      }
+    },
+    "case_type_rules": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "case_type": { "enum": ["personal_insurance", "traffic_accident", "industrial_accident", "liability"] },
+          "positive_fact": { "type": "string", "minLength": 1 },
+          "uncertain_fact": { "type": ["string", "null"] },
+          "evaluation_mode": { "const": "independent_parallel" },
+          "absence_means_false": { "const": false },
+          "evidence_required": { "const": true }
+        },
+        "required": ["case_type", "positive_fact", "uncertain_fact", "evaluation_mode", "absence_means_false", "evidence_required"]
+      }
+    },
+    "required_documents_by_case_type": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "personal_insurance": { "$ref": "#/$defs/document_kind_list" },
+        "traffic_accident": { "$ref": "#/$defs/document_kind_list" },
+        "industrial_accident": { "$ref": "#/$defs/document_kind_list" },
+        "liability": { "$ref": "#/$defs/document_kind_list" }
+      },
+      "required": ["personal_insurance", "traffic_accident", "industrial_accident", "liability"]
+    },
+    "filing_status_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "intake_value_authoritative": { "const": true },
+        "default_when_missing": { "const": "unknown" },
+        "search_when_missing": { "const": "opportunistic_in_already_read_documents" },
+        "extra_read_for_status": { "const": false }
+      },
+      "required": ["intake_value_authoritative", "default_when_missing", "search_when_missing", "extra_read_for_status"]
+    },
+    "policy_linking": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "performed_in_claim_analysis": { "const": true },
+        "clause_link_statuses": { "const": ["matched", "candidate", "not_found"] },
+        "requirement_evidence_statuses": { "const": ["supported", "contradicted", "unknown", "conflict"] },
+        "final_applicability_decision": { "const": false },
+        "amount_calculation": { "const": false }
+      },
+      "required": ["performed_in_claim_analysis", "clause_link_statuses", "requirement_evidence_statuses", "final_applicability_decision", "amount_calculation"]
+    }
+  },
+  "required": ["schema_version", "config_version", "behavior_enabled", "activation", "scope", "extraction_policy", "document_kinds", "domains", "fields", "source_routes", "case_type_rules", "required_documents_by_case_type", "filing_status_policy", "policy_linking"],
+  "allOf": [
+    {
+      "if": { "properties": { "behavior_enabled": { "const": true } }, "required": ["behavior_enabled"] },
+      "then": { "properties": { "activation": { "type": "object" } } }
+    }
+  ],
+  "$defs": {
+    "document_kind_list": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind" }
+    }
+  }
+}

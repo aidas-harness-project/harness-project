@@ -442,6 +442,10 @@
           ],
           "description": "owner: document-pipeline (checkpoint 1). null before classification; null (not 1.0) when pre-flagged, since no inference confidence applies."
         },
+        "medical_classification": {
+          "$ref": "medical_document_classification.schema.json#/$defs/classification",
+          "description": "owner: document-pipeline (checkpoint 1). Optional additive fine-grained medical form classification copied from classification_result. Absence means the v0.1 fine-grained classifier has not run; it is never equivalent to not_medical."
+        },
         "extraction_method": {
           "anyOf": [
             {

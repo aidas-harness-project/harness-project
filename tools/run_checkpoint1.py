@@ -76,6 +76,7 @@ from llm_providers import (
 )
 from ocr_extract import build_ocr_providers, resolve_single_reader, run_ocr
 import segment_case as _segment_case
+import medical_document_routing as _medical_routing
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
 
@@ -85,6 +86,7 @@ DOCUMENT_TYPES = ["insurance_certificate", "insurance_policy", "application_form
                    "diagnosis_certificate", "medical_record", "imaging_report",
                    "receipt", "insurer_response", "other"]
 CLASSIFICATION_PROMPT_VERSION = "classification_v0.2"
+MEDICAL_CLASSIFICATION_PROMPT_VERSION = "classification_v0.3_medical_v0.1"
 
 # The three easily-confused Korean insurance forms all carry policy-like
 # language, so a bare type list collapses them into insurance_policy (CASE_030:
@@ -137,16 +139,25 @@ def _write_contract(case_id, filename, data, schema_name, held_by, run_id):
     return target
 
 
-def classify_document(text: str, classifier=None) -> dict:
+def classify_document(text: str, classifier=None, routing_config: dict | None = None) -> dict:
     """Classify already-transcribed text through the configured provider.
 
     Fails loud on an unparseable response -- same fail-safe discipline as
     ocr_extract.compare(), not a silent guess.
     """
     selected_classifier = classifier or build_provider(ProviderConfig(DEFAULT_PROVIDER), root=ROOT)
+    selected_routing = (
+        routing_config if routing_config is not None
+        else _medical_routing.load_routing_config()
+    )
+    medical_enabled = _medical_routing.routing_enabled(selected_routing)
     prompt = CLASSIFY_PROMPT_TEMPLATE.format(types=", ".join(DOCUMENT_TYPES), text=text[:3000])
+    prompt_version = CLASSIFICATION_PROMPT_VERSION
+    if medical_enabled:
+        prompt += _medical_routing.medical_prompt_contract(selected_routing)
+        prompt_version = MEDICAL_CLASSIFICATION_PROMPT_VERSION
     try:
-        provider_result = selected_classifier.classify_document(prompt, CLASSIFICATION_PROMPT_VERSION)
+        provider_result = selected_classifier.classify_document(prompt, prompt_version)
     except ProviderExecutionError as exc:
         sys.exit(f"error: classification provider failed: {exc}")
     raw = provider_result.text.strip()
@@ -1006,12 +1017,29 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
     classification_result_{doc_id}.json, update document_manifest.json.
     Called both by run_checkpoint1() (no disagreement) and
     apply_disagreement_resolution() (once every page is resolved)."""
+    routing_config = _medical_routing.load_routing_config()
+    medical_enabled = _medical_routing.routing_enabled(routing_config)
     classification = inherited_classification(case_id, doc_id)
     if classification is None:
-        classification = printed_title_classification(case_id, doc_id)
+        title_candidate = printed_title_classification(case_id, doc_id)
+        if title_candidate is not None and medical_enabled:
+            title = title_candidate.get("_title_classified")
+            fine_title = _medical_routing.classification_from_title(title, routing_config)
+            if fine_title is None:
+                # The title settles only the broad legacy type. Fine-grained
+                # routing remains ambiguous, so use the one normal classifier
+                # call instead of inventing a medical kind from a genre label.
+                title_candidate = None
+        classification = title_candidate
     if classification is None:
-        classification = (classify_document(first_page_text, classifier) if classifier is not None
-                          else classify_document(first_page_text))
+        if medical_enabled:
+            classification = classify_document(
+                first_page_text, classifier, routing_config=routing_config
+            )
+        else:
+            # Preserve the pre-v0.1 call contract exactly while the gated
+            # feature is disabled, including existing test/provider adapters.
+            classification = classify_document(first_page_text, classifier)
     ocr_result = json.loads((case_dir(case_id) / f"ocr_result_{doc_id}.json").read_text(encoding="utf-8"))
     provider_metadata = classification.get("_provider_metadata", {})
 
@@ -1026,6 +1054,29 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         "evidence_references": [{"page": 1, "quote": classification.get("quote", "")}],
         "review_required": False,
     }
+    if medical_enabled:
+        title = classification.get("_title_classified")
+        inherited_label = classification.get("_inherited_label")
+        try:
+            if title:
+                medical_classification = _medical_routing.classification_from_title(
+                    title, routing_config
+                )
+                if medical_classification is None:
+                    raise ValueError(
+                        "printed-title path reached publication without a fine medical kind"
+                    )
+            elif classification.get("_inherited_from"):
+                medical_classification = _medical_routing.not_medical_classification(
+                    quote=inherited_label
+                )
+            else:
+                medical_classification = _medical_routing.classification_from_model(
+                    classification, routing_config
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            sys.exit(f"error: invalid fine-grained medical classification: {exc}")
+        classification_result["medical_classification"] = medical_classification
     classification_result["classification_text_source"] = text_source
     if text_source == "raw_page_text":
         # Not an error -- a document not yet redacted still has to be
@@ -1046,8 +1097,7 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         classification_result["classification_source"] = "printed_form_title"
         classification_result["evidence_references"] = [{
             "page": 1,
-            "quote": (f"printed form title {title_classified!r}: the approved "
-                      "text-anchor split cut this document's boundary on it"),
+            "quote": title_classified,
         }]
     inherited_from = classification.get("_inherited_from")
     if inherited_from:
@@ -1057,8 +1107,7 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         classification_result["inherited_from_document_id"] = inherited_from
         classification_result["evidence_references"] = [{
             "page": 1,
-            "quote": (f"inherited from {inherited_from}: deterministic text-anchor slice of an "
-                      "already-classified insurance_policy bundle; no classifier call made"),
+            "quote": inherited_label,
         }]
     _write_contract(case_id, f"classification_result_{doc_id}.json", classification_result,
                      "classification_result.schema.json", held_by, run_id)
@@ -1077,6 +1126,8 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
             classification["predicted_document_type"]),
         "non_text_verification": None,
     }
+    if medical_enabled:
+        fields["medical_classification"] = classification_result["medical_classification"]
     ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)
     if not ok:
         sys.exit(f"error: {message}")

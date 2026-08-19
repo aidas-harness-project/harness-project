@@ -1,0 +1,148 @@
+{
+  "schema_version": "claim_analysis_routing_config.v0.1",
+  "config_version": "claim_analysis_routing.v0.1",
+  "behavior_enabled": false,
+  "activation": null,
+  "scope": {
+    "case_scope": "traumatic_injury_poc",
+    "automatic_grade_ceiling": "B",
+    "disease_handling": "basic_diagnosis_only",
+    "cancer_module": "deferred",
+    "amount_calculation": "out_of_scope",
+    "final_eligibility": "out_of_scope"
+  },
+  "extraction_policy": {
+    "waves": ["A", "B"],
+    "read_document_once_per_wave": true,
+    "parallel_within_wave": true,
+    "stop_on_first_trusted_value": true,
+    "trusted_value_requirements": ["priority_source", "exact_quote", "complete", "unambiguous"],
+    "critical_field_additional_comparison_limit": 1,
+    "missing_mention_is_conflict": false,
+    "direct_conflict_canonical_value": null
+  },
+  "document_kinds": [
+    {"kind": "diagnosis_certificate", "default_roles": ["accident_context_source", "diagnosis_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "initial_visit_record", "default_roles": ["accident_context_source", "diagnosis_source", "diagnostic_evidence_source", "clinical_course_source", "prior_history_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "outpatient_record", "default_roles": ["diagnosis_source", "diagnostic_evidence_source", "treatment_source", "clinical_course_source", "prior_history_source", "complication_source", "disability_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "progress_record", "default_roles": ["diagnosis_source", "diagnostic_evidence_source", "treatment_source", "clinical_course_source", "prior_history_source", "complication_source", "disability_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "final_visit_record", "default_roles": ["diagnosis_source", "treatment_source", "clinical_course_source", "complication_source", "disability_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "surgery_procedure_record", "default_roles": ["treatment_source", "complication_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "imaging_interpretation", "default_roles": ["diagnostic_evidence_source", "disability_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "major_test_result", "default_roles": ["diagnostic_evidence_source", "disability_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "admission_discharge_summary", "default_roles": ["diagnosis_source", "treatment_source", "clinical_course_source", "complication_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "emergency_record", "default_roles": ["accident_context_source", "diagnosis_source", "diagnostic_evidence_source", "clinical_course_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "disability_assessment", "default_roles": ["disability_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "prescription_treatment_history", "default_roles": ["treatment_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "nursing_routine_record", "default_roles": ["clinical_course_source"], "claim_analysis_read_mode": "content"},
+    {"kind": "medical_expense_receipt", "default_roles": ["required_document_presence_only"], "claim_analysis_read_mode": "presence_only"},
+    {"kind": "medical_expense_itemization", "default_roles": ["required_document_presence_only"], "claim_analysis_read_mode": "presence_only"},
+    {"kind": "pharmacy_payment_confirmation", "default_roles": ["required_document_presence_only"], "claim_analysis_read_mode": "presence_only"},
+    {"kind": "other_medical", "default_roles": [], "claim_analysis_read_mode": "content"}
+  ],
+  "domains": [
+    {"code": "event_timeline", "label": "Event and timeline", "effective_first_required_grade": "B"},
+    {"code": "diagnosis", "label": "Diagnosis", "effective_first_required_grade": "A"},
+    {"code": "diagnosis_basis", "label": "Diagnostic basis", "effective_first_required_grade": "A"},
+    {"code": "treatment", "label": "Treatment", "effective_first_required_grade": "A"},
+    {"code": "clinical_course_outcome", "label": "Clinical course and outcome", "effective_first_required_grade": "A"},
+    {"code": "prior_history_influences", "label": "Prior history and influencing factors", "effective_first_required_grade": "A"},
+    {"code": "complications_new_problems", "label": "Complications and new problems", "effective_first_required_grade": "B"},
+    {"code": "disability", "label": "Disability information", "effective_first_required_grade": "A"}
+  ],
+  "fields": [
+    {"field_id": "accident_date", "domain_code": "event_timeline", "label": "Accident date", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "date", "cardinality": "single", "source_route_id": "accident_context", "critical_conflict_field": true},
+    {"field_id": "accident_mechanism", "domain_code": "event_timeline", "label": "Accident or injury mechanism", "medical_advisory_grade": "C", "extraction_wave": "B", "activation_basis": "routing_override", "value_shape": "text", "cardinality": "single", "source_route_id": "accident_context", "critical_conflict_field": true},
+    {"field_id": "injury_event_present", "domain_code": "event_timeline", "label": "External injury event documented", "medical_advisory_grade": "C", "extraction_wave": "B", "activation_basis": "routing_override", "value_shape": "boolean", "cardinality": "single", "source_route_id": "accident_context", "critical_conflict_field": true},
+    {"field_id": "work_activity_context", "domain_code": "event_timeline", "label": "Work activity context", "medical_advisory_grade": "C", "extraction_wave": "B", "activation_basis": "routing_override", "value_shape": "enum", "cardinality": "single", "source_route_id": "accident_context", "critical_conflict_field": true, "notes": "Explicit work activity supports industrial accident; commute, business trip, and company event remain uncertain."},
+    {"field_id": "vehicle_involvement", "domain_code": "event_timeline", "label": "Vehicle involvement", "medical_advisory_grade": "C", "extraction_wave": "B", "activation_basis": "routing_override", "value_shape": "boolean", "cardinality": "single", "source_route_id": "accident_context", "critical_conflict_field": true},
+    {"field_id": "facility_defect_or_third_party_responsibility", "domain_code": "event_timeline", "label": "Facility defect or responsible third-party act", "medical_advisory_grade": "C", "extraction_wave": "B", "activation_basis": "routing_override", "value_shape": "text", "cardinality": "single", "source_route_id": "accident_context", "critical_conflict_field": true},
+    {"field_id": "first_visit_date", "domain_code": "event_timeline", "label": "First medical visit date", "medical_advisory_grade": "C", "extraction_wave": "deferred", "activation_basis": "deferred", "value_shape": "date", "cardinality": "single", "source_route_id": "accident_context", "critical_conflict_field": false},
+
+    {"field_id": "primary_diagnosis", "domain_code": "diagnosis", "label": "Primary diagnosis", "medical_advisory_grade": "A", "extraction_wave": "A", "activation_basis": "advisory_priority", "value_shape": "text", "cardinality": "multi", "source_route_id": "diagnosis", "critical_conflict_field": true},
+    {"field_id": "diagnosis_date", "domain_code": "diagnosis", "label": "Diagnosis date", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "date", "cardinality": "multi", "source_route_id": "diagnosis", "critical_conflict_field": true},
+    {"field_id": "diagnosis_site", "domain_code": "diagnosis", "label": "Anatomical diagnosis site", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text", "cardinality": "multi", "source_route_id": "diagnosis", "critical_conflict_field": true},
+    {"field_id": "diagnosis_laterality", "domain_code": "diagnosis", "label": "Diagnosis laterality", "medical_advisory_grade": "C", "extraction_wave": "B", "activation_basis": "consistency_override", "value_shape": "enum", "cardinality": "multi", "source_route_id": "diagnosis", "critical_conflict_field": true},
+    {"field_id": "diagnosis_department", "domain_code": "diagnosis", "label": "Clinical department", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text", "cardinality": "multi", "source_route_id": "diagnosis", "critical_conflict_field": false},
+    {"field_id": "diagnosis_body_system", "domain_code": "diagnosis", "label": "Diagnosis body system", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "enum", "cardinality": "multi", "source_route_id": "diagnosis", "critical_conflict_field": false},
+    {"field_id": "diagnosis_code", "domain_code": "diagnosis", "label": "Diagnosis code", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "code", "cardinality": "multi", "source_route_id": "diagnosis", "critical_conflict_field": true},
+    {"field_id": "diagnostic_certainty", "domain_code": "diagnosis", "label": "Confirmed or clinically suspected diagnosis when stated", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "enum", "cardinality": "multi", "source_route_id": "diagnosis", "critical_conflict_field": false},
+    {"field_id": "secondary_diagnosis", "domain_code": "diagnosis", "label": "Secondary diagnosis", "medical_advisory_grade": "C", "extraction_wave": "deferred", "activation_basis": "deferred", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "diagnosis", "critical_conflict_field": false},
+
+    {"field_id": "diagnosis_certificate_anchor", "domain_code": "diagnosis_basis", "label": "Diagnosis stated on the diagnosis certificate", "medical_advisory_grade": "A", "extraction_wave": "A", "activation_basis": "advisory_priority", "value_shape": "text", "cardinality": "multi", "source_route_id": "diagnosis", "critical_conflict_field": true},
+    {"field_id": "direct_diagnostic_evidence", "domain_code": "diagnosis_basis", "label": "Direct supporting examination or test result", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "diagnostic_evidence", "critical_conflict_field": true},
+    {"field_id": "major_symptoms_and_history", "domain_code": "diagnosis_basis", "label": "Major symptoms and history", "medical_advisory_grade": "C", "extraction_wave": "deferred", "activation_basis": "deferred", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "diagnostic_evidence", "critical_conflict_field": false},
+
+    {"field_id": "major_treatment_category", "domain_code": "treatment", "label": "Major treatment category", "medical_advisory_grade": "A", "extraction_wave": "A", "activation_basis": "advisory_priority", "value_shape": "enum", "cardinality": "multi", "source_route_id": "treatment", "critical_conflict_field": false},
+    {"field_id": "surgery_or_major_procedure_status", "domain_code": "treatment", "label": "Surgery or major procedure status", "medical_advisory_grade": "A", "extraction_wave": "A", "activation_basis": "advisory_priority", "value_shape": "boolean", "cardinality": "single", "source_route_id": "treatment", "critical_conflict_field": true},
+    {"field_id": "surgery_or_procedure_name", "domain_code": "treatment", "label": "Specific surgery or procedure name", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text", "cardinality": "multi", "source_route_id": "treatment", "critical_conflict_field": true},
+    {"field_id": "surgery_or_procedure_date", "domain_code": "treatment", "label": "Surgery or procedure date", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "date", "cardinality": "multi", "source_route_id": "treatment", "critical_conflict_field": true},
+    {"field_id": "treatment_period", "domain_code": "treatment", "label": "Major treatment period", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "period", "cardinality": "multi", "source_route_id": "treatment", "critical_conflict_field": false},
+    {"field_id": "admission_status", "domain_code": "treatment", "label": "Admission status", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "boolean", "cardinality": "single", "source_route_id": "treatment", "critical_conflict_field": false},
+    {"field_id": "admission_period", "domain_code": "treatment", "label": "Admission period", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "period", "cardinality": "multi", "source_route_id": "treatment", "critical_conflict_field": false},
+    {"field_id": "repeated_treatment", "domain_code": "treatment", "label": "Repeated treatment type and count", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "treatment", "critical_conflict_field": false},
+    {"field_id": "major_treatment_change", "domain_code": "treatment", "label": "Major treatment change including reoperation", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "treatment", "critical_conflict_field": true},
+
+    {"field_id": "final_clinical_course", "domain_code": "clinical_course_outcome", "label": "Final documented clinical course", "medical_advisory_grade": "A", "extraction_wave": "A", "activation_basis": "advisory_priority", "value_shape": "enum", "cardinality": "single", "source_route_id": "clinical_course", "critical_conflict_field": false, "notes": "The latest record is not treated as final unless the source explicitly states finality or treatment conclusion."},
+    {"field_id": "current_treatment_status", "domain_code": "clinical_course_outcome", "label": "Current treatment status", "medical_advisory_grade": "A", "extraction_wave": "A", "activation_basis": "advisory_priority", "value_shape": "enum", "cardinality": "single", "source_route_id": "clinical_course", "critical_conflict_field": false},
+    {"field_id": "major_symptom_change", "domain_code": "clinical_course_outcome", "label": "Major symptom change", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "clinical_course", "critical_conflict_field": false},
+    {"field_id": "objective_change", "domain_code": "clinical_course_outcome", "label": "Objective examination change", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "clinical_course", "critical_conflict_field": false},
+    {"field_id": "additional_treatment_or_reoperation", "domain_code": "clinical_course_outcome", "label": "Additional treatment or reoperation", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "clinical_course", "critical_conflict_field": true},
+    {"field_id": "delayed_recovery", "domain_code": "clinical_course_outcome", "label": "Documented delayed recovery", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "boolean", "cardinality": "single", "source_route_id": "clinical_course", "critical_conflict_field": false},
+
+    {"field_id": "patient_reported_prior_same_site_history", "domain_code": "prior_history_influences", "label": "Patient-reported prior same-site or similar-condition history", "medical_advisory_grade": "A", "extraction_wave": "A", "activation_basis": "intake_only", "value_shape": "enum", "cardinality": "single", "source_route_id": "prior_history", "critical_conflict_field": false, "notes": "If no intake response exists, report unknown; never infer no history from silence."},
+    {"field_id": "documented_prior_same_site_history", "domain_code": "prior_history_influences", "label": "Documented prior same-site history", "medical_advisory_grade": "C", "extraction_wave": "opportunistic", "activation_basis": "consistency_override", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "prior_history", "critical_conflict_field": false, "notes": "Extract only from documents already opened for another field; do not launch a C-grade search."},
+
+    {"field_id": "major_complication_or_unexpected_long_treatment", "domain_code": "complications_new_problems", "label": "Major complication or unexpected long treatment", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "boolean", "cardinality": "single", "source_route_id": "complication", "critical_conflict_field": false},
+    {"field_id": "complication_type", "domain_code": "complications_new_problems", "label": "Complication type", "medical_advisory_grade": "C", "extraction_wave": "deferred", "activation_basis": "deferred", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "complication", "critical_conflict_field": false},
+
+    {"field_id": "disability_related_diagnosis", "domain_code": "disability", "label": "Diagnosis related to disability", "medical_advisory_grade": "A", "extraction_wave": "A", "activation_basis": "advisory_priority", "value_shape": "text", "cardinality": "multi", "source_route_id": "disability", "critical_conflict_field": true},
+    {"field_id": "disability_type", "domain_code": "disability", "label": "Documented disability type", "medical_advisory_grade": "A", "extraction_wave": "A", "activation_basis": "advisory_priority", "value_shape": "enum", "cardinality": "multi", "source_route_id": "disability", "critical_conflict_field": true},
+    {"field_id": "amputation_level", "domain_code": "disability", "label": "Documented amputation level", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text", "cardinality": "multi", "source_route_id": "disability", "critical_conflict_field": false},
+    {"field_id": "joint_range_of_motion", "domain_code": "disability", "label": "Joint range of motion", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "disability", "critical_conflict_field": false},
+    {"field_id": "neurologic_or_objective_function_test", "domain_code": "disability", "label": "Neurologic or objective function test", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "disability", "critical_conflict_field": false},
+    {"field_id": "existing_disability_assessment", "domain_code": "disability", "label": "Existing disability assessment document", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "disability", "critical_conflict_field": true},
+    {"field_id": "documented_disability_rate", "domain_code": "disability", "label": "Disability rate stated by an existing assessment", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "number", "cardinality": "multi", "source_route_id": "disability", "critical_conflict_field": true, "notes": "Extraction only; the pipeline does not calculate or endorse a final disability rate."},
+    {"field_id": "documented_disability_duration", "domain_code": "disability", "label": "Permanent or temporary status and stated period", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text", "cardinality": "multi", "source_route_id": "disability", "critical_conflict_field": true},
+    {"field_id": "documented_disability_standard", "domain_code": "disability", "label": "Assessment standard such as AMA or McBride", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text", "cardinality": "multi", "source_route_id": "disability", "critical_conflict_field": true},
+    {"field_id": "disability_treatment_duration", "domain_code": "disability", "label": "Treatment duration relevant to disability", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "period", "cardinality": "multi", "source_route_id": "disability", "critical_conflict_field": false},
+    {"field_id": "documented_function_change", "domain_code": "disability", "label": "Documented symptom or function change", "medical_advisory_grade": "B", "extraction_wave": "B", "activation_basis": "advisory_priority", "value_shape": "text_list", "cardinality": "multi", "source_route_id": "disability", "critical_conflict_field": false},
+    {"field_id": "symptom_fixation_judgment", "domain_code": "disability", "label": "Symptom fixation judgment", "medical_advisory_grade": "D", "extraction_wave": "deferred", "activation_basis": "deferred", "value_shape": "text", "cardinality": "single", "source_route_id": null, "critical_conflict_field": false},
+    {"field_id": "final_disability_rate", "domain_code": "disability", "label": "Final disability rate calculation", "medical_advisory_grade": "D", "extraction_wave": "deferred", "activation_basis": "deferred", "value_shape": "number", "cardinality": "single", "source_route_id": null, "critical_conflict_field": false}
+  ],
+  "source_routes": [
+    {"route_id": "accident_context", "priority_groups": [["initial_visit_record"], ["emergency_record"], ["diagnosis_certificate"], ["outpatient_record", "progress_record", "other_medical"]], "allow_intake_source": true, "read_only_if_already_open": false},
+    {"route_id": "diagnosis", "priority_groups": [["diagnosis_certificate"], ["admission_discharge_summary"], ["initial_visit_record"], ["outpatient_record", "progress_record", "final_visit_record"]], "allow_intake_source": false, "read_only_if_already_open": false},
+    {"route_id": "diagnostic_evidence", "priority_groups": [["imaging_interpretation", "major_test_result"], ["initial_visit_record", "emergency_record", "outpatient_record", "progress_record"]], "allow_intake_source": false, "read_only_if_already_open": false},
+    {"route_id": "treatment", "priority_groups": [["surgery_procedure_record"], ["admission_discharge_summary"], ["outpatient_record", "progress_record", "final_visit_record"], ["prescription_treatment_history"]], "allow_intake_source": false, "read_only_if_already_open": false},
+    {"route_id": "clinical_course", "priority_groups": [["final_visit_record"], ["outpatient_record", "progress_record"], ["admission_discharge_summary"], ["nursing_routine_record"]], "allow_intake_source": false, "read_only_if_already_open": false},
+    {"route_id": "prior_history", "priority_groups": [["initial_visit_record", "outpatient_record", "progress_record"]], "allow_intake_source": true, "read_only_if_already_open": true},
+    {"route_id": "complication", "priority_groups": [["final_visit_record", "outpatient_record", "progress_record"], ["admission_discharge_summary", "surgery_procedure_record"]], "allow_intake_source": false, "read_only_if_already_open": false},
+    {"route_id": "disability", "priority_groups": [["disability_assessment"], ["final_visit_record", "outpatient_record", "progress_record"], ["imaging_interpretation", "major_test_result"]], "allow_intake_source": false, "read_only_if_already_open": false}
+  ],
+  "case_type_rules": [
+    {"case_type": "personal_insurance", "positive_fact": "A documented external injury event can be handled as a personal-insurance review target even when contract or filing information is unknown.", "uncertain_fact": null, "evaluation_mode": "independent_parallel", "absence_means_false": false, "evidence_required": true},
+    {"case_type": "traffic_accident", "positive_fact": "The injury event explicitly involves a vehicle or traffic accident.", "uncertain_fact": null, "evaluation_mode": "independent_parallel", "absence_means_false": false, "evidence_required": true},
+    {"case_type": "industrial_accident", "positive_fact": "The injury occurred during explicitly documented work activity.", "uncertain_fact": "Commute, business trip, and company-event contexts remain uncertain unless work connection is explicit.", "evaluation_mode": "independent_parallel", "absence_means_false": false, "evidence_required": true},
+    {"case_type": "liability", "positive_fact": "The injury narrative explicitly identifies a facility defect or a responsible act or omission by another party.", "uncertain_fact": "A mere location or presence of another person does not establish responsibility.", "evaluation_mode": "independent_parallel", "absence_means_false": false, "evidence_required": true}
+  ],
+  "required_documents_by_case_type": {
+    "personal_insurance": ["diagnosis_certificate", "initial_visit_record", "surgery_procedure_record", "imaging_interpretation"],
+    "traffic_accident": ["diagnosis_certificate", "initial_visit_record", "surgery_procedure_record", "imaging_interpretation", "medical_expense_receipt", "medical_expense_itemization", "pharmacy_payment_confirmation"],
+    "industrial_accident": ["diagnosis_certificate", "initial_visit_record", "progress_record", "surgery_procedure_record", "imaging_interpretation", "major_test_result", "medical_expense_receipt", "medical_expense_itemization", "pharmacy_payment_confirmation"],
+    "liability": ["diagnosis_certificate", "initial_visit_record", "progress_record", "surgery_procedure_record", "imaging_interpretation", "major_test_result", "medical_expense_receipt", "medical_expense_itemization", "pharmacy_payment_confirmation"]
+  },
+  "filing_status_policy": {
+    "intake_value_authoritative": true,
+    "default_when_missing": "unknown",
+    "search_when_missing": "opportunistic_in_already_read_documents",
+    "extra_read_for_status": false
+  },
+  "policy_linking": {
+    "performed_in_claim_analysis": true,
+    "clause_link_statuses": ["matched", "candidate", "not_found"],
+    "requirement_evidence_statuses": ["supported", "contradicted", "unknown", "conflict"],
+    "final_applicability_decision": false,
+    "amount_calculation": false
+  }
+}

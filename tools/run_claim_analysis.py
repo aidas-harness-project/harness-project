@@ -1760,6 +1760,19 @@ def _verify_and_bind(case_id: str, run_id: str, unit_id: str, body: dict) -> dic
     return _bind(body, {_ref_key(ref): ref for ref in verified})
 
 
+def selective_routing_enabled() -> bool:
+    """Whether the v0.1 selective spine is activated.
+
+    Read at dispatch time rather than import time so a config edit does not
+    require a reinstall, and kept as a single predicate so the legacy path is
+    provably untouched while the gate is closed: with `behavior_enabled: false`
+    this returns False and `main()` runs exactly the code it ran before.
+    """
+    import medical_document_routing
+
+    return medical_document_routing.routing_enabled()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("case_id")
@@ -1769,6 +1782,17 @@ def main(argv: list[str] | None = None) -> int:
     add_provider_args(parser)
     args = parser.parse_args(argv)
     trace_mod.configure_from_args(args)
+    if selective_routing_enabled():
+        # The selective spine replaces the 2-call read-everything path. It is
+        # a separate module so this one keeps working unchanged while the gate
+        # is closed; both write through the same DAO commands.
+        print(
+            "selective claim analysis is enabled -- run "
+            "tools/run_claim_analysis_selective.py, which owns the routed "
+            "read plan and the claim_analysis_result/trace contracts",
+            file=sys.stderr,
+        )
+        return 2
     try:
         provider = build_provider(parse_provider_config(args))
         print(json.dumps(run(case_id=args.case_id, held_by=args.held_by, run_id=args.run_id,
