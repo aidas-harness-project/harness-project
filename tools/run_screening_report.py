@@ -39,7 +39,7 @@ DAO = ROOT / "tools" / "dao.py"
 STAGE = "screening_report"
 COMPONENT = "screening-report"
 CONTRACT = "screening_report.json"
-SCHEMA = "screening_report.schema.json"
+SCHEMA = "screening_report_selective.schema.json"
 VERSION = "screening_report_selective.v0.1"
 
 # Korean labels: this is a deliverable read by Korean-speaking professionals,
@@ -252,16 +252,34 @@ def build_report(
     conflict_entries: Mapping[str, Mapping[str, Any]] | None = None,
     deferred_conflict_ids: Sequence[str] = (),
     report_path: str | None = None,
+    denial_reasons: Mapping[str, Any] | None = None,
+    agent_judgement: Mapping[str, Any] | None = None,
 ) -> dict:
-    """Assemble `screening_report.json` from the two upstream contracts."""
+    """Assemble `screening_report.json`.
+
+    Two kinds of content, kept apart on purpose:
+
+    * **Deterministic** -- restated from upstream contracts with their evidence:
+      the case summary, the four type verdicts, the checklist, the unconfirmed
+      items, the insurer's position, and each verified conflict's
+      `professional_summary` COPIED VERBATIM from the ledger entry.
+    * **Agent** (`agent_judgement`) -- the screening-report agent's `key_issues`,
+      `review_points`, and per-conflict severity/placement. Nothing else: this
+      lane makes no feasibility, difficulty, or payout judgement.
+
+    The summary is copied rather than regenerated because it was written by
+    whoever had the evidence in hand at the moment the conflict was confirmed.
+    A downstream paraphrase of a disagreement is a second reading of it.
+    """
+    judgement = dict(agent_judgement or {})
     facts = {row["field_id"]: row for row in claim_analysis.get("claim_facts") or []}
     assessments = claim_analysis.get("case_type_assessment") or []
     checklist = claim_analysis.get("required_document_checklist") or []
     entries = dict(conflict_entries or {})
 
-    supported = [
+    applicable = [
         CASE_TYPE_LABEL.get(row["case_type"], row["case_type"])
-        for row in assessments if row["status"] == "supported"
+        for row in assessments if row["status"] == "applicable"
     ]
     uncertain = [
         CASE_TYPE_LABEL.get(row["case_type"], row["case_type"])
@@ -277,7 +295,7 @@ def build_report(
             period_block["end_date"] = treatment_period["end"]
 
     case_summary = {
-        "case_type": " / ".join(supported) if supported else "확정된 유형 없음",
+        "case_type": " / ".join(applicable) if applicable else "확정된 유형 없음",
         "main_diagnosis": main_diagnosis,
         "kcd_code": _as_text(_first_value(facts, "diagnosis_code")),
         "accident_date": _as_text(_first_value(facts, "accident_date")),
@@ -300,32 +318,14 @@ def build_report(
 
     # Only conflicts consistency_check CONFIRMED reach the report. A withdrawn
     # or immaterial candidate is development detail, not a finding.
+    severity_by_ref = dict(judgement.get("conflict_severity") or {})
     inconsistencies = []
     for check in consistency.get("checks") or []:
         if check.get("result") != "inconsistent":
             continue
         conflict_id = check.get("conflict_id")
         entry = entries.get(conflict_id, {})
-        sources = entry.get("sources") or []
-        described = " / ".join(
-            f"{source.get('document_id')}: {source.get('value')}"
-            for source in sources
-        )
-        row = {
-            "field": entry.get("field_or_topic") or check.get("topic", ""),
-            "description": (
-                f"출처 간 값이 다릅니다. {described}" if described
-                else "출처 간 값이 다릅니다."
-            ),
-            "severity": "high",
-            "related_documents": [
-                source["document_id"] for source in sources
-                if source.get("document_id")
-            ],
-        }
-        if conflict_id:
-            row["conflict_ref"] = conflict_id
-        inconsistencies.append(row)
+        inconsistencies.append(_conflict_row(conflict_id, entry, severity_by_ref))
 
     # A deferred conflict is a carried obligation: finalize-stage refuses the
     # report unless every deferred id appears here by conflict_ref.
@@ -333,24 +333,8 @@ def build_report(
     for conflict_id in deferred_conflict_ids:
         if conflict_id in carried:
             continue
-        entry = entries.get(conflict_id, {})
-        sources = entry.get("sources") or []
-        inconsistencies.append({
-            "field": entry.get("field_or_topic") or conflict_id,
-            "description": (
-                "판단이 필요한 출처 간 불일치입니다. "
-                + " / ".join(
-                    f"{source.get('document_id')}: {source.get('value')}"
-                    for source in sources
-                )
-            ).strip(),
-            "severity": "high",
-            "conflict_ref": conflict_id,
-            "related_documents": [
-                source["document_id"] for source in sources
-                if source.get("document_id")
-            ],
-        })
+        inconsistencies.append(
+            _conflict_row(conflict_id, entries.get(conflict_id, {}), severity_by_ref))
 
     missing_documents = [
         {
@@ -365,35 +349,44 @@ def build_report(
     ]
 
     unconfirmed = unconfirmed_section(facts, config)
-    key_issues = []
-    if uncertain:
-        key_issues.append({
-            "issue_id": "ISSUE_1",
-            "title": "사건유형 확정 필요",
-            "description": (
-                f"{', '.join(uncertain)} 유형은 자료만으로 확정되지 않았습니다. "
-                "추가 자료 또는 담당자 확인이 필요합니다."
-            ),
-            "review_required": True,
-            "reviewer_role": "손해사정사",
-        })
-    if inconsistencies:
-        key_issues.append({
-            "issue_id": f"ISSUE_{len(key_issues) + 1}",
-            "title": "출처 간 불일치 확인 필요",
-            "description": (
-                f"{len(inconsistencies)}건의 검증된 불일치가 확인되었습니다. "
-                "어느 값을 채택할지는 판단이 필요합니다."
-            ),
-            "review_required": True,
-            "reviewer_role": "손해사정사",
-        })
+    # The agent's half. key_issues, review_points, and per-conflict severity
+    # are readings of the case -- which questions matter and who can answer
+    # them -- so they come from the screening-report agent, not from a rule
+    # here. The fallbacks below state facts (a type is unconfirmed, N conflicts
+    # were verified) and route them for review; they are a floor for a run with
+    # no agent input, never a substitute for that judgement.
+    key_issues = list(judgement.get("key_issues") or [])
+    if not key_issues:
+        if uncertain:
+            key_issues.append({
+                "issue_id": "ISSUE_1",
+                "title": "사건유형 확정 필요",
+                "description": (
+                    f"{', '.join(uncertain)} 유형은 자료만으로 확정되지 않았습니다. "
+                    "추가 자료 또는 담당자 확인이 필요합니다."
+                ),
+                "review_required": True,
+                "reviewer_role": "손해사정사",
+            })
+        if inconsistencies:
+            key_issues.append({
+                "issue_id": f"ISSUE_{len(key_issues) + 1}",
+                "title": "출처 간 불일치 확인 필요",
+                "description": (
+                    f"{len(inconsistencies)}건의 검증된 불일치가 확인되었습니다. "
+                    "어느 값을 채택할지는 판단이 필요합니다."
+                ),
+                "review_required": True,
+                "reviewer_role": "손해사정사",
+            })
 
-    review_points = [{
-        "point": issue["description"],
-        "reviewer_role": issue.get("reviewer_role", "손해사정사"),
-        "priority": "high",
-    } for issue in key_issues]
+    review_points = list(judgement.get("review_points") or [])
+    if not review_points:
+        review_points = [{
+            "point": issue["description"],
+            "reviewer_role": issue.get("reviewer_role", "손해사정사"),
+            "priority": "high",
+        } for issue in key_issues]
     if not review_points:
         review_points = [{
             "point": "자동 판정 단계에서 추가 확인이 필요한 쟁점은 확인되지 않았습니다.",
@@ -414,22 +407,19 @@ def build_report(
         "source_grounded": True,
         "report_path": report_path or f"outputs/{case_id}/screening_report.md",
         "case_summary": case_summary,
-        "insurer_position": {
-            "has_denial": False,
-            "has_reduction": False,
-            "has_denial_or_reduction": False,
-            "denial": {"reason_ids": [], "total_amount": None},
-            "reduction": {"reason_ids": [], "total_amount": None},
-        },
+        "insurer_position": insurer_position(denial_reasons),
         "key_issues": key_issues,
         "inconsistencies": inconsistencies,
         "missing_documents": missing_documents,
         "review_points": review_points,
+        # Compatibility only. The selective contract does not require this
+        # section, and the lane makes no feasibility/difficulty judgement -- so
+        # the helper writes constants and the agent contributes nothing here.
+        # `priority_review_points` is copied from the review points above, not
+        # re-decided.
         "preliminary_assessment": {
-            # P3: this is the judgment-heavy section, so it is hedged and
-            # routed for review rather than asserted.
-            "feasibility": "medium",
-            "difficulty": "medium",
+            "feasibility": "not_assessed",
+            "difficulty": "not_assessed",
             "priority_review_points": [
                 point["point"] for point in review_points
             ],
@@ -442,6 +432,118 @@ def build_report(
         "unconfirmed_items": unconfirmed,
     }
     return report
+
+
+def _conflict_row(
+    conflict_id: str | None,
+    entry: Mapping[str, Any],
+    severity_by_ref: Mapping[str, str],
+) -> dict:
+    """One inconsistency row, carrying the ledger's own wording.
+
+    `professional_summary` is reproduced exactly. When an entry predates that
+    field there is nothing to carry, so the row shows the disagreeing values
+    and their sources and says where that leaves it -- a summary invented here
+    would be this stage's reading of a disagreement it did not examine.
+    """
+    sources = entry.get("sources") or []
+    summary = entry.get("professional_summary")
+    if summary:
+        description = summary
+        summary_source = "consistency_check_professional_summary"
+    else:
+        described = " / ".join(
+            f"{source.get('document_id')} p.{source.get('page')}: {source.get('value')}"
+            for source in sources
+        )
+        description = (
+            f"출처 간 값이 다릅니다. {described}".strip()
+            if described else "출처 간 값이 다릅니다."
+        )
+        summary_source = "legacy_entry_without_summary"
+    row = {
+        "field": entry.get("field_or_topic") or (conflict_id or ""),
+        "description": description,
+        "severity": severity_by_ref.get(conflict_id, "high"),
+        "summary_source": summary_source,
+        "related_documents": [
+            source["document_id"] for source in sources
+            if source.get("document_id")
+        ],
+        "source_values": [
+            {
+                "document_id": source.get("document_id"),
+                "page": source.get("page"),
+                "value": source.get("value"),
+                "quote": source.get("quote"),
+            }
+            for source in sources
+        ],
+    }
+    if conflict_id:
+        row["conflict_ref"] = conflict_id
+    return row
+
+
+def insurer_position(denial_reasons: Mapping[str, Any] | None) -> dict:
+    """The insurer's own decision, preserved as three separate outcomes.
+
+    Hard-coding false was wrong in the one direction that matters: a case where
+    the insurer denied or reduced would have been summarized as though it had
+    not, and the screening report is the first document a human reads. False is
+    only correct when there is no insurer response contract to read.
+    """
+    if not denial_reasons:
+        return {
+            "has_denial": False,
+            "has_reduction": False,
+            "has_denial_or_reduction": False,
+            "denial": {"reason_ids": [], "total_amount": None},
+            "reduction": {"reason_ids": [], "total_amount": None},
+        }
+
+    reasons = denial_reasons.get("denial_reasons") or []
+    denial_ids = [r["reason_id"] for r in reasons
+                  if r.get("decision_type") == "denial"]
+    reduction_ids = [r["reason_id"] for r in reasons
+                     if r.get("decision_type") == "reduction"]
+    accepted = denial_reasons.get("accepted_coverages") or []
+    position = {
+        "has_denial": bool(denial_ids),
+        "has_reduction": bool(reduction_ids),
+        "has_denial_or_reduction": bool(denial_ids or reduction_ids),
+        "denial": {
+            "reason_ids": denial_ids,
+            "total_amount": _total_amount(reasons, "denial"),
+        },
+        "reduction": {
+            "reason_ids": reduction_ids,
+            "total_amount": _total_amount(reasons, "reduction"),
+        },
+    }
+    if accepted:
+        # Silence about an accepted coverage reads as a total denial, which is
+        # the misreading the upstream field exists to prevent.
+        position["has_acceptance"] = True
+        position["acceptance"] = {
+            "accepted_coverage_ids": [
+                row["accepted_coverage_id"] for row in accepted
+            ],
+        }
+    return position
+
+
+def _total_amount(reasons: Sequence[Mapping[str, Any]], decision_type: str):
+    """A total only when every contributing amount is stated.
+
+    A partial sum presented as a total understates what the insurer withheld,
+    and nothing downstream would show that a figure was incomplete.
+    """
+    amounts = [r.get("amount") for r in reasons
+               if r.get("decision_type") == decision_type]
+    if not amounts or any(amount is None for amount in amounts):
+        return None
+    return sum(amounts)
 
 
 def require_open_attempt(case_id: str, run_id: str) -> None:

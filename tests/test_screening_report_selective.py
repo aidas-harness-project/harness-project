@@ -104,7 +104,7 @@ def test_report_validates_against_the_screening_schema() -> None:
         case_id="CASE_9001", run_id="RUN_20260819_1",
         claim_analysis=_claim_analysis(), consistency=_consistency(),
         config=_config())
-    assert _errors(report, "screening_report.schema.json") == []
+    assert _errors(report, "screening_report_selective.schema.json") == []
 
 
 def test_all_four_case_types_appear_with_a_verdict_and_its_basis() -> None:
@@ -238,7 +238,7 @@ def test_only_confirmed_conflicts_reach_the_report() -> None:
         }})
     assert len(report["inconsistencies"]) == 1
     assert report["inconsistencies"][0]["conflict_ref"] == "CONFLICT_1"
-    assert _errors(report, "screening_report.schema.json") == []
+    assert _errors(report, "screening_report_selective.schema.json") == []
 
 
 def test_every_deferred_conflict_is_carried_by_conflict_ref() -> None:
@@ -256,7 +256,7 @@ def test_every_deferred_conflict_is_carried_by_conflict_ref() -> None:
         deferred_conflict_ids=["CONFLICT_7"])
     refs = {row.get("conflict_ref") for row in report["inconsistencies"]}
     assert "CONFLICT_7" in refs
-    assert _errors(report, "screening_report.schema.json") == []
+    assert _errors(report, "screening_report_selective.schema.json") == []
 
 
 def test_a_deferred_conflict_already_carried_is_not_duplicated() -> None:

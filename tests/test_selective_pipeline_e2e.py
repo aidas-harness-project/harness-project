@@ -201,24 +201,68 @@ def test_claim_analysis_writes_no_conflict_ledger_entry(monkeypatch) -> None:
     }
 
 
-def test_consistency_check_confirms_the_material_conflict(monkeypatch) -> None:
+def _agent_verdicts(items, *, outcome="confirmed"):
+    """Stand in for the consistency-check agent.
+
+    The agent's judgement is a reading of the documents, so an E2E cannot
+    produce it; what it CAN check is that the seam holds -- that a verdict
+    written against prepared items registers, and that the summary carries the
+    values the helper will insist on.
+    """
+    verdicts = []
+    for item in items:
+        verdict = {
+            "conflict_candidate_id": item["conflict_candidate_id"],
+            "candidate_digest": item["candidate_digest"],
+            "outcome": outcome,
+            "reason": "the two records state different values",
+        }
+        if outcome == "confirmed":
+            values = [row["value"] for row in item["readings"]
+                      if row.get("value_state") == "asserted"]
+            verdict["professional_summary"] = (
+                "기록 간 값이 다릅니다: " + " / ".join(values)
+                + ". 어느 기록이 사고 사실을 반영하는지 확인이 필요합니다."
+            )
+        verdicts.append(verdict)
+    return verdicts
+
+
+def test_consistency_check_prepares_judges_then_registers(monkeypatch) -> None:
+    """The three-part seam: prepare -> agent verdict -> register.
+
+    prepare must hand over the readings WITHOUT a verdict, and register must
+    only act on what an agent decided -- so the same run also proves the helper
+    registers nothing when no verdict exists.
+    """
     config = _config()
     result, _, _, _ = _run_claim_analysis(config)
 
-    verdicts = checker.verify_candidates(result, config)
-    assert [row["outcome"] for row in verdicts] == ["confirmed"]
+    items = checker.build_work_items(result, config)
+    assert len(items) == 1
+    assert "outcome" not in items[0]
+    assert items[0]["decision_bearing"] is True
+
+    # No agent input: nothing is registered, and nothing can be.
+    assert checker.register_confirmed(
+        "CASE_9001", "RUN_20260819_1", "consistency-check", [], items) == {}
+
+    verdicts = _agent_verdicts(items)
+    assert checker.validate_verdicts(verdicts, items) == []
 
     ledger_calls: list[list[str]] = []
     monkeypatch.setattr(
         checker, "_dao_write",
         lambda args: (ledger_calls.append(args), "PASS: added CONFLICT_1")[1])
     registered = checker.register_confirmed(
-        "CASE_9001", "RUN_20260819_1", "consistency-check", verdicts)
+        "CASE_9001", "RUN_20260819_1", "consistency-check", verdicts, items)
 
     assert registered
     assert ledger_calls[0][0] == "add-conflict-entry"
     # Raised under consistency_check, not claim_analysis.
     assert ledger_calls[0][ledger_calls[0].index("--stage") + 1] == "consistency_check"
+    # The professional summary reaches the ledger with the entry.
+    assert "--professional-summary" in ledger_calls[0]
 
     contract = checker.build_contract(
         case_id="CASE_9001", run_id="RUN_20260819_1",
@@ -229,7 +273,8 @@ def test_consistency_check_confirms_the_material_conflict(monkeypatch) -> None:
 def test_screening_report_assembles_from_both_upstream_contracts() -> None:
     config = _config()
     result, _, _, _ = _run_claim_analysis(config)
-    verdicts = checker.verify_candidates(result, config)
+    items = checker.build_work_items(result, config)
+    verdicts = _agent_verdicts(items)
     registered = {verdicts[0]["conflict_candidate_id"]: "CONFLICT_1"}
     consistency = checker.build_contract(
         case_id="CASE_9001", run_id="RUN_20260819_1",
@@ -245,7 +290,7 @@ def test_screening_report_assembles_from_both_upstream_contracts() -> None:
                 {"document_id": "DOC_002", "value": "좌측 요골 골절", "quote": "좌측 요골 골절"},
             ]}})
 
-    assert _errors(report, "screening_report.schema.json") == []
+    assert _errors(report, "screening_report_selective.schema.json") == []
     # All four verdicts present.
     assert len(report["case_summary"]["case_type_assessment"]) == 4
     by_type = {
