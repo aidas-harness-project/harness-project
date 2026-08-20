@@ -3717,3 +3717,39 @@ shows two sources of one disputed fact.
 Open: whether the screening report should annotate a quality grade with its
 cause, or whether liability cases should force `--dual-read` regardless of the
 environment default.
+
+## 51. Section 3's citation path has no producer, so real cases cannot test it
+
+Found while confirming the section-3 fix on CASE_702 (2026-08-21).
+
+Section 3 of the screening report ("유형별 추가정보와 접수 상태") cites the
+evidence behind a filing status through `_mark`, matching every other section.
+The fix is correct and unit-tested, but **no case can exercise it**:
+
+* `run_screening_report.py` reads `filing_evidence_references` off each
+  `case_type_assessment` row (lines 305-309, consumed at 1129).
+* Nothing writes that key. `claim_analysis_case_types.py` builds the row with
+  `"filing_status": filing.get(case_type, "unknown")` from
+  `filing_status_by_type`, and never attaches references.
+* `filing_evidence_references` does not appear in
+  `claim_analysis_result.schema.json` at all.
+* The pipeline skill states outright that no stage produces a filing
+  declaration, so `filing_status` is `unknown` on every case -- CASE_700,
+  CASE_701 and CASE_702 all rendered four rows of 접수 확인 불가.
+
+So on CASE_702 section 3 published zero references and emitted zero markers.
+That is a pass, but it cannot distinguish "the fix works" from "the branch never
+ran". Only `test_screening_all_sections_cited.py` covers it, by supplying
+filed/not_filed rows with references synthetically.
+
+**Why this is a gap and not a nit.** This is the same shape the project has hit
+before (`raw_page_text`, `medical_review_adopted`): a field written by one side
+and read by none, or read by one side and written by none. The consumer looks
+correct in isolation and the defect stays invisible until something finally
+populates the key. When a filing producer is built, section 3's marking path
+executes for the first time on real data -- and that is the moment to re-check
+it, not to assume CASE_702 already proved it.
+
+Open: either wire a producer (intake records a 산재/자동차 접수 fact with its
+source), or drop `filing_evidence_references` from the consumer so the contract
+stops advertising evidence nothing supplies.
