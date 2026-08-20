@@ -889,7 +889,7 @@
       "cardinality": "multi",
       "source_route_id": "disability",
       "critical_conflict_field": true,
-      "notes": "Extraction only; the pipeline does not calculate or endorse a final disability rate.",
+      "notes": "Transcribe the rate the document itself prints -- a Korean form states it as 노동능력상실율(%) or 장해율. Report the printed number; the pipeline does not calculate or endorse a final rate of its own, which is why the document's own figure must be captured verbatim.",
       "label_ko": "기존 평가상 장해율"
     },
     {
@@ -1187,13 +1187,20 @@
       "diagnosis_certificate",
       "initial_visit_record",
       "surgery_procedure_record",
-      "imaging_interpretation"
+      "imaging_interpretation",
+      "admission_discharge_summary",
+      "disability_assessment"
     ],
     "traffic_accident": [
       "diagnosis_certificate",
       "initial_visit_record",
+      "outpatient_record",
+      "final_visit_record",
       "surgery_procedure_record",
       "imaging_interpretation",
+      "admission_discharge_summary",
+      "emergency_record",
+      "disability_assessment",
       "medical_expense_receipt",
       "medical_expense_itemization",
       "pharmacy_payment_confirmation"
@@ -1201,10 +1208,14 @@
     "industrial_accident": [
       "diagnosis_certificate",
       "initial_visit_record",
+      "outpatient_record",
       "progress_record",
+      "final_visit_record",
       "surgery_procedure_record",
       "imaging_interpretation",
       "major_test_result",
+      "admission_discharge_summary",
+      "disability_assessment",
       "medical_expense_receipt",
       "medical_expense_itemization",
       "pharmacy_payment_confirmation"
@@ -1212,10 +1223,15 @@
     "liability": [
       "diagnosis_certificate",
       "initial_visit_record",
+      "outpatient_record",
       "progress_record",
+      "final_visit_record",
       "surgery_procedure_record",
       "imaging_interpretation",
       "major_test_result",
+      "admission_discharge_summary",
+      "emergency_record",
+      "disability_assessment",
       "medical_expense_receipt",
       "medical_expense_itemization",
       "pharmacy_payment_confirmation"

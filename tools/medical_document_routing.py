@@ -63,7 +63,8 @@ _TITLE_KIND_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("입퇴원요약", "입퇴원확인서", "퇴원요약", "퇴원요약지"), "admission_discharge_summary"),
     (("응급실기록지", "응급실기록", "응급진료기록지", "응급진료기록", "응급의료기록"), "emergency_record"),
     (("약제비납입확인서", "약제비납부확인서"), "pharmacy_payment_confirmation"),
-    (("진료비세부내역서", "진료비세부산정내역", "진료비상세내역서"), "medical_expense_itemization"),
+    (("진료비세부내역서", "진료비세부산정내역", "진료비상세내역서", "진료비내역서"),
+     "medical_expense_itemization"),
     (("진료비계산서영수증", "진료비영수증"), "medical_expense_receipt"),
     (("처방내역", "투약내역", "치료내역"), "prescription_treatment_history"),
     (("간호기록지", "간호기록"), "nursing_routine_record"),
@@ -136,9 +137,41 @@ def roles_for_kind(kind: str, config: dict[str, Any]) -> list[str]:
     raise ValueError(f"medical document kind {kind!r} is absent from routing config")
 
 
+# Trailing marks a Korean medical form prints AFTER its own title: a
+# stamp/attestation box, an assessment standard, or a visit-class qualifier.
+# They are noise for identification, but `endswith` matching treats them as
+# part of the name, so a real 후유장애 진단서 whose header carries
+# `원본대조필 인` matched nothing at all and fell through to the generic
+# classifier -- which typed it 진단서 and cost the disability route its
+# primary source (CASE_049/DOC_012, 2026-08-20). Same defect typed all six
+# 진료비 세부산정내역(퇴원) pages as unknown.
+#
+# Stripped iteratively from the END only, so a qualifier never rescues a
+# title whose own name does not match. Anything appearing BEFORE the title
+# (a 별지 서식 header) is already handled by the caller's header window.
+_TITLE_TRAILING_NOISE = (
+    "mcbride", "ama",                    # assessment standards
+    "원본대조필인", "원본대조필", "사본",     # attestation / copy stamps
+    "직인", "인",
+    "퇴원", "외래", "입원", "응급",          # visit-class qualifiers
+)
+
+
+def _strip_trailing_noise(collapsed: str) -> str:
+    """Remove trailing form noise, longest match first, until nothing peels."""
+    changed = True
+    while changed and collapsed:
+        changed = False
+        for noise in sorted(_TITLE_TRAILING_NOISE, key=len, reverse=True):
+            if collapsed.endswith(noise) and len(collapsed) > len(noise):
+                collapsed = collapsed[: -len(noise)]
+                changed = True
+                break
+    return collapsed
+
+
 def medical_kind_from_title(title: str | None) -> str | None:
-    collapsed = _collapsed(title or "")
-    collapsed = re.sub(r"(?:mcbride|ama)$", "", collapsed)
+    collapsed = _strip_trailing_noise(_collapsed(title or ""))
     if not collapsed:
         return None
     # A death certificate is a distinct legal/medical form and is outside the

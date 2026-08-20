@@ -433,6 +433,7 @@ def build_contract(
     run_id: str,
     verdicts: Sequence[Mapping[str, Any]],
     registered: Mapping[str, str],
+    work_items: Sequence[Mapping[str, Any]] = (),
 ) -> dict:
     """`evidence_validation_result.json` -- the stage's audit record.
 
@@ -440,18 +441,53 @@ def build_contract(
     stays HERE: the screening report carries verified findings, and showing a
     professional the candidates that were ruled out buries the finding under
     the process.
+
+    `work_items` supplies the readings that were actually compared. Until
+    2026-08-20 this function did not receive them, so `values_compared` was
+    filled with the verdict's own `reason` text and `topic` fell back to the
+    candidate id -- schema-valid, and therefore silently wrong: the audit
+    record named no source and quoted no competing value, which is the one
+    thing a reader opens it for.
     """
+    prepared = {item.get("conflict_candidate_id"): item for item in work_items}
     checks = []
     for index, verdict in enumerate(verdicts, start=1):
         candidate_id = verdict["conflict_candidate_id"]
         confirmed = verdict["outcome"] == "confirmed"
+        item = prepared.get(candidate_id) or {}
+        field_id = verdict.get("field_id") or item.get("field_id") or candidate_id
+        label = item.get("field_label") or field_id
+
+        # One entry per reading, each carrying its own document/page/quote --
+        # the comparison itself, not a description of it.
+        values_compared = []
+        for reading in item.get("readings") or []:
+            for reference in reading.get("evidence_references") or []:
+                values_compared.append(dict(reference))
+        if not values_compared:
+            # minItems is 1, and a prepared item always carries readings. Fall
+            # back only so a missing work item cannot fail the whole write,
+            # and say plainly that the sources were not recoverable.
+            values_compared = [{
+                "quote": verdict.get("reason")
+                or f"{candidate_id}: prepared readings unavailable",
+            }]
+
+        documents = sorted({
+            reference.get("document_id") for reference in values_compared
+            if reference.get("document_id")
+        })
+        scope = f" across {'/'.join(documents)}" if documents else ""
         checks.append({
             "check_id": f"CHK-{index}",
-            "topic": (
-                f"{verdict.get('field_id', candidate_id)} ({candidate_id}): "
-                f"{verdict['outcome']}"
-            ),
-            "values_compared": [{"quote": verdict["reason"]}],
+            # Published as their own fields, not only inside `topic`: stage 7
+            # has to match a check back to the claim_facts field it settled,
+            # and parsing a display string to do that is exactly the kind of
+            # coupling that breaks the next time the wording changes.
+            "conflict_candidate_id": candidate_id,
+            "field_id": field_id,
+            "topic": f"{label}{scope} ({candidate_id}): {verdict['outcome']}",
+            "values_compared": values_compared,
             "result": "inconsistent" if confirmed else "consistent",
             "conflict_id": registered.get(candidate_id),
         })
@@ -545,7 +581,8 @@ def run_register(*, case_id: str, run_id: str, held_by: str) -> dict:
 
     registered = register_confirmed(case_id, run_id, held_by, verdicts, work_items)
     contract = build_contract(case_id=case_id, run_id=run_id,
-                              verdicts=verdicts, registered=registered)
+                              verdicts=verdicts, registered=registered,
+                              work_items=work_items)
     data_file = _temp_json(contract)
     try:
         _dao_write([

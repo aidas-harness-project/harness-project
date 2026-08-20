@@ -131,7 +131,18 @@ def build_prompt(
     field_lines = []
     for row in field_rows:
         hint = _VALUE_SHAPE_HINT.get(row.get("value_shape"), "a short phrase")
-        line = f'- "{row["field_id"]}" ({row.get("label", row["field_id"])}): {hint}'
+        # The document is Korean; the field's Korean name is what its heading
+        # actually prints. Naming only the English label made the model bridge
+        # "Disability rate stated by an existing assessment" to a form line
+        # reading `노동능력상실율(%)` on its own -- on CASE_049/DOC_012 it did
+        # not, and returned not_mentioned for the rate, the McBride standard
+        # and the 영구/한시 line while correctly extracting four other fields
+        # from the same 773 characters. `label_ko` was in the config all along
+        # and simply never reached the prompt.
+        names = row.get("label", row["field_id"])
+        if row.get("label_ko"):
+            names = f'{names} / {row["label_ko"]}'
+        line = f'- "{row["field_id"]}" ({names}): {hint}'
         if row.get("notes"):
             line += f"\n    NOTE: {row['notes']}"
         field_lines.append(line)

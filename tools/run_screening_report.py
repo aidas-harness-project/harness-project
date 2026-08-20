@@ -104,6 +104,74 @@ def _selected_value(field: Mapping[str, Any]) -> Any:
     return None
 
 
+def withdrawn_candidate_ids(consistency: Mapping[str, Any]) -> set[str]:
+    """Conflict candidates consistency_check judged NOT to be contradictions.
+
+    A `consistent` check with no ledger entry is a withdrawal: the reviewing
+    agent looked at both readings and found they state the same fact in
+    different words. Nothing writes that judgement back into
+    `claim_analysis_result.json` -- stage 5 is that contract's only writer --
+    so without this the field stays `conflict` forever and the report prints
+    확인 불가 for a value both sources actually agree on. Measured on CASE_049:
+    `primary_diagnosis` rendered 확인 불가 two lines above `진단코드: S6280`,
+    read from the same sentence of the same page.
+    """
+    return {
+        check["conflict_candidate_id"]
+        for check in consistency.get("checks") or []
+        if check.get("result") == "consistent"
+        and check.get("conflict_id") is None
+        and check.get("conflict_candidate_id")
+    }
+
+
+def resolve_withdrawn_conflicts(
+    facts: Mapping[str, Mapping[str, Any]],
+    consistency: Mapping[str, Any],
+) -> dict[str, dict]:
+    """Facts with every withdrawn `conflict` field re-read as asserted.
+
+    Returns a NEW mapping; the upstream contract on disk is never modified,
+    which is the point -- the judgement lives in consistency_check's own
+    contract and is applied at read time by each consumer.
+
+    The elected reading is the FIRST observation, which is the highest-priority
+    source the read ladder reached. That is a presentation choice, not a
+    finding: the agent withdrew the candidate precisely because the readings do
+    not disagree on fact, so no source is being declared the winner over
+    another. A field whose candidates were not all withdrawn stays `conflict`.
+    """
+    withdrawn = withdrawn_candidate_ids(consistency)
+    if not withdrawn:
+        return dict(facts)
+
+    resolved: dict[str, dict] = {}
+    for field_id, field in facts.items():
+        candidates = list(field.get("conflict_candidate_ids") or [])
+        if (field.get("resolution_status") != "conflict"
+                or not candidates
+                or not all(c in withdrawn for c in candidates)):
+            resolved[field_id] = dict(field)
+            continue
+        observations = field.get("observations") or []
+        if not observations:
+            resolved[field_id] = dict(field)
+            continue
+        elected = observations[0].get("observation_id")
+        promoted = dict(field)
+        promoted["resolution_status"] = "asserted"
+        promoted["selected_observation_ids"] = [elected] if elected else []
+        promoted["conflict_resolution"] = {
+            "source": "consistency_check",
+            "outcome": "withdrawn",
+            "conflict_candidate_ids": candidates,
+            "note": ("consistency_check judged these readings to state the same "
+                     "fact; the highest-priority reading is shown"),
+        }
+        resolved[field_id] = promoted
+    return resolved
+
+
 def _first_value(facts: Mapping[str, Mapping[str, Any]], field_id: str) -> Any:
     field = facts.get(field_id)
     if field is None or field.get("resolution_status") != "asserted":
@@ -418,7 +486,13 @@ def build_report(
     A downstream paraphrase of a disagreement is a second reading of it.
     """
     judgement = dict(agent_judgement or {})
-    facts = {row["field_id"]: row for row in claim_analysis.get("claim_facts") or []}
+    # Read-time application of consistency_check's judgement. The upstream
+    # contract is not rewritten -- stage 5 remains its only writer -- so a
+    # withdrawn conflict stops hiding a value both sources agreed on.
+    facts = resolve_withdrawn_conflicts(
+        {row["field_id"]: row for row in claim_analysis.get("claim_facts") or []},
+        consistency,
+    )
     assessments = claim_analysis.get("case_type_assessment") or []
     checklist = claim_analysis.get("required_document_checklist") or []
     entries = dict(conflict_entries or {})

@@ -28,6 +28,14 @@
           "type": "string",
           "description": "What was compared. e.g. \"accident_date across DOC_001/DOC_002\""
         },
+        "conflict_candidate_id": {
+          "type": ["string", "null"],
+          "description": "The claim-analysis conflict candidate this check judged, e.g. \"CAC_0001\". Lets a downstream reader match a check back to the claim_facts field that raised it without parsing `topic`. Null when the check did not come from a candidate."
+        },
+        "field_id": {
+          "type": ["string", "null"],
+          "description": "The claim_facts field the candidate belongs to, e.g. \"primary_diagnosis\". Null when the check is not field-scoped."
+        },
         "values_compared": {
           "type": "array",
           "description": "Each source's stated value for this topic, with attribution.",
