@@ -9,6 +9,29 @@ These are non-negotiable. Stage-specific skills describe *how* to do a stage's j
 
 During the PoC/evaluation phase, also see `harness-guardrails-dev` — ground-truth isolation and intake rules that only apply while a ground-truth answer key exists in this repo.
 
+## PoC scope: four rules are OFF
+
+Turned off by the PoC owner on 2026-08-20, each with the measurement behind
+it. The register is `dao.POC_INACTIVE_GUARDRAILS`, and removing a code from
+there turns the gate back on. **These are throughput reductions, not
+corrections** — a run made under them has no P8 evidence and is not
+privacy-preserving, and any report of its results has to say so.
+
+| Rule | What is off | What stays on |
+|---|---|---|
+| **P7** | human-input wait tracking (`human_input_status`) | Every synchronous human gate: D2 approval, segmentation boundaries, P8 resolution, P6 dispositions. 0 of 220 cases ever carried a `waiting` entry — the PoC has no asynchronous human step for it to track. |
+| **P9** | the 3-attempt cap and its audit halt | Attempt counts are still recorded in `_run_state.json`. What is off is the automatic halt, not the measurement. |
+| **P10** | the *cumulative snapshot* half | The run-state file — P10's other half — is untouched and is still the single source of truth for where a run stopped. Snapshots still run; they now carry the governed contracts only. `_backups` was 17.8MB of CASE_489's 21.4MB (83%, 594 of 1011 files), almost entirely `ocr_result_*.json`, which is regenerable and already held in `data/processed/`. |
+| **P8** | reader independence (`--single-reader` is now the default) | **Disagreement handling is unchanged.** If a comparison does happen, a material disagreement still hard-halts with no tolerance threshold. Every single-reader document is still stamped `ocr_quality: low`, `cross_validation_status: single_reader_no_cross_validation`, `review_required`. |
+
+`--dual-read`, `--redact`, and `HARNESS_SINGLE_READER=0` / `HARNESS_SKIP_REDACTION=0`
+restore the full paths for a run that needs them.
+
+**P1, P2, P3, P4, P5, P6, P11 are unchanged.** P4 earned its place the day
+this register was written: it caught CASE_048's `denial_response` returning a
+Korean value for an English enum, twice, which would otherwise have reached
+the screening report.
+
 ## P1. No fabricated claims
 
 Every extracted value or assertion must trace to a specific source quote. If it can't be traced, it is marked unconfirmed and routed for review — never stated as fact. This is the harness's highest-probability failure mode; treat any unlinked claim as a bug.
@@ -82,6 +105,11 @@ Note: this rule is for the case's *own* sources contradicting each other. An ins
 
 ## P7. Human-review steps are never fabricated
 
+> **OFF for the PoC (2026-08-20).** The wait-tracking field below is not
+> maintained. The prohibition it serves — never synthesise a stand-in for
+> a human decision — is NOT lifted and never was: it is enforced at each
+> synchronous gate instead.
+
 If a stage depends on human input that hasn't arrived, the pipeline waits — it never synthesizes a stand-in for a human decision. Waiting status is tracked as a field in the run-state file (P10): `human_input_status: waiting`, naming exactly which stage and what input is pending. The moment genuine human input is confirmed present — not merely claimed by an agent — the status flips to `received`. The field is never deleted, only updated in place, so the run's full history of what was waited on and when it cleared stays visible for as long as the run-state file exists.
 
 ## P8. Extraction failure is measured by cross-validation, not self-reported confidence
@@ -100,9 +128,18 @@ A page/document is marked extraction-failed if the two independent reads materia
 
 ## P9. Partial or failed stages retry 3 times, then halt for audit
 
+> **OFF for the PoC (2026-08-20).** Attempts are still counted and
+> recorded; the automatic halt at 3 is not enforced.
+
 A stage that fails or completes with `status: partial` does not proceed to the next stage — it retries, up to 3 attempts total, fixed (no exponential backoff). If, after 3 attempts, the stage still hasn't completed fully, the pipeline halts and requests a user audit — same hard-gate pattern as P4 (schema validation) and P8 (extraction cross-validation). Partial output is never silently forwarded or upgraded to "complete"; either the stage succeeds within 3 tries, or a human looks at it.
 
 ## P10. Run-state tracking and per-step backups
+
+> **Half off for the PoC (2026-08-20).** Run-state tracking is unchanged.
+> The cumulative snapshot is narrowed to the governed contracts — the
+> per-document extraction artifacts (`ocr_result_*`, `redaction_result_*`,
+> `classification_result_*`, `page_chunks*`) are excluded as regenerable
+> bulk. See `dao.snapshot_excludes_name`.
 
 Every run maintains a persistent run-state file (`outputs/CASE_XXX/_run_state.json`, provisional path per D4) recording every stage's status — `pending` / `in_progress` / `passed` / `failed` — with timestamps, plus the `human_input_status` field from P7. This file is the single source of truth for where the pipeline stopped; a crash or resume never has to guess or re-derive it from scattered output files.
 

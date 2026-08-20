@@ -17,7 +17,28 @@ At intake, every file in a case gets an entry in `_source_ledger.json` recording
 
 If a human marks a file `rejected` (classification looks wrong), intake halts for the **entire case** — no file copies, not even the ones already approved — until the rejected file is resolved. Review status lives only in `_source_ledger.json`; no file's status is inferred from anywhere else, so nothing can be mistaken for reviewed when it isn't.
 
-**Filename patterns alone are not a reliable classification signal.** A real case (CASE_002, see `known-gaps.md` item 2) showed two files whose names looked like plain claim documents actually being completed third-party loss-adjustment reports with stated payout figures — filename matching missed it, and an agent self-approved the file, which isn't valid human review. Before writing the ledger, `tools/intake_case.py` now also runs a cheap content pre-check on every file proposed as `raw` (PDFs only): one vision call over the document's first few pages, looking specifically for signs of a completed adjuster's conclusion (a `보험금사정서`/`손해사정서` title, a `사정 결과`/`사정 의견` section, a stated payout figure, an adjuster's license/stamp, a `위임장` granting adjustment authority). A flagged file gets `content_warning` set on its ledger entry. This does **not** auto-reject the file — a false positive shouldn't lock out a legitimate document — but it makes the risk visible right where the human review step already happens, instead of relying on a reviewer to notice on their own. The scan is a signal over a few pages, not a full read; `document-pipeline`'s checkpoint 1 (P8) still owns real OCR and cross-validation over the whole document.
+**Filename patterns alone are not a reliable classification signal.** A real
+case (CASE_002, see `known-gaps.md` item 2) showed two files whose names
+looked like plain claim documents actually being completed third-party
+loss-adjustment reports with stated payout figures — filename matching missed
+it, and an agent self-approved the file, which isn't valid human review. That
+is why the human review step exists and why nothing may be approved by an
+agent.
+
+**The vision content pre-check that used to run here was removed 2026-08-20**
+(PoC owner). It made one vision call over each raw-proposed PDF's first pages
+looking for answer-key-class content, and annotated the ledger entry with
+`content_warning`. It never auto-rejected anything — the human review below
+was always the actual gate — and it cost ~41s on a four-PDF case while reading
+raw, pre-redaction pages. `content_warning` remains in
+`source_ledger.schema.json` and in `build_ledger`, because ledgers written
+while it ran carry the field and must keep validating.
+
+**What this does NOT relax:** every entry still starts `pending`, a human
+still reviews each file's classification, `--execute` still refuses while any
+file is unapproved, and one `rejected` file still halts the whole case. The
+CASE_002 lesson stands — it is now carried entirely by the human review step,
+with no machine signal to lean on, so read the documents.
 
 ## D3. Dev/prod file-naming convention
 

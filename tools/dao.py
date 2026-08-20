@@ -7310,6 +7310,82 @@ def cmd_get_last_passed_stage(args):
     return 0
 
 
+# Guardrails the PoC owner turned off, with the measurement behind each.
+# Written down rather than left as a verbal waiver: an undocumented exception
+# gets re-litigated at every run, and the 2026-08-19 corpus run showed what
+# that costs. Removing a code from here turns the gate back on.
+POC_INACTIVE_GUARDRAILS: dict[str, dict[str, str]] = {
+    "P7": {
+        "rule": "human-input wait tracking",
+        "reason": (
+            "0 of 220 cases ever carried a `waiting` entry. The PoC has no "
+            "asynchronous human-input step for it to track; the human gates "
+            "that DO exist (D2 approval, segmentation, P8 resolution) stop "
+            "the tool synchronously and do not use this field."
+        ),
+        "decided_on": "2026-08-20",
+    },
+    "P9": {
+        "rule": "3-attempt cap then audit halt",
+        "reason": (
+            "Waived verbally during development and never written down, so "
+            "every run re-decided it. Attempt counts are still recorded in "
+            "_run_state.json -- what is off is the automatic halt, not the "
+            "measurement."
+        ),
+        "decided_on": "2026-08-20",
+    },
+    "P10-snapshots": {
+        "rule": "full cumulative per-stage snapshot",
+        "reason": (
+            "_backups was 17.8MB of CASE_489's 21.4MB (83%; 594 of 1011 "
+            "files), dominated by ocr_result_*.json -- regenerable, and "
+            "already held in data/processed/. Snapshots now carry the "
+            "governed contracts only; run-state tracking (the rest of P10) "
+            "is untouched."
+        ),
+        "decided_on": "2026-08-20",
+    },
+    "D2-content-scan": {
+        "rule": "vision answer-key pre-check at intake",
+        "reason": (
+            "Removed at the PoC owner's direction. The per-file human "
+            "approval gate it fed is NOT removed: every entry still starts "
+            "`pending` and intake still refuses to execute until a human "
+            "approves each one."
+        ),
+        "decided_on": "2026-08-20",
+    },
+}
+
+# Snapshot contents (P10, narrowed 2026-08-20 -- see POC_INACTIVE_GUARDRAILS).
+# Excluded by prefix: the per-document extraction artifacts. They are the bulk
+# of a case, they are regenerable from data/processed/, and no restore reads
+# them -- a resume re-derives them or reuses the processed layer directly.
+SNAPSHOT_EXCLUDED_PREFIXES = (
+    "ocr_result_",
+    "redaction_result_",
+    "classification_result_",
+    "page_chunks",
+)
+
+# Excluded outright: not contract data. `_backups` would make each snapshot
+# quadratic in the number of stages; `_trace` is diagnostic scratch that grows
+# through the run (its permanent derivative, _timing_summary.json, is kept).
+SNAPSHOT_EXCLUDED_NAMES = ("_backups", "_trace")
+
+
+def snapshot_excludes_name(name: str) -> bool:
+    """Whether a case-directory entry is left out of a P10 snapshot.
+
+    One predicate so "what does a backup contain" has a single answer that a
+    test can assert against, rather than a condition inlined in the copy loop.
+    """
+    if name in SNAPSHOT_EXCLUDED_NAMES or name.endswith(".lock"):
+        return True
+    return name.startswith(SNAPSHOT_EXCLUDED_PREFIXES)
+
+
 @trace_mod.traced("dao.snapshot", category="io")
 def _build_snapshot_atomic(case_id: str, stage: str, prospective_state: dict) -> Path:
     """Build a full cumulative snapshot of a case's outputs (P10) and place it
@@ -7336,13 +7412,11 @@ def _build_snapshot_atomic(case_id: str, stage: str, prospective_state: dict) ->
     tmp.mkdir(parents=True)
     try:
         for item in src.iterdir():
-            # _trace/ is diagnostic scratch, not contract data: nothing
-            # downstream reads it and there is nothing in it to restore. It
-            # also GROWS through the run, so copying it into every cumulative
-            # snapshot is precisely the O(stages x tree) cost that makes
-            # finalize a serial tail. The permanent artifact derived from it
-            # (_timing_summary.json) is a normal file and is still snapshotted.
-            if item.name in ("_backups", "_trace") or item.name.endswith(".lock"):
+            # See snapshot_excludes_name: _trace/ and _backups/ are not
+            # contract data, and the per-document extraction artifacts are
+            # the regenerable bulk (83% of a case, measured on CASE_489).
+            # What remains is the governed contracts -- what a restore needs.
+            if snapshot_excludes_name(item.name):
                 continue
             if item.is_file():
                 shutil.copy2(item, tmp / item.name)
