@@ -390,35 +390,47 @@ def test_a_candidate_pointing_outside_its_field_is_refused() -> None:
     assert any("outside field" in error for error in errors), errors
 
 
-def test_the_whole_flow_stays_disabled_until_activation_is_recorded() -> None:
+def test_the_shipped_config_is_activated_with_a_recorded_approval() -> None:
+    """The gate is OPEN in the shipped config, and says who opened it.
+
+    Inverted 2026-08-20 when the legacy spine was deleted. The former assertion
+    (`behavior_enabled is False`) guarded a rollback target that no longer
+    exists, so leaving it would have failed forever while testing nothing. The
+    flag survives the deletion deliberately -- `require_enabled` still refuses a
+    config that turns it off -- so what needs guarding now is that the shipped
+    config is the activated one AND that its approval block is present, since
+    the schema is what forbids enabling without a recorded approver.
+    """
     config = _config()
-    assert config["behavior_enabled"] is False
+    assert config["behavior_enabled"] is True
+    activation = config["activation"]
+    for key in ("approved_by", "authority_role", "approved_at", "scope"):
+        assert activation.get(key), f"activation is missing {key}"
+    claim_driver.require_enabled(config)
+
+
+def test_turning_the_flag_off_still_refuses_to_run() -> None:
+    """The flag is retained, so its closed state must still be a hard stop.
+
+    There is no legacy spine to fall back to any more: a disabled config must
+    halt the stage, never silently run an unrouted read-everything pass.
+    """
+    config = _config()
+    config["behavior_enabled"] = False
     with pytest.raises(RuntimeError, match="behavior_enabled=false"):
         claim_driver.require_enabled(config)
 
 
-def test_legacy_driver_keeps_its_own_path_while_the_gate_is_closed() -> None:
-    """Backward compatibility: with the gate closed nothing reroutes."""
-    import run_claim_analysis as legacy
+def test_the_legacy_driver_module_is_gone() -> None:
+    """`run_claim_analysis.py` was deleted 2026-08-20; nothing may import it.
 
-    assert legacy.selective_routing_enabled() is False
-    # The four legacy contracts are still the ones the legacy spine writes.
-    assert legacy.CONTRACT == "extracted_claim_fields.json"
-    assert legacy.CONTRACT_CP3 == "case_type_result.json"
+    Guards the deletion itself. The selective driver never imported the legacy
+    one, and downstream reads only `claim_analysis_result.json`, so the module
+    reappearing would mean a second writer of the stage had returned.
+    """
+    import importlib.util
 
-
-def test_enabling_the_gate_reroutes_the_legacy_entry_point(monkeypatch, capsys) -> None:
-    import run_claim_analysis as legacy
-
-    monkeypatch.setattr(legacy, "selective_routing_enabled", lambda: True)
-    monkeypatch.setattr(
-        legacy, "run",
-        lambda **kwargs: pytest.fail("the legacy spine must not run when enabled"))
-    rc = legacy.main([
-        "CASE_9001", "--held-by", "claim-analysis", "--run-id", "RUN_20260819_1",
-    ])
-    assert rc == 2
-    assert "run_claim_analysis_selective.py" in capsys.readouterr().err
+    assert importlib.util.find_spec("run_claim_analysis") is None
 
 
 def test_extracted_claim_fields_stays_the_medical_projection() -> None:

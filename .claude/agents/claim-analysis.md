@@ -1,16 +1,29 @@
 ---
 name: claim-analysis
-description: RETIRED as a dispatch target -- do NOT dispatch this agent. The claim_analysis stage runs as a driver: `python tools/run_claim_analysis.py CASE_ID --held-by claim-analysis --run-id RUN_ID --provider PROVIDER`. This file is retained as the specification the driver's two provider calls implement (field extraction + policy-page selection, then coverage/case-type/requirements). See the loss-adjustment-pipeline skill, Phase 1 stage 5.
+description: RETIRED as a dispatch target -- do NOT dispatch this agent. The claim_analysis stage runs as a driver: `python tools/run_claim_analysis_selective.py CASE_ID --held-by claim-analysis --run-id RUN_ID --provider PROVIDER`. This file is HISTORICAL: it specifies the deleted legacy spine's four contracts, which nothing writes or reads any more. See the loss-adjustment-pipeline skill, Phase 1 stage 5, for the live lane.
 model: opus
 ---
 
-> **Do not dispatch this agent.** `claim_analysis` is driver-owned:
-> `python tools/run_claim_analysis.py CASE_ID --held-by claim-analysis --run-id RUN_ID --provider PROVIDER`.
-> The driver executes the four checkpoints below in two structured provider calls and
-> writes the same four public contracts, byte-compatible with this spec. It requires
-> `_document_index.json`, which `run_policy_pipeline_driver.py` writes -- run stage 4's
-> driver first. What follows is the specification the driver implements, kept so the
-> contract shape and the checkpoint semantics have one authoritative description.
+> **Do not dispatch this agent, and do not implement what follows.**
+> `claim_analysis` is driver-owned:
+> `python tools/run_claim_analysis_selective.py CASE_ID --held-by claim-analysis --run-id RUN_ID --provider PROVIDER`.
+>
+> **This document is HISTORICAL as of 2026-08-20.** It specifies the legacy
+> two-call spine (`run_claim_analysis.py`), which was **deleted** on that date
+> along with its four public contracts (`extracted_claim_fields`,
+> `coverage_result`, `case_type_result`, `requirement_matching_result`).
+> Nothing writes those contracts now, and no downstream stage reads them:
+> `consistency_check` and `screening_report` consume
+> `claim_analysis_result.json` only. Their schemas remain registered in the DAO
+> so cases processed before this date stay readable — that is the sole reason
+> they still exist.
+>
+> The live lane is source-grounded and demand-driven: it reads per field in
+> priority order and stops at the first trusted value, rather than handing every
+> claim-side document to one extraction call. It treats `_document_index.json`
+> as optional. Read the skill's stage 5 row, not this file, for how the stage
+> actually runs. What follows is kept only so the retired contract shapes have
+> one authoritative description for anyone reading an old case's output.
 
 You are **ClaimAnalysisAgent** in the loss-adjustment harness. You turn validated, redacted claim documents into structured facts, coverage, case type, and requirement matches. One top-level pipeline stage, four internal checkpoints — each a real, resumable gate, not a formality.
 

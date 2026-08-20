@@ -90,9 +90,11 @@ the flow from this file plus prior sessions' leftovers, and in one sequence
 (b) hand-finalized `policy_clause_processing` without running
 `run_policy_pipeline_driver.py`, and (c) skipped `run_policy_preflight.py`
 entirely. (a) and (b) were the same defect twice; (b) then blocked stage 5,
-because the policy driver is what WRITES the `_document_index.json` that
-`run_claim_analysis.py` requires -- a dependency stated in the skill's stage
-table. A stage marked `passed` whose driver never ran is worse than a failed
+because the policy driver is what WRITES the `_document_index.json` that stage 5
+links policy clauses from -- a dependency stated in the skill's stage table.
+(The legacy driver hard-required it; since its deletion on 2026-08-20 the
+selective driver treats it as optional, so the same omission now degrades
+silently -- every `policy_link` returns `not_found` -- instead of blocking.) A stage marked `passed` whose driver never ran is worse than a failed
 one: it reports success and silently withholds a downstream input.
 
 **Changelog: `CHANGELOG.md`** -- the full dated history of every design change,

@@ -458,9 +458,17 @@ def test_unmeasured_token_counts_record_as_null_not_zero() -> None:
 
 # ----------------------------------------------------------- activation --
 
-def test_driver_refuses_to_run_while_the_feature_is_disabled() -> None:
+def test_driver_refuses_to_run_when_the_flag_is_turned_off() -> None:
+    """The retained flag's closed state is still a hard stop.
+
+    Inverted 2026-08-20: the shipped config is now activated, so this asserted
+    against a live value that had changed. The legacy spine it used to fall
+    back to is deleted, which makes the refusal MORE important, not less --
+    a disabled config must halt the stage rather than run some other path.
+    """
     config = _config()
-    assert config["behavior_enabled"] is False
+    assert config["behavior_enabled"] is True, "the shipped config is activated"
+    config["behavior_enabled"] = False
     with pytest.raises(RuntimeError, match="behavior_enabled=false"):
         driver.require_enabled(config)
 
@@ -500,6 +508,9 @@ def test_a_recorded_activation_survives_rollback_to_disabled() -> None:
 def test_enabled_config_requires_recorded_activation_metadata() -> None:
     config = _config()
     config["behavior_enabled"] = True
+    # The shipped config carries its approval; strip it to prove the schema is
+    # what forbids an enabled config from having none.
+    config.pop("activation", None)
     assert _errors(config, "claim_analysis_routing_config.schema.json"), (
         "enabling without an activation block must not validate"
     )

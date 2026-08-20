@@ -9,6 +9,43 @@ Coordinates the authorized local pipeline across two phases to produce screening
 
 **Execution mode: sub-agent and driver pipeline.** Agent-owned stages are dispatched as subagents; driver-owned stages run their named driver directly. In both cases, governed state passes through the DAO; agent return values carry only summaries and warnings, never contract data.
 
+## Who runs this skill — check this before the first stage command
+
+Everything below says "the orchestrator" does something. That word names a
+**role with an agent behind it**, not whoever happens to have loaded this file.
+Decide which of the two you are before running anything:
+
+- **You are `pipeline-orchestrator`** (this text arrived as your system prompt,
+  or you were dispatched as that agent) → you hold the role. Execute the
+  contract below directly.
+- **You are a main session, or any other agent** → you do **not** hold the
+  role. Dispatch it and stop:
+  `Agent(subagent_type="pipeline-orchestrator")` with the case, the run id, and
+  the orchestrator-owned decisions the user has already made (a P8 reduction,
+  a delegated gate and the name to record, run scope). Then wait for its
+  report; do not run stage commands, `update-run-state`, `record-dispatch`, or
+  `finalize-stage` yourself.
+
+Loading this skill is not the same as holding the role, and reading a correct
+procedure is not the same as being the right executor of it. A main session
+that follows every gate below perfectly is still wrong if it never dispatched
+the orchestrator: the T13 records then attribute the whole run to a session
+that no `record-dispatch` covers, so the orchestration interval — the largest
+single cost measured on this pipeline (Stage 2's 897s was 57% agent round
+trips) — lands nowhere and the run's timing cannot be read honestly.
+
+Origin, 2026-08-20 on CASE_700: the assistant loaded this skill, followed the
+Phase 0 gates and the T13 lifecycle correctly, and dispatched `document-pipeline`
+with a clean briefing — while never dispatching `pipeline-orchestrator`. Nothing
+in the procedure caught it, because the procedure was not what was wrong. The
+prose here ("the orchestrator alone calls...") reads naturally as addressing its
+own reader, which is exactly how the role silently gets assumed rather than
+assigned.
+
+The narrow exception: a human operator driving one command by hand, or a
+deliberate single-stage repair the user asked for by name. Neither is a case
+processing request, and neither licenses running the full sequence in-session.
+
 ### What a dispatch briefing may contain
 
 An agent's *procedure* already lives in its definition file, which is injected
@@ -163,15 +200,24 @@ this removes. The driver never moves a run-state marker: `update-run-state` and
 `finalize-stage` stay yours (T13).
 
 **Claim analysis runs as one driver, not as an agent dispatch.** Run
-`python tools/run_claim_analysis.py CASE_ID --held-by claim-analysis --run-id
-RUN_ID --provider PROVIDER` after the ordinary gates and an orchestrator-owned
-`claim_analysis in_progress` transition. It executes the four public
-checkpoints in two structured provider calls (M1: field extraction plus policy
-page selection; M2: coverage, case type, and requirements), validates every
-citation through the DAO, publishes its driver receipts, and never finalizes
-the stage. Do not dispatch `claim-analysis` for this work. Before finalizing,
-the orchestrator still runs `check-medical-reviews-clear` after canonical
-medical variables publish, as required by the gate.
+`python tools/run_claim_analysis_selective.py CASE_ID --held-by claim-analysis
+--run-id RUN_ID --provider PROVIDER` after the ordinary gates and an
+orchestrator-owned `claim_analysis in_progress` transition. It reads documents
+per field in priority order, stopping at the first trusted value, validates
+every citation through the DAO, publishes `claim_analysis_result.json` and
+`claim_analysis_trace.json`, and never finalizes the stage. Do not dispatch
+`claim-analysis` for this work. Before finalizing, the orchestrator still runs
+`check-medical-reviews-clear` after canonical medical variables publish, as
+required by the gate.
+
+**There is only one claim-analysis driver.** The legacy read-everything spine
+(`run_claim_analysis.py`) was **deleted 2026-08-20** — do not look for it, and
+do not treat the selective lane as conditional on a flag. The two spines wrote
+different contracts, and only the selective one's are consumed: stages 6 and 7
+read `claim_analysis_result.json` and nothing else. `behavior_enabled` is
+retained in the routing config as a governance record (it carries the approval
+block), and turning it off now HALTS the stage rather than selecting another
+path.
 
 **Do not cite an exact Stage 2 speedup ratio.** Earlier revisions of this skill
 quoted `897s` agent-led against `79s` driven, with `~510s` of model round trips.
@@ -306,7 +352,7 @@ The contact-sheet/vision code is retained only as a diagnostic tuning seam; it c
 | 2 | Document Processing | `document-pipeline` | (a) bundle OCR (`--bundle-ocr`, no classification) → (b) bundle redaction → (c) **segmentation**: propose/approve/split, children inherit the bundle's pages → (d) per-child classification → (e) per-child redaction → (f) case-wide chunking. All under `document_processing`; segmentation sits *inside* because processing runs on both sides of it |
 | 3 | Indexing (adapter, optional) | (tool, no agent) | pass-through by default; no-op unless enabled |
 | 4 | Policy Clause Processing | (driver, no agent) | `run_policy_pipeline_driver.py` after the UID preflight. Normalization retired 2026-08-15, so there is no extraction to delegate; the driver records the manifest fingerprint and the orchestrator finalizes. Policy text stays fully processed, chunked and citable |
-| 5 | Claim Analysis | (driver, no agent) | `run_claim_analysis.py`: (a) field extraction + policy-page selection, (b) coverage ID, (c) case-type classification + canonical medical-variable publication, (d) requirement matching. It requires `_document_index.json`; run medical clearance before pass/snapshot. **When `config/claim_analysis/claim_analysis_routing_v0.1.json` has `behavior_enabled: true`, run `run_claim_analysis_selective.py` instead** — the source-grounded selective spine. Reading is **demand-driven**: each round asks only the still-unresolved fields which document they need next, batches everyone wanting the same one into a single call, and a field that finds a trusted value drops out, so its lower-priority sources are never opened (a document is still read at most once per RUN). It publishes `authority: source_document_extraction` with `medical_projection_status: not_configured` (no canonical projection, and **no canonical medical revision required**), links clauses from `_document_index.json` (**optional here** -- no index means `policy_links` come back `not_found` with a reason, not a blocked stage) through the same DAO policy verification the legacy contracts use, reading only the candidate clauses' own pages rather than the whole 약관 bundle; leaves the industrial filing/approval fields `unavailable`/`outside_poc_scope` because **no stage in this pipeline produces a filing declaration** (deferred -- filing status therefore stays `unknown` on every case, and is never inferred from how the accident happened); and records conflict *candidates* only — it never writes the P6 ledger. The legacy entry point exits 2 and names it rather than running the old spine. On that lane the medical clearance gate applies only when a canonical revision exists: see §8 precedence in `dao.source_grounded_lane_only`, and never record the carve-out as cleared/approved. |
+| 5 | Claim Analysis | (driver, no agent) | `run_claim_analysis_selective.py` — the source-grounded selective spine, and since 2026-08-20 the **only** claim-analysis driver (the legacy `run_claim_analysis.py` was deleted; there is no flag to choose between them). Reading is **demand-driven**: each round asks only the still-unresolved fields which document they need next, batches everyone wanting the same one into a single call, and a field that finds a trusted value drops out, so its lower-priority sources are never opened (a document is still read at most once per RUN). It publishes `authority: source_document_extraction` with `medical_projection_status: not_configured` (no canonical projection, and **no canonical medical revision required**), links clauses from `_document_index.json` (**optional** — no index means `policy_links` come back `not_found` with a reason, not a blocked stage), reading only the candidate clauses’ own pages rather than the whole 약관 bundle; case-type assessment runs BEFORE clause linking, so a type-specific coverage term (배상책임의 시설소유/구내치료비) is searched for even when the medical fact terms find nothing; leaves the industrial filing/approval fields `unavailable`/`outside_poc_scope` because **no stage in this pipeline produces a filing declaration** (deferred — filing status therefore stays `unknown` on every case, and is never inferred from how the accident happened); and records conflict *candidates* only — it never writes the P6 ledger. Run medical clearance before pass/snapshot; on this lane the gate applies only when a canonical revision exists: see §8 precedence in `dao.source_grounded_lane_only`, and never record the carve-out as cleared/approved. |
 | 6 | Consistency Check | `consistency-check` | conflict-ledger-gated — any disagreement halts via `_conflict_ledger.json`. On the selective lane this stage is **agent-owned with a deterministic helper on both sides**: `run_consistency_check.py prepare` builds work items carrying both readings and their evidence (no verdict field), the agent judges each `confirmed`/`not_material`/`withdrawn` and writes a neutral `professional_summary` on every confirmed one, then `run_consistency_check.py register` verifies the verdicts against what was prepared (candidate digest) and creates the entries. Every entry is `pending`; never auto-`deferred_to_report` |
 | 7 | Screening Report | `screening-report` | consumes `denial-response`'s output as a dependency if an insurer-response document exists — not phase-gated. On the selective lane the agent supplies only `key_issues`, `review_points`, and per-conflict severity/placement (via `screening_report_judgement.json`); `run_screening_report.py` then produces all three artifacts — `screening_report.json`, `screening_report.md`, and the evidence sidecar — rendering the narrative through `document_assembly.py --template screening_report_selective` (nine sections). It produces **no** 진행 가능성/난이도/지급 가능성, and copies a deferred conflict's `professional_summary` verbatim from the ledger |
 | 8 | Draft Report v1 | `draft-report` | same agent reused for v2 in Phase 2 |
@@ -325,19 +371,13 @@ insurer-response input exists but `denial_reason_result.json` is absent. Each
 concurrent member retains its own locks, attempt boundary, result handling, and
 downstream gate; a phase label is never a reason to delay a ready stage.
 
-**The legacy claim-analysis driver requires the document index; the selective
-lane does not.** The two lanes differ here and the difference is deliberate, so
-do not carry a habit from one into the other:
-
-- **Legacy (`run_claim_analysis.py`) -- a hard gate.** M1's page selection is
-  built on the index, so the driver raises `BLOCKED: _document_index.json is
-  required for M1's page selection` and the stage does not run.
-- **Selective (`run_claim_analysis_selective.py`) -- an optional input.** It
-  reads the index with `allow_missing`, and a case without one simply produces
-  `policy_links` whose status is `not_found`, each carrying the reason. The
-  stage completes normally: a case with no processed policy has no clause to
-  link, and that is the honest result rather than a failure. It is also why
-  the index is never a precondition to check before dispatching this lane.
+**The document index is an OPTIONAL input to claim analysis.** It reads the
+index with `allow_missing`, and a case without one simply produces
+`policy_links` whose status is `not_found`, each carrying the reason. The stage
+completes normally: a case with no processed policy has no clause to link, and
+that is the honest result rather than a failure. It is therefore never a
+precondition to check before running this stage. (The deleted legacy driver
+hard-gated on it, which is why older notes describe a blocked stage.)
 
 The policy driver writes `_document_index.json` -- every article in the case's
 policy documents under `clauses` (`{page, policy_name, article, heading}`) with

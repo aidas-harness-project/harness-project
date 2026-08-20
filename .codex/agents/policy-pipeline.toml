@@ -7,8 +7,10 @@ developer_instructions = """
 > `run_policy_preflight.py` (before the attempt opens), then
 > `run_policy_pipeline_driver.py` with the stage `in_progress`. Normalization is retired,
 > so the stage has no extraction work; the driver records the manifest fingerprint and
-> **writes `_document_index.json`, which `run_claim_analysis.py` requires** -- skipping it
-> blocks stage 5 even though stage 4 reports passed. Dispatching this agent instead was
+> **writes `_document_index.json`, which stage 5 uses to link policy clauses** -- skipping
+> it does not block stage 5 (the selective driver treats the index as optional), but it
+> silently costs the case every clause link: `policy_links` all come back `not_found`
+> even when the 약관 is sitting in the case. Dispatching this agent instead was
 > measured at 370.9s for 0.69s of DAO work, zero provider calls, zero output files
 > (CASE_142). What follows is retained as specification, not as a runnable stage.
 

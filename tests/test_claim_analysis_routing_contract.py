@@ -58,11 +58,20 @@ def _resolved_medical_block() -> dict:
     }
 
 
-def test_routing_registry_is_schema_valid_and_inactive_by_default() -> None:
+def test_routing_registry_is_schema_valid_and_activated() -> None:
+    """The shipped registry validates and is the ACTIVE lane.
+
+    Inverted 2026-08-20 alongside the legacy spine's deletion. This previously
+    asserted `behavior_enabled is False` and `activation is None`, describing a
+    registry that had not been switched on yet; both became false when the lane
+    was activated (approved 2026-08-20T09:15+09:00) and there is no longer any
+    other lane for the flag to hand off to. Schema validity is the part worth
+    keeping, so it stays and the activation assertions flip to match.
+    """
     config = _config()
     assert _errors(config, "claim_analysis_routing_config.schema.json") == []
-    assert config["behavior_enabled"] is False
-    assert config["activation"] is None
+    assert config["behavior_enabled"] is True
+    assert config["activation"] is not None
 
 
 def test_registry_has_exactly_the_eight_accepted_medical_domains() -> None:

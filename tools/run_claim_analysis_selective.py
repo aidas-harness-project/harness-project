@@ -1,9 +1,14 @@
 """Selective Claim Analysis driver (routing config v0.1).
 
-This is the gated replacement spine for `run_claim_analysis.py`'s
-read-everything CP1. It reads documents **per field, in priority order, and
-stops at the first trusted value**, instead of handing every claim-side
-document to one extraction call.
+**The only claim-analysis driver.** It replaced `run_claim_analysis.py`'s
+read-everything CP1, which was deleted 2026-08-20 once this lane was activated
+and verified -- so this is no longer one of two spines behind a flag. It reads
+documents **per field, in priority order, and stops at the first trusted
+value**, instead of handing every claim-side document to one extraction call.
+
+`behavior_enabled` survives the deletion as the governance record carrying the
+activation approval; `require_enabled` still refuses a config that turns it
+off, which now HALTS the stage rather than selecting the old spine.
 
 What it owns:
 

@@ -63,13 +63,23 @@ def _gate_is_closed() -> bool:
 
 # --------------------------------------------------------- the gate holds --
 
-def test_the_shipped_gate_is_closed() -> None:
-    """Activation is a separate approval; nothing here may flip it."""
+def test_the_shipped_gate_is_open_and_records_who_opened_it() -> None:
+    """Activation is a separate approval, and the shipped config carries it.
+
+    Inverted 2026-08-20: this asserted the gate was still closed, which stopped
+    being true when the lane was activated and the legacy spine was deleted.
+    The approval block is the part worth guarding -- the schema refuses an
+    enabled config that has none, so a config enabled with no recorded approver
+    could only arrive by editing both the config and the schema.
+    """
     config = json.loads(
         (ROOT / "config" / "claim_analysis" /
          "claim_analysis_routing_v0.1.json").read_text(encoding="utf-8"))
-    assert config["behavior_enabled"] is False
-    assert config["activation"] is None
+    assert config["behavior_enabled"] is True
+    activation = config["activation"]
+    assert activation is not None
+    for key in ("approved_by", "authority_role", "approved_at", "scope"):
+        assert activation.get(key), f"activation is missing {key}"
 
 
 def test_claim_analysis_cli_refuses_while_the_gate_is_closed(sandbox) -> None:

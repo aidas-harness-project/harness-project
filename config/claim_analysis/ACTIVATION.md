@@ -1,9 +1,17 @@
 # Activating selective Claim Analysis (routing config v0.1)
 
-`claim_analysis_routing_v0.1.json` ships with `behavior_enabled: false`. While
-it is false, Stage 2 classifies exactly as before, `run_claim_analysis.py` runs
-its existing two-call spine, and none of the selective contracts are produced.
-Nothing about a case's runtime behaviour changes.
+> **Status: ACTIVATED 2026-08-20** (`approved_by: pyun`, scope
+> `traumatic_injury_poc`). The legacy spine this flag used to select between was
+> **deleted the same day**, so the flag no longer chooses a lane: it is retained
+> as the governance record that carries the approval block, and setting it to
+> `false` now HALTS `claim_analysis` rather than falling back to anything. The
+> rest of this document describes how activation was gated, kept because the
+> approval it records is still the live one.
+
+`claim_analysis_routing_v0.1.json` originally shipped with
+`behavior_enabled: false`. While it was false, Stage 2 classified as before,
+the legacy `run_claim_analysis.py` ran its two-call spine, and none of the
+selective contracts were produced.
 
 Activation is **two edits made together**, and the config schema refuses either
 one alone:
