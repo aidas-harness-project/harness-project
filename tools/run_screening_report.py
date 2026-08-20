@@ -1111,16 +1111,28 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
     # Filing is an administrative fact somebody recorded, so it carries the
     # evidence of that record when one exists. A type whose status is 확인 불가
     # contributes none -- there was no record to cite, which is the finding.
+    #
+    # Each row marks its OWN evidence through `_mark`, like sections 1, 6 and 8.
+    # The list was built in a comprehension separate from the prose until
+    # 2026-08-21, which is the section-6 shape: any case where a filing status
+    # resolved to filed/not_filed WITH a recorded reference would have died at
+    # assembly with "0 {{E}} placeholders but N evidence_references". It never
+    # fired, because every case so far left filing_status `unknown` -- CASE_701
+    # included, where all four types were unknown and the section published
+    # nothing. That is a latent trap rather than a working section: the first
+    # case carrying a 산재 or 자동차 접수 record would have hit it.
+    filing_references: list[dict] = []
+    filing_lines: list[str] = []
+    for row in rows:
+        line = f"- {row['case_type_label']}: 접수 {row['filing_status_label']}"
+        if row.get("filing_status") in {"filed", "not_filed"}:
+            for reference in row.get("filing_evidence_references") or []:
+                line += _mark(reference, filing_references)
+        filing_lines.append(line)
     sections.append({
         "heading": "3. 유형별 추가정보와 접수 상태",
-        "content": "\n".join(
-            f"- {row['case_type_label']}: 접수 {row['filing_status_label']}"
-            for row in rows) or "- 접수 정보 없음",
-        "evidence_references": _dedupe_references([
-            reference
-            for row in rows if row.get("filing_status") in {"filed", "not_filed"}
-            for reference in row.get("filing_evidence_references") or []
-        ]),
+        "content": "\n".join(filing_lines) or "- 접수 정보 없음",
+        "evidence_references": filing_references,
     })
 
     # 4. which medical areas the records could establish
