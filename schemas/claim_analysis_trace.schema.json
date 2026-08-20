@@ -43,8 +43,10 @@
             "enum": [
               "A",
               "B",
+              "type_conditional",
               "not_read"
-            ]
+            ],
+            "description": "Which pass opened the document. `type_conditional` is stage 3-a, the round that runs after case-type assessment and reads non-medical sources (법률의견서, insurer letter) for fields the common pass left unavailable."
           },
           "reason": {
             "type": "string",
@@ -168,6 +170,16 @@
           ],
           "minimum": 0,
           "description": "How many policy documents contributed at least one page to that read. Zero means no coverage term reached a candidate clause, so no policy text was needed at all."
+        },
+        "type_conditional_documents_read": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Documents opened by stage 3-a alone. Kept separate from `documents_read` because 3-a's cost scales with how many case types are in play, which is the one part of this stage that grows with the case rather than with the field catalogue -- an SLA regression here is invisible if it is folded into the common pass's count."
+        },
+        "type_conditional_provider_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Provider calls made by stage 3-a alone, on the same reasoning as the document count."
         }
       },
       "required": [

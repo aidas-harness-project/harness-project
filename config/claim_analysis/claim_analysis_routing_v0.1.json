@@ -1237,6 +1237,41 @@
       "pharmacy_payment_confirmation"
     ]
   },
+  "additional_fields_by_case_type": {
+    "personal_insurance": {
+      "trigger": "in_play",
+      "field_ids": [],
+      "sources": []
+    },
+    "traffic_accident": {
+      "trigger": "in_play",
+      "field_ids": [],
+      "sources": []
+    },
+    "industrial_accident": {
+      "trigger": "in_play",
+      "field_ids": [
+        "industrial_accident_filing_basis",
+        "industrial_accident_approval_status",
+        "industrial_accident_approved_diagnosis"
+      ],
+      "sources": [
+        "insurer_response"
+      ]
+    },
+    "liability": {
+      "trigger": "in_play",
+      "field_ids": [
+        "facility_defect_or_third_party_responsibility",
+        "accident_mechanism",
+        "accident_date"
+      ],
+      "sources": [
+        "legal_opinion",
+        "insurer_response"
+      ]
+    }
+  },
   "filing_status_policy": {
     "intake_value_authoritative": true,
     "default_when_missing": "unknown",
@@ -1260,21 +1295,48 @@
     "amount_calculation": false,
     "coverage_terms_note": "coverage_term_fields are searched when the named claim fact resolved asserted or conflict -- the case's own facts justify the search. coverage_terms_by_case_type are searched when the case-type assessment put that type in play, regardless of which medical facts resolved: a liability policy identifies its coverage by its own clause vocabulary, not by the claimant's treatment. Both lists were hardcoded in tools/claim_analysis_policy_links.py until 2026-08-20, which is why CASE_053's 영업배상책임보험 returned not_found on all seven terms while its index held both clauses the dispute turned on. A term must name a COVERAGE, which in a Korean policy is the owning 약관's name (시설소유(관리)자 특별약관): the article headings 보상하는 손해 / 보상하지 않는 손해 appear in every 약관 of a bundle, so searching on one selected 92 clauses across 144 pages and would have re-read the whole bundle the page-scoped read exists to avoid.",
     "coverage_term_fields": [
-      { "field_id": "surgery_or_major_procedure_status", "term": "수술" },
-      { "field_id": "surgery_or_procedure_name", "term": "수술" },
-      { "field_id": "admission_status", "term": "입원" },
-      { "field_id": "disability_type", "term": "후유장해" },
-      { "field_id": "disability_related_diagnosis", "term": "후유장해" },
-      { "field_id": "injury_event_present", "term": "상해" },
-      { "field_id": "primary_diagnosis", "term": "진단" }
+      {
+        "field_id": "surgery_or_major_procedure_status",
+        "term": "수술"
+      },
+      {
+        "field_id": "surgery_or_procedure_name",
+        "term": "수술"
+      },
+      {
+        "field_id": "admission_status",
+        "term": "입원"
+      },
+      {
+        "field_id": "disability_type",
+        "term": "후유장해"
+      },
+      {
+        "field_id": "disability_related_diagnosis",
+        "term": "후유장해"
+      },
+      {
+        "field_id": "injury_event_present",
+        "term": "상해"
+      },
+      {
+        "field_id": "primary_diagnosis",
+        "term": "진단"
+      }
     ],
     "coverage_terms_by_case_type": {
       "personal_insurance": [],
       "traffic_accident": [],
       "industrial_accident": [],
       "liability": [
-        { "coverage_id": "liability_premises_owner", "term": "시설소유" },
-        { "coverage_id": "liability_premises_medical_expense", "term": "구내치료비" }
+        {
+          "coverage_id": "liability_premises_owner",
+          "term": "시설소유"
+        },
+        {
+          "coverage_id": "liability_premises_medical_expense",
+          "term": "구내치료비"
+        }
       ]
     }
   }

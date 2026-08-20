@@ -267,6 +267,10 @@
         "source_document_kind": {
           "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind"
         },
+        "source_document_type": {
+          "$ref": "common_component_output.schema.json#/$defs/document_type",
+          "description": "owner: claim analysis (stage 3-a). The COARSE type of a non-medical source, for an observation the type-conditional round read from a document that has no medical kind -- a 법률의견서, an insurer letter. Set INSTEAD of `source_document_kind`, never alongside it: the two name different axes, and defaulting a legal opinion to `other_medical` (as the retired industrial branch did) would label a lawyer's letter a medical record. An observation carrying this is by construction from stage 3-a."
+        },
         "source_priority_rank": {
           "type": "integer",
           "minimum": 1,
@@ -276,8 +280,10 @@
           "enum": [
             "A",
             "B",
-            "opportunistic"
-          ]
+            "opportunistic",
+            "type_conditional"
+          ],
+          "description": "Which pass produced the observation. `type_conditional` is stage 3-a, the round that runs AFTER case-type assessment and re-opens fields the common A/B pass left unavailable; it is not a third wave of the common pass and never runs before a verdict exists."
         },
         "evidence_references": {
           "type": "array",
@@ -305,7 +311,6 @@
           },
           "required": [
             "value",
-            "source_document_kind",
             "source_priority_rank"
           ],
           "not": {
@@ -321,7 +326,34 @@
                 ]
               }
             ]
-          }
+          },
+          "allOf": [
+            {
+              "$comment": "Exactly one source axis. A medical form names `source_document_kind`; a non-medical document read by the type-conditional round names `source_document_type` instead. Requiring one of the two (rather than the medical one outright) is what lets stage 3-a cite a 법률의견서 without mislabelling it a medical record; forbidding both together is what stops a document being described on two axes at once.",
+              "oneOf": [
+                {
+                  "required": [
+                    "source_document_kind"
+                  ],
+                  "not": {
+                    "required": [
+                      "source_document_type"
+                    ]
+                  }
+                },
+                {
+                  "required": [
+                    "source_document_type"
+                  ],
+                  "not": {
+                    "required": [
+                      "source_document_kind"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
         },
         {
           "$comment": "explicitly_absent: no value, but the sentence asserting absence is quoted. Its scope is this field only -- an absence statement about one finding never travels to another field.",
@@ -335,7 +367,6 @@
           },
           "required": [
             "reason",
-            "source_document_kind",
             "source_priority_rank"
           ],
           "not": {
@@ -351,7 +382,34 @@
                 ]
               }
             ]
-          }
+          },
+          "allOf": [
+            {
+              "$comment": "Exactly one source axis. A medical form names `source_document_kind`; a non-medical document read by the type-conditional round names `source_document_type` instead. Requiring one of the two (rather than the medical one outright) is what lets stage 3-a cite a 법률의견서 without mislabelling it a medical record; forbidding both together is what stops a document being described on two axes at once.",
+              "oneOf": [
+                {
+                  "required": [
+                    "source_document_kind"
+                  ],
+                  "not": {
+                    "required": [
+                      "source_document_type"
+                    ]
+                  }
+                },
+                {
+                  "required": [
+                    "source_document_type"
+                  ],
+                  "not": {
+                    "required": [
+                      "source_document_kind"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
         },
         {
           "$comment": "unavailable: nothing established, so there is nothing to cite.",

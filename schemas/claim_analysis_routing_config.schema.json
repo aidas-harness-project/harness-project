@@ -571,6 +571,23 @@
         "liability"
       ]
     },
+    "additional_fields_by_case_type": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Stage 3-a: the second extraction round, run AFTER case-type assessment. It re-opens fields the common pass left `unavailable`, from sources the medical routes never reach. It does NOT introduce new fields -- every field_id must already exist in `fields` -- because the 56-field catalogue is deliberately case-type-agnostic; what a case type changes is which SOURCE may answer, not which facts matter. Measured on CASE_053: `facility_defect_or_third_party_responsibility` sat `unavailable/sources_exhausted` while two 법률의견서 in the same case argued the question directly, because `accident_context` ranks only medical form kinds.",
+      "properties": {
+        "personal_insurance": { "$ref": "#/$defs/additional_field_round" },
+        "traffic_accident": { "$ref": "#/$defs/additional_field_round" },
+        "industrial_accident": { "$ref": "#/$defs/additional_field_round" },
+        "liability": { "$ref": "#/$defs/additional_field_round" }
+      },
+      "required": [
+        "personal_insurance",
+        "traffic_accident",
+        "industrial_accident",
+        "liability"
+      ]
+    },
     "filing_status_policy": {
       "type": "object",
       "additionalProperties": false,
@@ -678,6 +695,7 @@
     "source_routes",
     "case_type_rules",
     "required_documents_by_case_type",
+    "additional_fields_by_case_type",
     "filing_status_policy",
     "policy_linking"
   ],
@@ -710,6 +728,52 @@
       "items": {
         "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind"
       }
+    },
+    "additional_field_round": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "trigger": {
+          "enum": ["in_play"],
+          "description": "When the round opens. `in_play` means any verdict except `not_applicable` -- an `uncertain` type counts. Requiring `applicable` would be circular on exactly the cases this exists for: the type is uncertain BECAUSE its deciding field is unavailable, so gating the re-read on a decided verdict guarantees it never runs. Only an affirmative negative from a source closes the round."
+        },
+        "field_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "description": "Fields this case type may re-open. Each MUST name a row in `fields`; a validator enforces that, because a typo would otherwise silently extract nothing. An empty array is a real answer -- it says the common pass already covers this type -- not a placeholder."
+        },
+        "sources": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": ["legal_opinion", "legal_reference", "insurer_response"]
+          },
+          "description": "Coarse `document_type` codes to read, in priority order. Deliberately NOT medical kinds: a medical route already ranks those, and the whole point of this round is reaching documents no medical ladder names. `legal_opinion` leads `insurer_response` where both apply -- the opinion argues the question, the insurer's letter only summarizes one."
+        }
+      },
+      "required": ["trigger", "field_ids", "sources"],
+      "allOf": [
+        {
+          "$comment": "Fields without sources could never be answered; sources without fields would read a document for nothing. Either alone is a config mistake, so both must be empty or both non-empty.",
+          "if": {
+            "properties": { "field_ids": { "minItems": 1 } },
+            "required": ["field_ids"]
+          },
+          "then": {
+            "properties": { "sources": { "minItems": 1 } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "sources": { "minItems": 1 } },
+            "required": ["sources"]
+          },
+          "then": {
+            "properties": { "field_ids": { "minItems": 1 } }
+          }
+        }
+      ]
     }
   }
 }
