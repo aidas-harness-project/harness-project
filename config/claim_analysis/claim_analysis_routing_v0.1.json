@@ -188,49 +188,63 @@
       "code": "event_timeline",
       "label": "Event and timeline",
       "effective_first_required_grade": "B",
-      "label_ko": "사고 경위와 시점"
+      "label_ko": "사고 경위와 시점",
+      "domain_kind": "medical"
     },
     {
       "code": "diagnosis",
       "label": "Diagnosis",
       "effective_first_required_grade": "A",
-      "label_ko": "진단"
+      "label_ko": "진단",
+      "domain_kind": "medical"
     },
     {
       "code": "diagnosis_basis",
       "label": "Diagnostic basis",
       "effective_first_required_grade": "A",
-      "label_ko": "진단 근거"
+      "label_ko": "진단 근거",
+      "domain_kind": "medical"
     },
     {
       "code": "treatment",
       "label": "Treatment",
       "effective_first_required_grade": "A",
-      "label_ko": "치료"
+      "label_ko": "치료",
+      "domain_kind": "medical"
     },
     {
       "code": "clinical_course_outcome",
       "label": "Clinical course and outcome",
       "effective_first_required_grade": "A",
-      "label_ko": "경과와 결과"
+      "label_ko": "경과와 결과",
+      "domain_kind": "medical"
     },
     {
       "code": "prior_history_influences",
       "label": "Prior history and influencing factors",
       "effective_first_required_grade": "A",
-      "label_ko": "기왕력과 영향 요인"
+      "label_ko": "기왕력과 영향 요인",
+      "domain_kind": "medical"
     },
     {
       "code": "complications_new_problems",
       "label": "Complications and new problems",
       "effective_first_required_grade": "B",
-      "label_ko": "합병증과 새로운 문제"
+      "label_ko": "합병증과 새로운 문제",
+      "domain_kind": "medical"
     },
     {
       "code": "disability",
       "label": "Disability information",
       "effective_first_required_grade": "A",
-      "label_ko": "후유장해"
+      "label_ko": "후유장해",
+      "domain_kind": "medical"
+    },
+    {
+      "code": "liability_basis",
+      "label": "Liability and fault basis",
+      "domain_kind": "legal_factual",
+      "label_ko": "책임과 과실 근거"
     }
   ],
   "fields": [
@@ -969,6 +983,96 @@
       "source_route_id": null,
       "critical_conflict_field": false,
       "label_ko": "최종 장해율 산정"
+    },
+    {
+      "field_id": "legal_basis_cited",
+      "domain_code": "liability_basis",
+      "label": "Legal basis cited",
+      "priority_grade": "A",
+      "legal_authority": "asserted_fact",
+      "extraction_wave": "B",
+      "activation_basis": "routing_override",
+      "value_shape": "text",
+      "cardinality": "multi",
+      "source_route_id": null,
+      "critical_conflict_field": true,
+      "label_ko": "적용 법조",
+      "notes": "인용된 법조문 그대로 (민법 제750조, 제758조 제1항 등). 조문 번호를 그대로 옮기고 해석은 하지 않는다."
+    },
+    {
+      "field_id": "liability_opinion_conclusion",
+      "domain_code": "liability_basis",
+      "label": "Liability conclusion in a legal opinion",
+      "priority_grade": "A",
+      "legal_authority": "legal_opinion",
+      "extraction_wave": "B",
+      "activation_basis": "routing_override",
+      "value_shape": "enum",
+      "cardinality": "multi",
+      "source_route_id": null,
+      "critical_conflict_field": true,
+      "label_ko": "배상책임 성립 여부(의견)",
+      "notes": "성립/불성립/판단유보. 의견 1건당 1값이며, 상반된 두 의견은 모순이 아니라 쟁점이다 -- 어느 쪽을 채택할지 이 단계에서 정하지 않는다."
+    },
+    {
+      "field_id": "comparative_negligence_rate",
+      "domain_code": "liability_basis",
+      "label": "Comparative negligence rate",
+      "priority_grade": "A",
+      "legal_authority": "legal_opinion",
+      "extraction_wave": "B",
+      "activation_basis": "routing_override",
+      "value_shape": "number",
+      "cardinality": "multi",
+      "source_route_id": null,
+      "critical_conflict_field": true,
+      "label_ko": "피해자 과실비율",
+      "notes": "서면에 기재된 비율만 기록한다(0~100). 계산하지 않으며, '과실 없음'은 0으로 기재된 경우에만 0이다. 금액 산출은 여전히 범위 밖 -- 기재 확인이다."
+    },
+    {
+      "field_id": "negligence_reasoning",
+      "domain_code": "liability_basis",
+      "label": "Grounds for the negligence finding",
+      "priority_grade": "B",
+      "legal_authority": "legal_opinion",
+      "extraction_wave": "B",
+      "activation_basis": "routing_override",
+      "value_shape": "text_list",
+      "cardinality": "multi",
+      "source_route_id": null,
+      "critical_conflict_field": false,
+      "label_ko": "과실 판단 근거",
+      "notes": "비율의 근거 문장. 숫자만 남기면 검토자가 다툴 수 없다."
+    },
+    {
+      "field_id": "duty_breach_grounds",
+      "domain_code": "liability_basis",
+      "label": "Grounds for breach of duty",
+      "priority_grade": "B",
+      "legal_authority": "legal_opinion",
+      "extraction_wave": "B",
+      "activation_basis": "routing_override",
+      "value_shape": "text_list",
+      "cardinality": "multi",
+      "source_route_id": null,
+      "critical_conflict_field": false,
+      "label_ko": "주의의무 위반 사유",
+      "notes": "제설 미실시, 경고 미게시 등 개별 사유. accident_mechanism 한 줄로는 담기지 않는다."
+    },
+    {
+      "field_id": "responsible_party_role",
+      "domain_code": "liability_basis",
+      "label": "Role of the responsible party",
+      "priority_grade": "B",
+      "legal_authority": "asserted_fact",
+      "extraction_wave": "B",
+      "activation_basis": "routing_override",
+      "value_shape": "text",
+      "cardinality": "multi",
+      "source_route_id": null,
+      "critical_conflict_field": false,
+      "label_ko": "책임주체 지위",
+      "notes": "점유자/소유자/관리운영자 등 서면 표현 그대로. 민법 제758조는 점유자와 소유자의 책임을 나누므로 누구에게 청구할지가 갈린다."
     }
   ],
   "source_routes": [
@@ -1262,9 +1366,15 @@
     "liability": {
       "trigger": "in_play",
       "field_ids": [
-        "facility_defect_or_third_party_responsibility",
+        "accident_date",
         "accident_mechanism",
-        "accident_date"
+        "comparative_negligence_rate",
+        "duty_breach_grounds",
+        "facility_defect_or_third_party_responsibility",
+        "legal_basis_cited",
+        "liability_opinion_conclusion",
+        "negligence_reasoning",
+        "responsible_party_role"
       ],
       "sources": [
         "legal_opinion",

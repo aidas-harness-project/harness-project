@@ -498,9 +498,10 @@
         "authority": {
           "enum": [
             "source_document_extraction",
-            "claim_analysis_native"
+            "claim_analysis_native",
+            "legal_opinion_assertion"
           ],
-          "description": "Where this field's content came from. 'source_document_extraction' -- read from a case document with an exact citation. 'claim_analysis_native' -- a claim-side finding this stage owns (accident circumstances, filing information, case-type triggers), reserved for the event_timeline domain. There is deliberately no projection value: this lane does not project canonical medical variables, and offering the label would invite claiming a binding it never computed."
+          "description": "Where this field's content came from. 'source_document_extraction' -- read from a case document with an exact citation. 'claim_analysis_native' -- a claim-side finding this stage owns (accident circumstances, filing information, case-type triggers), reserved for the event_timeline domain. 'legal_opinion_assertion' -- a judgement a party's counsel reached, read from a 법률의견서 with an exact citation. It is separated from `source_document_extraction` because two opposing opinions on one question are NOT a records contradiction to reconcile -- they are the dispute the case is about. Measured on CASE_053: DOC_006 (claimant) concluded 배상책임 성립 under 민법 제758조 and DOC_008 (insurer) concluded 불성립 on the same facts. Filing that as a conflict would ask a reviewer to pick a winner the records cannot settle; publishing both as opinions states the case accurately."
         },
         "resolution_status": {
           "enum": [

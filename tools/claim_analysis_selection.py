@@ -138,6 +138,22 @@ def opportunistic_fields(config: Mapping[str, Any]) -> list[dict]:
     ]
 
 
+def field_grade(field_row: Mapping[str, Any]) -> str:
+    """The field's extraction grade, from whichever axis it declares.
+
+    A medical field grades on clinical advisory priority; a `legal_factual`
+    field (과실비율, 적용 법조) carries `priority_grade` instead, because
+    ranking a fault percentage on what a 의사 needs is meaningless -- and doing
+    it produced the wrong answer: the single field liability is judged on sat
+    at grade C because it is medically unimportant. The config schema requires
+    exactly one of the two, so this never has to invent a default.
+    """
+    grade = field_row.get("medical_advisory_grade")
+    if grade is not None:
+        return grade
+    return field_row["priority_grade"]
+
+
 def plan_field(
     field_row: Mapping[str, Any],
     config: Mapping[str, Any],
@@ -155,7 +171,7 @@ def plan_field(
         field_id=field_row["field_id"],
         domain_code=field_row["domain_code"],
         wave=field_row["extraction_wave"],
-        grade=field_row["medical_advisory_grade"],
+        grade=field_grade(field_row),
         critical=bool(field_row.get("critical_conflict_field")),
         route_id=route_id,
     )

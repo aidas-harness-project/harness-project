@@ -195,8 +195,8 @@
     },
     "domains": {
       "type": "array",
-      "minItems": 8,
-      "maxItems": 8,
+      "minItems": 9,
+      "maxItems": 9,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -213,21 +213,60 @@
             "enum": [
               "A",
               "B"
-            ]
+            ],
+            "description": "The medical advisory grade at which a field in this domain first becomes required. Meaningful only for a `medical` domain; a `legal_factual` domain may omit it, since its fields carry no medical grade to compare against."
           },
           "label_ko": {
             "type": "string",
             "minLength": 1,
             "description": "owner: routing config. The reader-facing Korean name, printed by the screening report. `label` remains the English identifier used in code and documentation; this is what a 손해사정사 reads."
+          },
+          "domain_kind": {
+            "enum": [
+              "medical",
+              "legal_factual"
+            ],
+            "description": "What KIND of fact the domain holds. `medical` is the default and covers all eight original domains -- their fields are clinical findings a 의사 grades. `legal_factual` holds facts about liability, fault and contract terms: a 손해사정사 or a 법률전문가 reads them, and grading them on medical advisory priority is meaningless. Absent, a domain is `medical`."
           }
         },
         "required": [
           "code",
           "label",
-          "effective_first_required_grade",
           "label_ko"
+        ],
+        "allOf": [
+          {
+            "$comment": "A medical domain still declares its grade ceiling; the eight original domains are unaffected.",
+            "if": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "domain_kind": {
+                      "const": "medical"
+                    }
+                  },
+                  "required": [
+                    "domain_kind"
+                  ]
+                },
+                {
+                  "not": {
+                    "required": [
+                      "domain_kind"
+                    ]
+                  }
+                }
+              ]
+            },
+            "then": {
+              "required": [
+                "effective_first_required_grade"
+              ]
+            }
+          }
         ]
-      }
+      },
+      "description": "Nine domains: the eight medical ones (fixed -- they are the agreed clinical fact taxonomy and the count is pinned so one cannot be added or dropped quietly) plus `liability_basis`, added 2026-08-21 for facts that are not clinical at all. The medical count is enforced separately below, so raising this bound alone cannot smuggle in a ninth medical domain."
     },
     "fields": {
       "type": "array",
@@ -254,7 +293,8 @@
               "B",
               "C",
               "D"
-            ]
+            ],
+            "description": "Clinical advisory priority. Required for a field in a `medical` domain; a `legal_factual` field omits it and declares `priority_grade` instead."
           },
           "extraction_wave": {
             "enum": [
@@ -309,13 +349,27 @@
             "type": "string",
             "minLength": 1,
             "description": "owner: routing config. The reader-facing Korean name, printed by the screening report. `label` remains the English identifier used in code and documentation; this is what a 손해사정사 reads."
+          },
+          "priority_grade": {
+            "enum": [
+              "A",
+              "B",
+              "C"
+            ],
+            "description": "The field's own extraction priority, for a field with no medical grade. A `legal_factual` field declares this instead of `medical_advisory_grade`: 과실비율 is not a clinical finding a 의사 ranks, and forcing a medical grade onto it produced the wrong signal -- `facility_defect_or_third_party_responsibility` sits at grade C (medically unimportant) while being the single field liability is judged on. A medical field leaves this unset and its priority is derived from `medical_advisory_grade` as before."
+          },
+          "legal_authority": {
+            "enum": [
+              "asserted_fact",
+              "legal_opinion"
+            ],
+            "description": "For a `legal_factual` field, whether the value is a FACT stated in a document (a policy's 자기부담금, a 사고일) or an OPINION a party's counsel reached (배상책임 성립 여부, 과실비율). Two opposing opinions are not a contradiction to be resolved -- they are the dispute the case is about -- so this axis is what stops `consistency_check` filing them as a records conflict."
           }
         },
         "required": [
           "field_id",
           "domain_code",
           "label",
-          "medical_advisory_grade",
           "extraction_wave",
           "activation_basis",
           "value_shape",
@@ -381,6 +435,31 @@
                 }
               }
             }
+          },
+          {
+            "$comment": "Exactly one grading axis. A field carries a medical grade or a priority grade, never both and never neither -- 'neither' would make its wave unorderable, and 'both' would leave two rankings to disagree.",
+            "oneOf": [
+              {
+                "required": [
+                  "medical_advisory_grade"
+                ],
+                "not": {
+                  "required": [
+                    "priority_grade"
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "priority_grade"
+                ],
+                "not": {
+                  "required": [
+                    "medical_advisory_grade"
+                  ]
+                }
+              }
+            ]
           }
         ]
       }
@@ -576,10 +655,18 @@
       "additionalProperties": false,
       "description": "Stage 3-a: the second extraction round, run AFTER case-type assessment. It re-opens fields the common pass left `unavailable`, from sources the medical routes never reach. It does NOT introduce new fields -- every field_id must already exist in `fields` -- because the 56-field catalogue is deliberately case-type-agnostic; what a case type changes is which SOURCE may answer, not which facts matter. Measured on CASE_053: `facility_defect_or_third_party_responsibility` sat `unavailable/sources_exhausted` while two 법률의견서 in the same case argued the question directly, because `accident_context` ranks only medical form kinds.",
       "properties": {
-        "personal_insurance": { "$ref": "#/$defs/additional_field_round" },
-        "traffic_accident": { "$ref": "#/$defs/additional_field_round" },
-        "industrial_accident": { "$ref": "#/$defs/additional_field_round" },
-        "liability": { "$ref": "#/$defs/additional_field_round" }
+        "personal_insurance": {
+          "$ref": "#/$defs/additional_field_round"
+        },
+        "traffic_accident": {
+          "$ref": "#/$defs/additional_field_round"
+        },
+        "industrial_accident": {
+          "$ref": "#/$defs/additional_field_round"
+        },
+        "liability": {
+          "$ref": "#/$defs/additional_field_round"
+        }
       },
       "required": [
         "personal_insurance",
@@ -650,10 +737,18 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "field_id": { "type": "string" },
-              "term": { "type": "string", "minLength": 1 }
+              "field_id": {
+                "type": "string"
+              },
+              "term": {
+                "type": "string",
+                "minLength": 1
+              }
             },
-            "required": ["field_id", "term"]
+            "required": [
+              "field_id",
+              "term"
+            ]
           }
         },
         "coverage_terms_by_case_type": {
@@ -665,10 +760,18 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "coverage_id": { "type": "string" },
-                "term": { "type": "string", "minLength": 1 }
+                "coverage_id": {
+                  "type": "string"
+                },
+                "term": {
+                  "type": "string",
+                  "minLength": 1
+                }
               },
-              "required": ["coverage_id", "term"]
+              "required": [
+                "coverage_id",
+                "term"
+              ]
             }
           }
         }
@@ -718,6 +821,25 @@
           }
         }
       }
+    },
+    {
+      "$comment": "Exactly eight medical domains. The bound above counts all domains; this one keeps the clinical taxonomy fixed while a non-medical domain may be added.",
+      "properties": {
+        "domains": {
+          "contains": {
+            "properties": {
+              "domain_kind": {
+                "const": "legal_factual"
+              }
+            },
+            "required": [
+              "domain_kind"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      }
     }
   ],
   "$defs": {
@@ -734,43 +856,76 @@
       "additionalProperties": false,
       "properties": {
         "trigger": {
-          "enum": ["in_play"],
+          "enum": [
+            "in_play"
+          ],
           "description": "When the round opens. `in_play` means any verdict except `not_applicable` -- an `uncertain` type counts. Requiring `applicable` would be circular on exactly the cases this exists for: the type is uncertain BECAUSE its deciding field is unavailable, so gating the re-read on a decided verdict guarantees it never runs. Only an affirmative negative from a source closes the round."
         },
         "field_ids": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
           "description": "Fields this case type may re-open. Each MUST name a row in `fields`; a validator enforces that, because a typo would otherwise silently extract nothing. An empty array is a real answer -- it says the common pass already covers this type -- not a placeholder."
         },
         "sources": {
           "type": "array",
           "uniqueItems": true,
           "items": {
-            "enum": ["legal_opinion", "legal_reference", "insurer_response"]
+            "enum": [
+              "legal_opinion",
+              "legal_reference",
+              "insurer_response"
+            ]
           },
           "description": "Coarse `document_type` codes to read, in priority order. Deliberately NOT medical kinds: a medical route already ranks those, and the whole point of this round is reaching documents no medical ladder names. `legal_opinion` leads `insurer_response` where both apply -- the opinion argues the question, the insurer's letter only summarizes one."
         }
       },
-      "required": ["trigger", "field_ids", "sources"],
+      "required": [
+        "trigger",
+        "field_ids",
+        "sources"
+      ],
       "allOf": [
         {
           "$comment": "Fields without sources could never be answered; sources without fields would read a document for nothing. Either alone is a config mistake, so both must be empty or both non-empty.",
           "if": {
-            "properties": { "field_ids": { "minItems": 1 } },
-            "required": ["field_ids"]
+            "properties": {
+              "field_ids": {
+                "minItems": 1
+              }
+            },
+            "required": [
+              "field_ids"
+            ]
           },
           "then": {
-            "properties": { "sources": { "minItems": 1 } }
+            "properties": {
+              "sources": {
+                "minItems": 1
+              }
+            }
           }
         },
         {
           "if": {
-            "properties": { "sources": { "minItems": 1 } },
-            "required": ["sources"]
+            "properties": {
+              "sources": {
+                "minItems": 1
+              }
+            },
+            "required": [
+              "sources"
+            ]
           },
           "then": {
-            "properties": { "field_ids": { "minItems": 1 } }
+            "properties": {
+              "field_ids": {
+                "minItems": 1
+              }
+            }
           }
         }
       ]

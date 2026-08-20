@@ -19,11 +19,21 @@ ROUTING_CONFIG_PATH = (
 CASE_TYPES = {
     "personal_insurance", "traffic_accident", "industrial_accident", "liability"
 }
-DOMAIN_CODES = {
+# The clinical fact taxonomy. Pinned exactly: a ninth medical domain must be an
+# explicit decision, not something a config edit adds quietly.
+MEDICAL_DOMAIN_CODES = {
     "event_timeline", "diagnosis", "diagnosis_basis", "treatment",
     "clinical_course_outcome", "prior_history_influences",
     "complications_new_problems", "disability",
 }
+# Domains holding facts that are not clinical at all -- liability, fault,
+# contract terms. Added 2026-08-21: every one of the 56 original fields was a
+# medical fact, so 과실비율 and 적용 법조 had nowhere to live, and the single
+# field liability is judged on sat at medical grade C because a 의사 would not
+# rank it highly. A 손해사정사 reads these; grading them on medical advisory
+# priority is meaningless.
+LEGAL_DOMAIN_CODES = {"liability_basis"}
+DOMAIN_CODES = MEDICAL_DOMAIN_CODES | LEGAL_DOMAIN_CODES
 COST_KINDS = {
     "medical_expense_receipt", "medical_expense_itemization",
     "pharmacy_payment_confirmation",
@@ -51,8 +61,32 @@ def validate_routing_config_semantics(config: dict) -> list[str]:
     domain_codes = {row.get("code") for row in domains}
     if domain_codes != DOMAIN_CODES:
         errors.append(
-            "domains: must contain exactly the eight accepted domain codes"
+            "domains: must contain exactly the accepted domain codes "
+            f"(medical: {sorted(MEDICAL_DOMAIN_CODES)}, "
+            f"legal: {sorted(LEGAL_DOMAIN_CODES)})"
         )
+    # The two sets are checked separately as well: an edit that swapped a
+    # medical code for a legal one would keep the union identical.
+    declared_medical = {row.get("code") for row in domains
+                        if row.get("domain_kind", "medical") == "medical"}
+    if declared_medical != MEDICAL_DOMAIN_CODES:
+        errors.append(
+            "domains: the eight medical domains are fixed; "
+            f"got {sorted(declared_medical)}"
+        )
+    for row in domains:
+        code = row.get("code")
+        kind = row.get("domain_kind", "medical")
+        if kind == "medical" and not row.get("effective_first_required_grade"):
+            errors.append(
+                f"domains: medical domain {code!r} must declare "
+                "effective_first_required_grade"
+            )
+        if kind == "legal_factual" and row.get("effective_first_required_grade"):
+            errors.append(
+                f"domains: legal domain {code!r} must not declare a medical "
+                "grade ceiling -- its fields carry no medical grade"
+            )
 
     for duplicate in _duplicates(row.get("kind") for row in kinds):
         errors.append(f"document_kinds: duplicate kind {duplicate!r}")

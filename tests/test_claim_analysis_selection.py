@@ -84,7 +84,7 @@ def test_d_grade_fields_are_absent_from_every_search_wave() -> None:
     config = _config()
     d_fields = [
         row["field_id"] for row in config["fields"]
-        if row["medical_advisory_grade"] == "D"
+        if row.get("medical_advisory_grade") == "D"
     ]
     assert d_fields, "the fixture must actually contain D-grade fields"
     searched = {

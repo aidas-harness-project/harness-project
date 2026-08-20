@@ -256,7 +256,7 @@ def resolve_field(
     outcome = FieldExtractionOutcome(
         field_id=plan.field_id,
         domain_code=plan.domain_code,
-        grade=field_row["medical_advisory_grade"],
+        grade=selection.field_grade(field_row),
     )
     if plan.skip_reason is not None:
         # A field with nothing to read is UNAVAILABLE, not not_applicable.
@@ -437,7 +437,7 @@ def resolve_from_cache(
     outcome = FieldExtractionOutcome(
         field_id=plan.field_id,
         domain_code=plan.domain_code,
-        grade=field_row["medical_advisory_grade"],
+        grade=selection.field_grade(field_row),
     )
     if plan.skip_reason is not None:
         outcome.status = "unavailable"
@@ -543,7 +543,7 @@ def resolve_opportunistic(
     outcome = FieldExtractionOutcome(
         field_id=plan.field_id,
         domain_code=plan.domain_code,
-        grade=field_row["medical_advisory_grade"],
+        grade=selection.field_grade(field_row),
     )
     # `not_scheduled`, not `not_mentioned`: an opportunistic field never buys a
     # read of its own, so "no source discussed it" would overstate what was
@@ -817,7 +817,7 @@ def extract_all(
         outcome = FieldExtractionOutcome(
             field_id=plan.field_id,
             domain_code=plan.domain_code,
-            grade=field_row["medical_advisory_grade"],
+            grade=selection.field_grade(field_row),
         )
         outcomes.append(outcome)
         by_field[plan.field_id] = outcome
@@ -912,7 +912,7 @@ def extract_all(
             outcome = FieldExtractionOutcome(
                 field_id=field_id,
                 domain_code=field_row["domain_code"],
-                grade=field_row["medical_advisory_grade"],
+                grade=selection.field_grade(field_row),
             )
             if not active:
                 outcome.status = "unavailable"
@@ -1064,7 +1064,7 @@ def priority_grade_for(field_row: Mapping[str, Any]) -> str:
     honestly rather than inventing a `C` the downstream contract has no slot
     for.
     """
-    grade = field_row["medical_advisory_grade"]
+    grade = selection.field_grade(field_row)
     return "A" if grade == "A" else "B"
 
 

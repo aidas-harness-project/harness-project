@@ -87,7 +87,14 @@ def test_registry_has_exactly_the_eight_accepted_medical_domains() -> None:
         "disability",
     }
     domains = {row["code"]: row for row in config["domains"]}
-    assert set(domains) == expected
+    medical = {code for code, row in domains.items()
+               if row.get("domain_kind", "medical") == "medical"}
+    assert medical == expected, "the eight medical domains are fixed"
+    legal = {code for code, row in domains.items()
+             if row.get("domain_kind") == "legal_factual"}
+    assert legal == {"liability_basis"}
+    assert "effective_first_required_grade" not in domains["liability_basis"], (
+        "a legal domain carries no medical grade ceiling")
     assert domains["event_timeline"]["effective_first_required_grade"] == "B"
     assert domains["complications_new_problems"]["effective_first_required_grade"] == "B"
 
@@ -98,6 +105,12 @@ def test_active_fields_obey_the_b_ceiling_except_named_operational_overrides() -
     for field in config["fields"]:
         if field["extraction_wave"] not in {"A", "B"}:
             continue
+        # Medical fields only: the B ceiling is a clinical-priority rule, and
+        # a `legal_factual` field carries `priority_grade` instead (added
+        # 2026-08-21 -- 과실비율 has no medical grade to be ceilinged).
+        if "medical_advisory_grade" not in field:
+            assert field["priority_grade"] in {"A", "B", "C"}
+            continue
         if field["medical_advisory_grade"] in {"A", "B"}:
             continue
         assert field["medical_advisory_grade"] == "C"
@@ -107,7 +120,7 @@ def test_active_fields_obey_the_b_ceiling_except_named_operational_overrides() -
     deferred_ids = {
         field["field_id"]
         for field in config["fields"]
-        if field["medical_advisory_grade"] == "D"
+        if field.get("medical_advisory_grade") == "D"
     }
     assert deferred_ids == {"symptom_fixation_judgment", "final_disability_rate"}
     assert all(

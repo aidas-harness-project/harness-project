@@ -39,8 +39,19 @@ TYPE_TRIGGER_FIELDS: dict[str, tuple[str, ...]] = {
     "personal_insurance": ("injury_event_present", "accident_mechanism"),
     "traffic_accident": ("vehicle_involvement",),
     "industrial_accident": ("work_activity_context",),
-    "liability": ("facility_defect_or_third_party_responsibility",),
+    "liability": ("facility_defect_or_third_party_responsibility",
+                  "liability_opinion_conclusion"),
 }
+
+# What `liability_opinion_conclusion` may say, and what it means for the type.
+# An opinion finding the insured IS liable establishes the type. One finding no
+# liability does NOT rule it out -- that is a party's position on the very
+# question in dispute, not an affirmative statement that no third-party
+# responsibility exists. On CASE_053 the insurer's opinion concluded 불성립
+# while the claimant's concluded 성립 on identical facts; treating the first as
+# `not_applicable` would let one side's counsel close the case type.
+LIABILITY_OPINION_POSITIVE = frozenset({"성립"})
+LIABILITY_OPINION_NEUTRAL = frozenset({"불성립", "판단유보"})
 
 # `work_activity_context` is an enum whose values do not all mean the same
 # thing. Only explicit work activity supports 산재; the three context values are
@@ -173,6 +184,49 @@ def _assess_work_context(field: Mapping[str, Any] | None) -> tuple[str, list[dic
     )
 
 
+def _assess_liability(
+    defect_field: Mapping[str, Any] | None,
+    opinion_field: Mapping[str, Any] | None,
+) -> tuple[str, list[dict], str]:
+    """Liability reads the accident facts OR a legal opinion, whichever answers.
+
+    Added 2026-08-21. The type used to rest on
+    `facility_defect_or_third_party_responsibility` alone, which routes to
+    medical documents -- and no 진료기록 discusses stair de-icing, so on
+    CASE_053 the field was `unavailable` and the type came back `uncertain`
+    while two 법률의견서 in the same case argued the question directly.
+    """
+    status, evidence, reason = _assess_boolean_trigger(
+        defect_field,
+        positive_label=(
+            "사고 경위에 시설 하자 또는 제3자의 작위·부작위 책임이 "
+            "특정되어 있습니다."
+        ),
+        negative_label=(
+            "제3자 또는 시설 책임이 없다고 기재한 출처가 있습니다."
+        ),
+    )
+    if status == "applicable":
+        return status, evidence, reason
+
+    opinions = _selected_observations(opinion_field) if opinion_field else []
+    values = [observation.get("value") for observation in opinions]
+    supporting = [observation for observation in opinions
+                  if observation.get("value") in LIABILITY_OPINION_POSITIVE]
+    if supporting:
+        opposed = any(value in LIABILITY_OPINION_NEUTRAL for value in values)
+        return ("applicable", _evidence_of(supporting),
+                "법률의견서가 배상책임 성립을 명시했습니다."
+                + (" 다른 의견서는 반대 결론이므로 성립 여부 자체가 쟁점입니다."
+                   if opposed else ""))
+    if values:
+        return ("uncertain", [],
+                "법률의견서가 배상책임 불성립 또는 판단유보로 회신했습니다. "
+                "이는 다투는 쟁점에 대한 일방의 견해이므로, 배상책임 해당 "
+                "없음으로 단정하지 않습니다.")
+    return status, evidence, reason
+
+
 def assess_case_types(
     claim_facts: Sequence[Mapping[str, Any]],
     *,
@@ -210,15 +264,9 @@ def assess_case_types(
                 ),
             )
         elif case_type == "liability":
-            status, evidence, reason = _assess_boolean_trigger(
+            status, evidence, reason = _assess_liability(
                 fields.get("facility_defect_or_third_party_responsibility"),
-                positive_label=(
-                    "사고 경위에 시설 하자 또는 제3자의 작위·부작위 책임이 "
-                    "특정되어 있습니다."
-                ),
-                negative_label=(
-                    "제3자 또는 시설 책임이 없다고 기재한 출처가 있습니다."
-                ),
+                fields.get("liability_opinion_conclusion"),
             )
         else:
             # Personal insurance is the deliberately broad label: a documented
@@ -237,9 +285,16 @@ def assess_case_types(
                 ),
             )
 
+        # A field only counts as having triggered the verdict if it actually
+        # carries a value. `field_id in fields` was enough while every type had
+        # ONE trigger, but liability now has two and only one may have answered:
+        # on CASE_053 the medical-routed defect field is `unavailable` while the
+        # legal opinion establishes the type, and naming both would credit an
+        # empty field with the finding.
         triggered = [
             field_id for field_id in trigger_ids
-            if status == "applicable" and field_id in fields
+            if status == "applicable"
+            and fields.get(field_id, {}).get("resolution_status") == "asserted"
         ]
         if status == "applicable" and not triggered:
             # Never assert `applicable` without naming the field that carried it;
