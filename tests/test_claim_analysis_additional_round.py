@@ -281,3 +281,106 @@ def test_the_shipped_liability_round_targets_the_type_trigger_field():
     declared = _config()["additional_fields_by_case_type"]["liability"]
     for field_id in case_types.TYPE_TRIGGER_FIELDS["liability"]:
         assert field_id in declared["field_ids"]
+
+
+# --- settlement: what the round publishes ----------------------------------
+#
+# The gap that let CASE_701 fail. Every test above exercises the READ PLAN --
+# which documents, which fields, what order -- and none exercised what happens
+# once two documents both answer one field. `extract_additional` assigned the
+# whole observation list to `selected_observation_ids` before branching, which
+# violates BOTH arms of the result schema at once (`asserted` wants exactly
+# one, `conflict` wants none) and is invisible until a field collects two
+# readings. Stage 3-a is the first round where that is routine: two 법률의견서
+# arguing opposite conclusions is the normal shape of a disputed liability
+# case, not an edge case.
+
+def _settle(readings_by_document):
+    """Run the real settlement path over canned per-document readings."""
+    import run_claim_analysis_selective as driver
+
+    docs = _docs(DOC_006="legal_opinion", DOC_008="legal_opinion")
+    quote = "인용문"
+    page_text = {("DOC_006", 1): quote, ("DOC_008", 1): quote}
+
+    def extract(document_id, kind, field_rows, document_type=None):
+        assert kind is None, "a non-medical document has no medical form kind"
+        return {
+            field_id: {"presence": "asserted", "value": value,
+                       "page": 1, "quote": quote}
+            for field_id, value in readings_by_document[document_id].items()
+        }
+
+    settled, calls = driver.extract_additional(
+        config=_config(), documents=docs, assessments=_assessments(),
+        outcomes_by_field={}, extract=extract, page_text=page_text,
+        observation_ids=driver._observation_id_sequence())
+    return {outcome.field_id: outcome for outcome in settled}, calls
+
+
+OPINION = "liability_opinion_conclusion"
+
+
+def test_two_sources_that_agree_elect_exactly_one():
+    settled, _ = _settle({
+        "DOC_006": {OPINION: "성립"},
+        "DOC_008": {OPINION: "성립"},
+    })
+    outcome = settled[OPINION]
+    assert outcome.status == "asserted"
+    assert len(outcome.observations) == 2, "both readings are kept"
+    assert len(outcome.selected_ids) == 1, (
+        "`asserted` requires exactly one elected observation")
+    assert outcome.selected_ids[0] == outcome.observations[0]["observation_id"], (
+        "the highest-priority reading is the elected one")
+
+
+def test_two_sources_that_disagree_elect_none():
+    settled, _ = _settle({
+        "DOC_006": {OPINION: "성립"},
+        "DOC_008": {OPINION: "불성립"},
+    })
+    outcome = settled[OPINION]
+    assert outcome.status == "conflict"
+    assert outcome.stop_reason == "conflict_found"
+    assert len(outcome.observations) == 2
+    assert outcome.selected_ids == [], (
+        "electing one would pick a winner between two 법률의견서")
+
+
+def test_a_single_source_elects_its_only_reading():
+    settled, _ = _settle({
+        "DOC_006": {OPINION: "성립"},
+        "DOC_008": {},
+    })
+    outcome = settled[OPINION]
+    assert outcome.status == "asserted"
+    assert len(outcome.selected_ids) == 1
+
+
+def test_settled_outcomes_validate_against_the_result_schema():
+    """The check that would have caught this before a real run did.
+
+    Asserting on the outcome object alone is not enough -- the defect was a
+    contract violation, and only the schema states the contract.
+    """
+    import json
+
+    import run_claim_analysis_selective as driver
+    from _validation import load_registry, validate_instance
+
+    settled, _ = _settle({
+        "DOC_006": {OPINION: "성립", "comparative_negligence_rate": 0},
+        "DOC_008": {OPINION: "불성립", "comparative_negligence_rate": 0},
+    })
+    outcomes = list(settled.values())
+    result = driver.build_result(
+        case_id="CASE_9001", run_id="RUN_20260821_1", outcomes=outcomes,
+        config=_config(), documents=CASE_053_DOCS, model_name="test",
+        filing_status_by_type=driver.filing_status_by_case_type(),
+        conflict_candidate_ids_by_field=(
+            driver.assign_conflict_candidate_ids(outcomes)))
+    schemas, registry = load_registry()
+    errors = validate_instance(
+        result, "claim_analysis_result.schema.json", schemas, registry)
+    assert errors == [], json.dumps(errors[:3], ensure_ascii=False)

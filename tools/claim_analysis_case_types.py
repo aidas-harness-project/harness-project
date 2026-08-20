@@ -184,6 +184,19 @@ def _assess_work_context(field: Mapping[str, Any] | None) -> tuple[str, list[dic
     )
 
 
+def _all_asserted_observations(field: Mapping[str, Any]) -> list[dict]:
+    """Every asserted reading a field holds, elected or not.
+
+    A field in `conflict` elects none by contract, so an assessor that needs to
+    see BOTH sides of a disagreement cannot go through the elected set.
+    """
+    return [
+        dict(observation)
+        for observation in field.get("observations") or []
+        if observation.get("value_state") == "asserted"
+    ]
+
+
 def _assess_liability(
     defect_field: Mapping[str, Any] | None,
     opinion_field: Mapping[str, Any] | None,
@@ -209,7 +222,13 @@ def _assess_liability(
     if status == "applicable":
         return status, evidence, reason
 
-    opinions = _selected_observations(opinion_field) if opinion_field else []
+    # NOT `_selected_observations`: a `conflict` field elects nothing (the
+    # result schema requires `selected_observation_ids` to be empty there,
+    # because electing one would pick a winner between two 법률의견서), so
+    # reading only the elected set makes exactly the disputed case invisible --
+    # which is the case this whole path exists for. Every observation is read,
+    # and each is grounded evidence in its own right.
+    opinions = _all_asserted_observations(opinion_field) if opinion_field else []
     values = [observation.get("value") for observation in opinions]
     supporting = [observation for observation in opinions
                   if observation.get("value") in LIABILITY_OPINION_POSITIVE]

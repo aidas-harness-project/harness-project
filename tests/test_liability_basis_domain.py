@@ -169,6 +169,36 @@ def test_two_opposing_opinions_establish_the_type_and_say_it_is_disputed():
     assert "쟁점" in verdict["reason"]
 
 
+def test_a_conflict_field_elects_nothing_and_is_still_read():
+    """The shape the RESULT SCHEMA requires, which the earlier test did not use.
+
+    A `conflict` field must publish `selected_observation_ids: []` -- electing
+    one would pick a winner between two 법률의견서. The verdict path therefore
+    cannot read the elected set: doing so made exactly the disputed case
+    invisible and sent liability back to `uncertain`. Caught on CASE_701, the
+    first real run of stage 3-a: `claim_facts/47/selected_observation_ids`
+    ["CAO_0029","CAO_0032","CAO_0035"] "is expected to be empty".
+    """
+    disputed = _fact(OPINION, "conflict")
+    disputed["selected_observation_ids"] = []          # schema-required
+    disputed["observations"] = [
+        {"observation_id": "CAO_0001", "value_state": "asserted",
+         "value": "성립",
+         "evidence_references": [{"document_id": "DOC_006", "page": 10,
+                                  "quote": "인용", "start_char": 0,
+                                  "end_char": 2}]},
+        {"observation_id": "CAO_0002", "value_state": "asserted",
+         "value": "불성립",
+         "evidence_references": [{"document_id": "DOC_008", "page": 12,
+                                  "quote": "인용", "start_char": 0,
+                                  "end_char": 2}]},
+    ]
+    verdict = _liability([_fact(DEFECT, "unavailable"), disputed])
+    assert verdict["status"] == "applicable"
+    assert verdict["triggered_field_ids"] == [OPINION]
+    assert "쟁점" in verdict["reason"]
+
+
 def test_a_disputed_opinion_field_still_triggers_the_verdict():
     """A `conflict` field can still be what established the type.
 

@@ -1042,17 +1042,24 @@ def extract_additional(
         values = [observation["value"] for observation in outcome.observations]
         disagree = any(_values_disagree(values[0], other)
                        for other in values[1:])
-        outcome.selected_ids = [observation["observation_id"]
-                                for observation in outcome.observations]
         if disagree:
-            # Two non-medical sources that differ are preserved as a candidate,
-            # exactly as the common pass does. Whether opposing legal opinions
-            # are a CONTRADICTION or the dispute itself is a question the
-            # `legal_authority` axis answers downstream, not here.
+            # Both readings kept, NEITHER elected -- the schema requires
+            # `selected_observation_ids` to be empty here, and the rule is the
+            # point rather than a formality: electing one would make this stage
+            # pick a winner between two 법률의견서 it has no standing to judge.
+            # Every other settlement site in this module already does one or
+            # the other; assigning the whole list before the branch (the shape
+            # this replaced) violated BOTH arms at once and was invisible until
+            # a field collected two observations for the first time.
+            outcome.selected_ids = []
             outcome.status = "conflict"
             outcome.stop_reason = "conflict_found"
             outcome.reason = "비의료 출처 간 기재가 다릅니다"
         else:
+            # Agreement: elect the highest-priority reading. The observations
+            # are appended in plan order, which is priority order, so the first
+            # is the one a 법률의견서 gave over an insurer letter's summary.
+            outcome.selected_ids = [outcome.observations[0]["observation_id"]]
             outcome.status = "asserted"
             outcome.stop_reason = "trusted_value_found"
             outcome.reason = "사건유형별 추가 확인 출처에 기재되어 있습니다"
