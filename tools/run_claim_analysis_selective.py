@@ -326,6 +326,19 @@ def resolve_field(
         outcome.stop_reason = "trusted_value_found"
         outcome.selected_ids = [trusted["observation_id"]]
         outcome.reason = "확보 가능한 최상위 우선순위 출처에서 신뢰할 수 있는 값을 확인했습니다"
+    elif outcome.documents_read:
+        # Documents WERE opened and none stated the field. Kept distinct from
+        # the constructor default because the two ask a reviewer for different
+        # things: this says the records in hand are silent, so further records
+        # are needed; the default says the ladder reached nothing at all. On
+        # CASE_053 every unavailable field printed the same sentence, so
+        # 사고일 (unreachable -- the fact sits in an insurer document no route
+        # reads) was indistinguishable from 현재 치료 상태 (genuinely absent --
+        # the case holds no 최종진료기록).
+        outcome.reason = (
+            f"이 항목의 우선순위 출처 {outcome.documents_read}건을 읽었으나 "
+            "어느 자료에도 기재가 없었습니다"
+        )
     return outcome
 
 
@@ -491,6 +504,19 @@ def resolve_from_cache(
         outcome.stop_reason = "trusted_value_found"
         outcome.selected_ids = [trusted["observation_id"]]
         outcome.reason = "확보 가능한 최상위 우선순위 출처에서 신뢰할 수 있는 값을 확인했습니다"
+    elif outcome.documents_read:
+        # Documents WERE opened and none stated the field. Kept distinct from
+        # the constructor default because the two ask a reviewer for different
+        # things: this says the records in hand are silent, so further records
+        # are needed; the default says the ladder reached nothing at all. On
+        # CASE_053 every unavailable field printed the same sentence, so
+        # 사고일 (unreachable -- the fact sits in an insurer document no route
+        # reads) was indistinguishable from 현재 치료 상태 (genuinely absent --
+        # the case holds no 최종진료기록).
+        outcome.reason = (
+            f"이 항목의 우선순위 출처 {outcome.documents_read}건을 읽었으나 "
+            "어느 자료에도 기재가 없었습니다"
+        )
     return outcome
 
 

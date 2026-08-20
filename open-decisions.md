@@ -396,3 +396,54 @@ Open question for whoever picks it up: does the filing record belong at intake
 (a person records what the claimant supplied) or at Stage 2 (an administrative
 document is classified and read)? That choice decides who owns the writer, and
 it is a workflow question rather than a technical one.
+
+## `clause_ref` holds one article, but a coverage is a whole 약관
+
+**Status:** open. Behaviour chosen provisionally on 2026-08-20 so CASE_053's
+liability clauses could be cited at all; the choice is recorded here rather
+than settled.
+
+`policy_link.clause_ref` is a single `exact_evidence_reference` -- one
+document, one page, one quote. That shape carries an assumption from the legacy
+personal-insurance lane, where a coverage usually IS one article
+(`수술보험금의 지급사유`), so one reference said everything. The field carries
+no description and no rationale is recorded anywhere; it appears to have been
+mirrored from `coverage_result.matched_clause_ref` rather than decided.
+
+A Korean liability coverage does not have that shape. 「시설소유(관리)자
+특별약관」 is 제1조 사고 / 제2조 보상하지 않는 손해 / 제3조 준용규정, and the
+same 약관 is reprinted in more than one policy document of a bundle -- on
+CASE_053 that made 6 index entries for one coverage, and 14 for 구내치료비.
+Until 2026-08-20 `find_clause` matched only on exactly one hit, so a
+coverage-level term was unmatchable by construction and both stayed
+`candidate`: the exclusion clause the insurer's denial rests on was never
+cited. `find_clause` now collapses hits that share the 약관's name (and only
+when the search term matched that NAME -- two different benefits inside one
+약관 still stay candidates), which forces the question this entry records.
+
+**Provisional rule, and why it may be wrong.** The elected article is the one
+whose heading states what is NOT covered (`보상하지 않는 손해`), else the
+약관's lowest-numbered non-`준용규정` article. That suits a denial dispute --
+CASE_053's insurer refused on 시설물 하자 부존재, so 제2조 is exactly what a
+손해사정사 must compare the refusal against. It is probably wrong for a
+first-instance payment claim, where `보상하는 손해` is what decides whether the
+event is covered at all. The remaining articles are returned as `candidates`,
+so nothing is hidden; what the choice decides is which article a reviewer sees
+first.
+
+**The three options, for whoever settles it:**
+1. Keep the exclusion-first rule (assumes the lane's cases are disputes).
+2. Always elect the lowest-numbered article -- simple and predictable, but puts
+   `제1조 사고` in front of a reviewer whose actual question is the exclusion.
+3. Branch on the case: exclusion-first when `denial_reason_result.json` exists,
+   coverage-first otherwise. Most accurate, and the only one that needs a new
+   input to the linker.
+
+**The deeper question, which options 1-3 all dodge:** should `clause_ref`
+become plural? A coverage genuinely spans several articles, and every consumer
+currently receives one of them plus a candidate list that mixes "other articles
+of the same 약관" with "other 약관 entirely". Widening the field touches
+`_cross_contract`'s reference verification, `dao._downstream_policy_ref_errors`,
+and the legacy `matched_clause_ref` it was mirrored from, so it is a contract
+change rather than a linker change -- which is why it was not taken while
+fixing the matching.

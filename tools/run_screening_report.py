@@ -646,7 +646,14 @@ def build_report(
         "model_info": {"model_name": "deterministic", "prompt_version": VERSION},
         "review_required": True,
         "reviewer_role": "손해사정사",
-        "warnings": [],
+        # The agent's own warnings, carried through rather than dropped.
+        # `key_issues`, `review_points` and `conflict_severity` were read from
+        # the judgement contract while this stayed hardcoded to [], so on
+        # CASE_053 seven warnings -- the lane/case-scope mismatch, the
+        # medical-only accident routing, the candidate-only clause links --
+        # were written by the agent, validated, and then silently discarded.
+        # A caller trusting this field saw a clean run.
+        "warnings": list(judgement.get("warnings") or []),
         "source_grounded": True,
         "report_path": report_path or f"outputs/{case_id}/screening_report.md",
         "case_summary": case_summary,
@@ -1162,6 +1169,12 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
             line += (f" — {reference['document_id']} p.{reference.get('page')} "
                      f"{reference['quote']}")
             link_references.append(reference)
+            # A matched coverage may still carry a note, and until 2026-08-20
+            # this was an `elif` that dropped it: a coverage spanning several
+            # articles elects one into `clause_ref`, and the sentence naming
+            # its remaining articles never reached the reader.
+            if link.get("uncertainty_reason"):
+                line += f"\n  - {link['uncertainty_reason']}"
         elif link.get("uncertainty_reason"):
             line += f" — {link['uncertainty_reason']}"
         for requirement in link.get("requirements") or []:

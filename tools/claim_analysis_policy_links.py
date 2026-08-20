@@ -151,10 +151,24 @@ def find_clause(
 ) -> tuple[dict | None, list[dict]]:
     """(exact match, candidates) for one coverage term against the index.
 
-    A match is a clause whose heading or policy name contains the term. More
-    than one hit is NOT a match -- it is a set of candidates, because picking
-    one of several equally-matching clauses is a judgement this stage does not
-    make.
+    A match is a clause whose heading or policy name contains the term. Picking
+    one of several genuinely different clauses is a judgement this stage does
+    not make, so those come back as candidates.
+
+    But "several hits" and "several clauses" are not the same thing. A Korean
+    coverage is a 약관, and a 약관 is a handful of articles -- 제1조 사고,
+    제2조 보상하지 않는 손해, 제3조 준용규정 -- often printed in more than one
+    policy document of the same bundle. Requiring a single hit therefore made a
+    coverage-level term unmatchable BY CONSTRUCTION: on CASE_053, 시설소유
+    returned 6 hits that were one 약관 (3 articles x 2 documents) and
+    구내치료비 returned 14 that were one 약관, so both stayed `candidate` while
+    the case's central exclusion clause went uncited.
+
+    When every hit names the same `policy_name`, the coverage IS identified.
+    The reference then points at the article a reviewer needs first: the one
+    whose heading states what is NOT covered, since that is what a denial turns
+    on, else the 약관's opening article. Article ordering is preserved, so the
+    remaining articles still come back as candidates for the reviewer to open.
     """
     hits: list[dict] = []
     needle = _normalize(term)
@@ -166,7 +180,55 @@ def find_clause(
                 hits.append({**clause, "document_id": doc_id})
     if len(hits) == 1:
         return hits[0], []
+    if not hits:
+        return None, []
+
+    # Collapse only when the term matched the 약관's NAME. A term that matched
+    # article headings instead has found several distinct coverages that merely
+    # share a 약관 -- 수술보험금의 지급사유 and 수술급여금의 지급사유 are two
+    # benefits, and electing one would be the judgement this stage refuses to
+    # make. So the collapse requires that every hit's policy_name contains the
+    # term and that the hits differ only by article and printing location.
+    names = {clause.get("policy_name") for clause in hits}
+    matched_by_policy_name = (
+        len(names) == 1
+        and None not in names
+        and needle in _normalize(str(next(iter(names))))
+    )
+    if matched_by_policy_name:
+        primary = _primary_article(hits)
+        # Identity comparison would not work here: `_primary_article` returns a
+        # copy, so `is not` keeps every hit and the reviewer is handed the
+        # matched article back among its own alternatives.
+        key = (primary.get("document_id"), primary.get("page"),
+               primary.get("article"))
+        return primary, [
+            c for c in hits
+            if (c.get("document_id"), c.get("page"), c.get("article")) != key
+        ]
     return None, hits
+
+
+# The article a reviewer opens first when a coverage resolves to a whole 약관.
+# An exclusion clause is what a denial rests on, so it leads; otherwise the
+# 약관's own first article. Never a 준용규정, which only points elsewhere.
+_EXCLUSION_HEADING = "보상하지않는손해"
+
+
+def _primary_article(hits: Sequence[Mapping[str, Any]]) -> dict:
+    def article_number(clause: Mapping[str, Any]) -> int:
+        digits = re.findall(r"\d+", str(clause.get("article") or ""))
+        return int(digits[0]) if digits else 9999
+
+    exclusions = [c for c in hits
+                  if _normalize(str(c.get("heading") or "")) == _EXCLUSION_HEADING]
+    pool = exclusions or [
+        c for c in hits
+        if "준용" not in str(c.get("heading") or "")
+    ] or list(hits)
+    return dict(min(pool, key=lambda c: (article_number(c),
+                                         str(c.get("document_id")),
+                                         c.get("page") or 0)))
 
 
 def candidate_pages(
@@ -272,13 +334,26 @@ def build_policy_links(
                 match["document_id"], match["page"],
                 match.get("heading") or match.get("policy_name") or "")
             if reference is not None:
-                links.append({
+                link = {
                     "coverage_id": coverage_id,
                     "coverage_name": term,
                     "clause_link_status": "matched",
                     "clause_ref": reference,
                     "requirements": [requirement],
-                })
+                }
+                if candidates:
+                    # A coverage that is a whole 약관 elects ONE article into
+                    # `clause_ref` (the schema holds no more -- see
+                    # open-decisions.md), so its remaining articles would
+                    # otherwise vanish. A reviewer comparing a denial against
+                    # the policy needs to know 제1조 and 제3조 exist and where
+                    # they are, not only the article this stage put first.
+                    link["uncertainty_reason"] = (
+                        "이 담보는 여러 조항으로 구성되어 있어 대표 조항 1건을 "
+                        f"연결했습니다. 같은 담보의 나머지 조항 {len(candidates)}건: "
+                        + _candidate_summary(candidates)
+                    )
+                links.append(link)
                 continue
             # The index named a clause the processed text does not confirm.
             # Publishing it anyway would be exactly the fabricated reference
@@ -299,15 +374,43 @@ def build_policy_links(
             "coverage_id": coverage_id,
             "coverage_name": term,
             "clause_link_status": "candidate" if candidates else "not_found",
+            # Korean, and it NAMES the candidates. The previous wording was an
+            # English sentence reporting only a count -- it printed verbatim
+            # into a Korean deliverable, and a reviewer told "6 clauses match"
+            # with no article, page or heading could not act on it without
+            # re-deriving the search by hand.
             "uncertainty_reason": (
-                f"{len(candidates)} clauses match this coverage term; choosing "
-                "between them is a reviewer's judgement, not this stage's."
+                "이 담보에 해당할 수 있는 조항이 "
+                f"{len(candidates)}건입니다(어느 조항이 적용되는지는 검토자 판단): "
+                + _candidate_summary(candidates)
                 if candidates else
                 "처리된 약관 자료에서 이 담보를 명시한 조항을 찾지 못했습니다."
             ),
             "requirements": [requirement],
         })
     return links
+
+
+def _candidate_summary(candidates: Sequence[Mapping[str, Any]],
+                       limit: int = 6) -> str:
+    """Name the candidate clauses so the reason is actionable.
+
+    The candidate list itself has nowhere to live -- `policy_link` carries a
+    single `clause_ref` and no candidates array (see open-decisions.md) -- so
+    until that contract changes, this sentence is the only place a reviewer
+    learns WHICH clauses were found rather than merely how many.
+    """
+    parts = []
+    for clause in candidates[:limit]:
+        where = f"{clause.get('document_id')} p{clause.get('page')}"
+        name = str(clause.get("policy_name") or "").strip()
+        article = str(clause.get("article") or "").strip()
+        heading = str(clause.get("heading") or "").strip()
+        label = " ".join(bit for bit in (name, article, heading) if bit)
+        parts.append(f"{label}({where})" if label else where)
+    if len(candidates) > limit:
+        parts.append(f"외 {len(candidates) - limit}건")
+    return ", ".join(parts)
 
 
 def referenced_documents(links: Sequence[Mapping[str, Any]]) -> list[str]:
