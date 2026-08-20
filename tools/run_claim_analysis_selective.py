@@ -121,9 +121,13 @@ def classified_documents(manifest: Mapping[str, Any]) -> list[selection.Document
         doc_id = entry.get("document_id")
         if not isinstance(doc_id, str):
             continue
+        # Carried alongside the medical kind so a route may name a coarse type
+        # under `non_medical_sources`. It never substitutes for a medical kind.
+        doc_type = entry.get("document_type")
         block = entry.get("medical_classification")
         if not isinstance(block, dict):
-            documents.append(selection.DocumentRef(doc_id, None))
+            documents.append(selection.DocumentRef(
+                doc_id, None, document_type=doc_type))
             continue
         status = block.get("status")
         documents.append(selection.DocumentRef(
@@ -132,6 +136,7 @@ def classified_documents(manifest: Mapping[str, Any]) -> list[selection.Document
                 "deterministic_title", "llm_classified"
             } else None,
             ambiguous=status == "ambiguous",
+            document_type=doc_type,
         ))
     return sorted(documents, key=lambda ref: ref.document_id)
 
@@ -1475,13 +1480,23 @@ def run(
     # page each sits on, so only those pages are fetched -- never the whole
     # policy bundle, which was the previous behaviour and made the stage's real
     # policy-read cost unmeasurable.
+    # The case TYPE justifies a search of its own, so it has to be known before
+    # the links are built rather than only inside `build_result`. A liability
+    # policy prints none of the medical coverage terms -- searching only on
+    # facts found nothing in CASE_053 while the index held both clauses the
+    # dispute turns on. `assess_case_types` is pure over the facts, so
+    # computing it here and again in `build_result` yields the same verdicts.
+    link_assessments = case_types_mod.assess_case_types(
+        interim, filing_status_by_type=filing_status_by_case_type())
     policy_pages = policy_link_builder.candidate_pages(
-        claim_facts=interim, manifest=manifest, index=index)
+        claim_facts=interim, manifest=manifest, index=index,
+        config=config, case_type_assessment=link_assessments)
     policy_text = _policy_page_text(case_id, policy_pages, run_id=run_id)
     policy_links = policy_link_builder.build_policy_links(
         claim_facts=interim, manifest=manifest, index=index,
         verify_quote=make_quote_verifier(policy_text),
         conflict_candidate_ids_by_field=conflicts_by_field,
+        config=config, case_type_assessment=link_assessments,
     )
 
     result = build_result(

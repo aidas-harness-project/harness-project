@@ -49,12 +49,21 @@ class DocumentRef:
     `kind` is the fine-grained `medical_document_kind` published by Stage 2's
     `medical_classification` block. `None` means Stage 2 could not resolve one
     (ambiguous, not_medical, or the classifier never ran) -- such a document is
-    never routed to a field, because routing is by form kind.
+    never routed to a MEDICAL field, because that routing is by form kind.
+
+    `document_type` is the coarse manifest type (`insurer_response`,
+    `insurance_policy`, ...). It exists so a route can reach a document that has
+    no medical kind at all: on CASE_053 the insurer's legal opinion held the
+    entire 사고 경위 -- where it happened, what caused it, who was said to be
+    responsible -- and every route was keyed to medical kinds, so the document
+    was skipped with "no medical classification, so no route reaches it" and
+    배상책임 came back 불확실 on a case that is a liability dispute.
     """
 
     document_id: str
     kind: str | None
     ambiguous: bool = False
+    document_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -166,8 +175,21 @@ def plan_field(
             continue
         by_kind.setdefault(document.kind, []).append(document.document_id)
 
+    # A route may also name coarse manifest types under `non_medical_sources`.
+    # They are appended as the LOWEST-priority rung, after every medical group,
+    # so a medical record still answers first wherever one exists and the
+    # non-medical source only fills a gap that would otherwise stay empty.
+    for source_type in route.get("non_medical_sources") or []:
+        by_kind.setdefault(f"@type:{source_type}", []).extend(
+            document.document_id for document in documents
+            if document.document_type == source_type
+        )
+
     rank = 0
-    for group in route.get("priority_groups") or []:
+    groups = list(route.get("priority_groups") or [])
+    if route.get("non_medical_sources"):
+        groups.append([f"@type:{t}" for t in route["non_medical_sources"]])
+    for group in groups:
         doc_ids: list[str] = []
         kinds: list[str] = []
         for kind in group:
@@ -179,7 +201,11 @@ def plan_field(
             for doc_id in by_kind.get(kind, []):
                 if doc_id not in doc_ids:
                     doc_ids.append(doc_id)
-                    kinds.append(kind)
+                    # `@type:` is an internal marker for a coarse manifest
+                    # type; the step records the plain source name so the
+                    # trace reads as a document source, not a lookup key.
+                    kinds.append(kind[len("@type:"):]
+                                 if kind.startswith("@type:") else kind)
         if not doc_ids:
             continue
         rank += 1

@@ -58,12 +58,61 @@ def policy_document_ids(manifest: Mapping[str, Any]) -> list[str]:
     })
 
 
-def coverage_terms(claim_facts: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
-    """(coverage_id, search term) pairs the case's own facts justify.
+def _configured_field_terms(config: Mapping[str, Any] | None):
+    """The field-justified term list, from config when present."""
+    rows = ((config or {}).get("policy_linking") or {}).get("coverage_term_fields")
+    if not rows:
+        return COVERAGE_HINT_FIELDS
+    return tuple((row["field_id"], row["term"]) for row in rows
+                 if row.get("field_id") and row.get("term"))
 
-    Derived from facts the case actually established -- asserted OR conflicting.
-    An unresolved field suggests nothing, and searching on a value the case
-    never established would produce a link whose basis is a guess.
+
+def case_type_terms(
+    case_type_assessment: Sequence[Mapping[str, Any]] | None,
+    config: Mapping[str, Any] | None,
+) -> list[tuple[str, str]]:
+    """(coverage_id, term) pairs justified by the case TYPE rather than a fact.
+
+    A liability policy never prints 수술/입원/후유장해 -- its clause headings are
+    보상하는 손해 / 보상하지 않는 손해 and its coverage identity sits in the
+    owning 약관's name. Searching only on medical facts therefore finds nothing
+    in one, which is exactly what CASE_053 did: seven terms, zero heading
+    matches, while the index held the two clauses the dispute turns on.
+
+    Types are included when the assessment did not rule them out. A verdict of
+    `불확실` still means the type is in play -- and on this lane it is the
+    ordinary outcome for liability, so requiring a positive verdict here would
+    reproduce the gap this exists to close.
+    """
+    rows = ((config or {}).get("policy_linking") or {}).get(
+        "coverage_terms_by_case_type") or {}
+    if not rows:
+        return []
+    in_play = {
+        row.get("case_type") for row in case_type_assessment or []
+        if row.get("verdict") not in {"not_applicable", "excluded"}
+    }
+    terms: list[tuple[str, str]] = []
+    for case_type in sorted(t for t in in_play if t):
+        for entry in rows.get(case_type) or []:
+            pair = (entry.get("coverage_id"), entry.get("term"))
+            if all(pair) and pair not in terms:
+                terms.append(pair)
+    return terms
+
+
+def coverage_terms(
+    claim_facts: Sequence[Mapping[str, Any]],
+    *,
+    config: Mapping[str, Any] | None = None,
+    case_type_assessment: Sequence[Mapping[str, Any]] | None = None,
+) -> list[tuple[str, str]]:
+    """(coverage_id, search term) pairs this case justifies searching on.
+
+    Two independent justifications, because a policy can be identified either
+    way. A medical fact the case established suggests a coverage; so does the
+    case type itself, and for a non-medical policy the type is the ONLY signal
+    -- see `case_type_terms`.
     """
     # `conflict` counts alongside `asserted`, and that is the whole point of
     # searching under disagreement: the case DID establish that this coverage
@@ -76,8 +125,12 @@ def coverage_terms(claim_facts: Sequence[Mapping[str, Any]]) -> list[tuple[str, 
         row["field_id"] for row in claim_facts
         if row.get("resolution_status") in {"asserted", "conflict"}
     }
-    return [(field_id, term) for field_id, term in COVERAGE_HINT_FIELDS
-            if field_id in established]
+    terms = [(field_id, term) for field_id, term in _configured_field_terms(config)
+             if field_id in established]
+    for pair in case_type_terms(case_type_assessment, config):
+        if pair not in terms:
+            terms.append(pair)
+    return terms
 
 
 def _clause_entries(index: Mapping[str, Any], doc_id: str) -> list[dict]:
@@ -121,6 +174,8 @@ def candidate_pages(
     claim_facts: Sequence[Mapping[str, Any]],
     manifest: Mapping[str, Any],
     index: Mapping[str, Any] | None,
+    config: Mapping[str, Any] | None = None,
+    case_type_assessment: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, list[int]]:
     """The policy pages a link verification could actually need, per document.
 
@@ -141,7 +196,9 @@ def candidate_pages(
         return {}
 
     pages: dict[str, set[int]] = {}
-    for _coverage_id, term in coverage_terms(claim_facts):
+    for _coverage_id, term in coverage_terms(
+            claim_facts, config=config,
+            case_type_assessment=case_type_assessment):
         match, candidates = find_clause(index, doc_ids, term)
         for clause in ([match] if match is not None else []) + candidates:
             page = clause.get("page")
@@ -159,6 +216,8 @@ def build_policy_links(
     index: Mapping[str, Any] | None,
     verify_quote: Callable[[str, int, str], dict | None],
     conflict_candidate_ids_by_field: Mapping[str, Sequence[str]] | None = None,
+    config: Mapping[str, Any] | None = None,
+    case_type_assessment: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict]:
     """Link each justified coverage term to the policy layer.
 
@@ -177,7 +236,9 @@ def build_policy_links(
     by_field = dict(conflict_candidate_ids_by_field or {})
     links: list[dict] = []
 
-    for coverage_id, term in coverage_terms(claim_facts):
+    for coverage_id, term in coverage_terms(
+            claim_facts, config=config,
+            case_type_assessment=case_type_assessment):
         conflicts = list(by_field.get(coverage_id) or [])
         requirement = {
             "requirement_id": "REQ-1",

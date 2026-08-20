@@ -249,6 +249,24 @@ def _as_text(value: Any) -> str | None:
         return ", ".join(str(item) for item in value)
     if isinstance(value, bool):
         return "예" if value else "아니오"
+    if isinstance(value, Mapping):
+        # A `period`-shaped value is {"start": ..., "end": ...}. Three fields
+        # carry that shape (treatment_period, admission_period,
+        # disability_treatment_duration) but only the first was unpacked by
+        # its own call site, so the other two fell through to `str()` and put
+        # a Python dict repr into a Korean deliverable -- CASE_049 and
+        # CASE_053 both rendered `입원기간: {'start': '2023-12-04', 'end':
+        # '2023-12-07'}`. Formatting the shape here fixes every consumer at
+        # once instead of one call site at a time.
+        start, end = value.get("start"), value.get("end")
+        if start and end:
+            return f"{start} ~ {end}"
+        if start:
+            return f"{start} ~"
+        if end:
+            return f"~ {end}"
+        # Not a period: render the pairs readably rather than as a repr.
+        return ", ".join(f"{k}: {v}" for k, v in value.items() if v is not None) or None
     return str(value)
 
 

@@ -622,6 +622,38 @@
         },
         "amount_calculation": {
           "const": false
+        },
+        "coverage_terms_note": {
+          "type": "string"
+        },
+        "coverage_term_fields": {
+          "type": "array",
+          "description": "Search terms justified by a claim fact: the term is searched only when that field resolved asserted or conflict. Optional -- absent means the built-in personal-insurance list in tools/claim_analysis_policy_links.py.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "field_id": { "type": "string" },
+              "term": { "type": "string", "minLength": 1 }
+            },
+            "required": ["field_id", "term"]
+          }
+        },
+        "coverage_terms_by_case_type": {
+          "type": "object",
+          "description": "Search terms justified by the case TYPE rather than by a medical fact. A liability policy prints none of the medical coverage names, so the type is the only signal that reaches its clauses. A term must name a coverage -- in a Korean policy, the owning 약관's name -- never an article heading like 보상하는 손해, which every 약관 in a bundle repeats.",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "coverage_id": { "type": "string" },
+                "term": { "type": "string", "minLength": 1 }
+              },
+              "required": ["coverage_id", "term"]
+            }
+          }
         }
       },
       "required": [
