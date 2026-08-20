@@ -1438,6 +1438,55 @@ def _attempt_medical_publication(case_id: str, run_id: str, held_by: str,
     raise RuntimeError(f"medical-variable publication failed: {output.strip()[:500]}")
 
 
+def _declare_projection_mode(case_id: str, run_id: str, held_by: str,
+                             publication: Mapping[str, Any]) -> None:
+    """Record on cp1's contract which projection this run actually produced.
+
+    `medical_repository.load_projection` refuses a projection that does not
+    declare `projection_mode`, and deliberately treats a missing mode as an
+    error rather than as legacy -- silence must not be read as a claim. But
+    until this was added nothing wrote `legacy_pre_medical` at all: the only
+    occurrence in tools/ was the loader's own comparison. Medical structuring
+    is disabled for the PoC, so every run ended in `deferred_config_refusal`,
+    every projection was written without a mode, and screening_report blocked
+    on "medical compatibility projection must declare projection_mode"
+    (measured on CASE_488).
+
+    Declared here rather than when cp1 is written because cp1 precedes the
+    publication attempt and cannot yet know the answer. `canonical_medical_
+    projection` is NOT written here: that mode additionally requires
+    `medical_revision_sha`, and medical_repository owns that projection.
+
+    Keyed on whether canonical medical variables EXIST, not on what this
+    invocation attempted. A resumed run whose cp3 unit is reused reports
+    `skipped`, never `deferred_config_refusal`, and would otherwise leave the
+    declaration unwritten forever -- which is how CASE_488 stayed blocked even
+    after the driver learned to declare it.
+    """
+    if publication.get("published"):
+        return
+    # Absence is reported as a nonzero exit with "not found" on stdout, not as
+    # the "NOT_FOUND:" token _dao_json's allow_missing recognises, so the probe
+    # is run directly rather than through it.
+    probe = subprocess.run(
+        [sys.executable, str(DAO), "read-medical-variables", case_id],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+    if probe.returncode == 0:
+        return
+    contract = _dao_json(["read-contract", case_id, CONTRACT,
+                          "--run-id", run_id], allow_missing=True)
+    if not contract or contract.get("projection_mode"):
+        return
+    contract = {**contract, "projection_mode": "legacy_pre_medical"}
+    data_file = _temp_json(contract)
+    try:
+        _dao_write(["write-contract", case_id, CONTRACT,
+                    "--data-file", str(data_file), "--schema-name", SCHEMA,
+                    "--held-by", held_by, "--run-id", run_id, "--stage", STAGE])
+    finally:
+        data_file.unlink(missing_ok=True)
+
+
 def _unit_receipt_reuse(case_id: str, run_id: str, unit_id: str, contract: str,
                         digests: Mapping[str, str], prompt_version: str,
                         provider) -> dict | None:
@@ -1716,6 +1765,8 @@ def run(*, case_id: str, held_by: str, run_id: str, provider,
     else:
         summary["medical_publication"] = _attempt_medical_publication(
             case_id, run_id, held_by, cp3_contract["case_type"])
+    _declare_projection_mode(case_id, run_id, held_by,
+                             summary["medical_publication"])
 
     summary["status"] = "complete"
     summary["document_count"] = len(doc_ids)

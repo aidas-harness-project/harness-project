@@ -1036,3 +1036,44 @@ def test_legacy_projection_rejects_partial_medical_authority(isolated_dao):
 
     assert projection is None
     assert "post-adoption" in error
+
+
+# --- the legacy declaration must have a PRODUCER ---------------------------
+# Measured on CASE_488 (2026-08-20). `load_projection` refuses a projection
+# that does not declare `projection_mode`, and treats a missing mode as an
+# error rather than as legacy -- correctly, since silence must not be read as a
+# claim. But nothing in tools/ ever WROTE "legacy_pre_medical": the only
+# occurrence was the loader's own comparison. Medical structuring is disabled
+# for the PoC, so claim analysis always ends in `deferred_config_refusal`, the
+# projection is always written without a mode, and screening_report is blocked
+# on every legacy-lane case with "medical compatibility projection must declare
+# projection_mode".
+#
+# The value is only valid for a case carrying no medical artifacts, which the
+# loader already enforces below -- so the declaration is safe to write exactly
+# when the refusal says there is nothing canonical to project.
+
+def test_the_legacy_projection_mode_has_a_producer_in_tools():
+    """A value only ever compared and never written is an unreachable branch:
+    the loader's legacy path could not be entered by any real run."""
+    sources = [p for p in (ROOT / "tools").glob("*.py")
+               if "legacy_pre_medical" in p.read_text(encoding="utf-8")]
+    names = sorted(p.name for p in sources)
+    assert [n for n in names if n != "medical_repository.py"], (
+        "only medical_repository.py mentions legacy_pre_medical -- no tool "
+        f"writes it, so the legacy branch is unreachable. hits={names}")
+
+
+def test_a_legacy_declaration_loads_when_the_case_has_no_medical_artifacts(
+    isolated_dao, tmp_path
+):
+    """The declaration the driver must write is accepted by the loader for an
+    artifact-free case -- which is the shape every PoC legacy run has."""
+    case_dir = dao.case_dir("CASE_9001")
+    case_dir.mkdir(parents=True, exist_ok=True)
+    dao.atomic_write_json(
+        case_dir / "extracted_claim_fields.json",
+        _legacy_projection("CASE_9001", "legacy_pre_medical"))
+    data, error = medical_repository.load_projection(dao, "CASE_9001")
+    assert error is None, error
+    assert data["projection_mode"] == "legacy_pre_medical"

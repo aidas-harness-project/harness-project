@@ -511,3 +511,139 @@ def test_enabled_config_requires_recorded_activation_metadata() -> None:
     }
     assert _errors(config, "claim_analysis_routing_config.schema.json") == []
     driver.require_enabled(config)
+
+
+# --- the driver must ask the DAO for contracts by their real names ----------
+# Measured on CASE_489 (2026-08-20), the first case ever run on this lane. The
+# driver's first DAO read asked for "_document_manifest.json" -- with a leading
+# underscore, which marks the DAO's bookkeeping files (_run_state,
+# _source_ledger, _conflict_ledger), not contracts. Every case therefore died
+# at that line with NOT_FOUND before any field was read.
+#
+# It survived because the lane shipped disabled: no test reaches this call, and
+# the suite's selective coverage stubs the provider rather than the DAO, so
+# nothing ever asserted the contract names the driver actually requests. The
+# name is checked against the source here because that is where the defect was
+# -- a mocked DAO would have accepted the wrong name just as happily.
+
+def test_the_driver_reads_the_manifest_by_its_contract_name():
+    source = Path(driver.__file__).read_text(encoding="utf-8")
+    assert '"_document_manifest.json"' not in source, (
+        "the manifest is a contract, not a DAO bookkeeping file: it has no "
+        "leading underscore, and read-contract returns NOT_FOUND for one")
+    assert '"document_manifest.json"' in source, (
+        "the driver must read the manifest through read-contract")
+
+
+# --- the extraction schema must fit claude-cli's inline argv budget --------
+# Measured on CASE_489 (2026-08-20), the second defect the lane's first real run
+# exposed. `claim_analysis_extraction.output_schema` enumerated all eight member
+# keys per field, so the schema grew ~400 chars per field and the real run built
+# one of 16,868 chars against claude-cli's 8,000 limit:
+#
+#   claude-cli structured-output schema is too large for inline argv
+#   (16868 chars; limit 8000). Use a compact transport schema ...
+#
+# The legacy driver already solved this: one shared member spec under
+# `additionalProperties`, which makes the transport schema constant-size, with
+# the full shape kept for the local validation gate. Two constraints ride along,
+# both learned the expensive way on the legacy side and recorded in its
+# comments: claude-cli validates with ajv in STRICT mode, so a union
+# `"type": ["integer", "null"]` is refused outright; and the member keys must
+# stay DECLARED, or the model drops them.
+
+import json as _json
+import claim_analysis_extraction as _extraction
+
+
+def _rows(n):
+    return [{"field_id": f"field_{i:02d}"} for i in range(n)]
+
+
+@pytest.mark.parametrize("field_count", [10, 30, 60, 120])
+def test_the_extraction_schema_stays_within_the_cli_argv_budget(field_count):
+    from llm_providers import CLAUDE_CLI_SCHEMA_MAX_CHARS
+    schema = _extraction.output_schema(_rows(field_count))
+    size = len(_json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
+    assert size <= CLAUDE_CLI_SCHEMA_MAX_CHARS, (
+        f"{field_count} fields produced {size} chars, over the "
+        f"{CLAUDE_CLI_SCHEMA_MAX_CHARS} inline-argv limit")
+
+
+def test_the_extraction_schema_declares_no_union_types():
+    """claude-cli validates --json-schema with ajv in strict mode, which
+    refuses a union type outright -- a CASE_042 legacy run died on exactly that
+    AFTER the call was paid for."""
+    found = []
+
+    def walk(node, path=""):
+        if isinstance(node, dict):
+            declared = node.get("type")
+            if isinstance(declared, list):
+                found.append(f"{path}: {declared}")
+            for key, value in node.items():
+                walk(value, f"{path}/{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{path}[{index}]")
+
+    walk(_extraction.output_schema(_rows(30)))
+    assert found == [], f"union types are refused by ajv strict mode: {found}"
+
+
+def test_the_extraction_schema_still_declares_every_member_key():
+    """Compacting must not drop the key declarations -- the legacy driver
+    measured sonnet-5 omitting `review_required` on 38 of 57 fields when the
+    member spec was a bare object."""
+    schema = _extraction.output_schema(_rows(3))
+    member = schema["properties"]["fields"]["additionalProperties"]
+    for key in ("presence", "value", "page", "quote", "reason",
+                "complete", "unambiguous"):
+        assert key in member.get("properties", {}), f"{key} is not declared"
+
+
+def test_the_extraction_schema_requires_no_key_it_does_not_declare():
+    """CASE_489, third attempt. The compacted schema moved the field members
+    under `additionalProperties` but left the field ids in a top-level
+    `required`, so the schema demanded keys it never declared in `properties`.
+    claude-cli accepted it and returned an empty structured_output --
+    "subtype='success', is_error=False" with nothing in it -- which costs a
+    full provider call before failing. Which fields to return is the prompt's
+    job; it names them under "Extract exactly these fields"."""
+    schema = _extraction.output_schema(_rows(5))
+    declared = set(schema.get("properties", {}))
+    for key in schema.get("required", []):
+        assert key in declared, (
+            f"required names {key!r}, which `properties` does not declare")
+
+
+def test_the_extraction_schema_declares_a_top_level_property():
+    """CASE_489, fourth attempt. A top-level object whose only content is
+    `additionalProperties` does not survive claude-cli's tool-input encoding:
+    the argument arrives as a string rather than an object and the schema
+    rejects it, while the envelope still reports subtype='success',
+    is_error=False with `structured_output: null` -- a full provider call paid
+    for nothing. Verified directly against claude-cli: the same map wrapped in
+    a declared `fields` property returned a populated structured_output.
+    The legacy driver has always had this shape; only the selective one did
+    not."""
+    schema = _extraction.output_schema(_rows(3))
+    assert schema.get("properties"), (
+        "a bare open map is not encodable as a tool input -- declare at least "
+        "one property")
+    assert "fields" in schema["properties"]
+    assert isinstance(schema["properties"]["fields"].get("additionalProperties"),
+                      dict), "the open field map belongs under `fields`"
+
+
+def test_parse_result_unwraps_the_fields_envelope():
+    rows = [{"field_id": "primary_diagnosis"}]
+    wrapped = {"fields": {"primary_diagnosis": {
+        "presence": "asserted", "value": "우측 요골 골절",
+        "page": 1, "quote": "진단명: 우측 요골 골절"}}}
+    parsed = _extraction.parse_result(wrapped, rows)
+    assert parsed["primary_diagnosis"]["value"] == "우측 요골 골절"
+    # the older flat shape is still read rather than discarded
+    flat = {"primary_diagnosis": wrapped["fields"]["primary_diagnosis"]}
+    assert _extraction.parse_result(flat, rows)["primary_diagnosis"]["value"] == (
+        "우측 요골 골절")

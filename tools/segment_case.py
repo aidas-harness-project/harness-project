@@ -488,7 +488,17 @@ _MEDICAL_TITLE_MAX_CHARS = 40
 
 # A repeated table header is read within the same window a form title is, since
 # a titled first page carries both (title on line 1, columns on line 3-4).
-_TABLE_HEADER_SCAN_LINES = 6
+#
+# Widened from 6 to 10 on 2026-08-20. CASE_488/DOC_005's 진료비 세부산정내역
+# prints a BLANK LINE between every header row -- title(0), blank, 요양기관(2),
+# blank, patient block(4), blank, columns(6) -- so the real column row sat one
+# line past a 6-line window. The widest-line tiebreak then settled on the
+# patient block, whose cell count differs between pages (6 vs 7, an
+# 의사면허번호 column moves up), the leading-run comparison failed, and a
+# 7-page form split into 7 documents. Blank-separated layouts need the slack;
+# _is_patient_block_line below is what keeps the wider window from matching two
+# unrelated forms on their patient blocks instead.
+_TABLE_HEADER_SCAN_LINES = 10
 # Fewer cells than this is a prose line that happens to contain a separator.
 _TABLE_HEADER_MIN_CELLS = 3
 # How many LEADING columns must agree to call two headers the same table. The
@@ -1148,9 +1158,23 @@ def _boundaries_from_page_lines(
                 # 영수증/계산서 are excluded by operator decision: a run of
                 # outpatient receipts is kept as ONE document even though each
                 # is separately issued and each reprints the patient block.
+                # ... unless the numbered item run CONTINUES across the page.
+                # Measured on CASE_488/DOC_005 p9-15: a 7-page
+                # 진료비 세부산정내역 reprints its patient block on every page,
+                # so the block test above read all seven as reissues and
+                # produced seven documents. Its item numbers run 01 -> 06 -> 12
+                # -> 16 across those pages, because the statement is one billing
+                # run continuing.
+                #
+                # A re-ISSUED statement restarts at 01, which is exactly what
+                # separates this from CASE_047's three same-titled statements
+                # (pages 16/23/30, each opening with 01.진찰료). Merging those
+                # broke claim_analysis, so the distinction must be the numbering
+                # rather than the header -- both cases reprint the same columns.
                 if key != previous_title or (
                     _reprints_patient_block(lines)
                     and not any(word in key for word in _MERGED_FORM_TITLES)
+                    and not _continues_item_numbering(pages[index - 1], lines)
                 ):
                     boundaries[page] = title
                 previous_title = key
@@ -1391,6 +1415,69 @@ def _reprints_patient_block(lines: list[str]) -> bool:
     return False
 
 
+_ITEM_NUMBER_RE = re.compile(r"^\s*(\d{2})\s*\.\s*\S")
+
+
+def _numbered_items(lines: list[str]) -> list[int]:
+    """The leading "NN." item numbers a billing page prints, in order."""
+    found = []
+    for line in lines:
+        match = _ITEM_NUMBER_RE.match(line)
+        if match is not None:
+            found.append(int(match.group(1)))
+    return found
+
+
+def _continues_item_numbering(previous: list[str], current: list[str]) -> bool:
+    """Whether `current` resumes `previous`'s numbered item run.
+
+    A 진료비 세부산정내역 numbers its sections (01.진찰료, 02.입원료,
+    06.비급여주사료 …) and the run continues across the pages of ONE statement.
+    Measured on CASE_488/DOC_005: pages 9-15 read 01 -> 06 -> 12 -> 16, while
+    CASE_047's three separately-issued statements each restart at 01.
+
+    Compared as "does not go backwards" rather than "is strictly higher",
+    because one numbered section routinely spans a page break: CASE_488's
+    boundaries read 06 -> 06 and 12 -> 12, the same section continuing. A
+    reissue goes BACKWARDS (…20 -> 04), and a second statement under the same
+    title restarts at 01 -- both of which still split, which is what keeps
+    CASE_047 pages 16/23/30 three documents after the repeated-title merge
+    fused them into one and broke claim_analysis.
+
+    A page with no numbered items at all (a continuation whose rows are all
+    dated sub-entries) carries no evidence either way and does not merge; the
+    patient-block rule above decides it.
+    """
+    before, after = _numbered_items(previous), _numbered_items(current)
+    if not before or not after:
+        return False
+    if after[0] > before[-1]:
+        return True
+    # Equal numbers are the ambiguous case: one section spanning the break
+    # (CASE_488 p9->p10 reads 06 -> 06) versus a reissue whose first section
+    # simply repeats (CASE_047's statements each print 01 alone). They are told
+    # apart by whether the PREVIOUS page actually advanced -- a page that ran
+    # 01…06 is mid-statement, while one that only ever showed 01 is a fresh
+    # form's opening page.
+    return after[0] == before[-1] and before[-1] > before[0]
+
+
+def _is_patient_block_line(cells: list[str]) -> bool:
+    """Whether a delimiter-split line is the patient block, not a column row.
+
+    The block ("환자등록번호  환자성명  진료기간  병실  환자구분") is delimited
+    exactly like the column row above the table, so widening the header window
+    to reach forms that blank-line-separate their rows would otherwise let the
+    block win the widest-line tiebreak. It is told apart by vocabulary, using
+    the same labels and threshold `_reprints_patient_block` already applies --
+    a table column merely NAMED 진료기간 stays below the two-label floor.
+    """
+    hits = sum(1 for cell in cells
+               if any(re.sub(r"\s+", "", label) == cell
+                      for label in _PATIENT_BLOCK_LABELS))
+    return hits >= _PATIENT_BLOCK_MIN_LABELS
+
+
 def _table_header_cells(lines: list[str]) -> list[str]:
     """The column-name row in a page's header window, as normalised cells.
 
@@ -1411,6 +1498,8 @@ def _table_header_cells(lines: list[str]) -> list[str]:
         if len(cells) < _TABLE_HEADER_MIN_CELLS or any(
             re.match(r"^[\d,./-]", cell) for cell in cells
         ):
+            continue
+        if _is_patient_block_line(cells):
             continue
         # The patient block above the table is delimited the same way
         # ("등록번호  환자성명  진료기간"), so the first qualifying line is not
@@ -1437,12 +1526,49 @@ def _continues_table(previous: list[str], current: list[str]) -> bool:
     """
     if len(previous) < _TABLE_HEADER_MIN_MATCH or len(current) < _TABLE_HEADER_MIN_MATCH:
         return False
-    matched = 0
-    for before, after in zip(previous, current):
-        if before != after:
-            break
-        matched += 1
-    return matched >= _TABLE_HEADER_MIN_MATCH
+    return _leading_run_match(previous, current) >= _TABLE_HEADER_MIN_MATCH
+
+
+def _leading_run_match(previous: list[str], current: list[str]) -> int:
+    """Length of the leading run two headers agree on, tolerating a JOINED cell.
+
+    Positional equality is not enough because a transcription may join two
+    adjacent columns into one cell. Measured on CASE_488/DOC_005: p9 reads
+    "금액 | 횟수 일수 | 총액" while p10 reads "금액 | 횟수 | 일수 | 총액" --
+    the same printed header, split differently. Strict comparison stopped at 5
+    (floor 6) and separated a page from its own continuation.
+
+    A join is accepted only while the concatenation spells the SAME run, so two
+    unrelated headers still diverge on their first differing cell and score
+    below the floor. Counted as the number of printed columns consumed, so a
+    joined pair counts once on each side.
+    """
+    i = j = matched = 0
+    while i < len(previous) and j < len(current):
+        before, after = previous[i], current[j]
+        if before == after:
+            i, j, matched = i + 1, j + 1, matched + 1
+            continue
+        # one side joined what the other split: consume cells from the shorter
+        # side until it spells the longer one
+        if before.startswith(after):
+            joined, parts, k = before, after, j + 1
+            while k < len(current) and len(parts) < len(joined):
+                parts += current[k]
+                k += 1
+            if parts == joined:
+                i, j, matched = i + 1, k, matched + 1
+                continue
+        elif after.startswith(before):
+            joined, parts, k = after, before, i + 1
+            while k < len(previous) and len(parts) < len(joined):
+                parts += previous[k]
+                k += 1
+            if parts == joined:
+                i, j, matched = k, j + 1, matched + 1
+                continue
+        break
+    return matched
 
 
 def _medical_header_title(lines: list[str]) -> str | None:
@@ -3961,7 +4087,37 @@ def _manifest_bundle(case_id, doc_id):
     return manifest, None
 
 
-_SEGMENTATION_P8_CLEAR_STATUSES = frozenset({"agreed", "disagreed_resolved"})
+# Statuses that leave settled text on disk and may therefore be segmented.
+#
+# The last two are DELIBERATE P8 REDUCTIONS, chosen by the orchestrator for a
+# throughput or plumbing run (`--single-reader`, `--on-disagreement
+# assume-reading-a`) and recorded honestly under their own names -- the
+# `single_technology_weak_p8_poc` regime this PoC already runs under. They are
+# not unresolved disagreements: single-reader never compared, so there is
+# nothing for a human to adjudicate, and assume-reading-a already applied the
+# orchestrator's stated policy. Refusing them made a reduced run OCR and redact
+# every page and then halt at segmentation demanding a resolution that could
+# not exist (measured on CASE_487 and CASE_489).
+#
+# What this gate is for -- per segmentation_prerequisite_errors' own docstring
+# -- is preventing a fall back to raw-PDF vision when text is missing or
+# blocked. `disagreed_pending_review` is exactly that case and still refuses:
+# real pages disagreed and the text is not settled. `ocr_status != completed`
+# refuses independently, so a reduction can never become a route past a
+# document that has no text at all.
+#
+# Boundary evidence survives the reduction: on CASE_488/DOC_005 the two
+# readings were byte-identical on every title line, and differed only inside
+# table codes and amounts. A reduced read costs precision within a document,
+# not the titles segmentation cuts on. The reduction is still visible
+# downstream -- `ocr_quality: low` and `review_required: true` ride along with
+# it -- so nothing here makes a reduced run look like a validated one.
+_SEGMENTATION_P8_CLEAR_STATUSES = frozenset({
+    "agreed",
+    "disagreed_resolved",
+    "single_reader_no_cross_validation",
+    "assume_reading_a_unreviewed",
+})
 
 
 def segmentation_prerequisite_errors(bundle: dict, page_count: int) -> list[str]:

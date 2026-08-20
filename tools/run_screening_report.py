@@ -90,7 +90,8 @@ DISABILITY_DOCUMENT_KIND = "disability_assessment"
 
 def _dao_json(args: list[str], *, allow_missing: bool = False) -> dict | None:
     proc = subprocess.run([sys.executable, str(DAO), *args], cwd=ROOT,
-                          capture_output=True, text=True, encoding="utf-8")
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
     if proc.returncode:
         if allow_missing and "NOT_FOUND:" in (proc.stdout or ""):
             return None
@@ -591,9 +592,60 @@ def build_report(
         "required_document_checklist": checklist_section(checklist),
         "existing_disability_assessment": existing_disability_documents(
             checklist, facts),
+        "established_facts": established_facts(facts, config),
         "unconfirmed_items": unconfirmed,
     }
     return report
+
+
+def established_facts(
+    facts: Mapping[str, Mapping[str, Any]],
+    config: Mapping[str, Any],
+) -> list[dict]:
+    """Every asserted fact with its value and citations, grouped by domain.
+
+    The counterpart to `unconfirmed_items`: that lists what the records could
+    not establish, this lists what they DID -- so the two together account for
+    every field the lane searched. Before this existed the report showed only
+    the four fields `SUMMARY_FACT_FIELDS` names, and the rest of what claim
+    analysis had resolved never reached the reader (CASE_489: 19 asserted, 2
+    printed).
+
+    Labels come from the routing config, which already names every domain and
+    field, so this introduces no second vocabulary to keep in sync.
+    """
+    domain_labels = {
+        domain["code"]: domain.get("label") or domain["code"]
+        for domain in config.get("domains") or []
+    }
+    field_labels = {
+        row["field_id"]: row.get("label") or row["field_id"]
+        for row in config.get("fields") or []
+    }
+    order = list(domain_labels)
+    grouped: dict[str, list[dict]] = {}
+    for field_id, field in facts.items():
+        if field.get("resolution_status") != "asserted":
+            continue
+        value = _as_text(_first_value({field_id: field}, field_id))
+        if value in (None, ""):
+            continue
+        grouped.setdefault(field.get("domain_code") or "", []).append({
+            "field_id": field_id,
+            "field_label": field_labels.get(field_id, field_id),
+            "value_text": value,
+            "evidence_references": _selected_evidence(field),
+        })
+    return [
+        {
+            "domain_code": code,
+            "domain_label": domain_labels.get(code, code),
+            "facts": rows,
+        }
+        for code, rows in sorted(
+            grouped.items(),
+            key=lambda item: order.index(item[0]) if item[0] in order else len(order))
+    ]
 
 
 def _conflict_row(
@@ -766,12 +818,59 @@ def _dedupe_references(references: Sequence[Mapping[str, Any]]) -> list[dict]:
     return unique
 
 
-def _bullet(label: str, value) -> str:
+def _bullet(label: str, value, *, cited: int = 0) -> str:
+    """One fact line, carrying one `{{E}}` per citation that backs it.
+
+    `document_assembly.render` substitutes `[E#]` into these placeholders and
+    builds the sidecar from the same references, and refuses the section unless
+    the counts match 1:1 -- the P1 mechanism that stops a tag and its citation
+    drifting apart. Printing the value without a placeholder is therefore not a
+    cosmetic omission: it made assembly reject the whole report on CASE_489
+    ("0 {{E}} placeholders but 1 evidence_references").
+
+    A line the records could not establish renders 확인 불가 and takes no
+    placeholder -- it has nothing to cite, and must not borrow the citation of
+    the fact printed next to it.
+    """
     if value in (None, "", [], {}):
         return f"- {label}: 확인 불가"
     if isinstance(value, list):
-        return f"- {label}: {', '.join(str(item) for item in value)}"
-    return f"- {label}: {value}"
+        rendered = ", ".join(str(item) for item in value)
+    else:
+        rendered = str(value)
+    return f"- {label}: {rendered}{' ' + '{{E}}' * cited if cited else ''}"
+
+
+def _cited_bullets(rows) -> tuple[list[str], list[dict]]:
+    """Bullet lines and their references, with the 1:1 pairing already right.
+
+    `document_assembly.render` refuses a section whose `{{E}}` count differs
+    from its `evidence_references` count -- the P1 mechanism that keeps a tag
+    and its citation from drifting apart. Every section that prints cited facts
+    has to satisfy it, and doing that by hand per section is what produced the
+    same defect three times on CASE_489 (sections 1, 2 and 9, each surfacing
+    only once the data that populates it arrived).
+
+    Takes (label, value, references) and returns lines paired with the flat
+    reference list. Deduplicated across the section: two facts read off one
+    sentence cite it once, and the line that first introduces a citation is the
+    one that carries its placeholder.
+    """
+    lines: list[str] = []
+    collected: list[dict] = []
+    for label, value, references in rows:
+        fresh = [
+            reference
+            for reference in _dedupe_references(list(references or []))
+            if reference not in collected
+        ]
+        # A line with no value states 확인 불가 and cites nothing -- it must not
+        # borrow the citation of the fact printed beside it.
+        if value in (None, "", [], {}):
+            fresh = []
+        lines.append(_bullet(label, value, cited=len(fresh)))
+        collected.extend(fresh)
+    return lines, collected
 
 
 def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
@@ -805,31 +904,56 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
          (f"{period.get('start_date')} ~ {period.get('end_date') or '미종결'}")
          if period else None),
     ]
+    # Each line carries one placeholder per citation it contributes, in the
+    # same order the references are collected below, so assembly's 1:1 pairing
+    # binds each `[E#]` to the fact it was printed beside.
+    # Deduplicated ACROSS the section, not per line: two facts read off one
+    # sentence cite it once, or the report would read as two corroborations of
+    # each other. The line that first introduces a citation carries its
+    # placeholder; a later line repeating the same sentence carries none.
+    printed_refs: list[list[dict]] = []
+    seen: list[dict] = []
+    for _label, key, value in printed:
+        if value in (None, "", [], {}, "확인 불가"):
+            printed_refs.append([])
+            continue
+        fresh = [
+            reference
+            for reference in _dedupe_references(list(evidence_by_fact.get(key) or []))
+            if reference not in seen
+        ]
+        seen.extend(fresh)
+        printed_refs.append(fresh)
     sections.append({
         "heading": "1. 사고와 공통 의료정보",
         "content": "\n".join(
-            _bullet(label, value) for label, _key, value in printed),
-        "evidence_references": _dedupe_references([
-            reference
-            for _label, key, value in printed
-            if value not in (None, "", [], {}, "확인 불가")
-            for reference in evidence_by_fact.get(key) or []
-        ]),
+            _bullet(label, value, cited=len(refs))
+            for (label, _key, value), refs in zip(printed, printed_refs)),
+        "evidence_references": [
+            reference for refs in printed_refs for reference in refs
+        ],
     })
 
     # 2. the four verdicts, side by side
     rows = summary.get("case_type_assessment") or []
-    evidence = [
-        {"document_id": ref["document_id"], "page": ref["page"],
-         "quote": ref["quote"]}
-        for row in rows for ref in (row.get("evidence_references") or [])
-    ]
+    row_refs: list[list[dict]] = []
+    seen_rows: list[dict] = []
+    for row in rows:
+        fresh = []
+        for ref in row.get("evidence_references") or []:
+            citation = {"document_id": ref["document_id"], "page": ref["page"],
+                        "quote": ref["quote"]}
+            if citation not in seen_rows and citation not in fresh:
+                fresh.append(citation)
+        seen_rows.extend(fresh)
+        row_refs.append(fresh)
     sections.append({
         "heading": "2. 사건유형 병렬 판정",
         "content": "\n".join(
             f"- {row['case_type_label']}: {row['status_label']} — {row['basis']}"
-            for row in rows) or "- 판정 결과 없음",
-        "evidence_references": evidence,
+            + ("{{E}}" * len(refs) if refs else "")
+            for row, refs in zip(rows, row_refs)) or "- 판정 결과 없음",
+        "evidence_references": [ref for refs in row_refs for ref in refs],
     })
 
     # 3. filing status per type
@@ -857,19 +981,42 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
     # checklist records by document id.
     unconfirmed = report.get("unconfirmed_items") or []
     disability = report.get("existing_disability_assessment") or {}
-    diagnosis_value = summary.get("main_diagnosis")
+    established = report.get("established_facts") or []
+
+    # Every fact claim analysis ASSERTED, grouped by its domain -- not a
+    # whitelist of four slots. Measured on CASE_489: 19 fields resolved with
+    # values (surgery name, admission period, disability type, injury site and
+    # laterality, department, joint range of motion ...) and the report printed
+    # two of them, because SUMMARY_FACT_FIELDS named only accident_date,
+    # primary_diagnosis, diagnosis_code and treatment_period. Everything else
+    # stayed in the contract, so the 손해사정사 reading this document could not
+    # see what the pipeline had already established. Widening the whitelist
+    # would lose the next field added; grouping by the domain each fact already
+    # carries does not.
+    lines: list[str] = []
+    references: list[dict] = []
+    for group in established:
+        lines.append(f"- {group['domain_label']}")
+        for row in group["facts"]:
+            citations = row.get("evidence_references") or []
+            lines.append(
+                f"  - {row['field_label']}: {row['value_text']}"
+                + ("{{E}}" * len(citations) if citations else ""))
+            references.extend(citations)
+    if not lines:
+        lines.append(_bullet("확인된 핵심 의료정보", None))
+    lines.append(_bullet("후유장해진단서/신체감정서", disability.get("status_label")))
+    disability_refs = _dedupe_references(
+        disability.get("evidence_references") or [])
+    if disability_refs:
+        lines[-1] += "{{E}}" * len(disability_refs)
+        references.extend(disability_refs)
+    lines.append(_bullet("미확인 항목 수", len(unconfirmed) if unconfirmed else None))
+
     sections.append({
         "heading": "4. 의료영역 확보 현황",
-        "content": "\n".join([
-            _bullet("확인된 핵심 의료정보", diagnosis_value),
-            _bullet("후유장해진단서/신체감정서",
-                    disability.get("status_label")),
-            _bullet("미확인 항목 수", len(unconfirmed) if unconfirmed else None),
-        ]),
-        "evidence_references": _dedupe_references(
-            (evidence_by_fact.get("main_diagnosis") or [])
-            if diagnosis_value not in (None, "", "확인 불가") else []
-        ) + _dedupe_references(disability.get("evidence_references") or []),
+        "content": "\n".join(lines),
+        "evidence_references": references,
     })
 
     # 5. required-document checklist
@@ -955,18 +1102,18 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
     denial = position.get("denial") or {}
     reduction = position.get("reduction") or {}
     acceptance = position.get("acceptance") or {}
+    lines, references = _cited_bullets([
+        ("거절", ", ".join(denial.get("reason_ids") or []) or None,
+         denial.get("evidence_references")),
+        ("감액", ", ".join(reduction.get("reason_ids") or []) or None,
+         reduction.get("evidence_references")),
+        ("승인", ", ".join(acceptance.get("accepted_coverage_ids") or []) or None,
+         acceptance.get("evidence_references")),
+    ])
     sections.append({
         "heading": "9. 보험사 응답",
-        "content": "\n".join([
-            _bullet("거절", ", ".join(denial.get("reason_ids") or []) or None),
-            _bullet("감액", ", ".join(reduction.get("reason_ids") or []) or None),
-            _bullet("승인", ", ".join(
-                acceptance.get("accepted_coverage_ids") or []) or None),
-        ]),
-        "evidence_references": _dedupe_references(
-            list(denial.get("evidence_references") or [])
-            + list(reduction.get("evidence_references") or [])
-            + list(acceptance.get("evidence_references") or [])),
+        "content": "\n".join(lines),
+        "evidence_references": references,
     })
     return sections
 
@@ -992,7 +1139,8 @@ def render_markdown(
              "--sections-file", str(spec_file),
              "--template", TEMPLATE,
              "--held-by", held_by, "--run-id", run_id],
-            cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
         if proc.returncode:
             raise RuntimeError(
                 "document assembly refused the screening report:\n"
@@ -1057,7 +1205,8 @@ def run(*, case_id: str, run_id: str, held_by: str) -> dict:
             [sys.executable, str(DAO), "write-contract", case_id, CONTRACT,
              "--data-file", str(data_file), "--schema-name", SCHEMA,
              "--held-by", held_by, "--run-id", run_id, "--stage", STAGE],
-            cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
         if proc.returncode:
             raise RuntimeError((proc.stdout or proc.stderr or "").strip())
     finally:

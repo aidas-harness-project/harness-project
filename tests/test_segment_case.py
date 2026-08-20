@@ -3900,3 +3900,235 @@ def test_receipts_are_still_merged_because_that_is_the_operator_decision():
         [line.strip() for line in _RECEIPT_PAGE.splitlines() if line.strip()])
     assert set(sc.boundaries_from_page_texts(
         [_RECEIPT_PAGE, _RECEIPT_PAGE], medical=True)) == {1}
+
+
+# --- blank-line layout pushes the column row out of the header window -------
+# Measured on CASE_488/DOC_005 (2026-08-20), a 19-page 손해사정서 evidence
+# appendix. Pages 9-15 are ONE 진료비 세부산정내역, but each page opened its own
+# document, splitting a 7-page form into 7 documents.
+#
+# The form prints blank lines between its header rows:
+#
+#     0  진료비 세부산정내역(퇴원)
+#     1
+#     2  요양기관호 :                        의사면허번호 :
+#     3
+#     4  환자등록번호   환자성명   진료기간   병실   환자구분   비고
+#     5
+#     6  항목 | 일자 | 코드 | 명칭 | 금액 | 횟수 일수 | 총액 | ...
+#
+# so the real column row sits at index 6 -- one line past a 6-line window. The
+# widest-line tiebreak then settled on the PATIENT BLOCK at index 4, which is
+# delimited identically. Page 9's block has 6 cells and page 10's has 7 (an
+# 의사면허번호 column moves up), so the leading-run comparison failed and every
+# page read as a new document.
+#
+# This form also reprints the patient block on every page, so
+# `_reprints_patient_block` cannot carry the merge on its own -- the table-header
+# rule is the only one that can, which is why the window has to reach it.
+
+_BLANK_SPACED_BILLING_PAGE_9 = "\n".join([
+    "진료비 세부산정내역(퇴원)",
+    "",
+    "요양기관호 :                              의사면허번호 :",
+    "",
+    "환자등록번호    환자성명    진료기간    병실    환자구분    비고",
+    "",
+    "항목 | 일자 | 코드 | 명칭 | 금액 | 횟수 일수 | 총액 | 금액 | 비급여",
+    "",
+    "01. 진찰료 | 2023-12-04 | AA156 | 초진료 | 18,520 | 1 | 1 | 18,520 | 0",
+])
+
+_BLANK_SPACED_BILLING_PAGE_10 = "\n".join([
+    "진료비 세부산정내역(퇴원)",
+    "",
+    "요양기관기호 :",
+    "",
+    "환자등록번호 | 환자성명 | 진료기간 | 병실 | 환자구분 | 의사면허번호 | 비고",
+    "",
+    "항목 | 일자 | 코드 | 명칭 | 금액 | 횟수 | 일수 | 총액 | 금액 | 비고",
+    "",
+    "04. 약품투약료 | 2023-12-07 | J2000 | 조제료 | 1,812 | 2 | 3,624 | 0",
+])
+
+
+def test_column_row_below_blank_lines_is_found_not_the_patient_block():
+    """The window must reach the real column row, and the patient block above
+    it must not win the widest-line tiebreak."""
+    cells = sc._table_header_cells(_BLANK_SPACED_BILLING_PAGE_9.splitlines())
+    assert cells[:4] == ["항목", "일자", "코드", "명칭"], (
+        f"picked the wrong row: {cells}")
+
+
+def test_blank_spaced_billing_continuation_pages_stay_one_document():
+    """CASE_488 DOC_005 pages 9-15: one form, not seven documents."""
+    left = sc._table_header_cells(_BLANK_SPACED_BILLING_PAGE_9.splitlines())
+    right = sc._table_header_cells(_BLANK_SPACED_BILLING_PAGE_10.splitlines())
+    assert sc._continues_table(left, right), (
+        f"continuation not detected: {left} vs {right}")
+
+
+def test_patient_block_alone_is_still_not_a_column_header():
+    """A page with the block but no table must yield no header, so the widened
+    window cannot start matching two unrelated forms on their patient blocks."""
+    assert sc._table_header_cells([
+        "진 단 서",
+        "",
+        "환자등록번호    환자성명    진료기간    병실    환자구분    비고",
+        "",
+    ]) == []
+
+
+# --- OCR splits or joins a header cell -------------------------------------
+# Measured on CASE_488/DOC_005 p9 vs p10 (2026-08-20). The SAME printed header
+# reads "... | 금액 | 횟수 일수 | 총액 ..." on one page and
+# "... | 금액 | 횟수 | 일수 | 총액 ..." on the next -- two adjacent columns
+# joined into one cell by the transcription. Strict positional equality stops
+# at the join (5 matched, floor is 6) and the pages split into two documents,
+# even though every remaining column agrees. Pages 10-15 of the same form agree
+# on 8-9 leading cells and merged correctly, so the join on p9 was the only
+# thing separating page 9 from its own continuation.
+
+def test_a_joined_header_cell_still_matches_the_split_reading():
+    joined = ["항목", "일자", "코드", "명칭", "금액", "횟수일수", "총액", "금액", "비급여"]
+    split = ["항목", "일자", "코드", "명칭", "금액", "횟수", "일수", "총액", "금액"]
+    assert sc._continues_table(joined, split)
+    assert sc._continues_table(split, joined), "comparison must be symmetric"
+
+
+def test_joining_does_not_fuse_genuinely_different_headers():
+    """The join tolerance consumes cells only while they spell the same run;
+    two different tables still score below the floor."""
+    billing = ["항목", "일자", "코드", "명칭", "금액", "횟수", "일수", "총액"]
+    lab = ["검사명", "결과", "참고치", "단위", "판정", "비고", "채취일", "보고일"]
+    assert not sc._continues_table(billing, lab)
+
+
+# --- a repeated title + patient block, but the table runs on ---------------
+# Measured on CASE_488/DOC_005 pages 9-15 (2026-08-20). A 7-page
+# 진료비 세부산정내역 reprints BOTH its title and its patient block on every
+# page, so the patient-block test -- which separates CASE_907's continuing
+# statement from CASE_047's three separately-issued ones -- reads every page as
+# a reissue and split one form into 7 documents.
+#
+# The table header is the evidence that settles it: a form running over resumes
+# the SAME columns, while a genuinely re-issued form starts its table again
+# under its own header. This is already how titleless continuation pages are
+# decided; extending it to titled pages removes the need to keep listing
+# individual form names in _MERGED_FORM_TITLES, which is the maintenance trap
+# the vocabulary approach walks into every time a new form appears.
+
+_REISSUE_HEADER = ["항목", "일자", "코드", "명칭", "금액", "횟수", "일수", "총액"]
+
+
+def _billing_page(title="진료비 세부산정내역(퇴원)", columns=None, first_row=None):
+    cols = columns if columns is not None else _REISSUE_HEADER
+    return "\n".join([
+        title,
+        "",
+        "요양기관기호 :",
+        "",
+        "환자등록번호  환자성명  진료기간  병실  환자구분  비고",
+        "",
+        " | ".join(cols),
+        "",
+        first_row or "01. 진찰료 | 2023-12-04 | AA156 | 초진료 | 18,520 | 1 | 1 | 18,520",
+    ])
+
+
+def test_repeated_title_with_a_continuing_item_run_is_one_document():
+    """CASE_488 DOC_005 p9-15: title and patient block both reprint, but the
+    numbered item run climbs 01 -> 06 -> 12, so these pages continue."""
+    pages = [
+        _billing_page(first_row="01. 진찰료 | 2023-12-04 | AA156 | 초진료 | 18,520"),
+        _billing_page(first_row="06. 비급여주사료 | 2023-12-05 | 0647801081 | 90,000"),
+        _billing_page(first_row="12. 급여80치료재료 | 2023-12-05 | K7202009 | 1,150"),
+    ]
+    found = sc.boundaries_from_page_texts(pages, medical=True)
+    assert set(found) == {1}, f"continuation pages opened documents: {sorted(found)}"
+
+
+def test_a_restarted_item_run_still_opens_a_new_document():
+    """CASE_047 pages 16/23/30: three statements sharing one title, each
+    restarting at 01. Merging them broke claim_analysis, so a restart must
+    still split even though the title and columns are identical."""
+    first = _billing_page(first_row="01. 진찰료 | 2025-10-16 | AA156 | 초진진찰료 | 19,100")
+    again = _billing_page(first_row="01. 진찰료 | 2025-11-20 | AA156 | 초진진찰료 | 19,100")
+    found = sc.boundaries_from_page_texts([first, again], medical=True)
+    assert set(found) == {1, 2}, f"a reissued statement was merged away: {sorted(found)}"
+
+
+# --- an operator-chosen P8 reduction is not an unresolved disagreement ------
+# Measured on CASE_487 and CASE_489 (2026-08-20). Both flags that reduce P8 --
+# `--single-reader` and `--on-disagreement assume-reading-a` -- are documented
+# orchestrator decisions with their own honest status values, and both leave
+# REAL TEXT on disk. The gate accepted only {agreed, disagreed_resolved}, so a
+# reduced run could OCR and redact every page and then be refused at
+# segmentation with "human resolution is required", which there is nothing to
+# resolve: single-reader never compared, so no disagreement exists to settle.
+#
+# What this gate exists to prevent, per its own docstring, is falling back to
+# raw-PDF vision when text is missing or blocked -- "that would turn an
+# extraction hard gate into a routing preference". A reduced-P8 document is not
+# that case. `disagreed_pending_review` still IS: real pages disagreed, a human
+# owes a verdict, and the text is not settled. That distinction is the fix.
+#
+# Title lines -- the boundary signal -- were byte-identical across the two
+# readings on every disagreed page of CASE_488/DOC_005; the differences sat in
+# table codes and amounts. So a reduced read costs precision inside a document,
+# not the evidence segmentation actually cuts on.
+
+def _p8_bundle(status, tmp_path):
+    bundle = {
+        "document_id": "DOC_001",
+        "ocr_status": "completed",
+        "cross_validation_status": status,
+        "redacted_text_path": "data/processed/CASE_900/DOC_001/redacted_text.md",
+    }
+    text = tmp_path / bundle["redacted_text_path"]
+    if not text.exists():
+        text.parent.mkdir(parents=True, exist_ok=True)
+        text.write_text("<<<PAGE page=1>>>\nfirst\n<<<PAGE page=2>>>\nsecond\n",
+                        encoding="utf-8")
+    return bundle
+
+
+@pytest.mark.parametrize("status", [
+    "single_reader_no_cross_validation",   # --single-reader
+    "assume_reading_a_unreviewed",         # --on-disagreement assume-reading-a
+])
+def test_a_reduced_p8_document_may_be_segmented(status, tmp_path):
+    original_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        errors = sc.segmentation_prerequisite_errors(_p8_bundle(status, tmp_path), 2)
+    finally:
+        sc.ROOT = original_root
+    assert errors == [], f"{status} was refused: {errors}"
+
+
+def test_an_unresolved_disagreement_is_still_refused(tmp_path):
+    """The case the gate is actually for: pages disagreed, nobody adjudicated,
+    and the text genuinely is not settled."""
+    original_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        errors = sc.segmentation_prerequisite_errors(
+            _p8_bundle("disagreed_pending_review", tmp_path), 2)
+    finally:
+        sc.ROOT = original_root
+    assert any("human resolution" in error for error in errors)
+
+
+def test_a_document_with_no_ocr_is_still_refused(tmp_path):
+    """Reducing P8 must not become a way past a document that has no text --
+    that is the raw-vision fallback the gate exists to block."""
+    bundle = _p8_bundle("single_reader_no_cross_validation", tmp_path)
+    bundle["ocr_status"] = "pending"
+    original_root = sc.ROOT
+    sc.ROOT = tmp_path
+    try:
+        errors = sc.segmentation_prerequisite_errors(bundle, 2)
+    finally:
+        sc.ROOT = original_root
+    assert any("OCR is" in error for error in errors)

@@ -84,7 +84,12 @@ def _install(monkeypatch, *, published: list, index=INDEX, dao_calls=None):
             name = args[2]
             if name == "_run_state.json":
                 return run_state
-            if name == "_document_manifest.json":
+            # The contract's real name, with no leading underscore. The stub
+            # spelled it "_document_manifest.json" until 2026-08-20, matching a
+            # typo in the driver -- so the test passed while the driver failed
+            # on every real case with NOT_FOUND. A stub that mirrors a defect
+            # verifies nothing; this one now names what the DAO actually serves.
+            if name == "document_manifest.json":
                 return MANIFEST
             return None                      # no filing contracts exist
         if command == "read-redacted-text-bundle":

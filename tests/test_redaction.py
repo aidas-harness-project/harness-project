@@ -296,3 +296,41 @@ def test_no_pii_class_redactor_makes_no_provider_call():
     r = NoPiiClassRedactor()
     assert not hasattr(r, "provider")
     assert r.method == "no_pii_class_passthrough"
+
+
+# --- billing table: a drug code in the code column is not a phone -----------
+# Measured on CASE_488/DOC_005 p14 (2026-08-20). A 진료비 세부산정내역 table
+# prints "<date>\t<drug code>\t<name>\t<amount>...", and the 의약품 표준코드 in
+# the code column is a 9-10 digit run that begins 0 whenever the manufacturer's
+# prefix does -- indistinguishable from a contiguous landline under the plain
+# 0\d{9,10} rule. 0647801081 (타우롤린주사2%250ml) blocked the document on BOTH
+# paths: --skip-redaction flagged it as present, and the LLM redactor correctly
+# judged it non-PII and left it, whereupon the residual scan flagged it again.
+# There was no configuration under which the document could pass.
+#
+# The exemption is anchored on the TABLE CELL, not on the number's shape: the
+# run must occupy a whole tab-delimited cell whose preceding cell is a date.
+# A real phone is never typeset that way -- it carries a label (연락처/전화) or
+# separators -- so this cannot wave a claimant's number through.
+
+@pytest.mark.parametrize("clean", [
+    # the exact CASE_488 p14 row
+    "\t2023-12-05\t0647801081\t타우롤린주사2%250ml (삼진)\t90,000\t1\t1\t90,000",
+    # same column, other manufacturers' codes from the same page
+    "\t2023-12-05\t0527014310\t이부프로펜주400mg/100ml/bag\t35,000\t1\t1\t35,000",
+    "\t2023-12-07\t0416029400\t일반타인파워정 (대응)\t400\t1\t12\t4,800",
+])
+def test_drug_code_in_billing_code_column_is_not_read_as_a_phone(clean):
+    assert scan_residual_pii(clean) == [], f"false positive on {clean!r}"
+
+
+@pytest.mark.parametrize("leak", [
+    # a real contiguous landline in the same table must STILL be caught
+    "\t2023-12-05\t연락처 0212345678\t비고",
+    # bare contiguous number with no date cell before it
+    "\t환자 연락\t0647801081\t비고",
+    # a mobile in a cell after a date is still a leak (mobile prefix)
+    "\t2023-12-05\t01012345678\t비고",
+])
+def test_code_column_exemption_does_not_blind_the_scan_to_real_phones(leak):
+    assert scan_residual_pii(f"내용 {leak} 끝"), f"missed {leak}"

@@ -301,6 +301,41 @@ def _is_institutional_contact(kind: str, sample: str, context: str) -> bool:
     return any(marker in context for marker in _INSTITUTIONAL_LINE_MARKERS)
 
 
+# A 진료비 세부산정내역 prints one row per line as
+# "<date>\t<code>\t<name>\t<amount>...", and the 의약품 표준코드 in the code
+# column is a 9-10 digit run that begins 0 whenever the manufacturer prefix does
+# -- the same shape as a contiguous landline. Measured on CASE_488/DOC_005 p14:
+# 0647801081 (타우롤린주사2%250ml) blocked the document on BOTH paths, because
+# --skip-redaction reported it as present and the LLM redactor correctly judged
+# it non-PII and left it in place, whereupon this scan flagged it as residual.
+# No configuration let the document through.
+#
+# Anchored on the TABLE CELL, never on the number's shape: the run must fill a
+# whole tab-delimited cell whose preceding cell is a bare date. A real phone is
+# not typeset that way -- it carries a 연락처/전화 label or separators -- and a
+# mobile prefix is disqualified outright, so a claimant's number still blocks.
+_BILLING_DATE_CELL = re.compile(r"(?:^|\t)\s*\d{4}-\d{2}-\d{2}\s*$")
+
+
+def _is_billing_table_code(
+    kind: str, value: str, text: str, start: int, end: int
+) -> bool:
+    """True when the hit fills a code cell that directly follows a date cell."""
+    if kind != "phone_number_contiguous":
+        return False
+    if value.startswith(_PERSONAL_NUMBER_PREFIXES):
+        return False
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    before, after = text[line_start:start], text[end:line_end]
+    # the value must occupy a whole cell: tab-delimited on both sides
+    if not before.endswith("\t") or not (after.startswith("\t") or after == ""):
+        return False
+    return bool(_BILLING_DATE_CELL.search(before[:-1]))
+
+
 def scan_residual_pii(
     redacted_text: str,
     *,
@@ -338,6 +373,9 @@ def scan_residual_pii(
                 continue
             if allow_document_identifiers and _is_labelled_document_identifier(
                     kind, scanned, m.start()):
+                continue
+            if _is_billing_table_code(
+                    kind, m.group(0), scanned, m.start(), m.end()):
                 continue
             hits.append({"kind": kind, "sample": m.group(0)})
     return hits

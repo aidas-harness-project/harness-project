@@ -2311,6 +2311,14 @@ def check(filename: str, data: dict, case_dir: Path,
             data, case_dir, redacted_text_for)
     if base == DENIAL_VALIDATION:
         return check_denial_validation_result(data, case_dir)
-    if base.startswith("screening_report"):
+    # The REPORT and its sidecar restate the insurer's decisions, so both must
+    # record which denial_reason_result they were derived from. The agent's
+    # `screening_report_judgement.json` does not: it carries key_issues,
+    # review_points and per-conflict severity, derives from no upstream
+    # contract, and has no hash to record. A `startswith` match swept it into
+    # the report's check and refused the write for a missing
+    # `source_denial_contract_hash` -- unsatisfiable, so the selective lane's
+    # agent half could not be published at all (CASE_489, 2026-08-20).
+    if base in ("screening_report.json", "screening_report.evidence.json"):
         return check_screening_report(data, case_dir)
     return []

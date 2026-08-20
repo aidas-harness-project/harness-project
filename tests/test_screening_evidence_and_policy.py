@@ -259,13 +259,20 @@ def test_only_the_elected_observation_is_cited() -> None:
     assert quotes == {DIAGNOSIS_QUOTE}
 
 
-def test_the_medical_area_section_reuses_the_same_citation() -> None:
-    """Section 4 prints the diagnosis too; one fact, one source."""
+def test_the_medical_area_section_cites_each_fact_from_its_own_source() -> None:
+    """Section 4 now lists every established fact by domain, not just the
+    diagnosis (CASE_489: 19 asserted, 2 printed). Each still carries ITS OWN
+    citation -- a fact never borrows the quote of the one printed beside it,
+    and the placeholder count matches so document_assembly can pair them."""
     report = _report(claim_analysis=_claim_analysis(facts=_full_facts()))
     section = reporter.markdown_sections(report)[3]
 
-    assert {reference["quote"] for reference in section["evidence_references"]} \
-        == {DIAGNOSIS_QUOTE}
+    quotes = {reference["quote"] for reference in section["evidence_references"]}
+    assert DIAGNOSIS_QUOTE in quotes
+    # every fact the fixture asserted is cited from the source it came from
+    assert {ACCIDENT_QUOTE, CODE_QUOTE, PERIOD_QUOTE} <= quotes
+    assert section["content"].count("{{E}}") == len(
+        section["evidence_references"])
 
 
 def test_the_insurer_decision_carries_the_grounds_it_states() -> None:

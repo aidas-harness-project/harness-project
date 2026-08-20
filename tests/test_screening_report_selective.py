@@ -317,3 +317,167 @@ def test_judgment_section_stays_hedged_and_routed_for_review() -> None:
     serialized = json.dumps(report, ensure_ascii=False)
     for forbidden in ("지급 확정", "부지급 확정", "보상 확정"):
         assert forbidden not in serialized
+
+
+# --- markdown_sections must satisfy document_assembly's 1:1 tag rule -------
+# Measured on CASE_489 (2026-08-20). `document_assembly.render` requires each
+# section's `{{E}}` placeholder count to equal its `evidence_references` count,
+# so it can substitute `[E#]` tags and emit the sidecar from one source -- the
+# P1 mechanism that stops a tag and its citation drifting apart.
+#
+# `markdown_sections` collected the references but printed its bullets with no
+# placeholders, so the very first section arrived with 0 placeholders and 1
+# reference and assembly refused the whole report:
+#
+#   Section '1. 사고와 공통 의료정보': 0 {{E}} placeholders but
+#   1 evidence_references -- these must match 1:1.
+#
+# The suite had 79 passing screening tests and none caught it: they assert on
+# individual sections returned by `markdown_sections`, while the rule lives in
+# `document_assembly`. The contract between the two tools sat in the gap
+# between two test files. This test spans it.
+
+def _sections_for_a_populated_report():
+    report = reporter.build_report(
+        case_id="CASE_9001", run_id="RUN_20260819_1",
+        claim_analysis=_claim_analysis(), consistency=_consistency(),
+        config=_config())
+    return reporter.markdown_sections(report)
+
+
+def test_every_section_pairs_one_placeholder_with_one_reference():
+    for section in _sections_for_a_populated_report():
+        placeholders = section["content"].count("{{E}}")
+        references = len(section.get("evidence_references", []))
+        assert placeholders == references, (
+            f"section {section['heading']!r}: {placeholders} placeholders vs "
+            f"{references} references -- document_assembly refuses this")
+
+
+def test_the_sections_render_through_document_assembly(tmp_path):
+    """The real gate, not a restatement of it: run the sections through
+    document_assembly's own renderer."""
+    import document_assembly
+    spec = {"output_path": str(tmp_path / "screening_report.md"),
+            "sections": _sections_for_a_populated_report()}
+    doc_text, sidecar = document_assembly.render(spec)
+    assert doc_text, "assembly produced no document"
+    # every generated tag is backed by a sidecar citation
+    import re
+    tags = set(re.findall(r"\[E(\d+)\]", doc_text))
+    assert len(tags) == len(sidecar.get("citations", sidecar.get("evidence", [])))
+
+
+# --- the checklist must say WHICH document, not just that one exists -------
+# Raised on CASE_489 (2026-08-20): section 5 rendered "진단서: 보유
+# (산재/근재, 배상책임, ...)" and nothing else, so a 손해사정사 reading the
+# report learns a diagnosis certificate exists but not which document to open.
+# The ids were already in the contract -- `required_document_checklist` carries
+# `document_ids: ["DOC_011"]` -- and only the rendering dropped them.
+
+def test_the_checklist_names_the_documents_it_says_are_held():
+    report = reporter.build_report(
+        case_id="CASE_9001", run_id="RUN_20260819_1",
+        claim_analysis=_claim_analysis(), consistency=_consistency(),
+        config=_config())
+    rows = report["required_document_checklist"]
+    held = [row for row in rows if row.get("document_ids")]
+    if not held:
+        pytest.skip("fixture has no held document to name")
+    section = next(s for s in reporter.markdown_sections(report)
+                   if s["heading"].startswith("5."))
+    for row in held:
+        for document_id in row["document_ids"]:
+            assert document_id in section["content"], (
+                f"{row['document_label']} is reported as held but "
+                f"{document_id} is not named")
+
+
+# --- every asserted fact must reach the report ----------------------------
+# Raised on CASE_489 (2026-08-20). claim_analysis resolved 19 fields with
+# values -- surgery name (OR/IF c plate & screws), admission period
+# (2023-12-04~12-07), disability type (부전강직), injury site and laterality
+# (Rt. wrist), department (정형외과), joint range of motion -- and the screening
+# report printed TWO of them. `SUMMARY_FACT_FIELDS` whitelisted four slots
+# (accident_date, primary_diagnosis, diagnosis_code, treatment_period) and
+# section 4 printed the diagnosis plus a COUNT of unconfirmed items, so
+# everything outside those slots stayed in the contract and never reached the
+# 손해사정사 reading the document.
+#
+# Widening the whitelist would repeat the defect the next time a field is
+# added. The rule is the invariant instead: a fact claim analysis ASSERTED --
+# with a value and a citation -- appears somewhere in the rendered report.
+# Grouping is by `domain_code`, which the routing config already defines and
+# every fact already carries.
+
+def test_every_asserted_fact_value_appears_in_the_rendered_report():
+    # Mirrors CASE_489's real shape: facts asserted across several domains,
+    # only two of which the whitelist happened to cover.
+    facts = [
+        _fact("primary_diagnosis", "diagnosis", "우측 손목 요골 원위부 골절",
+              status="asserted"),
+        _fact("diagnosis_code", "diagnosis", "S6280", status="asserted"),
+        _fact("diagnosis_department", "diagnosis", "정형외과", status="asserted"),
+        _fact("surgery_or_procedure_name", "treatment",
+              "OR/IF c plate & screws", status="asserted"),
+        _fact("injury_site_and_laterality", "diagnosis_basis", "Rt. wrist",
+              status="asserted"),
+        _fact("disability_type", "disability", "부전강직", status="asserted"),
+        _fact("accident_mechanism", "event_timeline", "전일 slip down",
+              status="asserted"),
+    ]
+    analysis = _claim_analysis(facts=facts)
+    report = reporter.build_report(
+        case_id="CASE_9001", run_id="RUN_20260819_1",
+        claim_analysis=analysis, consistency=_consistency(),
+        config=_config())
+    rendered = "\n".join(
+        section["content"] for section in reporter.markdown_sections(report))
+
+    missing = []
+    for fact in analysis["claim_facts"]:
+        if fact.get("resolution_status") != "asserted":
+            continue
+        selected = set(fact.get("selected_observation_ids") or [])
+        for observation in fact.get("observations") or []:
+            if observation.get("observation_id") not in selected:
+                continue
+            value = observation.get("value")
+            text = (", ".join(str(item) for item in value)
+                    if isinstance(value, list) else str(value))
+            if text and text not in rendered:
+                missing.append(f"{fact['field_id']}={text[:40]}")
+    assert not missing, (
+        "claim analysis asserted these values and the report does not show "
+        f"them: {missing}")
+
+
+# --- the judgement contract is not the report ------------------------------
+# Measured on CASE_489 (2026-08-20). `_cross_contract` dispatched by
+# `base.startswith("screening_report")`, so `screening_report_judgement.json`
+# was routed into `check_screening_report` and refused for lacking
+# `source_denial_contract_hash` -- a field only the derived REPORT carries,
+# because only the report restates the insurer's decisions. The agent's
+# judgement (key_issues, review_points, conflict_severity) derives from nothing
+# upstream and cannot record such a hash, so the write was unsatisfiable: the
+# lane's agent half could not be published at all.
+
+def test_the_judgement_contract_is_not_validated_as_the_report(tmp_path):
+    import _cross_contract
+    # A denial contract must be present, or the staleness check never runs and
+    # the test passes for the wrong reason.
+    (tmp_path / "denial_reason_result.json").write_text(json.dumps({
+        "case_id": "CASE_9001", "denial_reasons": [
+            {"reason_id": "DR_1", "decision_type": "denial",
+             "taxonomy_code": "R04", "policy_matches": []}],
+    }), encoding="utf-8")
+    judgement = {
+        "case_id": "CASE_9001", "run_id": "RUN_20260819_1",
+        "component": "screening-report", "status": "success",
+        "created_at": "2026-08-20T00:00:00+00:00",
+        "key_issues": [], "review_points": [],
+    }
+    errors = _cross_contract.check(
+        "screening_report_judgement.json", judgement, tmp_path, None)
+    assert not any("source_denial_contract_hash" in error for error in errors), (
+        f"the judgement was validated as the report: {errors}")

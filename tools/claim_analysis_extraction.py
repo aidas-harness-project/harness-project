@@ -55,30 +55,68 @@ _VALUE_SHAPE_HINT = {
 
 
 def output_schema(field_rows: Sequence[Mapping[str, Any]]) -> dict:
-    """The structured shape one document read must return."""
+    """The structured shape one document read must return.
+
+    A TRANSPORT schema, deliberately compact: claude-cli accepts --json-schema
+    only as an inline argv value under a conservative cap, and enumerating all
+    eight member keys per field grew this ~400 chars per field. CASE_489's
+    first real selective run built one of 16,868 chars against the 8,000 limit
+    and died before any document was read. One shared member spec under
+    `additionalProperties` makes the size constant in the field count instead.
+
+    Two constraints, both learned on the legacy driver and repeated here
+    because breaking either fails only at generation time, after the call is
+    paid for:
+
+    * **No union types.** claude-cli validates with ajv in STRICT mode, which
+      refuses `{"type": ["integer", "null"]}` outright. Nullable members
+      therefore declare no type at all rather than a union.
+    * **Every member key stays DECLARED.** With a bare `{"type": "object"}`
+      member the legacy run measured sonnet-5 omitting keys on most fields.
+      The keys are named here even though the shape is permissive.
+
+    The authoritative check remains local: `parse_result` below drops any
+    member that is not a dict, names a field this read did not ask for, or
+    lacks what its own `presence` requires -- so a permissive transport shape
+    cannot put an uncitable claim into a contract whose basis is citation.
+    """
     return {
         "type": "object",
-        "additionalProperties": False,
         "properties": {
-            row["field_id"]: {
+            # One DECLARED property holding the open map, mirroring the legacy
+            # driver's `fields`. A top-level object whose only content is
+            # `additionalProperties` does not survive claude-cli's tool-input
+            # encoding: with no declared property the argument arrives as a
+            # string rather than an object and the schema rejects it, which the
+            # model itself reported -- "the argument keeps arriving as a string
+            # rather than an object, so the schema rejects it every time" --
+            # while the envelope still came back subtype='success',
+            # is_error=False with structured_output null. Reproduced directly
+            # against claude-cli on 2026-08-20 before this wrapper was added.
+            "fields": {
                 "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "presence": {
-                        "enum": ["asserted", "explicitly_absent", "not_mentioned"],
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "presence": {
+                            "enum": ["asserted", "explicitly_absent",
+                                     "not_mentioned"],
+                        },
+                        # `value`, `page`, `quote` and `reason` are legitimately
+                        # nullable, so they carry no `type` here -- see the ajv
+                        # note above. The local gate enforces their real shapes.
+                        "value": {},
+                        "page": {},
+                        "quote": {},
+                        "reason": {},
+                        "complete": {"type": "boolean"},
+                        "unambiguous": {"type": "boolean"},
                     },
-                    "value": {},
-                    "page": {"type": ["integer", "null"], "minimum": 1},
-                    "quote": {"type": ["string", "null"]},
-                    "reason": {"type": ["string", "null"]},
-                    "complete": {"type": "boolean"},
-                    "unambiguous": {"type": "boolean"},
+                    "required": ["presence"],
                 },
-                "required": ["presence"],
-            }
-            for row in field_rows
+            },
         },
-        "required": [row["field_id"] for row in field_rows],
+        "required": ["fields"],
     }
 
 
@@ -168,6 +206,12 @@ def parse_result(
     """
     if not structured:
         return {}
+    # The transport schema wraps the field map in a declared `fields` property
+    # (see output_schema: a bare top-level open map does not survive claude-cli's
+    # tool-input encoding). Unwrap it, while still accepting a flat map so a
+    # result produced by the older shape is read rather than discarded.
+    if isinstance(structured.get("fields"), dict):
+        structured = structured["fields"]
     known = {row["field_id"] for row in field_rows}
     parsed: dict[str, dict] = {}
     for field_id, payload in structured.items():

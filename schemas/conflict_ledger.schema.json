@@ -80,7 +80,12 @@
       "properties": {
         "stage": { "$ref": "run_state.schema.json#/$defs/stage_name" },
         "topic": { "type": "string", "minLength": 1 },
-        "sources": { "type": "array", "minItems": 2, "items": { "type": "object" } }
+        "sources": { "type": "array", "minItems": 2, "items": { "type": "object" } },
+        "professional_summary": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The summary supplied when the entry was CREATED. Carried in the operation payload as well as on the entry because the ledger's replay check rebuilds each add from its payload and compares against the stored conflicts -- a field stored on the entry but missing here makes the ledger permanently unreplayable, which on CASE_488 blocked every later operation and, through check-conflicts-clear, the screening report. Optional: an entry created without one replays as its 7-key legacy shape."
+        }
       },
       "required": ["stage", "topic", "sources"]
     },

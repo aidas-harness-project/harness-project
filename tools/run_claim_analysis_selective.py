@@ -1377,7 +1377,13 @@ def run(
     require_enabled(config)
     require_open_attempt(case_id, run_id)
 
-    manifest = _dao_json(["read-contract", case_id, "_document_manifest.json",
+    # `document_manifest.json`, with no leading underscore. The underscore
+    # prefix marks the DAO's own bookkeeping files (_run_state, _source_ledger,
+    # _conflict_ledger); the manifest is a contract and does not carry it.
+    # Spelled with one here until 2026-08-20, which made this driver fail at its
+    # first DAO read on every case -- invisible while the lane was disabled,
+    # because nothing ever reached this line.
+    manifest = _dao_json(["read-contract", case_id, "document_manifest.json",
                           "--run-id", run_id])
     documents = classified_documents(manifest)
     page_text: dict[tuple[str, int], str] = {}

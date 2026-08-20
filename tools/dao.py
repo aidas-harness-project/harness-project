@@ -5968,7 +5968,7 @@ def _replay_generic_ledger_history(ledger: dict, schema_name: str) -> None:
             entry["rejection_reason"] = (
                 payload["reason"] if payload["status"] == "rejected" else None)
         elif request["action"] == "add":
-            replayed.append({
+            rebuilt = {
                 "conflict_id": result["target_id"],
                 "raised_by_stage": payload["stage"],
                 "field_or_topic": payload["topic"],
@@ -5976,7 +5976,13 @@ def _replay_generic_ledger_history(ledger: dict, schema_name: str) -> None:
                 "verdict": "pending",
                 "resolution_note": None,
                 "resolved_at": None,
-            })
+            }
+            # Optional, and reconstructed only when the operation recorded one,
+            # so an entry written before the payload carried it still replays
+            # as the 7-key shape it was actually stored in.
+            if payload.get("professional_summary"):
+                rebuilt["professional_summary"] = payload["professional_summary"]
+            replayed.append(rebuilt)
         else:
             entry = next((i for i in replayed
                           if i["conflict_id"] == payload["conflict_id"]), None)
@@ -7766,6 +7772,16 @@ def cmd_add_conflict_entry(args):
         n = len(ledger["conflicts"]) + 1
         conflict_id = f"CONFLICT_{n}"
         payload = {"stage": args.stage, "topic": args.topic, "sources": sources}
+        # Carried in the OPERATION, not only on the entry. The replay check
+        # rebuilds each `add` from its payload and compares against the stored
+        # conflicts, so a field written to the entry but absent here makes the
+        # ledger permanently unreplayable -- measured on CASE_488, where the
+        # first summarised entry wrote fine and every later operation on the
+        # case (a second add, any set-conflict-verdict, check-conflicts-clear)
+        # failed closed and blocked screening_report.
+        summary = getattr(args, "professional_summary", None)
+        if summary:
+            payload["professional_summary"] = summary
         try:
             request, request_sha256, committed = _prepare_ledger_operation(
                 ledger, args, "add", payload)
@@ -7786,7 +7802,6 @@ def cmd_add_conflict_entry(args):
             "resolution_note": None,
             "resolved_at": None,
         }
-        summary = getattr(args, "professional_summary", None)
         if summary:
             # Stored only when supplied. An entry created without one is a
             # legacy-shaped entry, and downstream reports it from its sources

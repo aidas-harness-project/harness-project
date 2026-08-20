@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "screening_report_judgement.schema.json",
+  "title": "screening_report_judgement.json -- the screening-report agent's half of the selective lane",
+  "description": "The agent's contribution to a selective-lane screening report, and nothing else. `run_screening_report.py` assembles the report deterministically from claim_analysis_result.json, evidence_validation_result.json, the conflict ledger and denial_reason_result.json; what it CANNOT derive is which questions matter, who can answer them, and how serious a deferred conflict is. Those three are readings of the case, so they come from the agent through this contract. Added 2026-08-20: the helper had always read this file (`allow_missing=True`) but no schema existed for it, so `write-contract` refused it by name and no run in this repository had ever supplied one -- every selective report silently fell back to the helper's own floor values while reporting success. The fallbacks state facts (a type is unconfirmed, N conflicts were verified) and route them for review; they are not a substitute for this judgement, and a report built on them carries no agent reading at all.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "key_issues": {
+          "type": "array",
+          "description": "The issues a 손사/의사 must decide, in the agent's own reading. Spliced into the report as-is, so the ids must be unique within the run.",
+          "items": { "$ref": "screening_report_selective.schema.json#/$defs/key_issue" }
+        },
+        "review_points": {
+          "type": "array",
+          "description": "P3's aggregation point: each flagged claim with the role that can actually answer it. Routed by who can answer, not copied from an upstream contract's reviewer_role.",
+          "items": { "$ref": "screening_report_selective.schema.json#/$defs/review_point" }
+        },
+        "conflict_severity": {
+          "type": "object",
+          "description": "Severity per deferred conflict, keyed by conflict_id. Only the severity and placement are the agent's; a deferred entry's `professional_summary` was written by consistency-check with the evidence in hand and is copied verbatim by the helper. An empty object is correct when the ledger defers nothing.",
+          "propertyNames": { "pattern": "^CONFLICT_[0-9]+$" },
+          "additionalProperties": { "enum": ["high", "medium", "low"] }
+        }
+      },
+      "required": ["key_issues", "review_points"]
+    }
+  ]
+}
