@@ -66,8 +66,43 @@
         },
         "unconfirmed_items": {
           "type": "array",
+          "description": "Fields the run could not establish. Each carries the STRUCTURED cause alongside the sentence: an unconstrained `{type: object}` here is how the cause went unpublished until 2026-08-21 -- nothing failed when it was absent.",
           "items": {
-            "type": "object"
+            "type": "object",
+            "required": [
+              "field_id",
+              "label",
+              "gap_kind",
+              "reason"
+            ],
+            "properties": {
+              "field_id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "unavailable_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "$comment": "Mirrors claim_analysis_result#/$defs/field_result/unavailable_reason; nullable because a pre-2026-08-21 result may not carry one."
+              },
+              "gap_kind": {
+                "enum": [
+                  "records_gap",
+                  "not_searched",
+                  "out_of_scope",
+                  "disputed"
+                ],
+                "description": "What a reader can DO about it. Only `records_gap` is closable by requesting documents; `not_searched` says the pipeline never looked and why."
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
           }
         },
         "medical_projection_status": {

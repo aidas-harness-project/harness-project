@@ -265,7 +265,11 @@ def test_without_an_industrial_trigger_no_administrative_source_is_read() -> Non
     by_field = {outcome.field_id: outcome for outcome in outcomes}
     for field_id in _filing_fields():
         assert by_field[field_id].status == "unavailable"
-        assert by_field[field_id].unavailable_reason == "not_mentioned"
+        # `route_not_activated`, not `not_mentioned` (changed 2026-08-21): the
+        # assertion right above proves NOTHING was read, so reporting "no
+        # source mentioned it" would describe a records gap that does not
+        # exist and send a reviewer requesting documents that could not help.
+        assert by_field[field_id].unavailable_reason == "route_not_activated"
 
 
 def test_a_filed_case_reads_the_approval_document_once() -> None:

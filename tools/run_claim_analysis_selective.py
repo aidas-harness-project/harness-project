@@ -545,7 +545,11 @@ def resolve_opportunistic(
         domain_code=plan.domain_code,
         grade=field_row["medical_advisory_grade"],
     )
-    outcome.unavailable_reason = "not_mentioned"
+    # `not_scheduled`, not `not_mentioned`: an opportunistic field never buys a
+    # read of its own, so "no source discussed it" would overstate what was
+    # looked at. The distinction is what tells a reviewer this is a scheduling
+    # decision rather than a records gap they could close.
+    outcome.unavailable_reason = "not_scheduled"
     outcome.reason = (
         "이 항목의 경로에서 이미 열려 있던 문서에 기재가 없었고, 기회적 항목은 자체적으로 새 문서를 열지 않습니다"
     )
@@ -913,7 +917,11 @@ def extract_all(
             if not active:
                 outcome.status = "unavailable"
                 outcome.stop_reason = "sources_exhausted"
-                outcome.unavailable_reason = "not_mentioned"
+                # The route never opened, so no source was consulted and none
+                # is missing. `not_mentioned` claimed documents had been read
+                # and were silent, which would send a reviewer requesting
+                # records that could not have helped.
+                outcome.unavailable_reason = "route_not_activated"
                 outcome.reason = FILING_ROUTE_NOT_TRIGGERED_REASON
                 outcomes.append(outcome)
                 continue

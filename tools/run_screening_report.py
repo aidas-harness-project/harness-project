@@ -401,10 +401,39 @@ def unconfirmed_section(
         rows.append({
             "field_id": field_id,
             "label": _label_ko(searched[field_id], "field_id"),
+            # The STRUCTURED cause travels with the sentence. Until 2026-08-21
+            # only `reason` was carried, so a machine-readable consumer saw one
+            # undifferentiated bucket: on CASE_700 all 25 unavailable fields
+            # published `not_mentioned` while the free text held three
+            # different causes. The distinction decides what a reviewer does --
+            # request records, or note that a route never opened.
+            "unavailable_reason": field.get("unavailable_reason"),
+            "gap_kind": UNAVAILABLE_KIND.get(
+                field.get("unavailable_reason"), "records_gap"),
             "reason": field.get(
                 "resolution_reason", "자료에서 확인되지 않음"),
         })
     return sorted(rows, key=lambda row: row["field_id"])
+
+
+# What a reader is meant to DO about each cause, which is the distinction the
+# enum exists to carry. `records_gap` is the only one a document request can
+# close; the others say the pipeline did not look, and why.
+UNAVAILABLE_KIND = {
+    "not_mentioned": "records_gap",
+    "source_document_missing": "records_gap",
+    "unreadable": "records_gap",
+    "route_not_activated": "not_searched",
+    "not_scheduled": "not_searched",
+    "outside_poc_scope": "out_of_scope",
+    "conflict_unresolved": "disputed",
+}
+UNAVAILABLE_KIND_LABEL = {
+    "records_gap": "자료 미비",
+    "not_searched": "탐색 미실행",
+    "out_of_scope": "PoC 범위 밖",
+    "disputed": "자료 간 불일치",
+}
 
 
 LINK_STATUS_LABEL = {
@@ -911,6 +940,34 @@ def _dedupe_references(references: Sequence[Mapping[str, Any]]) -> list[dict]:
     return unique
 
 
+def _mark(reference: Mapping[str, Any], collected: list[dict]) -> str:
+    """Collect one reference and return the `{{E}}` it is owed, if any.
+
+    The renderer requires a section's placeholder count to equal its reference
+    count, and the section publishes `_dedupe_references(collected)` -- so a
+    marker may only be emitted for a reference that SURVIVES deduplication.
+    Emitting one per appended reference is wrong in the other direction: two
+    requirements citing one sentence collapse to a single published reference
+    and would leave an orphan placeholder.
+
+    Both failures are silent at write time and fatal at render time, which is
+    how section 8 shipped with zero markers for two references (CASE_700,
+    2026-08-21) -- the first run to supply a judgement AND match a
+    coverage-level 약관, so the branch had never executed with a real
+    `clause_ref` before.
+    """
+    if not reference.get("document_id") or not reference.get("quote"):
+        # `_dedupe_references` drops these, so a marker would be an orphan.
+        return ""
+    key = (reference.get("document_id"), reference.get("page"),
+           reference.get("quote"))
+    if any(key == (r.get("document_id"), r.get("page"), r.get("quote"))
+           for r in collected):
+        return ""
+    collected.append(dict(reference))
+    return "{{E}}"
+
+
 def _bullet(label: str, value, *, cited: int = 0) -> str:
     """One fact line, carrying one `{{E}}` per citation that backs it.
 
@@ -1141,11 +1198,29 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
     })
 
     # 7. what the records could not establish
+    #
+    # Grouped by what the reader can DO about it. A flat list read as one
+    # undifferentiated "missing" pile: on CASE_700 all 25 entries carried
+    # `not_mentioned`, mixing 21 genuine records gaps with 3 fields whose
+    # conditional route never opened and 1 never scheduled a read. Only the
+    # first group is closable by requesting documents; a reviewer chasing the
+    # other four would find nothing to chase.
+    grouped: dict[str, list[dict]] = {}
+    for row in unconfirmed:
+        grouped.setdefault(row.get("gap_kind") or "records_gap", []).append(row)
+    unconfirmed_lines: list[str] = []
+    for kind in ("records_gap", "disputed", "not_searched", "out_of_scope"):
+        rows = grouped.get(kind)
+        if not rows:
+            continue
+        if len(grouped) > 1:
+            unconfirmed_lines.append(
+                f"**{UNAVAILABLE_KIND_LABEL.get(kind, kind)}** ({len(rows)}건)")
+        unconfirmed_lines.extend(
+            f"- {row['label']}: {row['reason']}" for row in rows)
     sections.append({
         "heading": "7. 주요 미확인 항목",
-        "content": "\n".join(
-            f"- {row['label']}: {row['reason']}" for row in unconfirmed
-        ) or "- 미확인 항목 없음",
+        "content": "\n".join(unconfirmed_lines) or "- 미확인 항목 없음",
         "evidence_references": [],
     })
 
@@ -1166,9 +1241,17 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
         line = f"- {link.get('coverage_name') or link.get('coverage_id')}: {label}"
         reference = link.get("clause_ref")
         if link.get("clause_link_status") == "matched" and isinstance(reference, dict):
+            # Every appended reference needs its own `{{E}}` marker: the
+            # renderer refuses a section whose placeholder count differs from
+            # its reference count. This line appended the clause_ref without
+            # one, and stayed invisible until CASE_700 became the first run to
+            # reach it -- a matched clause_ref only arrives here when a
+            # `screening_report_judgement.json` is supplied AND the linker
+            # matched a clause, and until 2026-08-20 no coverage-level 약관
+            # ever matched, so the branch never ran with a real reference.
             line += (f" — {reference['document_id']} p.{reference.get('page')} "
                      f"{reference['quote']}")
-            link_references.append(reference)
+            line += _mark(reference, link_references)
             # A matched coverage may still carry a note, and until 2026-08-20
             # this was an `elif` that dropped it: a coverage spanning several
             # articles elects one into `clause_ref`, and the sentence naming
@@ -1184,7 +1267,8 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
             candidates = requirement.get("conflict_candidate_ids") or []
             if candidates:
                 line += f" (충돌 후보 {', '.join(candidates)})"
-            link_references.extend(requirement.get("evidence_references") or [])
+            for evidence in requirement.get("evidence_references") or []:
+                line += _mark(evidence, link_references)
         link_lines.append(line)
     sections.append({
         "heading": "8. 관련 약관과 요건 자료상태",

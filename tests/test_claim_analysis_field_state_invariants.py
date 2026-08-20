@@ -186,6 +186,12 @@ def test_unavailable_reason_enum_matches_spec() -> None:
     expected = {
         "not_mentioned", "source_document_missing", "unreadable",
         "outside_poc_scope", "conflict_unresolved",
+        # Added 2026-08-21. `not_mentioned` asserts that sources WERE read and
+        # said nothing, which a reviewer can act on by requesting documents.
+        # Two situations were being reported that way while nothing had been
+        # read at all: a conditional route whose trigger never fired, and an
+        # opportunistic field that schedules no read of its own.
+        "route_not_activated", "not_scheduled",
     }
     assert set(schema["$defs"]["field_result"]["properties"]["unavailable_reason"]["enum"]) == expected
     assert set(schema["$defs"]["observation"]["properties"]["unavailable_reason"]["enum"]) == expected
