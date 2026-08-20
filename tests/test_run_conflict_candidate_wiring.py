@@ -185,8 +185,10 @@ def test_the_requirement_is_marked_conflict_not_supported(published) -> None:
                 if link["coverage_id"] == "primary_diagnosis")
     requirement = link["requirements"][0]
     assert requirement["evidence_status"] == "conflict"
-    assert "asserted claim fact" not in requirement["reason"]
-    assert "conflicting" in requirement["reason"]
+    # Not the reason a supported requirement carries, and it names the
+    # disagreement. Both reasons are Korean: they print in the report.
+    assert "충족한다고" not in requirement["reason"]
+    assert "서로 다른 두 기재" in requirement["reason"]
 
 
 def test_the_claim_fact_and_the_requirement_agree(published) -> None:

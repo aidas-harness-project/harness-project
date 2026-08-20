@@ -98,7 +98,10 @@ def test_a_case_with_no_policy_document_records_not_found() -> None:
     """Unrunnable is not the same as uncovered -- the reason says which."""
     links = _build(manifest=_manifest(with_policy=False))
     assert links[0]["clause_link_status"] == "not_found"
-    assert "no processed insurance_policy" in links[0]["uncertainty_reason"]
+    # The reason prints in the report, so it is Korean; what it must say
+    # is that there is no policy layer to search -- not that the coverage
+    # was searched for and missed.
+    assert "약관 문서가 없어" in links[0]["uncertainty_reason"]
 
 
 def test_no_document_index_records_not_found() -> None:
@@ -117,7 +120,7 @@ def test_an_unverifiable_clause_is_demoted_not_published() -> None:
     links = _build(verify_quote=lambda *a: None)
     assert links[0]["clause_link_status"] == "candidate"
     assert "clause_ref" not in links[0]
-    assert "verified verbatim" in links[0]["uncertainty_reason"]
+    assert "그대로 확인하지 못해" in links[0]["uncertainty_reason"]
 
 
 def test_only_a_policy_typed_document_can_be_cited() -> None:

@@ -185,11 +185,10 @@ def build_policy_links(
             "evidence_status": "conflict" if conflicts else "supported",
             "conflict_candidate_ids": conflicts,
             "reason": (
-                "The claim fact this requirement rests on has two conflicting "
-                "readings; the clause is linked so a reviewer can judge both "
-                "against it."
+                "이 요건이 근거하는 사실에 서로 다른 두 기재가 있습니다. 검토자가 "
+                "양쪽을 조항에 대조할 수 있도록 조항을 연결했습니다."
                 if conflicts else
-                "An asserted claim fact states this condition."
+                "확인된 사실이 이 요건을 충족한다고 기재하고 있습니다."
             ),
             "evidence_references": [],
         }
@@ -200,8 +199,7 @@ def build_policy_links(
                 "coverage_name": term,
                 "clause_link_status": "not_found",
                 "uncertainty_reason": (
-                    "The case holds no processed insurance_policy document, so "
-                    "there is no clause layer to search."
+                    "처리된 약관 문서가 없어 검색할 조항 자료가 없습니다."
                 ),
                 "requirements": [requirement],
             })
@@ -229,9 +227,8 @@ def build_policy_links(
                 "coverage_name": term,
                 "clause_link_status": "candidate",
                 "uncertainty_reason": (
-                    "A clause was located in the document index, but its text "
-                    "could not be verified verbatim in the processed source, "
-                    "so it is offered as a candidate rather than a match."
+                    "색인에서 조항을 찾았으나 처리된 원문에서 문구를 그대로 "
+                    "확인하지 못해, 확정 조항이 아닌 후보로 제시합니다."
                 ),
                 "requirements": [requirement],
             })
@@ -245,7 +242,7 @@ def build_policy_links(
                 f"{len(candidates)} clauses match this coverage term; choosing "
                 "between them is a reviewer's judgement, not this stage's."
                 if candidates else
-                "No clause in the processed policy layer names this coverage."
+                "처리된 약관 자료에서 이 담보를 명시한 조항을 찾지 못했습니다."
             ),
             "requirements": [requirement],
         })

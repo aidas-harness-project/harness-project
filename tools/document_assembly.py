@@ -67,6 +67,7 @@ from dao import (
 from _validation import load_registry, validate_instance
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
+from medical_document_routing import document_label_ko
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
@@ -75,6 +76,68 @@ TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
 _CASE_OUTPUT_PATH_RE = re.compile(
     r"^outputs/(?P<case_id>CASE_[0-9]{3})/[^/]+$"
 )
+REFERENCE_HEADING = "---\n\n**출처**\n"
+
+
+def _document_labels(case_id):
+    """`document_id` -> the Korean name of that document, from the manifest.
+
+    Best-effort by design: a case whose manifest is absent or unreadable still
+    renders, with references falling back to the bare document id. Refusing to
+    write a report because a LABEL could not be looked up would trade a
+    complete document for a cosmetic one.
+    """
+    if not case_id:
+        return {}
+    path = ROOT / "outputs" / case_id / "document_manifest.json"
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    labels = {}
+    for document in manifest.get("documents") or []:
+        document_id = document.get("document_id")
+        if not document_id:
+            continue
+        classification = document.get("medical_classification") or {}
+        label = document_label_ko(
+            kind=classification.get("kind"),
+            document_type=document.get("document_type"),
+        )
+        if label:
+            labels[document_id] = label
+    return labels
+
+
+def render_reference_list(citations, case_id):
+    """The citation tags, resolved, inside the document that uses them.
+
+    `[E22]` in the body is a dead end on the page: the document, page and
+    quote behind it live in the .evidence.json sidecar, which is a machine
+    artifact and not something a 손해사정사 reading the report opens. Printing
+    the same citation list the sidecar is built from -- one source, so the two
+    cannot disagree -- makes every tag checkable where it is read.
+
+    Deliberately NOT a `## ` section: validate_template() checks the spec's
+    headings against templates/registry.json, every current template sets
+    allow_extra_sections=false, and an appendix rendered as a section would
+    fail all of them at once. It is a trailing block instead, added after that
+    check by the same function that assigns the tags.
+    """
+    if not citations:
+        return ""
+    labels = _document_labels(case_id)
+    lines = [REFERENCE_HEADING]
+    for citation in citations:
+        document_id = citation["document_id"]
+        label = labels.get(document_id)
+        name = "{} ({})".format(label, document_id) if label else document_id
+        page = citation.get("page")
+        where = "{} - p.{}".format(name, page) if page is not None else name
+        lines.append("- {} - {}".format(citation["tag"], where))
+    return "\n".join(lines) + "\n"
+
+
 _DRAFT_REPORT_PATH_RE = re.compile(
     r"^outputs/(?P<case_id>CASE_[0-9]{3})/draft_report_v(?P<version>[12])\.md$"
 )
@@ -303,6 +366,12 @@ def render(spec: dict) -> tuple[str, dict]:
             citations.append(citation)
         lines.append(content)
         lines.append("")
+
+    case_match = _CASE_OUTPUT_PATH_RE.fullmatch(output_path)
+    reference_list = render_reference_list(
+        citations, case_match.group("case_id") if case_match else None)
+    if reference_list:
+        lines.append(reference_list)
 
     doc_text = "\n".join(lines)
     sidecar = {

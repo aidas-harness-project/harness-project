@@ -47,10 +47,17 @@ def test_the_unproduced_contract_names_are_not_read_anywhere() -> None:
 
 
 def test_the_deferral_is_recorded_where_a_reader_would_look() -> None:
+    """The three facts this reason owes a reader, in the language they read.
+
+    It prints verbatim in the screening report's 주요 미확인 항목, so it is
+    Korean like the rest of that document: no stage produces this route, the
+    status is therefore 확인 불가 rather than 없음, and the gap is a recorded
+    deferral with somewhere to look it up.
+    """
     reason = driver.FILING_ROUTE_DEFERRED_REASON
-    assert "no producer" in reason
-    assert "unknown" in reason
-    assert "deferred" in reason
+    assert "없습니다" in reason              # no producer
+    assert "확인 불가" in reason             # unknown, not absent
+    assert "open-decisions.md" in reason     # deferred, and where it is filed
 
 
 # ------------------------------------------------------------ filing status --
@@ -144,7 +151,7 @@ def test_an_untriggered_route_says_the_trigger_never_fired() -> None:
         outcome = outcomes[field_id]
         assert outcome.status == "unavailable"
         assert outcome.reason != driver.FILING_ROUTE_DEFERRED_REASON
-        assert "never activated" in outcome.reason
+        assert outcome.reason == driver.FILING_ROUTE_NOT_TRIGGERED_REASON
 
 
 def test_the_route_opens_no_document_either_way() -> None:

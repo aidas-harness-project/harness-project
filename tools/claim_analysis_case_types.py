@@ -98,14 +98,14 @@ def _assess_boolean_trigger(
     """Status for a type whose trigger field is a boolean-ish assertion."""
     if field is None:
         return "uncertain", [], (
-            "The deciding fact was not extracted, so the type cannot be judged "
-            "from the available records."
+            "판정 기준이 되는 사실이 추출되지 않아, 확보된 자료만으로는 "
+            "유형을 판정할 수 없습니다."
         )
     status = field.get("resolution_status")
     if status == "conflict":
         return "uncertain", [], (
-            "Sources disagree on the deciding fact; the disagreement is "
-            "recorded as a conflict candidate rather than resolved here."
+            "판정 기준이 되는 사실에 대해 출처 간 기재가 다릅니다. 이 단계에서 "
+            "결론을 내리지 않고 충돌 후보로 기록했습니다."
         )
     if status == "explicitly_absent":
         # A source stated the fact is NOT present. That is affirmative negative
@@ -116,12 +116,12 @@ def _assess_boolean_trigger(
             return "not_applicable", _evidence_of(absent), negative_label
     if status in {"unavailable", "not_applicable"}:
         return "uncertain", [], (
-            "No source states the deciding fact. Absence of a statement is not "
-            "treated as a negative finding."
+            "판정 기준이 되는 사실을 기재한 출처가 없습니다. 기재가 없다는 점을 "
+            "부정 소견으로 보지는 않습니다."
         )
     observations = _selected_observations(field)
     if not observations:
-        return "uncertain", [], "No selected observation carries the deciding fact."
+        return "uncertain", [], "선택된 관측값에 판정 기준이 되는 사실이 없습니다."
     value = observations[0].get("value")
     evidence = _evidence_of(observations)
     if value is True:
@@ -131,8 +131,8 @@ def _assess_boolean_trigger(
     if isinstance(value, str) and value.strip():
         return "applicable", evidence, positive_label
     return "uncertain", evidence, (
-        "The extracted value does not state the deciding fact clearly enough "
-        "to judge the type."
+        "추출된 값만으로는 판정 기준이 되는 사실이 분명하지 않아 유형을 "
+        "판정할 수 없습니다."
     )
 
 
@@ -141,38 +141,35 @@ def _assess_work_context(field: Mapping[str, Any] | None) -> tuple[str, list[dic
         "unavailable", "not_applicable", "explicitly_absent", None
     }:
         return "uncertain", [], (
-            "The records do not state whether the injury occurred during work "
-            "activity. Silence is not treated as a negative finding."
+            "업무 수행 중 발생한 상해인지 자료에 기재되어 있지 않습니다. 기재가 "
+            "없다는 점을 부정 소견으로 보지는 않습니다."
         )
     if field.get("resolution_status") == "conflict":
         return "uncertain", [], (
-            "Sources disagree on the work context; the disagreement is recorded "
-            "as a conflict candidate rather than resolved here."
+            "업무 관련성에 대해 출처 간 기재가 다릅니다. 이 단계에서 결론을 "
+            "내리지 않고 충돌 후보로 기록했습니다."
         )
     observations = _selected_observations(field)
     if not observations:
-        return "uncertain", [], "No selected observation carries the work context."
+        return "uncertain", [], "선택된 관측값에 업무 관련 정황이 없습니다."
     value = observations[0].get("value")
     evidence = _evidence_of(observations)
     if isinstance(value, str):
         if value in WORK_SUPPORTING:
             return "applicable", evidence, (
-                "The records explicitly document the injury occurring during "
-                "work activity."
+                "업무 수행 중 상해가 발생했다고 자료에 명시되어 있습니다."
             )
         if value in WORK_UNCERTAIN:
             return "uncertain", evidence, (
-                "The context is a commute, business trip, or company event. "
-                "Work connection is not explicit, so the type stays uncertain "
-                "pending a human determination."
+                "출퇴근, 출장 또는 회사 행사 중 발생한 정황입니다. 업무 관련성이 "
+                "명시되어 있지 않아, 담당자 판단 전까지 불확실로 둡니다."
             )
         if value in WORK_NEGATIVE:
             return "not_applicable", evidence, (
-                "A source states the injury was not work-related."
+                "업무와 관련이 없다고 기재한 출처가 있습니다."
             )
     return "uncertain", evidence, (
-        "The recorded work context does not map to an explicit work-activity "
-        "finding."
+        "기재된 정황이 업무 수행 중이라는 판단으로 바로 이어지지 않습니다."
     )
 
 
@@ -206,23 +203,21 @@ def assess_case_types(
             status, evidence, reason = _assess_boolean_trigger(
                 fields.get("vehicle_involvement"),
                 positive_label=(
-                    "The injury event explicitly involves a vehicle or traffic "
-                    "accident."
+                    "차량 또는 교통사고가 사고 경위에 명시되어 있습니다."
                 ),
                 negative_label=(
-                    "A source states no vehicle was involved in the injury event."
+                    "사고 경위에 차량이 관여하지 않았다고 기재한 출처가 있습니다."
                 ),
             )
         elif case_type == "liability":
             status, evidence, reason = _assess_boolean_trigger(
                 fields.get("facility_defect_or_third_party_responsibility"),
                 positive_label=(
-                    "The injury narrative identifies a facility defect or a "
-                    "responsible act or omission by another party."
+                    "사고 경위에 시설 하자 또는 제3자의 작위·부작위 책임이 "
+                    "특정되어 있습니다."
                 ),
                 negative_label=(
-                    "A source states no third-party or facility responsibility "
-                    "applies."
+                    "제3자 또는 시설 책임이 없다고 기재한 출처가 있습니다."
                 ),
             )
         else:
@@ -234,12 +229,11 @@ def assess_case_types(
             status, evidence, reason = _assess_boolean_trigger(
                 fields.get("injury_event_present"),
                 positive_label=(
-                    "A documented external injury event makes this a "
-                    "personal-insurance review target. Contract existence and "
-                    "filing status are not determined at this stage."
+                    "외상 사고가 자료에 기재되어 있어 개인보험 검토 대상입니다. "
+                    "계약 존재 여부와 접수 상태는 이 단계에서 판정하지 않습니다."
                 ),
                 negative_label=(
-                    "A source states no external injury event occurred."
+                    "외상 사고가 없었다고 기재한 출처가 있습니다."
                 ),
             )
 
@@ -253,14 +247,14 @@ def assess_case_types(
             # reference for that status.
             status = "uncertain"
             reason = (
-                "The deciding fact could not be bound to an extracted field."
+                "판정 기준이 되는 사실을 추출된 항목에 연결하지 못했습니다."
             )
             evidence = []
         if status == "applicable" and not evidence:
             status = "uncertain"
             reason = (
-                "The deciding fact carries no exact source evidence, so the "
-                "type is not asserted."
+                "판정 기준이 되는 사실에 정확한 출처 근거가 없어 유형을 "
+                "단정하지 않습니다."
             )
 
         assessments.append({

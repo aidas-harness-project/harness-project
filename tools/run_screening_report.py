@@ -51,6 +51,8 @@ STATUS_LABEL = {
     "uncertain": "불확실",
     "not_applicable": "비해당",
 }
+from medical_document_routing import KIND_LABEL_KO
+
 CASE_TYPE_LABEL = {
     "personal_insurance": "개인보험",
     "traffic_accident": "교통사고",
@@ -64,25 +66,7 @@ CHECKLIST_LABEL = {
     "ambiguous": "미확인(분류 불가)",
     "not_applicable": "해당 없음",
 }
-DOCUMENT_KIND_LABEL = {
-    "diagnosis_certificate": "진단서",
-    "initial_visit_record": "초진기록지",
-    "outpatient_record": "외래기록",
-    "progress_record": "경과기록지",
-    "final_visit_record": "최종진료기록",
-    "surgery_procedure_record": "수술기록지",
-    "imaging_interpretation": "영상판독지",
-    "major_test_result": "주요검사결과지",
-    "admission_discharge_summary": "입퇴원요약",
-    "emergency_record": "응급실기록",
-    "disability_assessment": "후유장해진단서/신체감정서",
-    "prescription_treatment_history": "처방·치료내역",
-    "nursing_routine_record": "간호기록지",
-    "medical_expense_receipt": "진료비 영수증",
-    "medical_expense_itemization": "진료비 세부내역서",
-    "pharmacy_payment_confirmation": "약제비 납입확인서",
-    "other_medical": "기타 의무기록",
-}
+DOCUMENT_KIND_LABEL = KIND_LABEL_KO
 
 # The forms whose prior existence a screening reader asks about first.
 DISABILITY_DOCUMENT_KIND = "disability_assessment"
@@ -298,6 +282,16 @@ def existing_disability_documents(
     }
 
 
+def _label_ko(row, key):
+    """The reader-facing name of a config row, Korean first.
+
+    `label` is the English identifier the code and changelog use; `label_ko`
+    is what the report prints. Falling back through both means an untranslated
+    config revision still renders a name rather than a bare field id.
+    """
+    return row.get("label_ko") or row.get("label") or row.get(key)
+
+
 def unconfirmed_section(
     facts: Mapping[str, Mapping[str, Any]],
     config: Mapping[str, Any],
@@ -320,7 +314,7 @@ def unconfirmed_section(
             continue
         rows.append({
             "field_id": field_id,
-            "label": searched[field_id].get("label", field_id),
+            "label": _label_ko(searched[field_id], "field_id"),
             "reason": field.get(
                 "resolution_reason", "자료에서 확인되지 않음"),
         })
@@ -615,11 +609,11 @@ def established_facts(
     field, so this introduces no second vocabulary to keep in sync.
     """
     domain_labels = {
-        domain["code"]: domain.get("label") or domain["code"]
+        domain["code"]: _label_ko(domain, "code")
         for domain in config.get("domains") or []
     }
     field_labels = {
-        row["field_id"]: row.get("label") or row["field_id"]
+        row["field_id"]: _label_ko(row, "field_id")
         for row in config.get("fields") or []
     }
     order = list(domain_labels)

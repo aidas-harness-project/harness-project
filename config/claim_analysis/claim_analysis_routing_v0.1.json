@@ -187,42 +187,50 @@
     {
       "code": "event_timeline",
       "label": "Event and timeline",
-      "effective_first_required_grade": "B"
+      "effective_first_required_grade": "B",
+      "label_ko": "사고 경위와 시점"
     },
     {
       "code": "diagnosis",
       "label": "Diagnosis",
-      "effective_first_required_grade": "A"
+      "effective_first_required_grade": "A",
+      "label_ko": "진단"
     },
     {
       "code": "diagnosis_basis",
       "label": "Diagnostic basis",
-      "effective_first_required_grade": "A"
+      "effective_first_required_grade": "A",
+      "label_ko": "진단 근거"
     },
     {
       "code": "treatment",
       "label": "Treatment",
-      "effective_first_required_grade": "A"
+      "effective_first_required_grade": "A",
+      "label_ko": "치료"
     },
     {
       "code": "clinical_course_outcome",
       "label": "Clinical course and outcome",
-      "effective_first_required_grade": "A"
+      "effective_first_required_grade": "A",
+      "label_ko": "경과와 결과"
     },
     {
       "code": "prior_history_influences",
       "label": "Prior history and influencing factors",
-      "effective_first_required_grade": "A"
+      "effective_first_required_grade": "A",
+      "label_ko": "기왕력과 영향 요인"
     },
     {
       "code": "complications_new_problems",
       "label": "Complications and new problems",
-      "effective_first_required_grade": "B"
+      "effective_first_required_grade": "B",
+      "label_ko": "합병증과 새로운 문제"
     },
     {
       "code": "disability",
       "label": "Disability information",
-      "effective_first_required_grade": "A"
+      "effective_first_required_grade": "A",
+      "label_ko": "후유장해"
     }
   ],
   "fields": [
@@ -236,7 +244,8 @@
       "value_shape": "date",
       "cardinality": "single",
       "source_route_id": "accident_context",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "사고일"
     },
     {
       "field_id": "accident_mechanism",
@@ -248,7 +257,8 @@
       "value_shape": "text",
       "cardinality": "single",
       "source_route_id": "accident_context",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "사고 경위"
     },
     {
       "field_id": "injury_event_present",
@@ -260,7 +270,8 @@
       "value_shape": "boolean",
       "cardinality": "single",
       "source_route_id": "accident_context",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "외상 사고 기재 여부"
     },
     {
       "field_id": "work_activity_context",
@@ -273,7 +284,8 @@
       "cardinality": "single",
       "source_route_id": "accident_context",
       "critical_conflict_field": true,
-      "notes": "Explicit work activity supports industrial accident; commute, business trip, and company event remain uncertain."
+      "notes": "Explicit work activity supports industrial accident; commute, business trip, and company event remain uncertain.",
+      "label_ko": "업무 수행 중 여부"
     },
     {
       "field_id": "vehicle_involvement",
@@ -285,7 +297,8 @@
       "value_shape": "boolean",
       "cardinality": "single",
       "source_route_id": "accident_context",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "차량 관련 여부"
     },
     {
       "field_id": "facility_defect_or_third_party_responsibility",
@@ -297,7 +310,8 @@
       "value_shape": "text",
       "cardinality": "single",
       "source_route_id": "accident_context",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "시설 하자 또는 제3자 책임"
     },
     {
       "field_id": "injury_site_and_laterality",
@@ -310,7 +324,8 @@
       "cardinality": "multi",
       "source_route_id": "accident_context",
       "critical_conflict_field": true,
-      "notes": "The site recorded on the accident axis. Compared against diagnosis_site/diagnosis_laterality rather than merged with them: a left/right disagreement between the accident account and the operative record is exactly the conflict this field exists to expose."
+      "notes": "The site recorded on the accident axis. Compared against diagnosis_site/diagnosis_laterality rather than merged with them: a left/right disagreement between the accident account and the operative record is exactly the conflict this field exists to expose.",
+      "label_ko": "사고 기재상 상해 부위와 좌우"
     },
     {
       "field_id": "solitary_accident",
@@ -323,7 +338,8 @@
       "cardinality": "single",
       "source_route_id": "accident_context",
       "critical_conflict_field": true,
-      "notes": "Stated solitary circumstance only. Absence of a mentioned third party is silence, not evidence of a solitary accident."
+      "notes": "Stated solitary circumstance only. Absence of a mentioned third party is silence, not evidence of a solitary accident.",
+      "label_ko": "상대방 없는 단독사고 여부"
     },
     {
       "field_id": "industrial_accident_filing_basis",
@@ -335,7 +351,8 @@
       "value_shape": "text",
       "cardinality": "single",
       "source_route_id": "industrial_accident_filing",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "산재 접수 근거"
     },
     {
       "field_id": "industrial_accident_approval_status",
@@ -347,7 +364,8 @@
       "value_shape": "enum",
       "cardinality": "single",
       "source_route_id": "industrial_accident_filing",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "산재 승인 상태"
     },
     {
       "field_id": "industrial_accident_approved_diagnosis",
@@ -360,7 +378,8 @@
       "cardinality": "multi",
       "source_route_id": "industrial_accident_filing",
       "critical_conflict_field": true,
-      "notes": "The approved condition can differ from the treating diagnosis; that difference is a real conflict, not a transcription variance."
+      "notes": "The approved condition can differ from the treating diagnosis; that difference is a real conflict, not a transcription variance.",
+      "label_ko": "산재 승인 상병"
     },
     {
       "field_id": "first_visit_date",
@@ -372,7 +391,8 @@
       "value_shape": "date",
       "cardinality": "single",
       "source_route_id": "accident_context",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "최초 내원일"
     },
     {
       "field_id": "primary_diagnosis",
@@ -384,7 +404,8 @@
       "value_shape": "text",
       "cardinality": "multi",
       "source_route_id": "diagnosis",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "주요 진단명"
     },
     {
       "field_id": "diagnosis_date",
@@ -396,7 +417,8 @@
       "value_shape": "date",
       "cardinality": "multi",
       "source_route_id": "diagnosis",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "진단일"
     },
     {
       "field_id": "diagnosis_site",
@@ -408,7 +430,8 @@
       "value_shape": "text",
       "cardinality": "multi",
       "source_route_id": "diagnosis",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "진단 부위"
     },
     {
       "field_id": "diagnosis_laterality",
@@ -420,7 +443,8 @@
       "value_shape": "enum",
       "cardinality": "multi",
       "source_route_id": "diagnosis",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "진단 좌우"
     },
     {
       "field_id": "diagnosis_department",
@@ -432,7 +456,8 @@
       "value_shape": "text",
       "cardinality": "multi",
       "source_route_id": "diagnosis",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "진료과"
     },
     {
       "field_id": "diagnosis_body_system",
@@ -444,7 +469,8 @@
       "value_shape": "enum",
       "cardinality": "multi",
       "source_route_id": "diagnosis",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "진단 계통"
     },
     {
       "field_id": "diagnosis_code",
@@ -456,7 +482,8 @@
       "value_shape": "code",
       "cardinality": "multi",
       "source_route_id": "diagnosis",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "진단코드"
     },
     {
       "field_id": "diagnostic_certainty",
@@ -468,7 +495,8 @@
       "value_shape": "enum",
       "cardinality": "multi",
       "source_route_id": "diagnosis",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "확진 또는 임상적 추정 구분"
     },
     {
       "field_id": "secondary_diagnosis",
@@ -480,7 +508,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "diagnosis",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "부상병"
     },
     {
       "field_id": "diagnosis_certificate_anchor",
@@ -492,7 +521,8 @@
       "value_shape": "text",
       "cardinality": "multi",
       "source_route_id": "diagnosis",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "진단서상 진단명"
     },
     {
       "field_id": "direct_diagnostic_evidence",
@@ -504,7 +534,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "diagnostic_evidence",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "진단을 뒷받침하는 검사 소견"
     },
     {
       "field_id": "major_symptoms_and_history",
@@ -516,7 +547,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "diagnostic_evidence",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "주요 증상과 병력"
     },
     {
       "field_id": "major_treatment_category",
@@ -528,7 +560,8 @@
       "value_shape": "enum",
       "cardinality": "multi",
       "source_route_id": "treatment",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "주요 치료 유형"
     },
     {
       "field_id": "surgery_or_major_procedure_status",
@@ -540,7 +573,8 @@
       "value_shape": "boolean",
       "cardinality": "single",
       "source_route_id": "treatment",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "수술·주요 처치 시행 여부"
     },
     {
       "field_id": "surgery_or_procedure_name",
@@ -552,7 +586,8 @@
       "value_shape": "text",
       "cardinality": "multi",
       "source_route_id": "treatment",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "수술·처치명"
     },
     {
       "field_id": "surgery_or_procedure_date",
@@ -564,7 +599,8 @@
       "value_shape": "date",
       "cardinality": "multi",
       "source_route_id": "treatment",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "수술·처치일"
     },
     {
       "field_id": "treatment_period",
@@ -576,7 +612,8 @@
       "value_shape": "period",
       "cardinality": "multi",
       "source_route_id": "treatment",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "주요 치료기간"
     },
     {
       "field_id": "admission_status",
@@ -588,7 +625,8 @@
       "value_shape": "boolean",
       "cardinality": "single",
       "source_route_id": "treatment",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "입원 여부"
     },
     {
       "field_id": "admission_period",
@@ -600,7 +638,8 @@
       "value_shape": "period",
       "cardinality": "multi",
       "source_route_id": "treatment",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "입원기간"
     },
     {
       "field_id": "repeated_treatment",
@@ -612,7 +651,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "treatment",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "반복 치료 유형과 횟수"
     },
     {
       "field_id": "major_treatment_change",
@@ -624,7 +664,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "treatment",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "재수술 등 주요 치료 변경"
     },
     {
       "field_id": "final_clinical_course",
@@ -637,7 +678,8 @@
       "cardinality": "single",
       "source_route_id": "clinical_course",
       "critical_conflict_field": false,
-      "notes": "The latest record is not treated as final unless the source explicitly states finality or treatment conclusion."
+      "notes": "The latest record is not treated as final unless the source explicitly states finality or treatment conclusion.",
+      "label_ko": "최종 경과 기재"
     },
     {
       "field_id": "current_treatment_status",
@@ -649,7 +691,8 @@
       "value_shape": "enum",
       "cardinality": "single",
       "source_route_id": "clinical_course",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "현재 치료 상태"
     },
     {
       "field_id": "major_symptom_change",
@@ -661,7 +704,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "clinical_course",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "주요 증상 변화"
     },
     {
       "field_id": "objective_change",
@@ -673,7 +717,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "clinical_course",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "객관적 검사 소견 변화"
     },
     {
       "field_id": "additional_treatment_or_reoperation",
@@ -685,7 +730,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "clinical_course",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "추가 치료 또는 재수술"
     },
     {
       "field_id": "delayed_recovery",
@@ -697,7 +743,8 @@
       "value_shape": "boolean",
       "cardinality": "single",
       "source_route_id": "clinical_course",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "회복 지연 기재"
     },
     {
       "field_id": "patient_reported_prior_same_site_history",
@@ -710,7 +757,8 @@
       "cardinality": "single",
       "source_route_id": "prior_history",
       "critical_conflict_field": false,
-      "notes": "If no intake response exists, report unknown; never infer no history from silence."
+      "notes": "If no intake response exists, report unknown; never infer no history from silence.",
+      "label_ko": "환자 진술 동일부위·유사질환 기왕력"
     },
     {
       "field_id": "documented_prior_same_site_history",
@@ -723,7 +771,8 @@
       "cardinality": "multi",
       "source_route_id": "prior_history",
       "critical_conflict_field": false,
-      "notes": "Extract only from documents already opened for another field; do not launch a C-grade search."
+      "notes": "Extract only from documents already opened for another field; do not launch a C-grade search.",
+      "label_ko": "기록상 동일부위 기왕력"
     },
     {
       "field_id": "major_complication_or_unexpected_long_treatment",
@@ -735,7 +784,8 @@
       "value_shape": "boolean",
       "cardinality": "single",
       "source_route_id": "complication",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "주요 합병증 또는 예상 외 장기치료"
     },
     {
       "field_id": "complication_type",
@@ -747,7 +797,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "complication",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "합병증 유형"
     },
     {
       "field_id": "disability_related_diagnosis",
@@ -759,7 +810,8 @@
       "value_shape": "text",
       "cardinality": "multi",
       "source_route_id": "disability",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "후유장해 관련 상병"
     },
     {
       "field_id": "disability_type",
@@ -771,7 +823,8 @@
       "value_shape": "enum",
       "cardinality": "multi",
       "source_route_id": "disability",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "기재된 장해 유형"
     },
     {
       "field_id": "amputation_level",
@@ -783,7 +836,8 @@
       "value_shape": "text",
       "cardinality": "multi",
       "source_route_id": "disability",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "절단 부위 기재"
     },
     {
       "field_id": "joint_range_of_motion",
@@ -795,7 +849,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "disability",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "관절 운동범위"
     },
     {
       "field_id": "neurologic_or_objective_function_test",
@@ -807,7 +862,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "disability",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "신경학적·객관적 기능검사"
     },
     {
       "field_id": "existing_disability_assessment",
@@ -819,7 +875,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "disability",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "기존 후유장해 진단 자료"
     },
     {
       "field_id": "documented_disability_rate",
@@ -832,7 +889,8 @@
       "cardinality": "multi",
       "source_route_id": "disability",
       "critical_conflict_field": true,
-      "notes": "Extraction only; the pipeline does not calculate or endorse a final disability rate."
+      "notes": "Extraction only; the pipeline does not calculate or endorse a final disability rate.",
+      "label_ko": "기존 평가상 장해율"
     },
     {
       "field_id": "documented_disability_duration",
@@ -844,7 +902,8 @@
       "value_shape": "text",
       "cardinality": "multi",
       "source_route_id": "disability",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "영구·한시 구분과 기재 기간"
     },
     {
       "field_id": "documented_disability_standard",
@@ -856,7 +915,8 @@
       "value_shape": "text",
       "cardinality": "multi",
       "source_route_id": "disability",
-      "critical_conflict_field": true
+      "critical_conflict_field": true,
+      "label_ko": "평가 기준(AMA·맥브라이드 등)"
     },
     {
       "field_id": "disability_treatment_duration",
@@ -868,7 +928,8 @@
       "value_shape": "period",
       "cardinality": "multi",
       "source_route_id": "disability",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "장해 관련 치료기간"
     },
     {
       "field_id": "documented_function_change",
@@ -880,7 +941,8 @@
       "value_shape": "text_list",
       "cardinality": "multi",
       "source_route_id": "disability",
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "기재된 증상·기능 변화"
     },
     {
       "field_id": "symptom_fixation_judgment",
@@ -892,7 +954,8 @@
       "value_shape": "text",
       "cardinality": "single",
       "source_route_id": null,
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "증상 고정 판단"
     },
     {
       "field_id": "final_disability_rate",
@@ -904,7 +967,8 @@
       "value_shape": "number",
       "cardinality": "single",
       "source_route_id": null,
-      "critical_conflict_field": false
+      "critical_conflict_field": false,
+      "label_ko": "최종 장해율 산정"
     }
   ],
   "source_routes": [

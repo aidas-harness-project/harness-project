@@ -206,7 +206,7 @@ class FieldExtractionOutcome:
         self.observations: list[dict] = []
         self.selected_ids: list[str] = []
         self.stop_reason = "sources_exhausted"
-        self.reason = "no source in the routed priority order stated this field"
+        self.reason = "라우팅 우선순위상의 어떤 출처도 이 항목을 기재하지 않았습니다"
         self.unavailable_reason = "not_mentioned"
         self.documents_read = 0
         self.comparisons = 0
@@ -309,9 +309,7 @@ def resolve_field(
                     outcome.stop_reason = "conflict_found"
                     outcome.selected_ids = []
                     outcome.reason = (
-                        "two independent priority sources state different "
-                        "values for this field; both readings are preserved "
-                        "for consistency_check to verify"
+                        "두 개의 독립된 우선순위 출처가 이 항목에 서로 다른 값을 기재하고 있습니다. 두 기재를 모두 보존해 consistency_check에서 확인합니다"
                     )
                     return outcome
                 break
@@ -322,7 +320,7 @@ def resolve_field(
         outcome.status = "asserted"
         outcome.stop_reason = "trusted_value_found"
         outcome.selected_ids = [trusted["observation_id"]]
-        outcome.reason = "a trusted value was found in the highest available priority source"
+        outcome.reason = "확보 가능한 최상위 우선순위 출처에서 신뢰할 수 있는 값을 확인했습니다"
     return outcome
 
 
@@ -476,9 +474,7 @@ def resolve_from_cache(
                     outcome.stop_reason = "conflict_found"
                     outcome.selected_ids = []
                     outcome.reason = (
-                        "two independent priority sources state different "
-                        "values for this field; both readings are preserved "
-                        "for consistency_check to verify"
+                        "두 개의 독립된 우선순위 출처가 이 항목에 서로 다른 값을 기재하고 있습니다. 두 기재를 모두 보존해 consistency_check에서 확인합니다"
                     )
                     return outcome
                 break
@@ -489,7 +485,7 @@ def resolve_from_cache(
         outcome.status = "asserted"
         outcome.stop_reason = "trusted_value_found"
         outcome.selected_ids = [trusted["observation_id"]]
-        outcome.reason = "a trusted value was found in the highest available priority source"
+        outcome.reason = "확보 가능한 최상위 우선순위 출처에서 신뢰할 수 있는 값을 확인했습니다"
     return outcome
 
 
@@ -515,8 +511,7 @@ def resolve_opportunistic(
     )
     outcome.unavailable_reason = "not_mentioned"
     outcome.reason = (
-        "no already-open document on this field's route stated it, and an "
-        "opportunistic field never opens one of its own"
+        "이 항목의 경로에서 이미 열려 있던 문서에 기재가 없었고, 기회적 항목은 자체적으로 새 문서를 열지 않습니다"
     )
     for step in plan.steps:
         for document_id, kind in zip(step.document_ids, step.document_kinds):
@@ -545,7 +540,7 @@ def resolve_opportunistic(
             outcome.status = "asserted"
             outcome.stop_reason = "trusted_value_found"
             outcome.selected_ids = [observation["observation_id"]]
-            outcome.reason = "picked up from a document already open on this field's route"
+            outcome.reason = "이 항목의 경로에서 이미 열려 있던 문서에서 함께 확인했습니다"
             return outcome
     return outcome
 
@@ -627,7 +622,7 @@ def _finish(progress: FieldProgress) -> None:
         outcome.stop_reason = "trusted_value_found"
         outcome.selected_ids = [progress.trusted["observation_id"]]
         outcome.reason = (
-            "a trusted value was found in the highest available priority source")
+            "확보 가능한 최상위 우선순위 출처에서 신뢰할 수 있는 값을 확인했습니다")
     elif outcome.observations and outcome.status == "unavailable":
         # Only explicitly-absent readings survived: a source stated the thing
         # is NOT present. That is a finding, not an empty search.
@@ -638,7 +633,7 @@ def _finish(progress: FieldProgress) -> None:
             outcome.stop_reason = "explicitly_absent"
             outcome.selected_ids = []
             outcome.reason = (
-                "a routed source states this field is not present")
+                "라우팅된 출처가 이 항목이 없다고 기재하고 있습니다")
     progress.done = True
 
 
@@ -679,7 +674,7 @@ def _consume(
         outcome.observations.append({
             "observation_id": next(observation_ids),
             "value_state": "explicitly_absent",
-            "reason": found.get("reason") or "the source states this is not present",
+            "reason": found.get("reason") or "해당 출처가 이 항목이 없다고 기재하고 있습니다",
             "source_document_kind": kind,
             "source_priority_rank": progress.current_rank(),
             "extraction_wave": progress.plan.wave,
@@ -722,8 +717,7 @@ def _consume(
         outcome.stop_reason = "conflict_found"
         outcome.selected_ids = []
         outcome.reason = (
-            "two independent priority sources state different values for this "
-            "field; both readings are preserved for consistency_check to verify")
+            "두 개의 독립된 우선순위 출처가 이 항목에 서로 다른 값을 기재하고 있습니다. 두 기재를 모두 보존해 consistency_check에서 확인합니다")
         progress.done = True
         return
     if outcome.comparisons >= progress.budget:
@@ -884,10 +878,7 @@ def extract_all(
                 outcome.status = "unavailable"
                 outcome.stop_reason = "sources_exhausted"
                 outcome.unavailable_reason = "not_mentioned"
-                outcome.reason = (
-                    "no industrial-accident filing or applicable verdict was "
-                    "established, so the filing route never activated"
-                )
+                outcome.reason = FILING_ROUTE_NOT_TRIGGERED_REASON
                 outcomes.append(outcome)
                 continue
             found = non_medical_reader(field_row) if non_medical_reader else None
@@ -919,7 +910,7 @@ def extract_all(
             outcome.stop_reason = "trusted_value_found"
             outcome.observations = [observation]
             outcome.selected_ids = [observation["observation_id"]]
-            outcome.reason = "stated by an industrial-accident filing source"
+            outcome.reason = "산재 접수 관련 출처에 기재되어 있습니다"
             outcomes.append(outcome)
 
     return outcomes, cache
@@ -1314,9 +1305,15 @@ def _policy_page_text(
 # test. See `open-decisions.md`.
 
 FILING_ROUTE_DEFERRED_REASON = (
-    "the industrial-accident filing route has no producer in this pipeline: "
-    "no stage records filing, approval, or approved diagnosis, so the status "
-    "is unknown rather than absent (deferred, see open-decisions.md)"
+    "산재 접수 경로를 생성하는 단계가 이 파이프라인에 없습니다. 접수·승인·승인상병을 "
+    "기록하는 단계가 없으므로 '없음'이 아니라 '확인 불가'로 둡니다 "
+    "(보류 항목, open-decisions.md 참조)"
+)
+
+# The other half of the pair: the route never triggered at all. Named, not
+# inline, so a test can ask WHICH reason this is without matching prose.
+FILING_ROUTE_NOT_TRIGGERED_REASON = (
+    "산재 접수 사실이나 해당 판정이 확인되지 않아 산재 경로가 활성화되지 않았습니다"
 )
 
 

@@ -71,6 +71,64 @@ _TITLE_KIND_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+# The Korean name of each medical kind, and of each broad document type for
+# the documents that have no medical kind (a policy, an insurer letter). These
+# are what a reader sees; the codes above are what the pipeline matches on.
+# They live here rather than in a report module because more than one renderer
+# needs them -- run_screening_report.py labels its checklist from this map and
+# document_assembly.py labels its citation references from it, and two copies
+# would drift the moment a kind is added.
+KIND_LABEL_KO: dict[str, str] = {
+    "diagnosis_certificate": "진단서",
+    "initial_visit_record": "초진기록지",
+    "outpatient_record": "외래기록",
+    "progress_record": "경과기록지",
+    "final_visit_record": "최종진료기록",
+    "surgery_procedure_record": "수술기록지",
+    "imaging_interpretation": "영상판독지",
+    "major_test_result": "주요검사결과지",
+    "admission_discharge_summary": "입퇴원요약",
+    "emergency_record": "응급실기록",
+    "disability_assessment": "후유장해진단서/신체감정서",
+    "prescription_treatment_history": "처방·치료내역",
+    "nursing_routine_record": "간호기록지",
+    "medical_expense_receipt": "진료비 영수증",
+    "medical_expense_itemization": "진료비 세부내역서",
+    "pharmacy_payment_confirmation": "약제비 납입확인서",
+    "other_medical": "기타 의무기록",
+}
+
+DOCUMENT_TYPE_LABEL_KO: dict[str, str] = {
+    "insurance_certificate": "보험증권",
+    "insurance_policy": "약관",
+    "application_form": "청약서",
+    "diagnosis_certificate": "진단서",
+    "medical_record": "의무기록",
+    "imaging_report": "영상판독지",
+    "receipt": "영수증",
+    "insurer_response": "보험사 회신",
+    "other": "기타",
+}
+
+
+def document_label_ko(
+    kind: str | None = None, document_type: str | None = None
+) -> str | None:
+    """The reader-facing name of a document: its medical kind first.
+
+    `medical_classification.kind` is the more specific of the two -- a
+    `medical_record` that is really a 수술기록지 should read as one -- so it
+    wins where both exist. Returns None rather than a placeholder when neither
+    resolves, leaving the caller to decide what to show instead of putting an
+    invented type name in front of a professional.
+    """
+    if kind and kind in KIND_LABEL_KO:
+        return KIND_LABEL_KO[kind]
+    if document_type and document_type in DOCUMENT_TYPE_LABEL_KO:
+        return DOCUMENT_TYPE_LABEL_KO[document_type]
+    return None
+
+
 def roles_for_kind(kind: str, config: dict[str, Any]) -> list[str]:
     for row in config.get("document_kinds", []):
         if row.get("kind") == kind:
