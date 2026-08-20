@@ -302,7 +302,8 @@ For example, when the insurer denies without naming any figure:
 requested_documents is an array of document-type codes (use [] when none were requested). Each
 entry is exactly one of these literal codes, not a Korean document name:
   insurance_certificate, insurance_policy, application_form, diagnosis_certificate,
-  medical_record, imaging_report, receipt, insurer_response, other
+  medical_record, imaging_report, receipt, insurer_response, legal_opinion,
+  legal_reference, other
 
 Each accepted_coverages entry needs accepted_coverage_id, coverage_name, payment_status,
 accepted_amount (a number, or null when the insurer accepts without naming a figure),

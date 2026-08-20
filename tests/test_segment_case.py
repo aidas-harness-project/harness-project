@@ -168,15 +168,66 @@ def test_dedupes_and_sorts_page_lists():
     assert out["needs_full_page"] == [3, 7]
 
 
-def test_document_type_enum_matches_the_schema():
-    """The module keeps a literal copy to stay I/O-free; this catches drift."""
+def _schema_document_types() -> set:
     from _validation import load_registry
 
     schemas, _ = load_registry()
-    schema_enum = set(
+    return set(
         schemas["common_component_output.schema.json"]["$defs"]["document_type"]["enum"]
     )
-    assert set(sc.DOCUMENT_TYPES) == schema_enum
+
+
+def test_document_type_enum_matches_the_schema():
+    """The module keeps a literal copy to stay I/O-free; this catches drift."""
+    assert set(sc.DOCUMENT_TYPES) == _schema_document_types()
+
+
+def test_every_document_type_copy_matches_the_schema():
+    """All THREE literal copies, not just this module's.
+
+    Added 2026-08-21 with `legal_opinion`/`legal_reference`. Only
+    `segment_case.DOCUMENT_TYPES` was drift-tested, while two other copies
+    carried the same enum untested:
+
+    * `run_checkpoint1.DOCUMENT_TYPES` is rendered INTO the classifier prompt,
+      so a code missing there is a bucket the model cannot choose however
+      plainly the page names it -- CASE_053's 법률질의회신서 was classified
+      `other` at confidence 0.95 for exactly that reason, and dropped out of
+      claim analysis entirely.
+    * `medical_document_routing.DOCUMENT_TYPE_LABEL_KO` is what a Korean
+      reader sees; a missing key renders no label at all.
+    """
+    import run_checkpoint1
+    import medical_document_routing
+
+    schema_enum = _schema_document_types()
+    assert set(run_checkpoint1.DOCUMENT_TYPES) == schema_enum, (
+        "run_checkpoint1.DOCUMENT_TYPES drifted from the schema; it is shown "
+        "to the classifier, so a missing code is an unchoosable bucket")
+    assert set(medical_document_routing.DOCUMENT_TYPE_LABEL_KO) == schema_enum, (
+        "DOCUMENT_TYPE_LABEL_KO drifted; a missing key renders no Korean label")
+    assert all(
+        isinstance(label, str) and label.strip()
+        for label in medical_document_routing.DOCUMENT_TYPE_LABEL_KO.values()
+    ), "every document type needs a non-empty Korean label"
+
+
+def test_the_classifier_prompt_names_every_type_it_offers():
+    """A code in the list but absent from the guidance is a silent bucket.
+
+    The prompt shows the model `DOCUMENT_TYPES` and then explains only some of
+    them. That is fine for self-evident codes, but the three non-medical ones a
+    liability case turns on are mutually confusable -- an insurer letter that
+    quotes a legal opinion, the opinion itself, and an attached standards table
+    -- so each must be named in the guidance text, not merely listed.
+    """
+    import run_checkpoint1
+
+    prompt = run_checkpoint1.CLASSIFY_PROMPT_TEMPLATE
+    for code in ("insurer_response", "legal_opinion", "legal_reference"):
+        assert f"- {code} (" in prompt, (
+            f"{code} is offered to the classifier but never explained; the "
+            "three are confusable and need an explicit distinguishing rule")
 
 
 def test_type_guess_outside_the_enum_is_dropped_but_the_wording_survives():

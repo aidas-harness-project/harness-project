@@ -139,7 +139,24 @@ study authoring rules/schema, and `open-decisions.md` #2.
 
 `insurance_certificate`, `insurance_policy`, `application_form`,
 `diagnosis_certificate`, `medical_record`, `imaging_report`, `receipt`,
-`insurer_response`, `other`.
+`insurer_response`, `legal_opinion`, `legal_reference`, `other`.
+
+`insurer_response` / `legal_opinion` / `legal_reference` are the non-medical
+codes a liability case turns on, and are confusable in the same way the three
+policy forms are — distinguish by **who wrote it and what it decides**. The
+insurer's covering letter (협조요청, 부지급 통보) is `insurer_response` even when
+it summarizes an opinion; the reasoned answer itself — 법률질의회신서, citing
+민법 제750조/제758조 and 대법원 판례, ending in "…판단됩니다" — is
+`legal_opinion`, **whichever side commissioned it**, since both parties'
+opinions are evidence and the 수신/발신 block is usually masked; published
+material a party merely attached (서울중앙지법 위자료 산정기준표, a
+노동능력상실률/맥브라이드 표) is `legal_reference`, which disability-rate and
+위자료 calculation cite.
+
+Added 2026-08-21. Before that the classifier read these titles correctly at
+0.90–0.95 confidence and had no bucket but `other`, so CASE_053's two opposing
+법률의견서 (24 pages, one concluding 배상책임 있음 and one 없음) never reached
+claim analysis at all.
 
 `insurance_certificate` (증권서류) / `insurance_policy` (보험약관) /
 `application_form` (청약서류) are easily confused — all three carry

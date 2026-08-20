@@ -99,7 +99,7 @@
       "enum": ["손해사정사", "의사", "법률전문가"]
     },
     "document_type": {
-      "description": "Standard document-type code. See pipeline.md's taxonomy section.",
+      "description": "Standard document-type code. See pipeline.md's taxonomy section. The three non-medical codes added 2026-08-21 are a liability case's evidence, and were added because the classifier was already reading their titles correctly (confidence 0.90-0.95) and had no bucket but `other` to put them in -- which dropped them out of claim analysis entirely (`no medical classification, so no route reaches it`). `legal_opinion` is the legal ANSWER itself; `insurer_response` stays the insurer's covering letter, which may cite one. `legal_reference` is published reference material a party attached rather than authored -- a court's 위자료 산정기준표, a 노동능력상실률 table -- which disability-rate and 위자료 calculation need to cite. `legal_opinion` does not say which side commissioned the opinion: a masked 수신/발신 block often makes that undecidable from the page, and both sides' opinions are evidence.",
       "enum": [
         "insurance_certificate",
         "insurance_policy",
@@ -109,6 +109,8 @@
         "imaging_report",
         "receipt",
         "insurer_response",
+        "legal_opinion",
+        "legal_reference",
         "other"
       ]
     },

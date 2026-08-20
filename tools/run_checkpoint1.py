@@ -82,9 +82,15 @@ import trace as trace_mod
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Mirrors common_component_output.schema.json#/$defs/document_type. This list is
+# shown to the classifier, so a code missing here is a bucket the model cannot
+# choose however clearly the page names it --  which is exactly how CASE_053's
+# 법률질의회신서 landed in `other` at confidence 0.95.
+# test_document_type_enum_copies_match_the_schema fails if they drift.
 DOCUMENT_TYPES = ["insurance_certificate", "insurance_policy", "application_form",
                    "diagnosis_certificate", "medical_record", "imaging_report",
-                   "receipt", "insurer_response", "other"]
+                   "receipt", "insurer_response", "legal_opinion",
+                   "legal_reference", "other"]
 CLASSIFICATION_PROMPT_VERSION = "classification_v0.2"
 MEDICAL_CLASSIFICATION_PROMPT_VERSION = "classification_v0.3_medical_v0.1"
 
@@ -100,6 +106,11 @@ These three Korean forms look similar -- distinguish them by their defining mark
 - insurance_policy (보험약관): the full contract terms/clauses -- articles like 제N조, 지급사유, 면책, a table of contents of 특별약관. It is the rulebook, not a record of one contract.
 - insurance_certificate (증권서류): a "보험증권" issued as proof of ONE concluded contract -- a 계약번호/증권번호, 보험기간, 보장내용 with 가입금액 per coverage, 총보험료. It references the 약관 but is not the 약관 itself.
 - application_form (청약서류): a "청약서"/가입 신청서 the applicant fills in and signs to APPLY -- 청약일, applicant/피보험자 자필서명, 계약전 알릴의무 질문서, 상품설명서 cover pages. It precedes the contract; it is not the contract terms and not the issued certificate.
+
+Three non-medical types a liability case turns on -- distinguish them by WHO WROTE IT and WHAT IT DECIDES:
+- insurer_response (보험사 회신 공문): a letter the insurer sends -- 손해사정 업무 협조요청, 부지급/지급 통보, 조사 진행 안내. It may SUMMARIZE or attach a legal opinion ("법률자문 결과 ..."), but the letter itself is correspondence, not the legal analysis.
+- legal_opinion (법률의견서): the legal ANSWER itself -- 법률질의회신서, 법률자문 회신, a 제목 like "[시설소유자배상책임] ...". It cites 민법 조문 (제750조, 제758조) and 대법원 판례, works through 질의사항 in order, and ends in a reasoned verdict ("... 배상책임이 있다고 판단됩니다" / "... 부담하지 않는다고 판단됩니다"). Classify it here whichever side commissioned it -- both parties' opinions are evidence, and the 수신/발신 block is often masked.
+- legal_reference (법률참고자료): published reference material a party ATTACHED rather than authored -- a court's 위자료 산정기준표, a 노동능력상실률/맥브라이드 표, a 판례 모음. It states general standards with no 질의 and no verdict about THIS accident. Disability-rate and 위자료 calculation cite it.
 
 Reply with ONLY a JSON object, no other text, in exactly this shape:
 {{"predicted_document_type": "<one of the types above>", "document_type_label": "<Korean display label>",

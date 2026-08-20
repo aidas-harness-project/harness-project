@@ -108,6 +108,8 @@ DOCUMENT_TYPE_LABEL_KO: dict[str, str] = {
     "imaging_report": "영상판독지",
     "receipt": "영수증",
     "insurer_response": "보험사 회신",
+    "legal_opinion": "법률의견서",
+    "legal_reference": "법률참고자료",
     "other": "기타",
 }
 
