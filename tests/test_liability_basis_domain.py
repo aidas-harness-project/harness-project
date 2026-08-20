@@ -230,6 +230,47 @@ def test_a_disputed_opinion_field_still_triggers_the_verdict():
     assert "쟁점" in verdict["reason"]
 
 
+def test_the_dispute_is_stated_even_when_the_facts_decide_it():
+    """The sentence a 손해사정사 reads must say the conclusion is contested.
+
+    CASE_701: stage 3-a read `공작물의 설치 보존상의 하자` from one opinion, so
+    the DEFECT field came back asserted and settled the verdict on the facts
+    branch -- which returned before the opinion branch could mention that the
+    two 법률의견서 reach opposite conclusions. The dispute stayed visible in
+    `conflicting_field_ids` and vanished from `reason`, which is the only part
+    of this that reaches the report's prose.
+    """
+    disputed = _fact(OPINION, "conflict")
+    disputed["selected_observation_ids"] = []
+    disputed["observations"] = [
+        {"observation_id": "CAO_0001", "value_state": "asserted",
+         "value": "성립",
+         "evidence_references": [{"document_id": "DOC_006", "page": 10,
+                                  "quote": "인용", "start_char": 0,
+                                  "end_char": 2}]},
+        {"observation_id": "CAO_0002", "value_state": "asserted",
+         "value": "불성립",
+         "evidence_references": [{"document_id": "DOC_008", "page": 12,
+                                  "quote": "인용", "start_char": 0,
+                                  "end_char": 2}]},
+    ]
+    verdict = _liability([_fact(DEFECT, "asserted", "공작물의 설치 보존상의 하자"),
+                          disputed])
+    assert verdict["status"] == "applicable"
+    assert "사고 경위에" in verdict["reason"], "the facts are what decided it"
+    assert "쟁점" in verdict["reason"], (
+        "opposing legal opinions must be stated in the sentence, not only in "
+        "conflicting_field_ids")
+
+
+def test_agreeing_opinions_add_no_dispute_note():
+    """The note is earned, not decorative."""
+    verdict = _liability([_fact(DEFECT, "asserted", "공작물의 하자"),
+                          _fact(OPINION, "asserted", "성립")])
+    assert verdict["status"] == "applicable"
+    assert "쟁점" not in verdict["reason"]
+
+
 def test_the_medical_route_still_wins_when_it_answers():
     """A 진료기록 that does record the mechanism keeps its reading; the legal
     opinion is a fallback, not an override."""

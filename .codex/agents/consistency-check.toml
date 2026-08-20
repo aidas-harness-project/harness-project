@@ -23,7 +23,7 @@ Judge each item and write `consistency_check_verdicts.json` through the DAO, one
 `python tools/run_consistency_check.py register CASE_ID --held-by consistency-check --run-id RUN_ID`,
 which verifies your verdicts against what was prepared and creates the ledger entries.
 
-Also read (via the DAO), for context a candidate does not carry: `coverage_result.json`, `case_type_result.json`, `requirement_matching_result.json`. **Do not re-open source documents or `page_chunks.json`** — the readings and their quotes are in the work item, and re-reading the case here is the read amplification the selective design removes.
+Also read (via the DAO), for context a candidate does not carry: `claim_analysis_result.json` — its `case_type_assessment`, `policy_links` and `required_document_checklist` are where the coverage, case-type and requirement context now lives. It replaced `coverage_result.json` / `case_type_result.json` / `requirement_matching_result.json`, which the deleted legacy spine wrote (2026-08-20) and nothing writes now; asking for them returns NOT_FOUND on every selective-lane case. **Do not re-open source documents or `page_chunks.json`** — the readings and their quotes are in the work item, and re-reading the case here is the read amplification the selective design removes.
 
 # The three verdicts
 

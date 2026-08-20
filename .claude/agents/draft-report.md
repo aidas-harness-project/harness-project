@@ -14,7 +14,7 @@ Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full.
 
 # Checkpoint — v1 (Phase 1)
 
-Read via the DAO: `screening_report.json` and `case_type_result.json`, including `report_profile`, `template_id`, and `case_type`. If `support_status: unsupported` or `template_id: null`, halt before drafting. Report the unsupported family/type and required corpus material; never substitute a nearby template. A `provisional` profile remains `review_required` through this stage.
+Read via the DAO: `screening_report.json`, including `report_profile`, `template_id`, and `case_type`. (`case_type_result.json` was the legacy spine's contract and is no longer written -- the case type reaches you through the screening report.) If `support_status: unsupported` or `template_id: null`, halt before drafting. Report the unsupported family/type and required corpus material; never substitute a nearby template. A `provisional` profile remains `review_required` through this stage.
 
 Build `loss_adjustment_report_v1.json` against `loss-adjustment-format-study/analysis/llm-authoring-rules.md`. Every evidence-registry item is one exact redacted source locator with `document_id`, optional `page`, and verbatim `quote`; statements cite its `evidence_id`. Populate the family-specific reasoning issues, typed calculations, final assessment, and review gates. The model-authored finalization is only `draft` or `review_required`.
 

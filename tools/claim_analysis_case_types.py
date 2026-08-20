@@ -219,9 +219,6 @@ def _assess_liability(
             "제3자 또는 시설 책임이 없다고 기재한 출처가 있습니다."
         ),
     )
-    if status == "applicable":
-        return status, evidence, reason
-
     # NOT `_selected_observations`: a `conflict` field elects nothing (the
     # result schema requires `selected_observation_ids` to be empty there,
     # because electing one would pick a winner between two 법률의견서), so
@@ -230,6 +227,21 @@ def _assess_liability(
     # and each is grounded evidence in its own right.
     opinions = _all_asserted_observations(opinion_field) if opinion_field else []
     values = [observation.get("value") for observation in opinions]
+    disputed = (any(value in LIABILITY_OPINION_POSITIVE for value in values)
+                and any(value in LIABILITY_OPINION_NEUTRAL for value in values))
+
+    if status == "applicable":
+        # The accident facts decided it, but if the legal opinions disagree on
+        # whether liability follows, the reader must be told -- CASE_701 read
+        # `공작물의 설치 보존상의 하자` from one opinion, which settled the
+        # facts branch and returned before the opinion branch could say so.
+        # The dispute stayed visible in `conflicting_field_ids` and vanished
+        # from the sentence a 손해사정사 actually reads.
+        if disputed:
+            reason += (" 다만 법률의견서 간 배상책임 성립 여부에 대한 결론이 "
+                       "달라, 성립 여부 자체가 쟁점입니다.")
+        return status, evidence, reason
+
     supporting = [observation for observation in opinions
                   if observation.get("value") in LIABILITY_OPINION_POSITIVE]
     if supporting:

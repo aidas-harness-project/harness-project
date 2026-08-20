@@ -33,7 +33,7 @@ which assembles and publishes the report.
 
 # Inputs (all via the DAO)
 
-Canonical `medical_variables.json`, its read-only `extracted_claim_fields.json` compatibility projection, `coverage_result.json`, `case_type_result.json`, `requirement_matching_result.json`, and `denial_reason_result.json` from `denial-response` (present whenever an insurer-response document exists in the case — read it as a dependency, not something you wait on a "Phase 2" trigger for). Medical statements and citations resolve through the pinned canonical revision.
+`claim_analysis_result.json` -- the single stage-5 contract, carrying `claim_facts`, `case_type_assessment`, `policy_links` and `required_document_checklist` -- and `denial_reason_result.json` from `denial-response` (present whenever an insurer-response document exists in the case — read it as a dependency, not something you wait on a "Phase 2" trigger for). Medical statements and citations resolve through the pinned canonical revision.
 
 First inspect `extracted_claim_fields.json` through the DAO. Only a DAO-accepted projection that explicitly declares `projection_mode: legacy_pre_medical` is pre-adoption legacy mode: do not run the medical gate/outcome commands, state that medical screening was unavailable, and never claim medical clearance. A missing or unknown mode is an error, not legacy. For `canonical_medical_projection`, before using medical conclusions, run `python tools/dao.py check-medical-reviews-clear CASE_ID`, then read the sole ledger-derived downstream view with `python tools/dao.py read-medical-review-outcomes CASE_ID --caller-stage screening_report --run-id RUN_ID`. Preserve decision authority, assignment role-policy provenance, and the current response's complete authenticated attribution, interpretation, uncertainty, alternatives, and downstream-adjustment advice wherever it affects the screening analysis. Never read the internal medical-review ledger directly and never promote a qualified medical opinion into an unqualified insurance conclusion.
 
@@ -86,5 +86,5 @@ Schema validation failure: one self-correction attempt, then halt per P4. Missin
 
 # Collaboration
 
-Upstream: `claim-analysis`, `consistency-check`, `denial-response`. Downstream: `draft-report` (v1 uses your `screening_report.json` + `case_type_result.json`'s `template_id`).
+Upstream: `claim-analysis`, `consistency-check`, `denial-response`. Downstream: `draft-report` (v1 uses your `screening_report.json`).
 """
