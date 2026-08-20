@@ -41,21 +41,28 @@ judgement:
 
 WHAT THIS DRIVER DELIBERATELY DOES NOT DECIDE
 
-Four decision points in Stage 2 are real, and every one of them is a HUMAN
+Three decision points in Stage 2 are real, and every one of them is a HUMAN
 gate, not agent reasoning. The driver stops and reports; it never answers them:
 
   * a P8 disagreement            -- a human picks a reading, or supplies a
                                     corrected transcription
-  * segmentation boundary approval -- a reviewer sees the ranges and the title
-                                    line each cut is made on
   * a `raw_page_text` classification -- a human answers whether the evidence
                                     quote survives into the redacted text
   * a possible PII leak          -- a privacy event that must stop everything
 
-Stopping at these is the point, not a limitation: `--auto-approve-segmentation`
-exists for timing/plumbing runs and is refused unless explicitly passed, for
-the same reason `--single-reader` is orchestrator-owned rather than the
-agent's to choose.
+Stopping at these is the point, not a limitation, for the same reason
+`--single-reader` is orchestrator-owned rather than the agent's to choose.
+
+Segmentation boundary approval was a fourth such gate until 2026-08-20, when it
+was removed on the user's instruction: a `pending` proposal is now auto-approved
+and split without stopping. The approval record still exists and still names a
+reviewer -- it reads `<held_by> (auto-approved)` rather than a person, so a
+later reader can tell which boundaries a human actually saw. `propose` still
+flags `undecided_pages`, and a `rejected` proposal is still honoured rather than
+overwritten; what changed is only that nobody is asked about a `pending` one.
+The tradeoff accepted here: over-splitting stays cheap to undo by a later merge,
+while an over-merge now propagates a wrong `document_type` downstream with no
+human in its path.
 
 FAILURE SEMANTICS
 
@@ -329,15 +336,6 @@ def run_stage2(
                 return stop(f"segment.approve:{doc_id}",
                             f"unknown proposal review_status {review_status!r}")
 
-            if review_status != "approved" and not auto_approve_segmentation:
-                return stop(
-                    f"segment.approve:{doc_id}",
-                    "boundary approval is a human gate: a reviewer must see the "
-                    "proposed ranges and the title line each cut is made on. "
-                    "Approve with `segment_case.py approve` and re-run, or pass "
-                    "--auto-approve-segmentation for a timing/plumbing run.",
-                    gate=True)
-
             if review_status != "approved":
                 reviewer = segmentation_reviewer or f"{held_by} (auto-approved)"
                 step = _run(common([str(TOOLS / "segment_case.py"), "approve",
@@ -489,11 +487,12 @@ def main(argv=None):
         help="Force the redaction model on even under HARNESS_SKIP_REDACTION.")
     ap.add_argument(
         "--auto-approve-segmentation", action="store_true",
-        help="Skip the human boundary-approval gate. For timing and plumbing "
-             "runs only -- the reviewer normally sees the proposed ranges and "
-             "the title line each cut is made on.")
+        help="No-op since 2026-08-20: boundary approval is no longer a gate, so "
+             "a pending proposal is auto-approved either way. Still accepted so "
+             "existing invocations keep working.")
     ap.add_argument("--segmentation-reviewer", default=None,
-                    help="Reviewer recorded when --auto-approve-segmentation is used")
+                    help="Reviewer name recorded on an auto-approved proposal "
+                         "(default: '<held_by> (auto-approved)')")
     args = ap.parse_args(argv)
     trace_mod.configure_from_args(args)
 

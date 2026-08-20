@@ -42,13 +42,24 @@ This is the part that gets skipped. Do all five, in this order, for each stage:
 2. `update-run-state CASE_ID RUN_ID STAGE in_progress --held-by orchestrator`
    — and note the wall-clock time now, so step 4 is measured, not recalled.
 3. Run the driver, or dispatch the agent.
-4. **`record-dispatch`** for an agent stage, before finalizing, copying the
-   harness's reported duration/tokens/tool-uses verbatim:
+4. **`record-dispatch`** for an agent stage, before finalizing. Every
+   subagent completion hands you a `<usage>` block carrying `duration_ms`,
+   `subagent_tokens` and `tool_uses` — **paste it in whole** and let the tool
+   read it, rather than retyping the numbers into separate flags:
    `dao.py record-dispatch CASE_ID --run-id RUN_ID --stage STAGE
-   --started-at ISO --duration-s WALL --agent-reported-s REPORTED
-   --agent-kind AGENT --attempt N --total-tokens T --tool-uses U`
-   Omit a flag you were not given; never estimate one. Add `--human-wait-s`
-   if the dispatch stopped for a person.
+   --started-at ISO --agent-kind AGENT --attempt N
+   --from-usage '<usage>…</usage>'`
+   `--from-usage` fills duration and the token/tool counts. Add
+   `--agent-reported-s` or `--human-wait-s` yourself when you have them; an
+   explicit flag always wins over the parsed block. **Never estimate a figure
+   the block does not carry** — an omitted flag records as "not measured",
+   which is a true statement; a guessed one is indistinguishable from a
+   reading.
+
+   This step has never once been exercised: CASE_489 skipped it outright and
+   CASE_048 halted before reaching an agent stage. If you complete an agent
+   stage without it, say so in your report — a run that reports timings it
+   did not record is worse than one that reports none.
 5. `finalize-stage CASE_ID RUN_ID STAGE --held-by orchestrator`.
 
 A stage that fails: close it explicitly with

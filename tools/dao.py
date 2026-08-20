@@ -11802,6 +11802,56 @@ def trace_spans_dir(case_id: str, run_id: str) -> Path:
     return _require_within(case_dir(case_id), "_trace", run_id, "spans")
 
 
+_DISPATCH_USAGE_FIELDS = {
+    "duration_ms": ("duration_s", lambda v: v / 1000.0),
+    "subagent_tokens": ("total_tokens", int),
+    "tool_uses": ("tool_uses", int),
+}
+
+
+def parse_dispatch_usage(text: str) -> dict:
+    """Read a subagent completion's usage block into record-dispatch values.
+
+    `record-dispatch` stays caller-declared -- the dispatch crosses a session
+    boundary this process cannot observe, and that has not changed. What this
+    removes is the TRANSCRIPTION: the completion notification already carries
+    `duration_ms`, `subagent_tokens` and `tool_uses`, and copying them by hand
+    into eight flags is a step that gets skipped (CASE_489: skipped outright,
+    with nothing on disk showing it) or mistyped. A machine copy cannot be
+    either.
+
+    The figures stay harness-reported. The only transformation is ms -> s,
+    because `--duration-s` is in seconds and 377420 recorded as seconds is
+    4.4 days. Anything the notification does not carry -- input/output token
+    split, the agent's own reported duration, human wait -- is simply absent
+    from the result, so `record-dispatch` records it as "not measured" rather
+    than as a zero that would read as a measurement.
+
+    Raises ValueError when the block carries no figures at all: returning an
+    empty mapping would let a caller record a dispatch with no measurement in
+    it while believing it had recorded one.
+    """
+    parsed: dict = {}
+    for tag, (key, convert) in _DISPATCH_USAGE_FIELDS.items():
+        match = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.S)
+        if match is None:
+            continue
+        raw = match.group(1).strip()
+        try:
+            number = int(raw)
+        except ValueError:
+            raise ValueError(
+                f"dispatch usage field {tag} is not an integer: {raw!r}")
+        if number < 0:
+            raise ValueError(f"dispatch usage field {tag} is negative: {number}")
+        parsed[key] = convert(number)
+    if not parsed:
+        raise ValueError(
+            "no dispatch figures found in the usage block -- expected at least "
+            "one of " + ", ".join(_DISPATCH_USAGE_FIELDS))
+    return parsed
+
+
 def cmd_record_dispatch(args):
     """Record one closed subagent-dispatch interval into the run's trace.
 
@@ -11841,6 +11891,24 @@ def cmd_record_dispatch(args):
     never sees the model's context, so it records what it is told and does not
     derive tokens from anything.
     """
+    # getattr, not attribute access: this command is also driven directly
+    # with lightweight arg stubs, which carry only the fields a given
+    # test exercises. A new optional flag must not break those callers.
+    if getattr(args, "from_usage", None):
+        try:
+            parsed = parse_dispatch_usage(args.from_usage)
+        except ValueError as exc:
+            print(f"REFUSED: {exc}")
+            return 1
+        # Explicit flags win: a caller who knows something the block does not
+        # -- a dispatch that stopped for a person, a corrected duration -- must
+        # still be able to say so.
+        for key, value in parsed.items():
+            if getattr(args, key, None) is None:
+                setattr(args, key, value)
+    if getattr(args, "duration_s", None) is None:
+        print("REFUSED: --duration-s is required unless --from-usage supplies it")
+        return 1
     if args.duration_s < 0:
         print("REFUSED: --duration-s cannot be negative")
         return 1
@@ -12740,9 +12808,15 @@ def build_parser():
                    help="the stage this dispatch belongs to")
     p.add_argument("--started-at", required=True,
                    help="ISO-8601 wall time the dispatch was issued")
-    p.add_argument("--duration-s", type=float, required=True,
+    p.add_argument("--duration-s", type=float, default=None,
                    help="whole dispatch, from asking for the work to holding "
-                        "its result")
+                        "its result. Required unless --from-usage supplies it.")
+    p.add_argument("--from-usage", dest="from_usage", default=None,
+                   help="the subagent completion's <usage> block, verbatim. "
+                        "Fills --duration-s/--total-tokens/--tool-uses from "
+                        "what the harness reported, so those figures are "
+                        "copied by machine rather than retyped. An explicit "
+                        "flag still wins over the parsed value.")
     p.add_argument("--agent-reported-s", type=float, default=None,
                    help="what the harness says the subagent itself took; the "
                         "difference from --duration-s is the round trip")
