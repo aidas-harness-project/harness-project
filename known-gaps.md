@@ -3682,3 +3682,38 @@ tests show the code runs, not that the medical judgments are right.
 *(Numbering note: two pre-existing items both claim 47 -- the P8 correlated-error
 item and the lock-poll item. Not renumbered here to avoid breaking citations to
 either; this item takes 48.)*
+
+## 50. Reduced P8 grades a liability case's two opposing opinions unequally
+
+Measured on CASE_701 (2026-08-21), a facility-liability case whose central
+dispute is two 법률의견서 reaching opposite conclusions.
+
+| document | side | ocr_quality | cross_validation_status |
+|---|---|---|---|
+| DOC_006 | claimant, 성립 | **high** | agreed |
+| DOC_008 | insurer, 불성립 | **low** | single_reader_no_cross_validation |
+| DOC_007 | insurer letter | **low** | single_reader_no_cross_validation |
+
+The grades are an artifact of HOW each document reached the pipeline, not of
+how reliable its text is: DOC_006 carried an embedded text layer and got a
+real dual read, while the insurer bundle was a scan run under
+`HARNESS_SINGLE_READER=1`. Case-wide the split is 6 high/agreed against 18
+low/single_reader.
+
+**Why it matters beyond one case.** A reviewer comparing two opinions sees one
+graded high and the other low, and the low one is the insurer's. Nothing in the
+report says the grades reflect scan-versus-embedded plus a throughput setting
+rather than transcription confidence, so the reduction quietly discounts one
+side of the exact question the case turns on. A screening report is meant to
+present a dispute neutrally.
+
+**Not a blocker for a plumbing run, and not a reason to distrust CASE_701's
+extraction** -- the quotes were verified verbatim against the served text like
+any other. It is a reason not to use a P8-reduced liability case as evaluation
+input, which `harness-guardrails` already says for other reasons, and a reason
+to consider surfacing the *cause* of an ocr_quality grade wherever the report
+shows two sources of one disputed fact.
+
+Open: whether the screening report should annotate a quality grade with its
+cause, or whether liability cases should force `--dual-read` regardless of the
+environment default.

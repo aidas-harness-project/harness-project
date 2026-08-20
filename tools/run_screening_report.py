@@ -1182,18 +1182,25 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
 
     # 6. verified conflicts, in consistency-check's own words
     inconsistencies = report.get("inconsistencies") or []
-    conflict_evidence = [
-        {"document_id": source["document_id"], "page": source.get("page", 1),
-         "quote": source["quote"]}
-        for row in inconsistencies
-        for source in (row.get("source_values") or [])
-        if source.get("document_id") and source.get("quote")
-    ]
+    # Each conflict cites its OWN sources, on its own line, through the same
+    # `_mark` helper section 8 uses. The list was built separately and handed
+    # over whole while the prose emitted no markers at all, so any case with a
+    # verified conflict died at assembly with "0 {{E}} placeholders but N
+    # evidence_references". CASE_701 is where it fired: CONFLICT_1 named three
+    # source documents, so N=3 -- the conflict the run existed to carry is
+    # exactly what killed the render.
+    conflict_evidence: list[dict] = []
+    conflict_lines: list[str] = []
+    for row in inconsistencies:
+        line = f"- [{row['field']}] {row['description']}"
+        for source in row.get("source_values") or []:
+            line += _mark({"document_id": source.get("document_id"),
+                           "page": source.get("page", 1),
+                           "quote": source.get("quote")}, conflict_evidence)
+        conflict_lines.append(line)
     sections.append({
         "heading": "6. 중요 충돌과 유형 판정 영향",
-        "content": "\n".join(
-            f"- [{row['field']}] {row['description']}"
-            for row in inconsistencies) or "- 검증된 충돌 없음",
+        "content": "\n".join(conflict_lines) or "- 검증된 충돌 없음",
         "evidence_references": conflict_evidence,
     })
 
