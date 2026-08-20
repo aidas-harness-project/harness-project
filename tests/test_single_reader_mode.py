@@ -131,12 +131,15 @@ class TestSingleReaderDefault:
     @pytest.mark.parametrize(
         "env,arg,expected",
         [
-            (None, None, False),          # nothing set anywhere -> P8 stays on
-            ("1", None, True),            # dev shell default
+            # PoC default since 2026-08-20: nothing set anywhere -> P8 OFF.
+            # It was on until then, which is what the two rows below used to
+            # assert. The env var now works in BOTH directions.
+            (None, None, True),
+            ("1", None, True),
             ("true", None, True),
             ("on", None, True),
-            ("0", None, False),
-            ("maybe", None, False),       # unparseable is not "on"
+            ("0", None, False),           # a negative env value turns it back on
+            ("maybe", None, True),        # unparseable falls back to the default
             ("1", False, False),          # --dual-read overrides the env
             ("0", True, True),            # --single-reader overrides the env
         ],

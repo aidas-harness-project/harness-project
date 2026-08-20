@@ -562,17 +562,32 @@ DEFAULT_OCR_WORKERS = 24
 SINGLE_READER_ENV = "HARNESS_SINGLE_READER"
 
 
+# PoC default (2026-08-20, set by the PoC owner): unspecified means P8 OFF.
+# It was the reverse until then. The reduction is not hidden by being the
+# default -- run_checkpoint1 still stamps `ocr_quality: low`,
+# `cross_validation_status: single_reader_no_cross_validation` and
+# `review_required` on every document read this way, so a single-reader
+# document never reads as a clean P8 pass. Set HARNESS_SINGLE_READER=0, or
+# pass --dual-read, for an evaluation run that needs real cross-validation.
+SINGLE_READER_DEFAULT = True
+
+
 def resolve_single_reader(single_reader: bool | None) -> bool:
     """Whether to run with P8 off. Explicit argument wins, then the env var.
 
-    `None` means "not specified" -- only then is the environment consulted.
-    Passing True or False explicitly is always honoured, so an evaluation run
-    can force dual-read P8 even inside a shell that exports the dev default.
+    `None` means "not specified" -- only then is the environment consulted,
+    and only then does `SINGLE_READER_DEFAULT` apply. Passing True or False
+    explicitly is always honoured, so an evaluation run can force dual-read P8
+    without changing this file or the shell.
     """
     if single_reader is not None:
         return bool(single_reader)
     raw = os.environ.get(SINGLE_READER_ENV, "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return SINGLE_READER_DEFAULT
 
 
 def _resolve_workers(max_workers: int | None) -> int:

@@ -270,7 +270,8 @@ def test_run_ocr_with_api_style_providers_does_not_require_claude_cli(monkeypatc
     reader_b = FakeReader("openai-api", "same-model", ["reader B text"])
     comparator = FakeComparator("AGREE: same material facts")
 
-    result = oe.run_ocr("CASE_009", "DOC_001", image_path, reader_a=reader_a, reader_b=reader_b, comparator=comparator)
+    result = oe.run_ocr("CASE_009", "DOC_001", image_path, reader_a=reader_a, reader_b=reader_b, comparator=comparator,
+                        single_reader=False)
 
     assert len(reader_a.calls) == 1
     assert len(reader_b.calls) == 1
@@ -364,7 +365,9 @@ def test_run_ocr_caches_pages_and_resume_skips_reader_calls(monkeypatch, tmp_pat
     reader_b = _PageKeyedReader("B", fail_on=[2])
     comparator = FakeComparator("AGREE")
     with pytest.raises(IndexError):
-        oe.run_ocr("CASE_009", "DOC_001", doc, reader_a=reader_a, reader_b=reader_b, comparator=comparator)
+        oe.run_ocr("CASE_009", "DOC_001", doc, reader_a=reader_a,
+                   reader_b=reader_b, comparator=comparator,
+                   single_reader=False)
 
     cache = oe._resume_cache_dir("CASE_009", "DOC_001")
     assert (cache / "page_001.json").exists()
@@ -374,7 +377,9 @@ def test_run_ocr_caches_pages_and_resume_skips_reader_calls(monkeypatch, tmp_pat
     # Page 1 must come from cache (readers NOT called for it); only page 2 runs.
     reader_a2 = FakeReader("fixture", "m", ["A2"])
     reader_b2 = FakeReader("fixture", "m", ["B2"])
-    result = oe.run_ocr("CASE_009", "DOC_001", doc, reader_a=reader_a2, reader_b=reader_b2, comparator=FakeComparator("AGREE"))
+    result = oe.run_ocr("CASE_009", "DOC_001", doc, reader_a=reader_a2,
+                        reader_b=reader_b2, comparator=FakeComparator("AGREE"),
+                        single_reader=False)
 
     assert [p["page"] for p in result["pages"]] == [1, 2]
     assert result["pages"][0]["reading_a"] == "A1"  # from cache, not "A2"

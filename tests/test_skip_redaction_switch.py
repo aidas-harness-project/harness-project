@@ -38,19 +38,33 @@ from redaction import DevNoLlmRedactor, RedactionLeakError  # noqa: E402
 
 
 class TestPrecedence:
-    def test_off_by_default(self, monkeypatch) -> None:
+    def test_on_by_default(self, monkeypatch) -> None:
+        """PoC default since 2026-08-20: unspecified means the redaction MODEL
+        is skipped. It was the reverse before, which is why this test reads
+        the opposite of its own name's history."""
         monkeypatch.delenv(rd.SKIP_REDACTION_ENV, raising=False)
-        assert rd.resolve_skip_redaction(None) is False
+        assert rd.resolve_skip_redaction(None) is True
 
     @pytest.mark.parametrize("raw", ["1", "true", "yes", "on", "TRUE", "On"])
     def test_env_turns_it_on(self, monkeypatch, raw: str) -> None:
         monkeypatch.setenv(rd.SKIP_REDACTION_ENV, raw)
         assert rd.resolve_skip_redaction(None) is True
 
-    @pytest.mark.parametrize("raw", ["0", "false", "no", "off", "", "garbage"])
-    def test_other_env_values_leave_it_off(self, monkeypatch, raw: str) -> None:
+    @pytest.mark.parametrize("raw", ["0", "false", "no", "off"])
+    def test_a_negative_env_value_turns_it_off(self, monkeypatch, raw: str) -> None:
+        """The env var works in BOTH directions now that the default is on --
+        it is how a shell opts a whole evaluation run back into real
+        redaction without touching a command line."""
         monkeypatch.setenv(rd.SKIP_REDACTION_ENV, raw)
         assert rd.resolve_skip_redaction(None) is False
+
+    @pytest.mark.parametrize("raw", ["", "garbage"])
+    def test_an_unrecognized_env_value_falls_back_to_the_default(
+        self, monkeypatch, raw: str
+    ) -> None:
+        """A typo must not silently mean the opposite of the default."""
+        monkeypatch.setenv(rd.SKIP_REDACTION_ENV, raw)
+        assert rd.resolve_skip_redaction(None) is rd.SKIP_REDACTION_DEFAULT
 
     def test_explicit_redact_beats_the_env(self, monkeypatch) -> None:
         """An evaluation run must be able to force redaction back on inside a
@@ -115,9 +129,13 @@ class TestSelector:
         assert isinstance(redactor, DevNoLlmRedactor)
 
     def test_without_the_switch_the_class_exemption_still_applies(self, monkeypatch) -> None:
+        """`skip_redaction=False` is the non-skip path -- since the PoC default
+        flipped to skip-on, the class exemption is only REACHED that way, so
+        the test asks for it rather than inheriting it from the default."""
         monkeypatch.delenv(rd.SKIP_REDACTION_ENV, raising=False)
         monkeypatch.setattr(rd.dao, "read_contract_data", lambda *a, **kw: {
             "documents": [{"document_id": "DOC_001",
                            "document_type": "insurance_policy"}]})
-        redactor = rd._redactor_for("CASE_900", "DOC_001", "claude-cli", None)
+        redactor = rd._redactor_for("CASE_900", "DOC_001", "claude-cli", None,
+                                    skip_redaction=False)
         assert type(redactor).__name__ == "NoPiiClassRedactor"

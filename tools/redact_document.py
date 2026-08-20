@@ -505,18 +505,33 @@ NO_PII_DOCUMENT_TYPES = frozenset({"insurance_policy"})
 SKIP_REDACTION_ENV = "HARNESS_SKIP_REDACTION"
 
 
+# PoC default (2026-08-20, set by the PoC owner): unspecified means the
+# redaction MODEL is skipped. It was the reverse until then. What still runs
+# is the deterministic residual-PII sweep, which hard-fails a page carrying
+# structured PII, and every page produced this way is stamped
+# `dev_no_llm_redaction` and carries a warning that unstructured PII (a bare
+# personal name) was checked by no model. A run under this default is
+# therefore NOT privacy-preserving; set HARNESS_SKIP_REDACTION=0, or pass
+# --redact, for anything that leaves the PoC.
+SKIP_REDACTION_DEFAULT = True
+
+
 def resolve_skip_redaction(skip: bool | None = None) -> bool:
     """Whether to skip the redaction MODEL. Explicit argument wins, then the env.
 
     Same precedence as every other knob here (and as
     ocr_extract.resolve_single_reader): `None` means "not specified", so an
-    evaluation run can force real redaction back on inside a shell that exports
-    the dev default.
+    evaluation run can force real redaction back on without changing this file
+    or the shell.
     """
     if skip is not None:
         return bool(skip)
     raw = str(os.environ.get(SKIP_REDACTION_ENV, "")).strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return SKIP_REDACTION_DEFAULT
 
 
 def _redactor_for(case_id: str, doc_id: str, provider_name: str, model: str | None,

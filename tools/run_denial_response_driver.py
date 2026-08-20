@@ -30,7 +30,12 @@ ROOT = Path(__file__).resolve().parent.parent
 DAO = ROOT / "tools" / "dao.py"
 STAGE, UNIT = "denial_response", "initial_extraction"
 CONTRACT, SCHEMA = "denial_reason_result.json", "denial_reason_result.schema.json"
-VERSION = "denial_response_initial_driver.v0.3"
+# v0.4 (2026-08-20): the prompt now states the closed vocabularies the
+# transport schema drops. Bumped rather than edited in place because
+# `receipt_matches` reuses a stored candidate only when the prompt
+# version matches -- a candidate produced under v0.3 was answered
+# without ever being told decision_type's allowed values.
+VERSION = "denial_response_initial_driver.v0.4"
 TEXT_DISPOSITIONS = frozenset({"automated_text_pipeline", "text_only_no_normalization"})
 
 
@@ -241,6 +246,16 @@ evidence_references, and review_required. Every evidence reference needs documen
 exact quote. The complete response is validated against the full local contract before publication.
 If review_required is true at the response level, reviewer_role is required and must be one of
 손해사정사, 의사, or 법률전문가.
+
+CLOSED VOCABULARIES. These fields take one of a fixed set of codes. Write the code exactly as
+written here -- they are literal identifiers, not labels to translate. The source bundle is
+Korean and these codes are not; that is expected, and a Korean rendering of one is invalid:
+  decision_type must be one of: denial, reduction
+  payment_status must be one of: unpaid, partially_paid, paid, unknown
+  reviewer_role, where required, must be one of: 손해사정사, 의사, 법률전문가
+decision_type applies to denial_reasons items only. payment_status applies to items in both
+denial_reasons and accepted_coverages. taxonomy_code is an R-code (R01-R21, or R99 when none
+applies), also written verbatim.
 
 BUNDLE TEXT:
 {rendered}

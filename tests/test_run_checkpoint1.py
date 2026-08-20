@@ -224,9 +224,13 @@ def test_classifier_defaults_to_comparator_provider(tmp_path, monkeypatch):
         '"confidence": 0.77, "quote": "page text"}'
     )
 
+    # Dual-read explicitly: the comparator only EXISTS on that path (under
+    # the PoC's single-reader default reader_b and the comparator are never
+    # built), so "the classifier falls back to the comparator's provider" is
+    # a dual-read property and the test has to ask for it.
     result = rc1.run_checkpoint1(
         "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001",
-        comparator=comparator_and_classifier,
+        comparator=comparator_and_classifier, single_reader=False,
     )
 
     assert result["status"] == "passed"
