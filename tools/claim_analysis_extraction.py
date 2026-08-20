@@ -120,14 +120,30 @@ def output_schema(field_rows: Sequence[Mapping[str, Any]]) -> dict:
     }
 
 
+def _document_label(document_kind: str | None, document_type: str | None) -> str:
+    """How the prompt names the document it is asking the model to read."""
+    if document_kind:
+        return f"form kind: {document_kind}"
+    if document_type:
+        return f"document type: {document_type}"
+    return "form kind: unknown"
+
+
 def build_prompt(
     *,
     document_id: str,
     document_kind: str | None,
     pages: Sequence[Mapping[str, Any]],
     field_rows: Sequence[Mapping[str, Any]],
+    document_type: str | None = None,
 ) -> str:
-    """One prompt covering every field this document is responsible for."""
+    """One prompt covering every field this document is responsible for.
+
+    `document_kind` is the fine MEDICAL form kind; `document_type` is the
+    coarse manifest type. Stage 3-a reads documents that have only the latter
+    -- a 법률의견서 has no medical kind at all -- and naming such a document
+    "form kind: unknown" would tell the model nothing about what it is reading.
+    """
     field_lines = []
     for row in field_rows:
         hint = _VALUE_SHAPE_HINT.get(row.get("value_shape"), "a short phrase")
@@ -154,7 +170,7 @@ def build_prompt(
     return f"""You are reading ONE document from a Korean insurance claim file and
 extracting only the fields listed below.
 
-Document: {document_id} (form kind: {document_kind or "unknown"})
+Document: {document_id} ({_document_label(document_kind, document_type)})
 
 Extract exactly these fields:
 {chr(10).join(field_lines)}
@@ -275,10 +291,15 @@ def make_reader(
 
     Returned as a closure so the driver's ordering logic stays testable with a
     plain function in place of a provider.
+
+    `document_type` is optional and used only to name a document the prompt
+    would otherwise call "unknown" -- stage 3-a's sources (법률의견서, insurer
+    letter) carry no medical form kind.
     """
 
     def extract(document_id: str, kind: str | None,
-                field_rows: Sequence[Mapping[str, Any]]) -> dict[str, dict]:
+                field_rows: Sequence[Mapping[str, Any]],
+                document_type: str | None = None) -> dict[str, dict]:
         pages = (
             pages_by_document(document_id)
             if callable(pages_by_document)
@@ -287,7 +308,8 @@ def make_reader(
         if not pages or not field_rows:
             return {}
         prompt = build_prompt(document_id=document_id, document_kind=kind,
-                              pages=pages, field_rows=field_rows)
+                              pages=pages, field_rows=field_rows,
+                              document_type=document_type)
         result = provider.analyze_text_structured(
             prompt, PROMPT_VERSION, output_schema(field_rows))
         structured = result.structured_output

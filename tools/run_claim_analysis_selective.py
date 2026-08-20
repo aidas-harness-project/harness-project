@@ -47,8 +47,9 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, MutableMapping, Sequence
 
+import claim_analysis_additional as additional_mod
 import claim_analysis_case_types as case_types_mod
 import claim_analysis_extraction as extraction
 import claim_analysis_policy_links as policy_link_builder
@@ -960,6 +961,107 @@ def extract_all(
     return outcomes, cache
 
 
+def extract_additional(
+    *,
+    config: Mapping[str, Any],
+    documents: Sequence[selection.DocumentRef],
+    assessments: Sequence[Mapping[str, Any]],
+    outcomes_by_field: Mapping[str, FieldExtractionOutcome],
+    extract,
+    page_text: MutableMapping[tuple[str, int], str],
+    observation_ids,
+) -> tuple[list[FieldExtractionOutcome], int]:
+    """Stage 3-a: re-open unavailable fields from non-medical sources.
+
+    Runs AFTER case-type assessment, because which sources are worth opening
+    depends on which types are in play. Only fields the common pass left
+    `unavailable` are re-read, so a 진료기록's reading is never overwritten and
+    a case whose medical records answered everything pays nothing here.
+
+    Returns REPLACEMENT outcomes for the fields it settled; a field it could
+    not settle keeps the common pass's outcome untouched.
+    """
+    plan = additional_mod.read_plan(
+        config, assessments, outcomes_by_field, documents)
+    if not plan:
+        return [], 0
+
+    by_field_row = {row["field_id"]: row for row in config.get("fields") or []}
+    replacements: dict[str, FieldExtractionOutcome] = {}
+
+    for entry in plan:
+        field_rows = [by_field_row[field_id] for field_id in entry["field_ids"]
+                      if field_id in by_field_row]
+        if not field_rows:
+            continue
+        # `kind=None`: these documents have no medical form kind, and passing a
+        # medical one would misdescribe the document to the model. The coarse
+        # type names it instead.
+        readings = extract(entry["document_id"], None, field_rows,
+                           entry["source_type"]) or {}
+        for field_row in field_rows:
+            field_id = field_row["field_id"]
+            payload = readings.get(field_id) or {}
+            if payload.get("presence") != "asserted":
+                continue
+            page = payload.get("page")
+            quote = payload.get("quote")
+            if not isinstance(page, int) or not isinstance(quote, str):
+                continue
+            reference = build_reference(
+                entry["document_id"], page, quote,
+                page_text.get((entry["document_id"], page), ""))
+            if reference is None:
+                # Same rule as the common pass: a quote the served text does
+                # not contain verbatim is not evidence, whatever the document.
+                continue
+            outcome = replacements.get(field_id)
+            if outcome is None:
+                outcome = FieldExtractionOutcome(
+                    field_id=field_id,
+                    domain_code=field_row["domain_code"],
+                    grade=selection.field_grade(field_row),
+                )
+                replacements[field_id] = outcome
+            observation = {
+                "observation_id": next(observation_ids),
+                "value_state": "asserted",
+                "value": payload.get("value"),
+                # The COARSE type, never a medical kind -- see the module
+                # docstring in claim_analysis_additional.
+                "source_document_type": entry["source_type"],
+                "source_priority_rank": entry["field_ranks"][field_id],
+                "extraction_wave": "type_conditional",
+                "evidence_references": [reference],
+            }
+            outcome.observations.append(observation)
+            outcome.documents_read += 1
+
+    settled: list[FieldExtractionOutcome] = []
+    for field_id, outcome in replacements.items():
+        values = [observation["value"] for observation in outcome.observations]
+        disagree = any(_values_disagree(values[0], other)
+                       for other in values[1:])
+        outcome.selected_ids = [observation["observation_id"]
+                                for observation in outcome.observations]
+        if disagree:
+            # Two non-medical sources that differ are preserved as a candidate,
+            # exactly as the common pass does. Whether opposing legal opinions
+            # are a CONTRADICTION or the dispute itself is a question the
+            # `legal_authority` axis answers downstream, not here.
+            outcome.status = "conflict"
+            outcome.stop_reason = "conflict_found"
+            outcome.reason = "비의료 출처 간 기재가 다릅니다"
+        else:
+            outcome.status = "asserted"
+            outcome.stop_reason = "trusted_value_found"
+            outcome.reason = "사건유형별 추가 확인 출처에 기재되어 있습니다"
+        settled.append(outcome)
+    # One provider call per planned document -- the round batches exactly as
+    # the common pass does, so calls equal documents opened.
+    return settled, len(plan)
+
+
 def _observation_id_sequence(start: int = 1):
     counter = start
     while True:
@@ -1184,6 +1286,8 @@ def build_trace(
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     wall_time_seconds: float | None = None,
+    type_conditional_documents: int = 0,
+    type_conditional_calls: int = 0,
 ) -> dict:
     """Development/performance trace, kept out of the authority contract."""
     presence_only = sum(
@@ -1221,6 +1325,12 @@ def build_trace(
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "wall_time_seconds": wall_time_seconds,
+            # Stage 3-a, counted separately. Its cost scales with how many case
+            # types are in play -- the one part of this stage that grows with
+            # the case rather than with the field catalogue -- so folding it
+            # into the common pass's totals would hide an SLA regression there.
+            "type_conditional_documents_read": type_conditional_documents,
+            "type_conditional_provider_calls": type_conditional_calls,
         },
     }
 
@@ -1504,11 +1614,40 @@ def run(
     # processed policy to link against, which the links record as not_found.
     index = _dao_json(["read-document-index", case_id, "--run-id", run_id],
                       allow_missing=True)
-    interim = [
-        {"field_id": outcome.field_id,
-         "resolution_status": outcome.status}
-        for outcome in outcomes
-    ]
+    def _interim(rows):
+        """Facts as the case-type assessor reads them.
+
+        Observations are carried, not just the status: liability now reads
+        `liability_opinion_conclusion`'s VALUE (성립/불성립), so a status-only
+        view would make every legal opinion invisible to the verdict.
+        """
+        return [
+            {"field_id": outcome.field_id,
+             "resolution_status": outcome.status,
+             "selected_observation_ids": list(outcome.selected_ids),
+             "observations": list(outcome.observations)}
+            for outcome in rows
+        ]
+
+    # ------------------------------------------------------------ stage 3-a --
+    # The type-conditional round runs AFTER a first assessment -- which types
+    # are in play decides which sources are worth opening -- and BEFORE the
+    # verdicts that get published, since a field it settles can change one.
+    first_pass = case_types_mod.assess_case_types(
+        _interim(outcomes), filing_status_by_type=filing_status_by_case_type())
+    settled, type_conditional_calls = extract_additional(
+        config=config, documents=documents, assessments=first_pass,
+        outcomes_by_field={o.field_id: o for o in outcomes}, extract=extract,
+        page_text=page_text, observation_ids=observation_ids)
+    if settled:
+        replaced = {outcome.field_id: outcome for outcome in settled}
+        outcomes = [replaced.pop(outcome.field_id, outcome)
+                    for outcome in outcomes]
+        # A field the common pass never planned -- every `liability_basis`
+        # field is on no medical route -- joins the list rather than vanishing.
+        outcomes.extend(replaced.values())
+
+    interim = _interim(outcomes)
     # Decided once, here, and handed to BOTH consumers. Previously this map
     # was built with empty lists, so every requirement resting on a disputed
     # fact published `supported` and cited no candidate -- the disagreement
@@ -1560,6 +1699,8 @@ def run(
         case_id=case_id, run_id=run_id, config=config, outcomes=outcomes,
         document_dispositions=dispositions,
         provider_calls=sum(cache.calls.values()),
+        type_conditional_documents=type_conditional_calls,
+        type_conditional_calls=type_conditional_calls,
     )
     # Recorded so the policy-verification read scope is a number in the trace
     # rather than something a reader has to infer from the code.

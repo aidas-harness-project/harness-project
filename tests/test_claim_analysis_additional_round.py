@@ -35,6 +35,23 @@ class _Outcome:
         self.status = status
 
 
+def _settled_except(*unavailable: str) -> dict:
+    """Every 3-a field settled by the common pass, except the named ones.
+
+    A test that supplies only ONE field's outcome would see every OTHER
+    declared field come back eligible-because-unplanned, which is correct
+    behaviour (a `liability_basis` field is on no route and never gets an
+    outcome) but drowns the property under test. This fixes the rest at
+    `asserted` so each test isolates the field it is about.
+    """
+    declared = set()
+    for row in _config()["additional_fields_by_case_type"].values():
+        declared.update(row["field_ids"])
+    return {field_id: _Outcome("unavailable" if field_id in unavailable
+                               else "asserted")
+            for field_id in declared}
+
+
 def _assessments(**statuses: str) -> list[dict]:
     """Four verdicts, defaulting to `uncertain` -- CASE_053's real shape."""
     return [
@@ -93,7 +110,7 @@ def test_a_type_with_no_declared_fields_yields_no_round():
 
 def test_an_unavailable_field_is_re_opened():
     eligible = additional.eligible_field_ids(
-        _config(), _assessments(), {LIABILITY_FIELD: _Outcome("unavailable")})
+        _config(), _assessments(), _settled_except(LIABILITY_FIELD))
     assert eligible[LIABILITY_FIELD] == ["liability"]
 
 
@@ -109,12 +126,33 @@ def test_a_field_the_common_pass_settled_is_never_re_opened(status):
     belongs to consistency_check.
     """
     eligible = additional.eligible_field_ids(
-        _config(), _assessments(), {LIABILITY_FIELD: _Outcome(status)})
+        _config(), _assessments(), {**_settled_except(), LIABILITY_FIELD: _Outcome(status)})
     assert eligible == {}
 
 
-def test_a_field_absent_from_the_run_is_skipped_not_invented():
-    assert additional.eligible_field_ids(_config(), _assessments(), {}) == {}
+def test_a_field_the_common_pass_never_planned_is_eligible():
+    """Absence of an outcome means UNREAD, not out of scope.
+
+    Inverted 2026-08-21 with the `liability_basis` domain. Every field there
+    sits on no medical route (`source_route_id: null`), so no wave plans it and
+    the common pass produces no outcome at all -- the earlier rule, which
+    treated a missing outcome as "not in this run", would have made the six
+    fields added for exactly this round permanently unreachable.
+    """
+    eligible = additional.eligible_field_ids(_config(), _assessments(), {})
+    assert "liability_opinion_conclusion" in eligible
+    assert eligible["liability_opinion_conclusion"] == ["liability"]
+
+
+def test_a_field_no_live_type_asks_for_is_still_skipped():
+    """The scope rule still holds: eligibility comes from a live round, not
+    from merely existing in the catalogue."""
+    eligible = additional.eligible_field_ids(
+        _config(),
+        _assessments(liability="not_applicable",
+                     industrial_accident="not_applicable"),
+        {})
+    assert eligible == {}
 
 
 # --- the read plan ---------------------------------------------------------
@@ -122,7 +160,7 @@ def test_a_field_absent_from_the_run_is_skipped_not_invented():
 def test_the_legal_opinions_are_read_and_the_medical_record_is_not():
     plan = additional.read_plan(
         _config(), _assessments(),
-        {LIABILITY_FIELD: _Outcome("unavailable")}, CASE_053_DOCS)
+        _settled_except(LIABILITY_FIELD), CASE_053_DOCS)
     opened = {entry["document_id"] for entry in plan}
     assert {"DOC_006", "DOC_008"} <= opened
     assert "DOC_013" not in opened, (
@@ -135,7 +173,7 @@ def test_both_opposing_opinions_are_read_not_just_the_first():
     real state is a disagreement, which only surfaces if both are read."""
     plan = additional.read_plan(
         _config(), _assessments(),
-        {LIABILITY_FIELD: _Outcome("unavailable")}, CASE_053_DOCS)
+        _settled_except(LIABILITY_FIELD), CASE_053_DOCS)
     opinions = [e for e in plan if e["source_type"] == "legal_opinion"]
     assert sorted(e["document_id"] for e in opinions) == ["DOC_006", "DOC_008"]
 
@@ -155,8 +193,7 @@ def test_a_field_ranks_the_opinion_above_the_insurers_letter():
     """
     plan = additional.read_plan(
         _config(), _assessments(),
-        {LIABILITY_FIELD: _Outcome("unavailable"),
-         "industrial_accident_filing_basis": _Outcome("unavailable")},
+        _settled_except(LIABILITY_FIELD, "industrial_accident_filing_basis"),
         CASE_053_DOCS)
     by_id = {entry["document_id"]: entry for entry in plan}
     assert by_id["DOC_006"]["field_ranks"][LIABILITY_FIELD] == 1
@@ -168,8 +205,7 @@ def test_fields_wanting_the_same_document_share_one_read():
     """Batched like the common pass: one call serves every asking field."""
     plan = additional.read_plan(
         _config(), _assessments(),
-        {LIABILITY_FIELD: _Outcome("unavailable"),
-         "accident_date": _Outcome("unavailable")}, CASE_053_DOCS)
+        _settled_except(LIABILITY_FIELD, "accident_date"), CASE_053_DOCS)
     reads = [e for e in plan if e["document_id"] == "DOC_006"]
     assert len(reads) == 1, "two fields wanting one document must not cost two reads"
     assert reads[0]["field_ids"] == sorted([LIABILITY_FIELD, "accident_date"])
@@ -179,7 +215,7 @@ def test_a_case_without_the_source_documents_plans_nothing():
     """No legal opinion, no insurer letter -- the round costs zero."""
     plan = additional.read_plan(
         _config(), _assessments(),
-        {LIABILITY_FIELD: _Outcome("unavailable")},
+        _settled_except(LIABILITY_FIELD),
         _docs(DOC_013="medical_record"))
     assert plan == []
 
@@ -188,7 +224,7 @@ def test_a_closed_type_plans_nothing_even_with_the_documents_present():
     plan = additional.read_plan(
         _config(), _assessments(liability="not_applicable",
                                 industrial_accident="not_applicable"),
-        {LIABILITY_FIELD: _Outcome("unavailable")}, CASE_053_DOCS)
+        _settled_except(LIABILITY_FIELD), CASE_053_DOCS)
     assert plan == []
 
 
@@ -201,11 +237,11 @@ def test_a_field_two_live_types_both_want_is_read_once():
         "sources": ["legal_opinion"],
     }
     eligible = additional.eligible_field_ids(
-        config, _assessments(), {LIABILITY_FIELD: _Outcome("unavailable")})
+        config, _assessments(), _settled_except(LIABILITY_FIELD))
     assert eligible[LIABILITY_FIELD] == ["liability", "traffic_accident"]
     plan = additional.read_plan(
         config, _assessments(),
-        {LIABILITY_FIELD: _Outcome("unavailable")}, CASE_053_DOCS)
+        _settled_except(LIABILITY_FIELD), CASE_053_DOCS)
     assert len([e for e in plan if e["document_id"] == "DOC_006"]) == 1
 
 

@@ -287,14 +287,22 @@ def assess_case_types(
 
         # A field only counts as having triggered the verdict if it actually
         # carries a value. `field_id in fields` was enough while every type had
-        # ONE trigger, but liability now has two and only one may have answered:
-        # on CASE_053 the medical-routed defect field is `unavailable` while the
-        # legal opinion establishes the type, and naming both would credit an
-        # empty field with the finding.
+        # ONE trigger, but liability now has two and only one may have
+        # answered: on CASE_053 the medical-routed defect field is
+        # `unavailable` while the legal opinion establishes the type, and
+        # naming both would credit an empty field with the finding.
+        #
+        # `conflict` counts alongside `asserted`. Two 법률의견서 reaching
+        # opposite conclusions make the field `conflict`, and one of them still
+        # established the type -- requiring `asserted` here dropped the
+        # trigger, which sent the verdict back to `uncertain` through the
+        # "could not connect the fact to an extracted field" branch below. The
+        # disagreement is reported separately in `conflicting_field_ids`.
         triggered = [
             field_id for field_id in trigger_ids
             if status == "applicable"
-            and fields.get(field_id, {}).get("resolution_status") == "asserted"
+            and fields.get(field_id, {}).get("resolution_status")
+            in {"asserted", "conflict"}
         ]
         if status == "applicable" and not triggered:
             # Never assert `applicable` without naming the field that carried it;

@@ -103,8 +103,13 @@ def eligible_field_ids(
         for field_id in row["field_ids"]:
             outcome = outcomes_by_field.get(field_id)
             if outcome is None:
-                # The common pass produces an outcome for every configured
-                # field, so absence means the field is not in this run at all.
+                # NOT a skip. A `liability_basis` field sits on no medical
+                # route, so no wave ever plans it and the common pass produces
+                # no outcome at all -- treating absence as "not in this run"
+                # would make the six fields added for exactly this round
+                # permanently unreachable. Absence means unread, which is
+                # precisely what this round exists to fix.
+                wanted.setdefault(field_id, []).append(case_type)
                 continue
             if getattr(outcome, "status", None) not in RETRYABLE_STATUSES:
                 continue

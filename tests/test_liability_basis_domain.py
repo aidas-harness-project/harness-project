@@ -169,6 +169,37 @@ def test_two_opposing_opinions_establish_the_type_and_say_it_is_disputed():
     assert "쟁점" in verdict["reason"]
 
 
+def test_a_disputed_opinion_field_still_triggers_the_verdict():
+    """A `conflict` field can still be what established the type.
+
+    Two opposing 법률의견서 make `liability_opinion_conclusion` a conflict, and
+    one of them stated 성립. Requiring `asserted` in the trigger filter dropped
+    it, which sent the verdict back to `uncertain` through the "could not
+    connect the fact to an extracted field" branch -- undoing the whole point
+    of reading the opinions. The disagreement is reported separately, in
+    `conflicting_field_ids`.
+    """
+    disputed = _fact(OPINION, "conflict")
+    disputed["selected_observation_ids"] = ["CAO_0001", "CAO_0002"]
+    disputed["observations"] = [
+        {"observation_id": "CAO_0001", "value_state": "asserted",
+         "value": "성립",
+         "evidence_references": [{"document_id": "DOC_006", "page": 10,
+                                  "quote": "인용", "start_char": 0,
+                                  "end_char": 2}]},
+        {"observation_id": "CAO_0002", "value_state": "asserted",
+         "value": "불성립",
+         "evidence_references": [{"document_id": "DOC_008", "page": 12,
+                                  "quote": "인용", "start_char": 0,
+                                  "end_char": 2}]},
+    ]
+    verdict = _liability([_fact(DEFECT, "unavailable"), disputed])
+    assert verdict["status"] == "applicable"
+    assert verdict["triggered_field_ids"] == [OPINION]
+    assert verdict["conflicting_field_ids"] == [OPINION]
+    assert "쟁점" in verdict["reason"]
+
+
 def test_the_medical_route_still_wins_when_it_answers():
     """A 진료기록 that does record the mechanism keeps its reading; the legal
     opinion is a fallback, not an override."""
