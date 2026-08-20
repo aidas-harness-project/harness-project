@@ -243,7 +243,22 @@ basis arrays, amounts, requested_documents, policy_matches, confidence, evidence
 review_required. For each accepted_coverages item include: accepted_coverage_id, coverage_name,
 payment_status, accepted_amount, insurer_stated_basis, policy_matches, confidence,
 evidence_references, and review_required. Every evidence reference needs document_id, page, and an
-exact quote. The complete response is validated against the full local contract before publication.
+exact quote.
+
+candidate_codes is an array of 1 to 3 objects, and each object has EXACTLY these two keys:
+  taxonomy_code -- the R-code string, e.g. "R07"
+  confidence    -- a number from 0 to 1
+No other key is permitted in a candidate_codes entry: rank, code, rationale, label and reason are
+all rejected. Rank is expressed by array ORDER, not by a field. The list is ranked best-first, its
+first entry's taxonomy_code MUST equal this reason's taxonomy_code, the codes must be distinct, and
+confidence must never increase as the list goes on. For example:
+  "taxonomy_code": "R07",
+  "candidate_codes": [
+    {{"taxonomy_code": "R07", "confidence": 0.82}},
+    {{"taxonomy_code": "R12", "confidence": 0.11}}
+  ]
+
+The complete response is validated against the full local contract before publication.
 If review_required is true at the response level, reviewer_role is required and must be one of
 손해사정사, 의사, or 법률전문가.
 

@@ -298,6 +298,79 @@ def _wall_interval(span: dict) -> tuple[float, float] | None:
     return start, start + max(duration, 0.0)
 
 
+# Categories whose spans represent real work rather than bookkeeping.
+_LEAF_COST_CATEGORIES = frozenset({"provider", "subprocess", "compute"})
+
+# Container spans: `pool.*` and `stage.*` WRAP their children and are recorded
+# as "compute" like any other, so they pass the category filter. They still
+# count toward a stage's WALL -- a pool occupied that time whether or not its
+# children were traced -- but they must not appear in the per-operation
+# ranking beside the calls they contain. On CASE_489 `pool.documents` and
+# `stage.document` both ranked above the OCR pool they enclose.
+_CONTAINER_OP_PREFIXES = ("pool.", "stage.")
+
+
+def _is_container_op(op: str) -> bool:
+    return op.startswith(_CONTAINER_OP_PREFIXES)
+
+
+def stage_cost_rows(spans) -> dict:
+    """Per-stage tool cost as WALL time, with the self-time sum beside it.
+
+    Both numbers are already in `_timing_summary.json` -- `by_stage` carries a
+    union, `by_op` carries self-time sums -- but they are bare floats in
+    different sections, and reading one as the other is the mistake this
+    exists to stop. Twice in one session a stage's cost was reported wrong
+    from that file: once by calling an existing union "tool time", and then,
+    correcting it, by reporting the SUM of 34 parallel OCR calls (1344.7s) as
+    the wall cost of a 1300.6s attempt. A figure larger than the window it
+    sits in is the tell; nothing in the summary made it legible.
+
+    `tool_wall_s` is the union -- how long any tool was running, which is what
+    a stage's elapsed cost is made of. `tool_self_time_s` is the sum, which
+    answers a different question (how much work was done) and exceeds the wall
+    whenever anything ran in parallel. `max_concurrency` is their ratio, so
+    parallelism is a number rather than an inference.
+
+    `top_ops_by_wall` ranks operations by union too: 34 OCR calls summing to
+    1344s occupy less wall than one 400s serial driver, and a ranking by sum
+    puts them the wrong way round.
+    """
+    by_stage: dict[str, list] = {}
+    by_stage_op: dict[str, dict[str, list]] = {}
+    for span in spans:
+        if span.get("category") not in _LEAF_COST_CATEGORIES:
+            continue
+        stage = span.get("stage_name")
+        if not isinstance(stage, str):
+            continue
+        interval = _wall_interval(span)
+        if interval is None:
+            continue
+        by_stage.setdefault(stage, []).append(interval)
+        op = span.get("op") or "?"
+        if not _is_container_op(op):
+            by_stage_op.setdefault(stage, {}).setdefault(op, []).append(interval)
+
+    rows: dict[str, dict] = {}
+    for stage, intervals in by_stage.items():
+        wall = _union_length(intervals)
+        self_time = sum(end - start for start, end in intervals)
+        ops = [
+            (op, round(_union_length(op_intervals), 6))
+            for op, op_intervals in by_stage_op.get(stage, {}).items()
+        ]
+        ops.sort(key=lambda item: item[1], reverse=True)
+        rows[stage] = {
+            "tool_wall_s": round(wall, 6),
+            "tool_self_time_s": round(self_time, 6),
+            "max_concurrency": round(self_time / wall, 6) if wall else 0.0,
+            "call_count": len(intervals),
+            "top_ops_by_wall": ops[:8],
+        }
+    return rows
+
+
 def _stage_marker_key(span: dict) -> tuple[str, int] | None:
     attrs = span.get("attrs") or {}
     stage = attrs.get("stage_name")
