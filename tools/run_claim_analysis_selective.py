@@ -561,6 +561,24 @@ def resolve_opportunistic(
             found = (cache.cached(document_id) or {}).get(plan.field_id)
             if not found:
                 continue
+            # A cached record is not always an asserted value. The main pass
+            # (`_absorb`) reads `presence` first and routes an
+            # `explicitly_absent` record to an observation carrying a reason
+            # and NO value -- a source stating the field is absent is evidence,
+            # not a reading. This path never checked, so it reached
+            # `found["value"]` on exactly that record and took the whole driver
+            # down with a KeyError: CASE_712 (2026-08-21) crashed stage 5 after
+            # 235.9s, on a case whose only defect was that one ride-along
+            # source said a field was not present.
+            #
+            # A ride-along is opportunistic by definition: it answers from a
+            # document another field already opened, so anything it cannot
+            # cleanly read is skipped rather than repaired. The absence is
+            # still recorded by the owning field's own read.
+            if found.get("presence", "asserted") != "asserted":
+                continue
+            if found.get("value") is None or not found.get("quote"):
+                continue
             text = page_text.get((document_id, found.get("page")))
             if text is None:
                 continue

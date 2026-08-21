@@ -357,3 +357,59 @@ def test_the_filing_route_opens_no_medical_document() -> None:
     # No document was opened that only a filing field routes to.
     for _, fields in recorder.calls:
         assert not set(fields) & set(_filing_fields())
+
+
+# ------------------------------------- a ride-along that is not a value -----
+
+def _opportunistic_plan():
+    field_row = selection.opportunistic_fields(_config())[0]
+    documents = [selection.DocumentRef("DOC_010", "outpatient_record")]
+    plan = selection.plan_field(field_row, _config(), documents)
+    if not plan.steps:
+        pytest.skip("the opportunistic field does not route to this kind")
+    return field_row, plan
+
+
+def _ride_along(record):
+    """Run the opportunistic path over one cached record."""
+    field_row, plan = _opportunistic_plan()
+    recorder = _Recorder({"DOC_010": {field_row["field_id"]: record}})
+    cache = driver.DocumentCache(recorder)
+    cache.read("DOC_010", "outpatient_record", [field_row])
+    return driver.resolve_opportunistic(
+        plan, field_row, cache, {("DOC_010", 1): QUOTE},
+        driver._observation_id_sequence())
+
+
+def test_an_explicitly_absent_ride_along_does_not_crash_the_driver():
+    """A source stating the field is ABSENT carries no `value`.
+
+    The main pass (`_absorb`) reads `presence` first and routes such a record
+    to an observation with a reason and no value. This path did not check, so
+    it reached `found["value"]` on exactly that record and took the whole
+    driver down: CASE_712 (2026-08-21) died at stage 5 after 235.9s with
+    `KeyError: 'value'`, on a case whose only peculiarity was that one
+    ride-along source said a field was not present.
+    """
+    outcome = _ride_along(
+        {"presence": "explicitly_absent", "page": 1, "quote": QUOTE,
+         "reason": "해당 기재 없음"})
+    assert outcome.status == "unavailable"
+    assert outcome.observations == []
+
+
+def test_a_ride_along_missing_its_value_is_skipped_not_fatal():
+    outcome = _ride_along({"page": 1, "quote": QUOTE})
+    assert outcome.status == "unavailable"
+
+
+def test_a_ride_along_missing_its_quote_is_skipped_not_fatal():
+    outcome = _ride_along({"value": QUOTE, "page": 1})
+    assert outcome.status == "unavailable"
+
+
+def test_a_well_formed_ride_along_still_asserts():
+    """The guards must not swallow the case the path exists for."""
+    outcome = _ride_along({"value": QUOTE, "page": 1, "quote": QUOTE})
+    assert outcome.status == "asserted"
+    assert outcome.observations[0]["extraction_wave"] == "opportunistic"
