@@ -26,6 +26,7 @@ under the process.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -387,6 +388,17 @@ def unconfirmed_section(
     Only fields that were actually searched (an A or B wave field) and came
     back `unknown`. A `not_applicable` field was never routable in this case
     and is not a gap in the records; a deferred field was never asked.
+
+    `route_not_activated` is excluded for the same reason (2026-08-21). The
+    route's trigger never fired -- on CASE_702 the three 산재 fields printed
+    because no 산재 접수 fact was found, which is not a finding about THIS
+    case's records: nothing was read, nothing is missing, and requesting
+    documents would be wasted effort. Listing them told a 손해사정사 to chase
+    a 산재 file that the case gives no reason to believe exists, and the same
+    three lines would print on every non-산재 case in the corpus. The cause is
+    still carried per field in `claim_analysis_result.json` for anyone auditing
+    what the lane did or did not open; what changes here is only whether the
+    practitioner's briefing lists it as an outstanding item.
     """
     searched = {
         row["field_id"]: row for row in config.get("fields") or []
@@ -397,6 +409,8 @@ def unconfirmed_section(
         if field_id not in searched:
             continue
         if field.get("resolution_status") != "unavailable":
+            continue
+        if field.get("unavailable_reason") == "route_not_activated":
             continue
         rows.append({
             "field_id": field_id,
@@ -1023,7 +1037,132 @@ def _cited_bullets(rows) -> tuple[list[str], list[dict]]:
     return lines, collected
 
 
-def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
+def _merge_links_by_coverage(links: Sequence[Mapping[str, Any]]) -> list[dict]:
+    """One line per coverage NAME, not per contributing field.
+
+    `policy_links` is built per FIELD -- 수술 arrives twice
+    (`surgery_or_major_procedure_status`, `surgery_or_procedure_name`) and
+    후유장해 twice (`disability_type`, `disability_related_diagnosis`) -- so
+    CASE_702's section 8 printed 수술 and 후유장해 as duplicate rows carrying
+    identical text. That is a display artifact, not duplicated data: the rows
+    differ only in a `coverage_id` the reader never sees.
+
+    Merging happens HERE rather than in the linker on purpose. The per-field
+    shape is what lets each field's requirement carry its own evidence status,
+    and changing it would reach into `claim_analysis_policy_links.py` and the
+    contract every downstream consumer reads. This changes presentation only.
+
+    A merged row keeps the first `matched` clause_ref if any field matched --
+    a coverage whose clause was found through one field is found, period --
+    and unions the requirements so no requirement's status is dropped.
+    """
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for link in links:
+        key = str(link.get("coverage_name") or link.get("coverage_id") or "")
+        if key not in merged:
+            merged[key] = dict(link)
+            merged[key]["requirements"] = list(link.get("requirements") or [])
+            merged[key]["contributing_coverage_ids"] = [link.get("coverage_id")]
+            order.append(key)
+            continue
+        row = merged[key]
+        row["contributing_coverage_ids"].append(link.get("coverage_id"))
+        # A found clause wins over a not_found one: the coverage IS linked.
+        if (row.get("clause_link_status") != "matched"
+                and link.get("clause_link_status") == "matched"):
+            for field in ("clause_link_status", "clause_link_status_label",
+                          "clause_ref", "uncertainty_reason"):
+                row[field] = link.get(field)
+        seen = {(r.get("requirement_id"), r.get("requirement_text"))
+                for r in row["requirements"]}
+        for requirement in link.get("requirements") or []:
+            if (requirement.get("requirement_id"),
+                    requirement.get("requirement_text")) not in seen:
+                row["requirements"].append(requirement)
+    return [merged[key] for key in order]
+
+
+def _clause_body_reader(case_id: str, run_id: str | None):
+    """Return `clause_body(document_id, page, heading) -> str`.
+
+    Reads the REDACTED layer through the DAO, the same text every analysis
+    stage reads -- `read-page-text` serves the pre-redaction layer and refuses
+    this caller outright, which is the capability gate working as intended.
+
+    Pages are cached per document because a coverage spanning several articles
+    asks for the same page repeatedly, and one narrowed bundle read per page is
+    already the cheapest sanctioned path.
+    """
+    cache: dict[tuple[str, int], str] = {}
+
+    def clause_body(document_id: str | None, page: Any, heading: str | None) -> str:
+        if not document_id or not isinstance(page, int) or not heading:
+            return ""
+        key = (document_id, page)
+        if key not in cache:
+            args = ["read-redacted-text-bundle", case_id,
+                    "--doc-id", document_id,
+                    "--pages", f"{document_id}={page}"]
+            if run_id:
+                args += ["--run-id", run_id]
+            try:
+                payload = _dao_json(args, allow_missing=True) or {}
+            except RuntimeError:
+                # Never fail the report over a presentation extra: the clause
+                # reference itself is already published and verified.
+                payload = {}
+            text = ""
+            for document in payload.get("documents") or []:
+                for entry in document.get("pages") or []:
+                    if entry.get("page") == page:
+                        text = entry.get("text") or ""
+            cache[key] = text
+        return _excerpt_article(cache[key], heading)
+
+    return clause_body
+
+
+# One article's body, capped. Long enough to carry the operative sentence,
+# short enough that section 8 stays a briefing rather than a reprint of the
+# 약관 -- a matched coverage can span a dozen articles.
+CLAUSE_BODY_MAX_CHARS = 400
+
+
+def _excerpt_article(page_text: str, heading: str) -> str:
+    """The text under `heading` on this page, trimmed to one excerpt.
+
+    The heading arrives as the bare article name (`보상하지 않는 손해`) while
+    the page prints it as `제2조(보상하지 않는 손해)`, so the search is for the
+    heading anywhere on the page and the body is what follows it up to the next
+    `제N조` or the cap.
+    """
+    if not page_text or not heading:
+        return ""
+    start = page_text.find(heading)
+    if start < 0:
+        return ""
+    body = page_text[start + len(heading):]
+    body = body.lstrip(")） \t\r\n")
+    # The next article STARTS a line. Matching `제N조` anywhere truncates the
+    # body at the first cross-reference instead -- 구내치료비 제1조 opens with
+    # "보통약관 제3조(보상하는 손해)의 규정에도 불구하고", so an anywhere-match
+    # cut the excerpt after four words and dropped the operative sentence.
+    marker = re.search(r"^\s*제\s*\d+\s*조", body, re.MULTILINE)
+    if marker:
+        body = body[:marker.start()]
+    body = " ".join(body.split())
+    if not body:
+        return ""
+    if len(body) > CLAUSE_BODY_MAX_CHARS:
+        body = body[:CLAUSE_BODY_MAX_CHARS].rstrip() + " …"
+    return body
+
+
+def markdown_sections(
+    report: Mapping[str, Any],
+    clause_body: Any = None,
+) -> list[dict]:
     """The nine sections of the selective template, as document_assembly input.
 
     Content only -- no `[E#]` tags. The tool generates those and the matching
@@ -1038,6 +1177,12 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
     summary = report.get("case_summary") or {}
     evidence_by_fact = summary.get("fact_evidence") or {}
     sections: list[dict] = []
+    # Injected rather than called directly so this function stays pure: it takes
+    # a report and returns sections, which is what lets the tests build one
+    # report with every branch live and render it without a case on disk.
+    if clause_body is None:
+        def clause_body(document_id, page, heading):  # noqa: ARG001
+            return ""
 
     # 1. accident and shared medical facts
     #
@@ -1254,7 +1399,7 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
     links = report.get("policy_links") or []
     link_lines: list[str] = []
     link_references: list[dict] = []
-    for link in links:
+    for link in _merge_links_by_coverage(links):
         label = link.get("clause_link_status_label", link.get(
             "clause_link_status", ""))
         line = f"- {link.get('coverage_name') or link.get('coverage_id')}: {label}"
@@ -1271,6 +1416,18 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
             line += (f" — {reference['document_id']} p.{reference.get('page')} "
                      f"{reference['quote']}")
             line += _mark(reference, link_references)
+            # The clause's own words, not just its heading. `clause_ref.quote`
+            # carries the ARTICLE HEADING ("보상하지 않는 손해") because the
+            # linker verifies the heading string, so a reader saw which article
+            # applied and never what it said -- and the whole point of this
+            # section is to put the clause in front of the reviewer. The body
+            # is read here from the redacted layer, the same text every other
+            # analysis stage reads.
+            body = clause_body(
+                reference.get("document_id"), reference.get("page"),
+                reference.get("quote"))
+            if body:
+                line += f"\n  - 조항 본문: {body}"
             # A matched coverage may still carry a note, and until 2026-08-20
             # this was an `elif` that dropped it: a coverage spanning several
             # articles elects one into `clause_ref`, and the sentence naming
@@ -1279,6 +1436,19 @@ def markdown_sections(report: Mapping[str, Any]) -> list[dict]:
                 line += f"\n  - {link['uncertainty_reason']}"
         elif link.get("uncertainty_reason"):
             line += f" — {link['uncertainty_reason']}"
+            # "조항을 찾지 못했습니다" reads as a search failure, and on a
+            # single-product pack it usually is not one: CASE_702's only 약관
+            # is an 영업배상책임보험, so 수술/입원/후유장해 are absent from the
+            # product rather than missed by the lookup (verified by searching
+            # the policy text for both spellings of 후유장해/후유장애 and for
+            # 장해분류표/장해지급률 -- zero hits outside the 의무보험 지급한도
+            # clauses of two 추가특별약관). The report must not assert that as
+            # fact, because this stage did not establish it; it states the
+            # possibility so a reviewer checks the product rather than hunting
+            # for a clause that may not exist.
+            line += ("\n  - 이 담보가 본건 약관에 처음부터 없을 가능성이 "
+                     "있습니다. 편철된 약관의 상품 종류를 먼저 확인하시기 "
+                     "바랍니다.")
         for requirement in link.get("requirements") or []:
             status = requirement.get(
                 "evidence_status_label", requirement.get("evidence_status", ""))
@@ -1333,7 +1503,8 @@ def render_markdown(
     """
     output_path = f"outputs/{case_id}/screening_report.md"
     spec = {"output_path": output_path,
-            "sections": markdown_sections(report)}
+            "sections": markdown_sections(
+                report, clause_body=_clause_body_reader(case_id, run_id))}
     spec_file = _temp_json(spec)
     try:
         proc = subprocess.run(

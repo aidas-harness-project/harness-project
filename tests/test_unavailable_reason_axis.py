@@ -112,13 +112,43 @@ def test_the_report_publishes_the_structured_cause():
     field_ids = _searched_field_ids(2)
     facts = {
         field_ids[0]: _fact(field_ids[0], "not_mentioned"),
-        field_ids[1]: _fact(field_ids[1], "route_not_activated"),
+        field_ids[1]: _fact(field_ids[1], "not_scheduled"),
     }
     rows = {row["field_id"]: row for row in
             screening.unconfirmed_section(facts, CONFIG)}
     assert rows[field_ids[0]]["gap_kind"] == "records_gap"
     assert rows[field_ids[1]]["gap_kind"] == "not_searched"
-    assert rows[field_ids[1]]["unavailable_reason"] == "route_not_activated"
+    assert rows[field_ids[1]]["unavailable_reason"] == "not_scheduled"
+
+
+def test_a_route_that_never_activated_is_not_an_outstanding_item():
+    """`route_not_activated` is dropped from the reader's list (2026-08-21).
+
+    The trigger never fired, so nothing was read and nothing is missing --
+    listing it told a 손해사정사 to chase records the case gives no reason to
+    believe exist. On CASE_702 the three 산재 fields printed on a case with no
+    산재 element at all, and the same three lines would print on every
+    non-산재 case in the corpus.
+
+    The cause is still carried per field in `claim_analysis_result.json`; what
+    changes is only whether the practitioner's briefing lists it as a gap. The
+    OTHER `not_searched` value, `not_scheduled`, is still reported: an
+    opportunistic field genuinely could have been answered by a document
+    another field opened.
+    """
+    field_ids = _searched_field_ids(3)
+    facts = {
+        field_ids[0]: _fact(field_ids[0], "not_mentioned"),
+        field_ids[1]: _fact(field_ids[1], "route_not_activated"),
+        field_ids[2]: _fact(field_ids[2], "not_scheduled"),
+    }
+    reported = {row["field_id"] for row in
+                screening.unconfirmed_section(facts, CONFIG)}
+    assert field_ids[1] not in reported, (
+        "a route that never activated is not a gap in THIS case's records")
+    assert field_ids[0] in reported
+    assert field_ids[2] in reported, (
+        "not_scheduled is a different situation and must still be reported")
 
 
 def test_a_result_without_the_axis_still_renders():
