@@ -1,0 +1,141 @@
+{
+  "case_id": "CASE_705",
+  "run_id": "RUN_20260821_001",
+  "component": "screening-rubric",
+  "status": "success",
+  "created_at": "2026-08-21T14:30:00+09:00",
+  "schema_version": "screening_rubric_result.v0.1",
+  "rubric_version": "screening_rubric.v0.1",
+  "target_report_path": "rubric_test/screening_report_705.md",
+  "target_report_sha256": "bfd69a1b4c0bb6cc6e028f584e04ebd4cce8770985efb717afcca4a71a59791f",
+  "axis_scores": [
+    {
+      "axis_id": "A1",
+      "raw": 4,
+      "weight": 10,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "10개 섹션 역할이 모두 실제 내용으로 채워져 있고, 값이 없는 항목은 §7에 20건이 부재 선언 형태로 정리되어 있다. 플레이스홀더·미완성 문장 없음.",
+      "evidence_quotes": [
+        "## 4. 의료영역 확보 현황",
+        "- 미확인 항목 수: 20"
+      ]
+    },
+    {
+      "axis_id": "A2",
+      "raw": 4,
+      "weight": 25,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "A등급 전 항목 처리됨: 주진단명·진단서상 진단명·주요 치료 유형(수술)·수술 시행 여부·장해 관련 상병·장해 유형이 값으로, 최종 경과 기재와 환자 자가응답 기왕력은 §7의 범위 한정 부재 선언으로 처리. B등급(부위·좌우·진료과·계통·코드·확진구분·수술명·입원기간·ROM·평가기준·기존 장해율)도 대부분 값으로 확보되어 있다.",
+      "evidence_quotes": [
+        "  - 주요 치료 유형: 수술[E18]",
+        "  - 기재된 장해 유형: 부전강직[E25]",
+        "- 환자 진술 동일부위·유사질환 기왕력: 라우팅 우선순위상의 어떤 출처도 이 항목을 기재하지 않았습니다"
+      ]
+    },
+    {
+      "axis_id": "A3",
+      "raw": 3,
+      "weight": 15,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "출처 태그가 사실 서술마다 붙어 있고 주진단명·수술은 A등급 문서(진단서 DOC_012, 수술기록지 DOC_015)에 귀속된다. 다만 진단을 뒷받침하는 검사 소견이 경과기록지(B등급)의 'Xray>' 기재에 의존하고, 필요서류 체크리스트가 영상판독지 '보유'로 기재하고 있음에도 판독결과지가 근거로 인용되지 않았다. 의무기록 우선순위 문서의 '영상 판독결과지 우선' 원칙에 미달.",
+      "evidence_quotes": [
+        "  - 진단을 뒷받침하는 검사 소견: swelling +, Xray> Fx. distal radius, wrist, Rt.[E17]",
+        "- 영상판독지: 보유 (산재/근재, 배상책임, 개인보험, 교통사고)"
+      ]
+    },
+    {
+      "axis_id": "A4",
+      "raw": 4,
+      "weight": 20,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "사고경위(결빙 계단)와 정합하게 개인보험·배상책임을 '해당'으로, 교통사고·산재/근재를 '불확실'로 병렬 판정하고 근거를 각각 기재했다. 필요서류 체크리스트가 14종을 4개 유형별 귀속과 함께 보유/미확인으로 대조하며, 유형별 필요서류 문서의 배상 9종 세트를 포괄한다.",
+      "evidence_quotes": [
+        "- 배상책임: 해당 — 사고 경위에 시설 하자 또는 제3자의 작위·부작위 책임이 특정되어 있습니다.",
+        "- 진료비 세부내역서: 보유 (산재/근재, 배상책임, 교통사고)"
+      ]
+    },
+    {
+      "axis_id": "A5",
+      "raw": 4,
+      "weight": 15,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "쟁점 8건이 모두 리포트 내 사실에 묶여 있고 법률전문가·의사·손해사정사로 라우팅되며, 각 검토 포인트가 '무엇을 확인하면 해소되는지'까지 지정한다. 배상책임 성립 여부가 나머지 판단의 전제라는 의존관계도 명시.",
+      "evidence_quotes": [
+        "- **검토 포인트** [high, 법률전문가] 법률의견서 4건(DOC_006/007/008/009)의 작성 주체·작성일자·의뢰 범위를 원문에서 확인하고",
+        "이 쟁점이 정리되기 전에는 담보 적용·손해액 산정·보험사 부지급 사유의 당부 어느 것도 확정할 수 없습니다."
+      ]
+    },
+    {
+      "axis_id": "A6",
+      "raw": 3,
+      "weight": 15,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "우측 손목·S6280·법률의견서 상반 기재가 섹션 간 일관되고, 충돌 2건 모두 양측 출처를 제시한다. 다만 §4에서 입원기간을 2023-12-04~2023-12-07로 기재하면서 현재 치료 상태를 '입원예정'으로 남겨 두었고(상류 값으로 보이나 시점상 이미 종료된 입원과 어긋난다), 리포트가 이 어긋남을 표시하지 않는다. 서로 다른 필드이므로 G4(같은 사실의 상이한 값)로 보지 않고 축 감점으로 처리했다.",
+      "evidence_quotes": [
+        "  - 입원기간: 2023-12-04 ~ 2023-12-07[E22]",
+        "  - 현재 치료 상태: 입원예정[E23]"
+      ]
+    }
+  ],
+  "weighted_total": 92.5,
+  "gates": [
+    {
+      "gate_id": "G1",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "check-forbidden-expressions clean:true. 의미 패스에서도 무완충 단정 없음 -- 판단성 서술이 '…로 판단됩니다'/'…해 주시기 바랍니다' 형태로 유보되어 있음."
+    },
+    {
+      "gate_id": "G2",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "리포트가 장해율을 산출하거나 증세고정을 판단하지 않음."
+    },
+    {
+      "gate_id": "G3",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "부재 서술이 모두 자료 범위를 한정한 형태. 무한정 부재 단정 없음."
+    },
+    {
+      "gate_id": "G4",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "리포트가 인지하지 못한 섹션 간 사실 모순 없음."
+    },
+    {
+      "gate_id": "G5",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "사건유형 판정과 청구담보·사고경위가 양립함."
+    }
+  ],
+  "verdict": "pass",
+  "findings": [
+    {
+      "finding_id": "SR-1",
+      "severity": "medium",
+      "section": "4. 의료영역 확보 현황",
+      "description": "'현재 치료 상태: 입원예정'이 같은 섹션의 입원기간(2023-12-04~2023-12-07)과 시점상 어긋나는데 표시되지 않았다.",
+      "fix_suggestion": "값을 유지하되 기준 시점을 밝히거나(예: 'DOC_018 작성 시점 기준'), §7·§10에 시점 확인 요청으로 올린다."
+    },
+    {
+      "finding_id": "SR-2",
+      "severity": "medium",
+      "section": "4. 의료영역 확보 현황",
+      "description": "영상판독지를 보유로 기재하면서 진단 근거는 경과기록지의 'Xray>' 요약에만 의존한다.",
+      "fix_suggestion": "영상판독지의 판독 결론을 진단 근거로 인용하거나, 판독지가 이 진단을 다루지 않는다는 점을 명시한다."
+    }
+  ]
+}

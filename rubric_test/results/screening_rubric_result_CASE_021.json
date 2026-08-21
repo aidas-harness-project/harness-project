@@ -1,0 +1,140 @@
+{
+  "case_id": "CASE_021",
+  "run_id": "RUN_20260821_001",
+  "component": "screening-rubric",
+  "status": "success",
+  "created_at": "2026-08-21T14:30:00+09:00",
+  "schema_version": "screening_rubric_result.v0.1",
+  "rubric_version": "screening_rubric.v0.1",
+  "target_report_path": "outputs/CASE_021/screening_report.md",
+  "target_report_sha256": "6712638dd7e010c4f7d44f59c4f67199ada5ca01ef09f3a3e3578282f0ec148a",
+  "axis_scores": [
+    {
+      "axis_id": "A1",
+      "raw": 4,
+      "weight": 10,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "8섹션 서술형이지만 역할 매핑상 R1·R4·R5·R8·R9가 모두 채워져 있고, 이 형태가 갖지 않는 R3·R6·R7은 감점 대상이 아니다. 빈 섹션·플레이스홀더 없음.",
+      "evidence_quotes": [
+        "## 1. 사건 개요",
+        "## 5. 추가 필요 자료"
+      ]
+    },
+    {
+      "axis_id": "A2",
+      "raw": 2,
+      "weight": 25,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "주진단명(I67.8)은 값으로 확보되어 있고 진단서·의무기록 부존재도 명시했다. 그러나 A등급 변수 중 주요 치료 유형, 최종 임상경과, 현재 치료 상태, 환자 자가응답 기왕력이 값도 개별 부재 선언도 없이 비어 있다. '진단서·의무기록·영상 원본 자료 부존재'라는 포괄 문장은 문서 종류의 부재를 말할 뿐, 각 변수의 상태를 대신하지 않는다.",
+      "evidence_quotes": [
+        "약관 전문·진단서·의무기록·영상 원본 자료는 사건 내 존재하지 않는 것으로 확인된다.",
+        "피보험자는 '기타 명시된 뇌혈관질환(I67.8)'으로 진단받았다고 청구한 것으로 확인된다[E1]"
+      ]
+    },
+    {
+      "axis_id": "A3",
+      "raw": 3,
+      "weight": 15,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "모든 사실 서술에 [E#] 태그가 붙어 있으나, 사건이 보험사 안내문 1건으로만 구성되어 A·B등급 의무기록에 귀속되는 근거가 존재하지 않는다. 리포트가 그 사실을 명시하고 원 영상·판독지·진단서 확보를 필요 자료로 올린 점에서 은폐는 없으나, 근거 등급 자체는 낮다.",
+      "evidence_quotes": [
+        "(1) 2025-10-10 brain MRI/MRA 원본 및 판독지 — 본 건 판단의 핵심 임상 근거로 판단됨[E12]",
+        "사건 자료상 확인되는 주요 시점은 최초 내원 2025-09-30(두통·어지럼)[E2]"
+      ]
+    },
+    {
+      "axis_id": "A4",
+      "raw": 3,
+      "weight": 20,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "사건유형을 '진단·수술비'로 판정하고 청구담보와 정합한다. 다만 유형별 필요서류 문서의 4개 유형(개인보험·교통사고·배상·근재)은 상해 계열을 전제하므로 이 질병 청구에는 직접 대응하는 서류 세트가 없고, 리포트도 유형별 표준 세트 대조 대신 사건 특유 필요자료 3건을 제시한다. 필요자료 제시 자체는 근거와 함께 이루어졌다.",
+      "evidence_quotes": [
+        "본 건은 뇌혈관질환진단비 청구 건(사건유형: 진단·수술비)으로",
+        "(3) 각 보험사 약관 전문(진단확정 조항 전체) — 안내문에 인용된 문언 외 지급요건 확인용[E13]"
+      ]
+    },
+    {
+      "axis_id": "A5",
+      "raw": 4,
+      "weight": 15,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "핵심 쟁점을 요건 단위(REQ-2 충족 / REQ-3 다툼)로 특정하고, 의사 검토와 손해사정사 검토를 나눠 배정했으며, 무엇이 확보되면 판단이 바뀔 수 있는지까지 적었다.",
+      "evidence_quotes": [
+        "본 건의 핵심 쟁점은 2025-10-10 영상소견이 I67.8 뇌혈관질환의 진단확정을 객관적으로 뒷받침하는지 여부로 판단된다.",
+        "[의사] 2025-10-10 영상소견이 I67.8 진단확정을 객관적으로 뒷받침하는지 여부(핵심·우선)[E14]"
+      ]
+    },
+    {
+      "axis_id": "A6",
+      "raw": 4,
+      "weight": 15,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "3개 보험사 안내문의 공유 사실 9개 항목이 상호 일치함을 확인했고, 'I67B' 표기가 I67.8의 표기 변형으로 상위 단계에서 정리된 사항임을 밝혀 신규 충돌로 오인되지 않게 처리했다. 섹션 간 날짜·진단명 기재가 일관된다.",
+      "evidence_quotes": [
+        "다만 KB 안내문 p3의 'I67B' 표기는 I67.8의 OCR/표기 변형으로 상위 단계에서 이미 정리된 사항이며 신규 충돌로 제기되지 않았다[E11]",
+        "공유 사실 전 항목(9개 확인 항목)이 상호 일치하는 것으로 확인되었다[E10]"
+      ]
+    }
+  ],
+  "weighted_total": 78.8,
+  "gates": [
+    {
+      "gate_id": "G1",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "check-forbidden-expressions clean:true. 의미 패스에서도 무완충 단정 없음 -- 판단성 서술이 '…로 판단됩니다'/'…해 주시기 바랍니다' 형태로 유보되어 있음."
+    },
+    {
+      "gate_id": "G2",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "리포트가 장해율을 산출하거나 증세고정을 판단하지 않음."
+    },
+    {
+      "gate_id": "G3",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "부재 서술이 모두 자료 범위를 한정한 형태. 무한정 부재 단정 없음."
+    },
+    {
+      "gate_id": "G4",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "리포트가 인지하지 못한 섹션 간 사실 모순 없음."
+    },
+    {
+      "gate_id": "G5",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "사건유형 판정과 청구담보·사고경위가 양립함."
+    }
+  ],
+  "verdict": "revise",
+  "findings": [
+    {
+      "finding_id": "SR-1",
+      "severity": "high",
+      "section": "1. 사건 개요",
+      "description": "A등급 변수인 주요 치료 유형·최종 임상경과·현재 치료 상태·환자 자가응답 기왕력이 값도 개별 부재 선언도 없이 비어 있다.",
+      "fix_suggestion": "각 항목에 '제공된 자료에서 확인되지 않음' 형태의 범위 한정 부재 선언을 개별로 넣는다. 포괄적 문서 부재 문장으로 대체하지 않는다."
+    },
+    {
+      "finding_id": "SR-2",
+      "severity": "low",
+      "section": "5. 추가 필요 자료",
+      "description": "사건유형에 대응하는 표준 필요서류 세트 대조가 없다(질병 청구라 유형별 서류 문서의 4개 유형에 직접 대응하지 않는 사정은 있다).",
+      "fix_suggestion": "질병 청구용 필요서류 기준을 별도로 정의하거나, 대응 세트가 없다는 점을 리포트에 명시한다."
+    }
+  ]
+}

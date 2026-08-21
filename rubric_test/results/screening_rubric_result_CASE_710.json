@@ -1,0 +1,141 @@
+{
+  "case_id": "CASE_710",
+  "run_id": "RUN_20260821_001",
+  "component": "screening-rubric",
+  "status": "success",
+  "created_at": "2026-08-21T14:30:00+09:00",
+  "schema_version": "screening_rubric_result.v0.1",
+  "rubric_version": "screening_rubric.v0.1",
+  "target_report_path": "rubric_test/screening_report_710.md",
+  "target_report_sha256": "5a6a71d25ef292b56d869048e8a4f0a5ba1d9845dc318c8e0d2518bae1d8a524",
+  "axis_scores": [
+    {
+      "axis_id": "A1",
+      "raw": 3,
+      "weight": 10,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "10개 역할이 모두 채워져 있으나, §7의 6개 항목이 한국어 산출물에 영어 내부 문자열 'the case holds no document of any kind this field routes to'로 그대로 노출된다. 부재 사유 자체는 전달되므로 역할은 충족이지만, 손해사정사·의사가 읽는 문서에 미번역 템플릿 문자열이 남은 것은 완결성 결함이다.",
+      "evidence_quotes": [
+        "- 추가 치료 또는 재수술: the case holds no document of any kind this field routes to",
+        "- 현재 치료 상태: the case holds no document of any kind this field routes to"
+      ]
+    },
+    {
+      "axis_id": "A2",
+      "raw": 4,
+      "weight": 25,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "A등급 전 항목이 값 또는 범위 한정 부재 선언으로 처리되어 있다. 주진단명·진단서상 진단명·주요 치료 유형(수술)·수술 시행 여부는 값으로, 최종 임상경과·현재 치료 상태는 '해당 종류의 문서가 사건에 없음'으로, 장해 유형은 §7 부재 선언으로 처리. 환자 자가응답 기왕력은 'unknown'으로 명시하고 기록상 기왕력(충수절제술)을 따로 구분해 적었다 -- 핵심변수 문서가 요구하는 자가응답/기록 구분 그대로다.",
+      "evidence_quotes": [
+        "  - 환자 진술 동일부위·유사질환 기왕력: unknown[E16]",
+        "  - 기록상 동일부위 기왕력: # appendectomy - 15년전,[E17]",
+        "- 기재된 장해 유형: 라우팅 우선순위상의 어떤 출처도 이 항목을 기재하지 않았습니다"
+      ]
+    },
+    {
+      "axis_id": "A3",
+      "raw": 4,
+      "weight": 15,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "주진단명·진단코드는 진단서(DOC_002, A등급), 치료는 수술기록지(DOC_005, A등급), 진단 뒷받침 소견은 영상판독지(DOC_006)에 귀속되어 '판독결과지 우선' 원칙에 맞고, 장해 기재는 후유장해진단서(DOC_003, A등급)에서 온다. 출처 블록이 문서 종류를 명시해 등급 판정이 추적된다.",
+      "evidence_quotes": [
+        "- E13 - 영상판독지 (DOC_006) - p.1",
+        "- E18 - 후유장해진단서/신체감정서 (DOC_003) - p.1"
+      ]
+    },
+    {
+      "axis_id": "A4",
+      "raw": 4,
+      "weight": 20,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "개인보험만 '해당', 나머지 3종은 근거 부재를 이유로 '불확실'로 두고 '기재가 없다는 점을 부정 소견으로 보지는 않습니다'를 명시했다 -- 유형 분류 문서가 요구하는 미확정 처리다. 필요서류 14종이 4개 유형별로 보유/미확인 대조되어 있다.",
+      "evidence_quotes": [
+        "- 산재/근재: 불확실 — 업무 수행 중 발생한 상해인지 자료에 기재되어 있지 않습니다.",
+        "- 초진기록지: 보유 (산재/근재, 배상책임, 개인보험, 교통사고)"
+      ]
+    },
+    {
+      "axis_id": "A5",
+      "raw": 4,
+      "weight": 15,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "쟁점 7건이 근거 문서·면수와 함께 제시되고 의사/손해사정사/법률전문가로 라우팅되며, 각 항목이 무엇을 확인해야 해소되는지를 지정한다. 장해율 도출을 '이 단계의 판단 범위를 벗어난다'고 선을 긋고 의사 판단으로 넘긴 처리가 특히 정확하다.",
+      "evidence_quotes": [
+        "기재된 운동범위 수치로부터 장해율을 도출하는 것은 이 단계의 판단 범위를 벗어나므로",
+        "- **검토 포인트** [medium, 손해사정사] 수술 이후의 경과 자료(퇴원요약, 최종 외래기록, 경과기록, 진료비 내역·영수증)가 사건에 없습니다."
+      ]
+    },
+    {
+      "axis_id": "A6",
+      "raw": 3,
+      "weight": 15,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "좌측 병변의 문서 간 일관성, 사고경위 두 기재의 차이, 일자 공란을 모두 스스로 확인해 §10에 올렸다. 다만 §6은 '검증된 충돌 없음' 한 줄뿐이어서, §6만 읽는 독자는 사고경위 불일치가 존재한다는 사실에 도달하지 못한다. §10 본문이 원장 미등재 사유를 설명하고 있어 모순은 아니지만, 충돌 역할 섹션과 실제 충돌 서술이 갈라져 있다.",
+      "evidence_quotes": [
+        "- 검증된 충돌 없음",
+        "이 항목은 상류 단계에서 conflict_candidate로 등록되지 않았고 conflict ledger에도 항목이 없으므로, 본 보고서가 자체 확인으로 제기하는 사항입니다."
+      ]
+    }
+  ],
+  "weighted_total": 93.8,
+  "gates": [
+    {
+      "gate_id": "G1",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "check-forbidden-expressions clean:true. 의미 패스에서도 무완충 단정 없음 -- 판단성 서술이 '…로 판단됩니다'/'…해 주시기 바랍니다' 형태로 유보되어 있음."
+    },
+    {
+      "gate_id": "G2",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "리포트가 장해율을 산출하거나 증세고정을 판단하지 않음."
+    },
+    {
+      "gate_id": "G3",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "부재 서술이 모두 자료 범위를 한정한 형태. 무한정 부재 단정 없음."
+    },
+    {
+      "gate_id": "G4",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "리포트가 인지하지 못한 섹션 간 사실 모순 없음."
+    },
+    {
+      "gate_id": "G5",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "사건유형 판정과 청구담보·사고경위가 양립함."
+    }
+  ],
+  "verdict": "pass",
+  "findings": [
+    {
+      "finding_id": "SR-1",
+      "severity": "high",
+      "section": "7. 주요 미확인 항목",
+      "description": "영어 내부 문자열 'the case holds no document of any kind this field routes to'가 6개 항목에 그대로 출력되었다. 산출물은 한국어 전문가에게 제출되는 문서다.",
+      "fix_suggestion": "부재 사유 문자열을 한국어로 렌더링한다(예: '이 항목이 귀속되는 종류의 문서가 사건에 없습니다')."
+    },
+    {
+      "finding_id": "SR-2",
+      "severity": "medium",
+      "section": "6. 중요 충돌과 유형 판정 영향",
+      "description": "§6이 '검증된 충돌 없음'으로 끝나지만 §10은 리포트가 자체 확인한 사고경위 불일치를 제기한다.",
+      "fix_suggestion": "§6에 '원장 등재 충돌 없음. 본 보고서 자체 확인 사항 N건은 §10 참조' 형태의 연결 문장을 넣는다."
+    }
+  ]
+}

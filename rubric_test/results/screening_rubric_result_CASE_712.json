@@ -1,0 +1,149 @@
+{
+  "case_id": "CASE_712",
+  "run_id": "RUN_20260821_001",
+  "component": "screening-rubric",
+  "status": "success",
+  "created_at": "2026-08-21T14:30:00+09:00",
+  "schema_version": "screening_rubric_result.v0.1",
+  "rubric_version": "screening_rubric.v0.1",
+  "target_report_path": "rubric_test/screening_report_712.md",
+  "target_report_sha256": "6eeb778bf9c01b0c25d867d5156bb3323ee2a8238185d3d1b791910c7a06562a",
+  "axis_scores": [
+    {
+      "axis_id": "A1",
+      "raw": 4,
+      "weight": 10,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "10개 역할이 모두 실제 내용으로 채워져 있고 미확인 30건이 전부 범위 한정 부재 선언으로 정리되어 있다. 미번역 문자열·플레이스홀더 없음.",
+      "evidence_quotes": [
+        "- 미확인 항목 수: 30",
+        "## 8. 관련 약관과 요건 자료상태"
+      ]
+    },
+    {
+      "axis_id": "A2",
+      "raw": 3,
+      "weight": 25,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "A등급 대부분이 값 또는 부재 선언으로 처리되어 있다(주진단명·진단서상 진단명·주요 치료 유형·현재 치료 상태는 값, 수술 시행 여부·장해 유형·장해 관련 상병·최종 경과는 §7 부재 선언). 다만 환자 자가응답 기왕력이 §4에도 §7에도 없고 §10 검토 포인트 본문의 'PMHx. n/s' 언급으로만 존재한다 -- 구조화된 변수 영역에서는 침묵 상태다.",
+      "evidence_quotes": [
+        "  - 주요 치료 유형: 입원 안정 가료[E20]",
+        "- 수술·주요 처치 시행 여부: 라우팅 우선순위상의 어떤 출처도 이 항목을 기재하지 않았습니다",
+        "기왕증 여부는 DOC_004에 'PMHx. n/s'(비특이적)로만 기재되어 있습니다."
+      ]
+    },
+    {
+      "axis_id": "A3",
+      "raw": 3,
+      "weight": 15,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "주진단명·진단코드는 진단서(DOC_003, A등급)에 귀속되고 출처 블록이 문서 종류를 명시한다. 다만 진단을 뒷받침하는 핵심 검사 소견이 경과기록지(DOC_004, B등급)의 CT 요약에 의존하며, 영상판독지는 분류 실패로 '미확인'이다. 리포트가 그 분류 실패를 §10에서 밝히고 있어 은폐는 아니나, 핵심 근거의 등급은 낮다.",
+      "evidence_quotes": [
+        "  - 진단을 뒷받침하는 검사 소견: CT review:Lt sacral fx, [Conclusion]R/O CTS, right, [Conclusion]R/O CTS, left[E19]",
+        "- 영상판독지: 미확인(분류 불가) (산재/근재, 배상책임, 개인보험, 교통사고)"
+      ]
+    },
+    {
+      "axis_id": "A4",
+      "raw": 4,
+      "weight": 20,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "'차대 차 TA' 기재에 근거해 교통사고를 '해당'으로 판정하고, 유형별 필요서류 문서가 교통사고에 요구하는 진료비영수증·진료비세부내역서·약제비납입확인서를 체크리스트에서 모두 대조했다. 미확인 사유가 '문서 부재'가 아니라 '분류 불가'임을 §10에서 구분해 밝힌 점이 특히 정확하다.",
+      "evidence_quotes": [
+        "- 교통사고: 해당 — 차량 또는 교통사고가 사고 경위에 명시되어 있습니다.[E5]",
+        "이들이 '미확인'인 이유는 문서가 없어서가 아니라 Stage 2가 DOC_004~DOC_011을 일괄 'medical_record'로, DOC_012를 'other'로 분류해 세부 종류를 특정하지 못했기 때문입니다"
+      ]
+    },
+    {
+      "axis_id": "A5",
+      "raw": 4,
+      "weight": 15,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "쟁점 7건·검토 포인트 12건이 모두 문서·면수 근거와 함께 제시되고 의사/손해사정사/법률전문가로 라우팅된다. 맥브라이드 27%와 AMA 30%를 병기한 채 병합 판단을 의사에게 넘긴 처리, 기지급 진료비의 중복보상 관계를 별도 쟁점으로 세운 처리 모두 다음 행동이 지정되어 있다.",
+      "evidence_quotes": [
+        "- **검토 포인트** [high, 의사] DOC_002 후유장해진단서에 맥브라이드 27%(천장관절 골절)와 AMA 30%(Sacral kyphosis angle 34도)가 병기되어 있으나 병합합산란과 최종 노동력상실률란이 공란입니다.",
+        "- **검토 포인트** [high, 손해사정사] 입원·통원 일수의 채택 범위를 결정해 주십시오."
+      ]
+    },
+    {
+      "axis_id": "A6",
+      "raw": 3,
+      "weight": 15,
+      "applicable": true,
+      "na_reason": null,
+      "rationale": "입원일수 3계열 불일치, 골절 범위 불일치, 사고일 불일치를 모두 스스로 확인해 근거와 함께 제기했고, 현재 치료 상태 '입원'이 사고 직후 시점 기재라 현재와 다를 수 있음까지 표시했다. 다만 §1 머리표가 '사고일: 확인 불가'로만 끝나 §10에서 제기한 2024-11-13 기재와 연결되지 않고, §6은 다시 '검증된 충돌 없음' 한 줄이다. 리포트가 인지하고 있으므로 G4는 아니다.",
+      "evidence_quotes": [
+        "- 사고일: 확인 불가",
+        "DOC_002 후유장해진단서는 '부상 (발병)일 | 2024년 11월 13일'을 명기하고 있고",
+        "이는 사고 직후 시점의 기재로 현재 상태와 다를 수 있습니다."
+      ]
+    }
+  ],
+  "weighted_total": 86.2,
+  "gates": [
+    {
+      "gate_id": "G1",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "check-forbidden-expressions clean:true. 의미 패스에서도 무완충 단정 없음 -- 판단성 서술이 '…로 판단됩니다'/'…해 주시기 바랍니다' 형태로 유보되어 있음."
+    },
+    {
+      "gate_id": "G2",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "리포트가 장해율을 산출하거나 증세고정을 판단하지 않음."
+    },
+    {
+      "gate_id": "G3",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "부재 서술이 모두 자료 범위를 한정한 형태. 무한정 부재 단정 없음."
+    },
+    {
+      "gate_id": "G4",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "리포트가 인지하지 못한 섹션 간 사실 모순 없음."
+    },
+    {
+      "gate_id": "G5",
+      "triggered": false,
+      "quote": null,
+      "section": null,
+      "description": "사건유형 판정과 청구담보·사고경위가 양립함."
+    }
+  ],
+  "verdict": "pass",
+  "findings": [
+    {
+      "finding_id": "SR-1",
+      "severity": "medium",
+      "section": "1. 사고와 공통 의료정보",
+      "description": "머리표의 '사고일: 확인 불가'가 §10에서 제기한 DOC_002의 부상(발병)일 2024-11-13 기재와 연결되지 않는다. 머리표만 읽는 독자는 자료에 일자 기재가 전혀 없다고 이해한다.",
+      "fix_suggestion": "'확인 불가(자료 간 불일치 -- §10 ISSUE 참조)'처럼 부재 사유를 구분해 표기한다."
+    },
+    {
+      "finding_id": "SR-2",
+      "severity": "medium",
+      "section": "4. 의료영역 확보 현황",
+      "description": "A등급 변수인 환자 자가응답 기왕력이 구조화 영역(§4·§7) 어디에도 없고 §10 본문에만 등장한다.",
+      "fix_suggestion": "§4 기왕력 블록에 값 또는 범위 한정 부재 선언을 추가한다."
+    },
+    {
+      "finding_id": "SR-3",
+      "severity": "low",
+      "section": "6. 중요 충돌과 유형 판정 영향",
+      "description": "§6이 '검증된 충돌 없음'인데 §10은 새로 제기한 불일치 3건을 담고 있다.",
+      "fix_suggestion": "§6에서 §10의 자체 확인 항목으로 연결한다."
+    }
+  ]
+}
