@@ -175,3 +175,48 @@ def test_the_config_routes_the_negligence_fields_to_real_documents():
     liability = config["additional_fields_by_case_type"]["liability"]
     assert "comparative_negligence_rate" in liability["field_ids"]
     assert set(liability["sources"]) >= {"legal_opinion", "insurer_response"}
+
+
+# --- 3. a withdrawn candidate must not survive in policy_links -------------
+
+def _link_with_conflict(candidate_ids):
+    return [{
+        "coverage_id": "primary_diagnosis", "coverage_name": "진단",
+        "clause_link_status": "not_found",
+        "uncertainty_reason": "약관 없음",
+        "requirements": [{
+            "requirement_id": "REQ-1", "requirement_text": "진단 관련 담보 요건",
+            "evidence_status": "conflict",
+            "conflict_candidate_ids": list(candidate_ids),
+            "reason": "두 기재가 다릅니다", "evidence_references": [],
+        }],
+    }]
+
+
+def test_a_withdrawn_candidate_clears_the_requirement():
+    """CASE_711: CAC_0001 was withdrawn and the 진단 requirement still
+    published `conflict` citing it -- a retired dispute shown as live, beside a
+    claim_facts entry that had correctly resolved. Stage 5 is the only writer
+    of its contract, so the withdrawal is applied at read time here too."""
+    rows = screening.policy_links_section(
+        _link_with_conflict(["CAC_0001"]), {"CAC_0001"})
+    requirement = rows[0]["requirements"][0]
+    assert requirement["evidence_status"] == "supported"
+    assert requirement["conflict_candidate_ids"] == []
+    assert "철회" in requirement["reason"]
+
+
+def test_a_surviving_candidate_keeps_the_conflict():
+    rows = screening.policy_links_section(
+        _link_with_conflict(["CAC_0001", "CAC_0002"]), {"CAC_0001"})
+    requirement = rows[0]["requirements"][0]
+    assert requirement["evidence_status"] == "conflict"
+    assert requirement["conflict_candidate_ids"] == ["CAC_0002"], (
+        "the withdrawn id must be dropped and the live one kept")
+
+
+def test_no_withdrawals_changes_nothing():
+    rows = screening.policy_links_section(_link_with_conflict(["CAC_0001"]), set())
+    requirement = rows[0]["requirements"][0]
+    assert requirement["evidence_status"] == "conflict"
+    assert requirement["conflict_candidate_ids"] == ["CAC_0001"]

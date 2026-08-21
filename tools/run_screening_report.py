@@ -474,7 +474,10 @@ REQUIREMENT_STATUS_LABEL = {
 }
 
 
-def policy_links_section(links: Sequence[Mapping[str, Any]]) -> list[dict]:
+def policy_links_section(
+    links: Sequence[Mapping[str, Any]],
+    withdrawn: set[str] | None = None,
+) -> list[dict]:
     """The clauses claim analysis linked, restated for a reader.
 
     Copied, not recomputed. `matched` keeps its exact `clause_ref` so the
@@ -486,7 +489,20 @@ def policy_links_section(links: Sequence[Mapping[str, Any]]) -> list[dict]:
     disputed fact must still point at that dispute after the hop, or the
     screening report would present a clean requirement over a disagreement the
     case actually recorded.
+
+    Unchanged EXCEPT for candidates consistency_check withdrew. Stage 5 is the
+    only writer of `claim_analysis_result.json`, so a withdrawal is applied at
+    read time -- `resolve_withdrawn_conflicts` already does that for
+    `claim_facts`, and this path did not, so the same judgement reached one
+    consumer and not the other. Measured on CASE_711 (2026-08-21): CAC_0001 was
+    judged `consistent` and never registered, and the 진단 requirement still
+    published `evidence_status: conflict` citing it -- a retired dispute shown
+    to a reviewer as live, next to a `claim_facts` entry that had correctly
+    resolved. A requirement whose every candidate was withdrawn returns to
+    `supported`; one with any surviving candidate keeps `conflict` and keeps
+    only the surviving ids.
     """
+    withdrawn = withdrawn or set()
     rows: list[dict] = []
     for link in links:
         status = link.get("clause_link_status", "not_found")
@@ -507,15 +523,24 @@ def policy_links_section(links: Sequence[Mapping[str, Any]]) -> list[dict]:
             }
         for requirement in link.get("requirements") or []:
             requirement_status = requirement.get("evidence_status", "unknown")
+            candidates = [candidate for candidate
+                          in requirement.get("conflict_candidate_ids") or []
+                          if candidate not in withdrawn]
+            reason = requirement.get("reason", "")
+            if requirement_status == "conflict" and not candidates:
+                # Every dispute this requirement rested on was withdrawn.
+                requirement_status = "supported"
+                reason = ("이 요건이 근거하는 기재의 상이는 "
+                          "consistency_check가 같은 사실의 다른 표현으로 "
+                          "판단하여 철회했습니다")
             row["requirements"].append({
                 "requirement_id": requirement.get("requirement_id", ""),
                 "requirement_text": requirement.get("requirement_text", ""),
                 "evidence_status": requirement_status,
                 "evidence_status_label": REQUIREMENT_STATUS_LABEL.get(
                     requirement_status, requirement_status),
-                "conflict_candidate_ids": list(
-                    requirement.get("conflict_candidate_ids") or []),
-                "reason": requirement.get("reason", ""),
+                "conflict_candidate_ids": candidates,
+                "reason": reason,
                 "evidence_references": [
                     {"document_id": item["document_id"],
                      "page": item.get("page", 1), "quote": item["quote"]}
@@ -734,7 +759,8 @@ def build_report(
         # already established, with their status and their uncertainty, and
         # adds no coverage or payout verdict on top.
         "policy_links": policy_links_section(
-            claim_analysis.get("policy_links") or []),
+            claim_analysis.get("policy_links") or [],
+            withdrawn_candidate_ids(consistency)),
         "required_document_checklist": checklist_section(checklist),
         "existing_disability_assessment": existing_disability_documents(
             checklist, facts),
