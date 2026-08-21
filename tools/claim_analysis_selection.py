@@ -114,39 +114,6 @@ def presence_only_kinds(config: Mapping[str, Any]) -> set[str]:
     }
 
 
-# Fields a cost document may still answer, despite `presence_only`.
-#
-# A 진료비 세부산정내역 is not only a bill. Every line is
-# `date + 수가코드 + 항목명 + 금액`, which makes it the densest treatment-date
-# ledger in a case -- and often the ONLY place a date appears. Measured on
-# CASE_705/CASE_907, same source material: `surgery_or_procedure_date`
-# (2023-12-05), `imaging_date` (2023-12-04) and `treatment_period`'s end
-# (2024-06-28) live exclusively on those pages. Searching the whole case for
-# "2024-06-28" returns exactly one hit, on a receipt. The medical record says
-# only `Plan> admission, 내일 Op.` -- "surgery tomorrow", with no date at all.
-#
-# The legacy lane read those documents whole and got all three. The selective
-# lane blocked them entirely and lost all three, while correctly saving the
-# read cost. So the block narrows from "never open" to "never open FOR AN
-# AMOUNT": these date fields may use a cost document as a last-resort rung,
-# and every other field still cannot.
-#
-# Amount extraction stays out of scope for the PoC, so no amount field appears
-# here and adding one is a scope decision, not a config tweak.
-COST_DOCUMENT_DATE_FIELDS = frozenset({
-    "surgery_or_procedure_date",
-    "treatment_period",
-    "imaging_date",
-    "first_visit_date",
-    "diagnosis_date",
-})
-
-
-def cost_documents_readable_for(field_id: str) -> bool:
-    """Whether a cost document may serve as a rung for this field."""
-    return field_id in COST_DOCUMENT_DATE_FIELDS
-
-
 def active_fields(config: Mapping[str, Any], wave: str) -> list[dict]:
     """Configured fields this wave actively searches for, in config order.
 
@@ -218,11 +185,6 @@ def plan_field(
         )
 
     blocked = presence_only_kinds(config)
-    # A date field may read a cost document; everything else may not. See
-    # COST_DOCUMENT_DATE_FIELDS for the measurement behind this.
-    cost_kinds = set(blocked)
-    if cost_documents_readable_for(plan.field_id):
-        blocked = set()
     by_kind: dict[str, list[str]] = {}
     for document in documents:
         if document.kind is None or document.ambiguous:
@@ -243,17 +205,6 @@ def plan_field(
     groups = list(route.get("priority_groups") or [])
     if route.get("non_medical_sources"):
         groups.append([f"@type:{t}" for t in route["non_medical_sources"]])
-    # Cost documents go on the LAST rung, after every clinical source and even
-    # after the non-medical ones. A 수술기록 stating its own date must always
-    # win over a billing line that merely happens to carry one; the receipt is
-    # there to answer a date nothing else in the case states, which is exactly
-    # the CASE_705 situation. `stop_on_first_trusted_value` then means a case
-    # whose records DO carry the date never opens a receipt at all, so the read
-    # saving is kept everywhere it was real.
-    if cost_documents_readable_for(plan.field_id):
-        present = [kind for kind in cost_kinds if by_kind.get(kind)]
-        if present:
-            groups.append(sorted(present))
     for group in groups:
         doc_ids: list[str] = []
         kinds: list[str] = []
