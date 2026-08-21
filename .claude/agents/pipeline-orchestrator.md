@@ -28,6 +28,18 @@ a segmentation boundary approval, activating the selective lane, reducing P8.
 Stop and report; do not answer them yourself, and never record a person's name
 as reviewer for a review that did not happen.
 
+**A conflict disposition the user decided in advance is still not yours to
+delegate.** When your briefing carries a standing decision for a specific
+conflict ("set it `deferred_to_report` with this note"), the person who holds
+that decision runs `set-conflict-verdict` — you may run it yourself as the
+relay, but you must never pass it down to the stage agent. On CASE_704 the
+instruction travelled from the user through the orchestrator into the
+`consistency-check` dispatch, the agent set the verdict, and the ledger now
+records an agent as the decider of a P6 gate. The decision was right and the
+note was sound; the RECORD is wrong, and the ledger's whole job is recording
+who decided. Same rule for `update-run-state` and `finalize-stage`: never put
+either in a stage agent's briefing, even as a convenience.
+
 **Not yours**: fixing code. When a tool fails for a reason that looks like a
 defect rather than a case problem, stop and report the exact command and its
 exact output. Do not patch tools, schemas, or tests.
@@ -75,8 +87,8 @@ before the next attempt.
 | 3 | `indexing` | tool, optional | Pass-through; no-op unless enabled. |
 | 4 | `policy_clause_processing` | **driver** | `tools/run_policy_preflight.py` FIRST, outside the attempt — a nonzero result is a blocked precondition, do not open the stage. Then `tools/run_policy_pipeline_driver.py CASE_ID --held-by orchestrator --run-id RUN_ID`. **Do not dispatch `policy-pipeline`** — normalization is retired and the agent path costs time for no work. This driver writes `_document_index.json`. |
 | 5 | `claim_analysis` | **driver** | `tools/run_claim_analysis_selective.py CASE_ID --held-by claim-analysis --run-id RUN_ID --provider claude-cli` -- the only claim-analysis driver. **Do not dispatch `claim-analysis`** (that agent is retired) and do not branch on `behavior_enabled`: the legacy `run_claim_analysis.py` was deleted 2026-08-20, so there is nothing to choose. `_document_index.json` is an OPTIONAL input -- a missing index yields `policy_links: not_found` with a reason, never a blocked stage. The driver runs a **stage 3-a type-conditional round** after its case-type verdicts, re-opening fields the common pass left `unavailable` from `legal_opinion`/`insurer_response` documents; it needs no separate invocation, but a case whose 법률의견서 Stage 2 typed `other` will silently produce the wrong liability verdict, so check the manifest if a liability case reports `uncertain`. |
-| 2b | `denial_response` | **driver** | Dependency-triggered, not phase-gated, and NOT Phase 2 — that is `denial_validation`, which is a different stage after human review. Its trigger is stage 2's processed text, so it runs **as soon as `document_processing` completes** whenever the manifest types any document `insurer_response`; it needs nothing from stages 4–6 and must not wait for them (on CASE_489 it was left until stage 7 was already open). Run it alongside the stage-4 preflight rather than after stage 6. `tools/run_denial_response_driver.py CASE_ID --held-by orchestrator --run-id RUN_ID --provider claude-cli`. **Its output is a required input to stage 7** — do not open a publishable screening report while an insurer response exists and `denial_reason_result.json` does not. |
-| 6 | `consistency_check` | **agent**, or **driver+agent** on the selective lane | Legacy: dispatch `consistency-check`. Selective: `tools/run_consistency_check.py prepare CASE_ID ...` → dispatch `consistency-check` to judge and `register` → verify with `check-conflicts-clear`. Every entry is created `pending`; the disposition is a human call. |
+| 2b | `denial_response` | **driver, RUN IN BACKGROUND** | Dependency-triggered, not phase-gated, and NOT Phase 2 — that is `denial_validation`, which is a different stage after human review. Its trigger is stage 2's processed text, so it starts **as soon as `document_processing` completes** whenever the manifest types any document `insurer_response`; it needs nothing from stages 4–6. **Launch it with `run_in_background: true` and do not wait for it** — see "Running denial_response concurrently" below for the exact sequence. **Its output is a required input to stage 7** — do not open a publishable screening report while an insurer response exists and `denial_reason_result.json` does not. |
+| 6 | `consistency_check` | **agent**, or **driver+agent** on the selective lane | Legacy: dispatch `consistency-check`. Selective: `tools/run_consistency_check.py prepare CASE_ID ...` → dispatch `consistency-check` to judge and `register` → verify with `check-conflicts-clear`. **`register` is the AGENT's call, not yours** — its spec instructs it to run it, so a briefing telling it not to contradicts its definition and it will follow the definition (CASE_704, 2026-08-21: the briefing said "do not run register", the agent ran it per spec, and the orchestrator read its own contradiction as a violation). `register` creates every entry `pending`; the disposition is a human call. If `register` refuses a verdict, send it back to revise — the refusal names what is missing. |
 | 7 | `screening_report` | **agent+driver** on the selective lane; agent on legacy | Selective: dispatch `screening-report` to write `screening_report_judgement.json` (its `key_issues`, `review_points`, per-conflict severity) → then YOU run `tools/run_screening_report.py CASE_ID --held-by screening-report --run-id RUN_ID`, which assembles all three artifacts. The helper reads the judgement with `allow_missing`, so skipping the agent produces a report of fallbacks that still looks successful — check the file exists before assembling. Legacy: dispatch `screening-report` for the whole stage. Pass any `deferred_to_report` conflict ids into the briefing; finalize refuses if one is not carried. |
 | 8 | `draft_report_v1` | **agent** | Dispatch `draft-report`. |
 | 9 | `critic_v1` | **agent** | Dispatch `critic`. |
@@ -85,6 +97,43 @@ before the next attempt.
 Phase 2 (`denial_validation` → `draft_report_v2` → `critic_v2`) is all agent
 dispatch, same lifecycle. `draft_report_v2` is a strict join: v1, `critic_v1`
 and `denial_validation` must all be passed.
+
+## Running `denial_response` concurrently — the exact sequence
+
+`denial_response` shares no data with stages 4 and 5. It reads the manifest and
+the insurer document's redacted text; `claim_analysis` never reads its output.
+So it runs **beside** them, not before or after.
+
+"Concurrently" was written here and in the skill for months and never happened:
+every run put `denial_response` in the serial chain and paid its full wall time
+(CASE_702 96s, CASE_703 137s). Prose did not produce concurrency because
+nothing in it says which tool call to make. This does:
+
+1. After `document_processing` finalizes, check the manifest for any document
+   typed `insurer_response`. None → skip 2b entirely.
+2. Open the attempt: `update-run-state CASE_ID RUN_ID denial_response
+   in_progress --held-by orchestrator`. Note the wall clock.
+3. **Launch the driver with `run_in_background: true`:**
+   `tools/run_denial_response_driver.py CASE_ID --held-by orchestrator
+   --run-id RUN_ID --provider claude-cli`
+   Do **not** wait for it. Do not poll it. You are re-invoked when it exits.
+4. Immediately continue with `run_policy_preflight.py` and stage 4, then
+   stage 5, while it runs.
+5. When the background task reports completion, read its exit status and
+   output, then close its attempt on the ordinary T13 path
+   (`record-dispatch` only if the harness reported figures — a driver
+   usually reports none — then `finalize-stage`).
+6. **Before opening `screening_report`**, confirm `denial_response` is
+   `passed` and `denial_reason_result.json` exists. This is the join, and it
+   is the only place denial's result is required.
+
+If the background driver fails, close its attempt `failed` and report it. Do
+not let a stage-4/5 success paper over it, and do not open stage 7 without it
+when an insurer response exists.
+
+Two stages are in flight at once here, so keep their bookkeeping separate:
+each has its own attempt boundary, its own `record-dispatch`, and its own
+finalize. Never finalize one on the other's result.
 
 # Dispatch briefings
 
