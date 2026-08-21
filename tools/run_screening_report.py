@@ -1244,6 +1244,62 @@ def _excerpt_article(page_text: str, heading: str) -> str:
     return body
 
 
+def _with_review_section(
+    sections: list[dict], report: Mapping[str, Any],
+) -> list[dict]:
+    """Append section 10 and return the list.
+
+    Extracted so every return path renders it. The template pins ten
+    headings with `allow_extra_sections: false`, so a path that returns
+    early -- section 9's no-insurer-document branch -- would produce a
+    nine-section document the assembler refuses outright.
+    """
+    # 10. how to read sections 1-9
+    #
+    # The agent's whole contribution, and until 2026-08-21 it rendered nowhere:
+    # the template pinned nine sections with `allow_extra_sections: false` and
+    # none of them held an agent's judgement, while the template's own
+    # 생성 주체 table assigned 중요도·배치·검토 포인트 to that agent. So the
+    # stage dispatched an agent, paid for it (CASE_704: 391.4s / 117,993
+    # tokens), and the deliverable discarded the result -- including the notice
+    # that reduced P8 had graded the two 법률의견서 unequally and a reader must
+    # not prefer the more legible side.
+    #
+    # Last rather than first: a reviewer reads the facts, then how to read
+    # them. Putting it first would also renumber every existing section, which
+    # the template enforces by pattern.
+    review_lines: list[str] = []
+    review_references: list[dict] = []
+    for issue in report.get("key_issues") or []:
+        title = issue.get("title") or issue.get("issue_id") or ""
+        body = issue.get("description") or ""
+        role = issue.get("reviewer_role")
+        suffix = f" (검토: {role})" if role else ""
+        review_lines.append(f"- **핵심 쟁점** {title}{suffix}")
+        if body:
+            review_lines.append(f"  - {body}")
+    for point in report.get("review_points") or []:
+        text = point.get("point") or ""
+        if not text:
+            continue
+        priority = point.get("priority")
+        role = point.get("reviewer_role")
+        tags = ", ".join(str(x) for x in (priority, role) if x)
+        review_lines.append(f"- **검토 포인트**{f' [{tags}]' if tags else ''} {text}")
+        for reference in point.get("source_refs") or []:
+            if isinstance(reference, Mapping):
+                review_lines[-1] += _mark(reference, review_references)
+    for warning in report.get("warnings") or []:
+        if warning:
+            review_lines.append(f"- **고지** {warning}")
+    sections.append({
+        "heading": "10. 검토 시 유의사항",
+        "content": "\n".join(review_lines) or "- 추가 유의사항 없음",
+        "evidence_references": _dedupe_references(review_references),
+    })
+    return sections
+
+
 def markdown_sections(
     report: Mapping[str, Any],
     clause_body: Any = None,
@@ -1556,6 +1612,34 @@ def markdown_sections(
     # Without them a reader sees reason codes and has no way to check what the
     # insurer actually wrote.
     position = report.get("insurer_position") or {}
+    # No insurer document at all is a different finding from one that was read
+    # and could not be understood, and 확인 불가 says the second. Three runs
+    # rendered 「거절/감액/승인: 확인 불가」 on cases whose manifest holds no
+    # `insurer_response` (CASE_710/711/712, 2026-08-21), telling a 손해사정사
+    # the response was inspected and unclear when nothing was ever filed in the
+    # pack. `has_denial`/`has_reduction`/`has_acceptance` are already computed
+    # by `insurer_position`; this section simply never consulted them.
+    # Keyed on the CONTENT, not only the `has_*` flags. `insurer_position`
+    # sets those flags, but a position assembled by hand (or by an older
+    # contract) can carry real reason ids without them, and treating that as
+    # "no document" would erase a decision the insurer actually made -- the
+    # opposite and worse error.
+    stated = bool(
+        (position.get("denial") or {}).get("reason_ids")
+        or (position.get("reduction") or {}).get("reason_ids")
+        or (position.get("acceptance") or {}).get("accepted_coverage_ids")
+        or position.get("has_denial") or position.get("has_reduction")
+        or position.get("has_acceptance"))
+    if not stated:
+        sections.append({
+            "heading": "9. 보험사 응답",
+            "content": ("- 본건에 편철된 보험사 회신 문서가 없습니다. "
+                        "거절·감액·승인 여부는 이 자료만으로 판단할 수 "
+                        "없으며, 조회 결과가 불명확한 것이 아니라 "
+                        "판단 대상 문서가 존재하지 않는 상태입니다."),
+            "evidence_references": [],
+        })
+        return _with_review_section(sections, report)
     denial = position.get("denial") or {}
     reduction = position.get("reduction") or {}
     acceptance = position.get("acceptance") or {}
@@ -1604,50 +1688,7 @@ def markdown_sections(
         "evidence_references": references,
     })
 
-    # 10. how to read sections 1-9
-    #
-    # The agent's whole contribution, and until 2026-08-21 it rendered nowhere:
-    # the template pinned nine sections with `allow_extra_sections: false` and
-    # none of them held an agent's judgement, while the template's own
-    # 생성 주체 table assigned 중요도·배치·검토 포인트 to that agent. So the
-    # stage dispatched an agent, paid for it (CASE_704: 391.4s / 117,993
-    # tokens), and the deliverable discarded the result -- including the notice
-    # that reduced P8 had graded the two 법률의견서 unequally and a reader must
-    # not prefer the more legible side.
-    #
-    # Last rather than first: a reviewer reads the facts, then how to read
-    # them. Putting it first would also renumber every existing section, which
-    # the template enforces by pattern.
-    review_lines: list[str] = []
-    review_references: list[dict] = []
-    for issue in report.get("key_issues") or []:
-        title = issue.get("title") or issue.get("issue_id") or ""
-        body = issue.get("description") or ""
-        role = issue.get("reviewer_role")
-        suffix = f" (검토: {role})" if role else ""
-        review_lines.append(f"- **핵심 쟁점** {title}{suffix}")
-        if body:
-            review_lines.append(f"  - {body}")
-    for point in report.get("review_points") or []:
-        text = point.get("point") or ""
-        if not text:
-            continue
-        priority = point.get("priority")
-        role = point.get("reviewer_role")
-        tags = ", ".join(str(x) for x in (priority, role) if x)
-        review_lines.append(f"- **검토 포인트**{f' [{tags}]' if tags else ''} {text}")
-        for reference in point.get("source_refs") or []:
-            if isinstance(reference, Mapping):
-                review_lines[-1] += _mark(reference, review_references)
-    for warning in report.get("warnings") or []:
-        if warning:
-            review_lines.append(f"- **고지** {warning}")
-    sections.append({
-        "heading": "10. 검토 시 유의사항",
-        "content": "\n".join(review_lines) or "- 추가 유의사항 없음",
-        "evidence_references": _dedupe_references(review_references),
-    })
-    return sections
+    return _with_review_section(sections, report)
 
 
 def render_markdown(

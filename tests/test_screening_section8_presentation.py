@@ -260,3 +260,36 @@ def test_a_reason_without_a_summary_contributes_no_line():
     section = _section9(contract)
     assert "거절: DR_1" in section["content"]
     assert section["content"].count("\n  - ") == 0
+
+
+# --- 5. no insurer document is not a failed lookup -------------------------
+
+def test_a_case_with_no_insurer_document_says_so():
+    """CASE_710/711/712 all rendered 「거절/감액/승인: 확인 불가」 on cases whose
+    manifest holds no `insurer_response` at all.
+
+    확인 불가 means "we looked and could not tell". With no document filed in
+    the pack, nothing was ever looked at -- a different finding, and the one a
+    손해사정사 acts on differently (request the insurer's letter, rather than
+    re-read one).
+    """
+    section = _section9({"denial_reasons": [], "accepted_coverages": []})
+    assert "편철된 보험사 회신 문서가 없습니다" in section["content"]
+    assert "확인 불가" not in section["content"]
+
+
+def test_the_no_insurer_branch_still_renders_ten_sections():
+    """The template pins ten headings with allow_extra_sections: false, so an
+    early return that skips section 10 produces a document the assembler
+    refuses outright."""
+    sections = screening.markdown_sections(
+        {"insurer_position": screening.insurer_position(None)})
+    assert len(sections) == 10
+    assert sections[-1]["heading"].startswith("10.")
+
+
+def test_an_insurer_decision_still_renders_normally():
+    """The new branch must not swallow the case section 9 exists for."""
+    section = _section9(DENIAL_CONTRACT)
+    assert "거절: DR_1" in section["content"]
+    assert "편철된 보험사 회신 문서가 없습니다" not in section["content"]
