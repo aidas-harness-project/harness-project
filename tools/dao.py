@@ -1932,6 +1932,21 @@ def cmd_search_document_text(args):
 
 PAGE_TEXT_ALLOWED_STAGES = frozenset({"document-pipeline"})
 
+# Who may read the answer key. `evaluation` is the deferred Unit 11 stage and
+# stays listed because the command predates the carve-out; `screening_fidelity`
+# was added 2026-08-22 for the verification agent, which exists to compare a
+# finished screening report against the adjuster's real report -- the PoC's
+# actual success measure, which a scorer blind to ground truth cannot take.
+#
+# This set is deliberately the ONLY thing that changed. The `Read()` deny globs
+# over data/ground_truth/** and source-cases/** in .claude/settings.json stay
+# in place, so no agent (including the verification agent) can open those paths
+# directly, and every read goes through this one logged command. Adding a stage
+# here is a governance change, not a config tweak: see harness-guardrails-dev D1
+# for the four conditions the carve-out is bounded by, including that the
+# verification result is terminal and may never be consumed by a producing stage.
+GROUND_TRUTH_ALLOWED_STAGES = frozenset({"evaluation", "screening_fidelity"})
+
 PAGE_TEXT_CAPABILITY_ENV = "HARNESS_CHECKPOINT2_CAPABILITY"
 
 
@@ -2203,8 +2218,9 @@ def _transcribe_ground_truth_ephemeral(path: Path, args) -> int:
 
 
 def cmd_read_ground_truth(args):
-    if args.caller_stage != "evaluation":
-        print(f"DENIED: ground truth may only be read by the evaluation stage (harness-guardrails-dev D1). "
+    if args.caller_stage not in GROUND_TRUTH_ALLOWED_STAGES:
+        print(f"DENIED: ground truth may only be read by {sorted(GROUND_TRUTH_ALLOWED_STAGES)} "
+              f"(harness-guardrails-dev D1). "
               f"caller_stage={args.caller_stage!r} is not permitted. This is logged as a potential violation.")
         return 1
     review_flag = human_review_flag_path(args.case_id, args.version)

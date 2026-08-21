@@ -9,7 +9,16 @@ These rules are scoped to the PoC/evaluation phase specifically — they exist b
 
 ## D1. Ground-truth isolation
 
-No agent or tool in the local Units 1–7 harness reads `source-cases/` final reports or `data/ground_truth/`. Evaluation is deferred to an isolated Unit 11 service that is not implemented here; human-review completion records a future handoff prerequisite but does not grant local ground-truth access. If any local agent or tool is found to have accessed ground truth, halt the run immediately and exclude that run's outputs from evaluation entirely.
+No agent or tool that **produces** pipeline output reads `source-cases/` final reports or `data/ground_truth/`. That covers every stage from intake through draft report and critic, without exception. If any of them is found to have accessed ground truth, halt the run immediately and exclude that run's outputs from evaluation entirely.
+
+**The verification agent is the one exception (2026-08-22).** The PoC is validated by how well a produced report agrees with the adjuster's real report, and a scorer blind to the answer key cannot measure that. `screening-fidelity` may read ground truth under four conditions, all enforced rather than trusted:
+
+1. **Only through the DAO.** `python tools/dao.py read-ground-truth CASE_ID --caller-stage screening_fidelity --version {v1|v2} [--list | --file NAME]`. The `Read()` deny globs over `data/ground_truth/**` and `source-cases/**` in `.claude/settings.json` stay in place, so a direct read is still refused for every agent including this one. The DAO command is the single door, and it logs.
+2. **Only after human review of that version is marked complete.** Already enforced by the command; it refuses without the flag.
+3. **Its result is terminal.** No pipeline stage may consume `screening_fidelity_result*.json`. If a producing stage is rerun, it must not read that file — a score that flows back into generation turns the answer key into training signal, which is the leak this rule exists to stop.
+4. **The exception is agent-scoped, not run-scoped.** Ground truth being readable by the scorer does not make a run contaminated; ground truth being read by anything else still does, and the halt-and-exclude rule above applies unchanged.
+
+The full Evaluation suite (draft report vs ground truth, `evaluation_result.schema.json`) remains deferred to the isolated Unit 11 service. This carve-out authorizes one narrow comparison, not that service.
 
 ## D2. Intake requires a per-file review ledger
 
