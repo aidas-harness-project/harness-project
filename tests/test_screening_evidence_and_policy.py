@@ -370,7 +370,7 @@ def test_the_sections_still_satisfy_the_template() -> None:
         facts=_full_facts(), links=[_policy_link()]))
     headings = [section["heading"]
                 for section in reporter.markdown_sections(report)]
-    assert len(headings) == 9
+    assert len(headings) == 10
     assert document_assembly.validate_template(headings, reporter.TEMPLATE) == []
 
 

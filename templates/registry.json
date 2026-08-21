@@ -335,12 +335,14 @@
         "^6\\. 중요 충돌과 유형 판정 영향",
         "^7\\. 주요 미확인 항목",
         "^8\\. 관련 약관과 요건 자료상태",
-        "^9\\. 보험사 응답"
+        "^9\\. 보험사 응답",
+        "^10\\. 검토 시 유의사항"
       ],
       "allow_extra_sections": false,
       "analytical_heading_patterns": [
         "^6\\. 중요 충돌과 유형 판정 영향",
-        "^8\\. 관련 약관과 요건 자료상태"
+        "^8\\. 관련 약관과 요건 자료상태",
+        "^10\\. 검토 시 유의사항"
       ],
       "$comment": "Selective lane. Deliberately has no 1차 판단 section: feasibility, difficulty, and payout likelihood are judgments the lane does not make, and the legacy screening_report template's section 7 is where they lived."
     }

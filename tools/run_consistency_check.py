@@ -488,7 +488,20 @@ def build_contract(
             "field_id": field_id,
             "topic": f"{label}{scope} ({candidate_id}): {verdict['outcome']}",
             "values_compared": values_compared,
-            "result": "inconsistent" if confirmed else "consistent",
+            # THREE outcomes, three results. Collapsing `not_material` into
+            # `consistent` threw away the distinction the agent is asked to
+            # make: `withdrawn` means the readings state the same fact, while
+            # `not_material` means they genuinely differ and the difference
+            # changes no decision. Stage 7 promotes a `consistent` field's
+            # first observation to a settled value, so a real dispute rendered
+            # as established fact -- CASE_704 printed DOC_006's "the victim
+            # walked normally" in section 4 while DOC_008 p4 said the accident
+            # arose from the victim's carelessness, and the reader saw only
+            # the first.
+            "result": ("inconsistent" if confirmed
+                       else "contested_not_decisive"
+                       if verdict["outcome"] == "not_material"
+                       else "consistent"),
             "conflict_id": registered.get(candidate_id),
         })
     warnings: list[str] = []

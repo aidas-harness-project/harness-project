@@ -116,6 +116,16 @@ def withdrawn_candidate_ids(consistency: Mapping[str, Any]) -> set[str]:
     확인 불가 for a value both sources actually agree on. Measured on CASE_049:
     `primary_diagnosis` rendered 확인 불가 two lines above `진단코드: S6280`,
     read from the same sentence of the same page.
+
+    **Only `consistent` promotes.** `contested_not_decisive` (the agent's
+    `not_material`) is a REAL disagreement that happens not to change a
+    decision, and electing one of its readings would print a contested claim as
+    settled fact -- which is exactly what happened on CASE_704 while
+    `not_material` was still written as `consistent`: section 4 rendered
+    DOC_006's "the victim walked normally" as established, and DOC_008 p4's
+    opposite statement appeared nowhere in the report. The comparison here is
+    against the literal string for that reason; do not widen it to "anything
+    that is not inconsistent".
     """
     return {
         check["conflict_candidate_id"]
@@ -1566,6 +1576,50 @@ def markdown_sections(
         "heading": "9. 보험사 응답",
         "content": "\n".join(lines),
         "evidence_references": references,
+    })
+
+    # 10. how to read sections 1-9
+    #
+    # The agent's whole contribution, and until 2026-08-21 it rendered nowhere:
+    # the template pinned nine sections with `allow_extra_sections: false` and
+    # none of them held an agent's judgement, while the template's own
+    # 생성 주체 table assigned 중요도·배치·검토 포인트 to that agent. So the
+    # stage dispatched an agent, paid for it (CASE_704: 391.4s / 117,993
+    # tokens), and the deliverable discarded the result -- including the notice
+    # that reduced P8 had graded the two 법률의견서 unequally and a reader must
+    # not prefer the more legible side.
+    #
+    # Last rather than first: a reviewer reads the facts, then how to read
+    # them. Putting it first would also renumber every existing section, which
+    # the template enforces by pattern.
+    review_lines: list[str] = []
+    review_references: list[dict] = []
+    for issue in report.get("key_issues") or []:
+        title = issue.get("title") or issue.get("issue_id") or ""
+        body = issue.get("description") or ""
+        role = issue.get("reviewer_role")
+        suffix = f" (검토: {role})" if role else ""
+        review_lines.append(f"- **핵심 쟁점** {title}{suffix}")
+        if body:
+            review_lines.append(f"  - {body}")
+    for point in report.get("review_points") or []:
+        text = point.get("point") or ""
+        if not text:
+            continue
+        priority = point.get("priority")
+        role = point.get("reviewer_role")
+        tags = ", ".join(str(x) for x in (priority, role) if x)
+        review_lines.append(f"- **검토 포인트**{f' [{tags}]' if tags else ''} {text}")
+        for reference in point.get("source_refs") or []:
+            if isinstance(reference, Mapping):
+                review_lines[-1] += _mark(reference, review_references)
+    for warning in report.get("warnings") or []:
+        if warning:
+            review_lines.append(f"- **고지** {warning}")
+    sections.append({
+        "heading": "10. 검토 시 유의사항",
+        "content": "\n".join(review_lines) or "- 추가 유의사항 없음",
+        "evidence_references": _dedupe_references(review_references),
     })
     return sections
 

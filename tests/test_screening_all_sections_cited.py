@@ -226,3 +226,61 @@ def test_section3_marks_its_filing_evidence():
     assert "DOC_099" not in published, (
         "the unknown row's reference was published despite contributing no "
         "status a reader can act on")
+
+
+# --- section 10: the agent's judgement must reach the deliverable ----------
+
+AGENT_JUDGEMENT = {
+    "key_issues": [
+        {"issue_id": "ISSUE_1", "title": "배상책임 성립 여부가 쟁점",
+         "description": "두 법률의견서의 결론이 상반됩니다.",
+         "reviewer_role": "법률전문가", "related_documents": ["DOC_006"]},
+    ],
+    "review_points": [
+        {"point_id": "RP_1", "point": "P8 축소로 한쪽이 낮게 채점되었으니 편들지 말 것",
+         "priority": "high", "reviewer_role": "손해사정사", "answerable": True,
+         "source_refs": [{"document_id": "DOC_008", "page": 4,
+                          "quote": "피해자의 부주의로 발생한 것으로 보이므로"}]},
+    ],
+    "warnings": ["이 실행은 P8이 축소되어 평가용 입력이 아닙니다."],
+}
+
+
+def test_the_agents_judgement_renders_in_section_10():
+    """CASE_704 published 7 warnings, 7 key_issues and 9 review_points in the
+    JSON and none of them in the .md -- the template had no section for them,
+    so the stage paid an agent and the deliverable threw the result away."""
+    section = next(s for s in screening.markdown_sections(AGENT_JUDGEMENT)
+                   if s["heading"].startswith("10."))
+    assert "배상책임 성립 여부가 쟁점" in section["content"]
+    assert "두 법률의견서의 결론이 상반됩니다" in section["content"]
+    assert "편들지 말 것" in section["content"]
+    assert "평가용 입력이 아닙니다" in section["content"]
+
+
+def test_section_10_balances_its_citations():
+    section = next(s for s in screening.markdown_sections(AGENT_JUDGEMENT)
+                   if s["heading"].startswith("10."))
+    assert (section["content"].count("{{E}}")
+            == len(section["evidence_references"]) == 1)
+
+
+def test_section_10_renders_when_the_agent_supplied_nothing():
+    """A fallback report (no judgement file) must still produce the section --
+    the template pins ten headings and refuses a missing one."""
+    section = next(s for s in screening.markdown_sections({})
+                   if s["heading"].startswith("10."))
+    assert section["content"].strip()
+    assert section["evidence_references"] == []
+
+
+def test_the_template_registry_accepts_ten_sections():
+    """The registry is what would refuse section 10 as an extra section."""
+    import json as _json
+    registry = _json.loads(
+        (ROOT / "templates" / "registry.json").read_text(encoding="utf-8"))
+    template = registry["templates"]["screening_report_selective"]
+    assert len(template["heading_patterns"]) == 10
+    assert any("10" in p for p in template["heading_patterns"])
+    assert any("10" in p for p in template["analytical_heading_patterns"]), (
+        "section 10 carries agent judgement, so it is an analytical section")

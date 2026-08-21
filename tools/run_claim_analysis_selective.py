@@ -1653,6 +1653,26 @@ def run(
         # A field the common pass never planned -- every `liability_basis`
         # field is on no medical route -- joins the list rather than vanishing.
         outcomes.extend(replaced.values())
+    # A field this round ASKED FOR but found nothing in was read, not skipped.
+    # The common pass had already stamped it `source_document_missing` with
+    # "the field is not routed to any document source", which is true of the
+    # medical routes and false of what actually happened: stage 3-a opened the
+    # 법률의견서 and 보험사 문서 that `additional_fields_by_case_type` names for
+    # this case type. On CASE_704 `comparative_negligence_rate` therefore told
+    # a 손해사정사 the field was unroutable, while DOC_008 carried a whole
+    # 「피해자의 과실비율」 section that declined to set a rate -- which is a
+    # records finding, not a routing defect. `not_mentioned` is the honest
+    # code: sources WERE read and none stated the value.
+    asked_for = additional_mod.eligible_field_ids(
+        config, first_pass, {o.field_id: o for o in outcomes})
+    for outcome in outcomes:
+        if (outcome.field_id in asked_for
+                and outcome.status == "unavailable"
+                and outcome.unavailable_reason == "source_document_missing"):
+            outcome.unavailable_reason = "not_mentioned"
+            outcome.reason = (
+                "사건유형별 추가 확인 출처를 열람했으나 이 항목을 기재한 "
+                "내용이 없습니다")
 
     interim = _interim(outcomes)
     # Decided once, here, and handed to BOTH consumers. Previously this map

@@ -5,7 +5,7 @@ that nothing created. A reviewer following that path found no file, and the
 evidence sidecar -- the artifact that makes every `[E#]` tag checkable -- did
 not exist at all.
 
-These tests pin the seam rather than the prose: the nine sections satisfy the
+These tests pin the seam rather than the prose: the ten sections satisfy the
 selective template's contract, evidence references travel with the content so
 `document_assembly.py` can generate tags and sidecar from one source, and the
 call is delegated to that tool rather than reimplemented. A renderer written
@@ -76,7 +76,7 @@ def test_the_selective_template_is_the_one_used() -> None:
 
 def test_the_sections_satisfy_the_template_exactly() -> None:
     headings = [s["heading"] for s in reporter.markdown_sections(_report())]
-    assert len(headings) == 9
+    assert len(headings) == 10
     assert document_assembly.validate_template(headings, reporter.TEMPLATE) == []
 
 
@@ -93,7 +93,7 @@ def test_every_section_renders_even_when_it_has_nothing_to_say() -> None:
             "existing_disability_assessment": {}, "policy_links": [],
             "insurer_position": {}}
     sections = reporter.markdown_sections(bare)
-    assert len(sections) == 9
+    assert len(sections) == 10
     assert all(section["content"].strip() for section in sections)
     assert document_assembly.validate_template(
         [s["heading"] for s in sections], reporter.TEMPLATE) == []
