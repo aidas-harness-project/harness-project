@@ -38,7 +38,7 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `document-pipeline`, checkpoint 1 (P8's dual-path cross-validation, `tools/ocr_extract.py`).
 
-**Current:** unresolved. Every available provider (claude-cli / codex-cli / openai-api) sends the page image or extracted text to an external service. The offline local path that would have closed the on-machine transmission gap was removed (never produced usable transcriptions on real Korean pages; single-machine Windows/E: only -- `known-gaps.md` item 16). So this risk is back to open, exactly as it was before that path was attempted.
+**Current:** unresolved. Every available provider (openrouter / claude-cli / codex-cli / openai-api) sends the page image or extracted text to an external service. The offline local path that would have closed the on-machine transmission gap was removed (never produced usable transcriptions on real Korean pages; single-machine Windows/E: only -- `known-gaps.md` item 16). So this risk is back to open, exactly as it was before that path was attempted.
 
 **Problem:** P8's two readers must see the raw, unredacted page image (that's the point -- they have to see what's actually on the page before redaction). The comparator and classifier may also see unredacted extracted text. If any configured provider path is not under a no-data-retention arrangement, every checkpoint-1 run may send PII to that destination.
 
@@ -52,7 +52,7 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `tools/ocr_extract.py`, used by `document-pipeline` checkpoint 1.
 
-**Current:** no dedicated OCR engine exists. Every P8 reader is LLM-vision-backed (claude-cli / codex-cli / openai-api), so both reads share one extraction technology class and `ocr_result.json` records `cross_validation_mode: single_technology_weak_p8_poc` honestly. `dual_technology` remains a defined-but-unreachable schema value, reserved for the day a real OCR engine is added as one of the two reading paths. `ocr_result.json` records the actual provider/model labels.
+**Current:** no dedicated OCR engine exists. Every P8 reader is LLM-vision-backed (openrouter / claude-cli / codex-cli / openai-api), so both reads share one extraction technology class and `ocr_result.json` records `cross_validation_mode: single_technology_weak_p8_poc` honestly. `dual_technology` remains a defined-but-unreachable schema value, reserved for the day a real OCR engine is added as one of the two reading paths. `ocr_result.json` records the actual provider/model labels.
 
 **Problem:** two LLM-vision reads (even from different vendors) can produce a correlated confident error that P8 cannot catch -- the protection is real but weaker than the original design intended, which assumed two genuinely different extraction technologies.
 

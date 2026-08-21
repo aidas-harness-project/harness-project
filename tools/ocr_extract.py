@@ -9,7 +9,7 @@ reading has that the other lacks entirely) as a disagreement even when the
 core facts otherwise match.
 
 The reader/comparator backends are provider-configurable (claude-cli /
-codex-cli / openai-api). All available providers are LLM-vision-backed, so any
+codex-cli / openai-api / openrouter). All available providers are LLM-vision-backed, so any
 reader pair is a documented weak-P8 (see _classify_cross_validation): the two
 reads share one extraction technology class and cannot catch a correlated
 confident error. A genuinely technology-independent reader (a real OCR engine)
@@ -1016,7 +1016,7 @@ def _run_embedded_text(case_id: str, doc_id: str, doc_path: Path, progress=None)
 def _classify_cross_validation(reader_a, reader_b) -> tuple[str, str]:
     """Label P8's cross-validation strength honestly, computed from the actual
     readers rather than hard-coded. Every provider available today is
-    LLM-vision-backed (claude-cli / codex-cli / openai-api): even two different
+    LLM-vision-backed (openrouter / claude-cli / codex-cli / openai-api): even two different
     vendors share the same extraction *technology class* and can produce a
     correlated confident error, so any current reader pair is a documented
     weak-P8. `dual_technology` stays a defined schema value but is currently

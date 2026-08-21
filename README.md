@@ -109,16 +109,35 @@ Run-mode detection (initial / full rerun / partial rerun / resume-from-
 interruption) and per-stage rules are defined in
 `.claude/skills/loss-adjustment-pipeline/SKILL.md`.
 
-Checkpoint 1's P8 extraction gate is provider-configurable. `claude-cli`
-remains the backward-compatible default. Codex environments can select
-`codex-cli` for `--reader-a`, `--reader-b`, `--comparator`, and
-`--classifier-provider`; it runs `codex exec`, reuses the local Codex login,
-and does not require an API key. `CODEX_API_KEY` is only an optional fallback
-for unattended CI. The provider accepts an optional model through the
-existing `--*-model` arguments; set `HARNESS_CODEX_COMMAND` to override the
-`codex` executable. API-backed providers such as `openai-api` remain
-available when their credentials are present. All available providers are
-LLM-vision-backed, so any P8 reader pair is a documented weak cross-validation
+Checkpoint 1's P8 extraction gate is provider-configurable. **`openrouter` is
+the default** (since 2026-08-21): one OpenAI-compatible HTTP transport that
+reaches every model family the harness has run behind a CLI, without a node
+subprocess per call. It needs `OPENROUTER_API_KEY` and a model slug
+(`--model`, or `HARNESS_OPENROUTER_MODEL` / `OPENROUTER_MODEL`) -- there is no
+fabricated default slug, so a misconfiguration fails at provider SELECTION
+rather than as an opaque 404 on the first page. Optional:
+`HARNESS_OPENROUTER_MAX_TOKENS` (default 16000, and a response truncated
+against it is refused, never used partially), `OPENROUTER_BASE_URL`, the
+`HARNESS_OPENROUTER_REFERER` / `HARNESS_OPENROUTER_TITLE` attribution headers,
+and `HARNESS_OPENROUTER_USER_AGENT`.
+
+**Check the model's output cap before pointing the harness at it.** The 16000
+default is sent on every call, and of the 420 models in the live catalogue on
+2026-08-22, 40 declare a lower `top_provider.max_completion_tokens` -- as low
+as 2048 -- so those need `HARNESS_OPENROUTER_MAX_TOKENS` lowered or the
+upstream 400 will read as a model-name problem. Structured output rides a
+forced tool call rather than `response_format: json_schema`, which is also the
+better-supported surface: 350 of those models list `tools`, 336 list
+`structured_outputs`, and 221 accept image input as well as tools.
+
+The CLI providers remain selectable and unchanged. `claude-cli` and
+`codex-cli` are still valid for `--reader-a`, `--reader-b`, `--comparator`,
+and `--classifier-provider`; `codex-cli` runs `codex exec`, reuses the local
+Codex login, and does not require an API key (`CODEX_API_KEY` is only an
+optional fallback for unattended CI), and `HARNESS_CODEX_COMMAND` overrides
+the `codex` executable. `anthropic-api` / `openai-api` remain available when
+their credentials are present. All available providers are LLM-vision-backed,
+so any P8 reader pair is a documented weak cross-validation
 (`cross_validation_mode: single_technology_weak_p8_poc`); a genuinely
 technology-independent reader (a real OCR engine) is deferred -- see
 `open-decisions.md` #4.
@@ -129,8 +148,11 @@ exfiltrate them). A deployment that backs a CLI with a cloud provider whose
 credentials are not prefixed by the CLI's family name -- claude-via-Bedrock
 (`AWS_SECRET_ACCESS_KEY`), claude-via-Vertex (`GOOGLE_*`) -- must add those
 prefixes via `HARNESS_CHILD_ENV_KEEP_PREFIXES` (comma-separated) so the child
-keeps the creds it needs. Checkpoint-2 redaction defaults to `--provider
-codex-cli` (override with `HARNESS_REDACTION_PROVIDER`).
+keeps the creds it needs. The HTTP providers need none of this: there is no
+child process, no filesystem access, and no ambient project context to
+inherit -- the request carries the prompt and the base64 image and nothing
+else. Checkpoint-2 redaction follows the harness-wide default (override with
+`HARNESS_REDACTION_PROVIDER`).
 
 ## Tools
 

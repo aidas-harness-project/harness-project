@@ -165,7 +165,15 @@ class TestSingleReaderDefault:
     def test_explicit_dual_read_beats_env(
             self, page_image: Path, monkeypatch) -> None:
         monkeypatch.setenv(ocr_extract.SINGLE_READER_ENV, "1")
-        out = _run(page_image, single_reader=False)
+        # reader_b is supplied explicitly. Omitting it made run_ocr BUILD the
+        # default provider and perform a real second read -- a live model call
+        # sitting inside the unit suite, invisible for exactly as long as the
+        # default happened to be a locally installed CLI that quietly answered.
+        # Two identical readings take compare()'s byte-identical shortcut, so
+        # the dual-read branch runs here with no comparator call either.
+        out = _run(page_image, single_reader=False,
+                   reader_b=FixtureProvider(model_name="stub-2",
+                                            text="환자 홍길동 진단명 골절"))
         assert out["pages"][0]["agreement"] != "single_reader"
         assert out["pages"][0]["reading_b"] is not None
 

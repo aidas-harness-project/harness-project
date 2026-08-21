@@ -6,6 +6,12 @@ execution backend. That lets OCR, classification, and intake checks share
 one provider-selection path without coupling their safety rules to any one
 CLI or API surface.
 
+The default backend is ``openrouter``: one OpenAI-compatible HTTP transport
+that reaches every model family the harness has run behind a CLI, without a
+node subprocess per call. The CLI providers remain selectable -- ``--provider
+claude-cli`` / ``codex-cli`` still work unchanged, and the P8 reader pair is
+still configured per reader -- but nothing defaults to them any more.
+
 Providers here are all LLM-backed (CLI or HTTP API). An earlier revision
 also shipped an offline Tesseract/Ollama trio (``local-ocr``/``local-vlm``/
 ``local-llm``); it was removed because the pinned local models never
@@ -20,6 +26,7 @@ import argparse
 import base64
 import contextlib
 import functools
+import http.client
 import json
 import mimetypes
 import os
@@ -44,9 +51,9 @@ import trace as trace_mod
 ROOT = Path(__file__).resolve().parent.parent
 
 SUPPORTED_PROVIDERS = (
-    "claude-cli", "codex-cli", "anthropic-api", "openai-api", "fixture",
+    "openrouter", "claude-cli", "codex-cli", "anthropic-api", "openai-api", "fixture",
 )
-DEFAULT_PROVIDER = "claude-cli"
+DEFAULT_PROVIDER = "openrouter"
 DEFAULT_ENV_PREFIX = "HARNESS_LLM"
 
 # claude-cli transient-failure retry. Applies only to subprocess-level failures
@@ -212,6 +219,56 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _ANTHROPIC_MAX_TOKENS_ENV = "HARNESS_ANTHROPIC_MAX_TOKENS"
 _ANTHROPIC_MAX_TOKENS_DEFAULT = 16_000
+
+# ---------------------------------------------------------------- OpenRouter --
+#
+# OpenRouter is an OpenAI-chat-completions-compatible aggregator, so ONE HTTP
+# transport reaches every model family the harness has used behind a CLI
+# (Anthropic, OpenAI, Google, open weights) without a per-family provider class.
+# That is why it is the default: the CLI providers pay a full node process per
+# call and can only reach their own vendor.
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Sent on every call. Checked against the live model catalogue on 2026-08-22:
+# of 420 models, 40 declare a `top_provider.max_completion_tokens` BELOW this
+# default (as low as 2,048 -- gemma-2-27b-it, ui-tars-1.5-7b, the cohere
+# command-r family at 4,000, gpt-4-turbo at 4,096), and 11 do not list
+# `max_tokens` among their supported parameters at all. Pointing the harness at
+# one of those needs this lowered; leaving it high risks an upstream 400 that
+# reads as a model-name problem. It is not raised to a per-model lookup here
+# because that would add a second network call before every completion.
+_OPENROUTER_MAX_TOKENS_ENV = "HARNESS_OPENROUTER_MAX_TOKENS"
+_OPENROUTER_MAX_TOKENS_DEFAULT = 16_000
+
+# Optional attribution headers OpenRouter reads for its public leaderboards.
+# Both are opt-in: unset means the call is simply unattributed, never rejected.
+_OPENROUTER_REFERER_ENV = "HARNESS_OPENROUTER_REFERER"
+_OPENROUTER_TITLE_ENV = "HARNESS_OPENROUTER_TITLE"
+
+# urllib would otherwise send `Python-urllib/3.x`, which edge protection in
+# front of a public API is entitled to challenge or block. Naming the client
+# costs nothing and removes a failure mode that would look like an
+# authentication problem. Overridable for a deployment that must identify
+# itself differently.
+_OPENROUTER_USER_AGENT_ENV = "HARNESS_OPENROUTER_USER_AGENT"
+_OPENROUTER_DEFAULT_USER_AGENT = "loss-adjustment-harness/0.1 (+tools/llm_providers.py)"
+
+# Transport-level retry. Distinct from the CLI providers' retry in one way that
+# matters: a subprocess only reports "non-zero exit", so ClaudeCliProvider
+# cannot tell a rate limit from a schema rejection and therefore refuses to
+# retry a structured call at all (that would hide a whole extra model round
+# behind the caller's single P4 correction). HTTP gives us a status code, so
+# retries here are restricted to statuses where the request provably did NOT
+# produce a completion -- no model output is ever discarded and re-rolled, and
+# structured calls retry on exactly the same narrow set as plain ones.
+_OPENROUTER_MAX_ATTEMPTS = 3
+_OPENROUTER_RETRY_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
+
+# finish_reason values that mean the text in hand is not a complete answer.
+# "length" is the truncation case the other HTTP providers already refuse
+# (anthropic stop_reason=max_tokens, openai status=incomplete); "error" is
+# OpenRouter's own mid-generation provider failure; "content_filter" produced
+# no usable content by definition.
+_OPENROUTER_BAD_FINISH_REASONS = frozenset({"length", "error", "content_filter"})
 
 # ---------------------------------------------------------------- T6: in-flight cap --
 #
@@ -1557,6 +1614,361 @@ class OpenAIApiProvider(_ApiProviderStub):
         return self._post_responses(prompt, prompt_version=prompt_version, timeout=120)
 
 
+class OpenRouterProvider(_ApiProviderStub):
+    """OpenAI-compatible chat-completions backend, routed through OpenRouter.
+
+    The default provider. It implements the WHOLE provider surface -- both
+    vision paths (OCR transcription, the D2 intake scan), both structured paths
+    (text and image), and the plain text paths -- so selecting it replaces the
+    CLI transport outright rather than covering a subset of it, the way
+    ``anthropic-api`` (text-structured only) does.
+
+    Two deliberate differences from the CLI providers, both consequences of
+    HTTP replacing a subprocess:
+
+    * **Images are attached, not read.** ``ClaudeCliProvider`` hands the child a
+      path and lets its Read tool open the file, which is why it needs
+      ``--safe-mode``, an ``--allowedTools Read`` allowlist, a cwd confined to
+      the image directory, and a scrubbed child environment. None of that
+      applies here: there is no child, no filesystem access, and no ambient
+      project context to inherit -- the request carries exactly the prompt and
+      the base64 image bytes and nothing else. The D1/PII confinement those
+      flags provide is structural on this path.
+    * **Structured output rides a forced tool call**, as in
+      ``AnthropicApiProvider``, not ``response_format: json_schema``. The strict
+      json_schema mode requires every object to close ``additionalProperties``,
+      which several harness contracts deliberately do not (a claim-facts map
+      keyed by field name needs a *schema* there -- see
+      ``_codex_native_schema_compatible``). A forced single-function tool
+      expresses those contracts unchanged. Provider-side conformance is still
+      only a pre-check: ``validate_instance()`` against the unmodified on-disk
+      schema stays the authoritative gate, and the caller keeps its one P4
+      correction attempt.
+    """
+
+    provider_name = "openrouter"
+    required_key_env = "OPENROUTER_API_KEY"
+    model_env_names = ("HARNESS_OPENROUTER_MODEL", "OPENROUTER_MODEL")
+    STRUCTURED_TOOL_NAME = "emit_result"
+
+    def __init__(
+        self,
+        *,
+        model_name: str | None,
+        env: Mapping[str, str],
+        base_url: str | None = None,
+    ):
+        super().__init__(model_name=model_name, env=env)
+        self.base_url = (
+            base_url or env.get("OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_BASE_URL
+        ).rstrip("/")
+        raw_cap = env.get(_OPENROUTER_MAX_TOKENS_ENV, "")
+        try:
+            cap = int(raw_cap) if raw_cap else _OPENROUTER_MAX_TOKENS_DEFAULT
+        except ValueError:
+            raise ProviderConfigError(
+                f"{_OPENROUTER_MAX_TOKENS_ENV} must be an integer, got {raw_cap!r}"
+            )
+        if cap <= 0:
+            raise ProviderConfigError(f"{_OPENROUTER_MAX_TOKENS_ENV} must be positive")
+        self.max_output_tokens = cap
+        self.referer = env.get(_OPENROUTER_REFERER_ENV) or None
+        self.title = env.get(_OPENROUTER_TITLE_ENV) or None
+        self.user_agent = (
+            env.get(_OPENROUTER_USER_AGENT_ENV) or _OPENROUTER_DEFAULT_USER_AGENT)
+
+    # No model_env_names fallback to a hard-coded slug: OpenRouter model ids are
+    # vendor-prefixed and change constantly, and a fabricated default only fails
+    # later as an opaque 404 on the first page. _ApiProviderStub already fails at
+    # selection instead, which is the behaviour wanted here.
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": self.user_agent,
+        }
+        if self.referer:
+            headers["HTTP-Referer"] = self.referer
+        if self.title:
+            headers["X-Title"] = self.title
+        return headers
+
+    def _post_chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        prompt_version: str,
+        timeout: int,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> ProviderResult:
+        payload: dict[str, Any] = {
+            "model": self.model_name,
+            "messages": messages,
+            "max_tokens": self.max_output_tokens,
+        }
+        if output_schema is not None:
+            payload["tools"] = [{
+                "type": "function",
+                "function": {
+                    "name": self.STRUCTURED_TOOL_NAME,
+                    "description": (
+                        "Return the complete analysis result in the required structure."
+                    ),
+                    "parameters": _cli_json_schema(output_schema),
+                },
+            }]
+            payload["tool_choice"] = {
+                "type": "function",
+                "function": {"name": self.STRUCTURED_TOOL_NAME},
+            }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        last_exc: ProviderExecutionError | None = None
+        for attempt in range(_OPENROUTER_MAX_ATTEMPTS):
+            request = urllib.request.Request(
+                f"{self.base_url}/chat/completions",
+                data=body,
+                headers=self._headers(),
+                method="POST",
+            )
+            retry_detail: str | None = None
+            try:
+                # The permit covers the single round trip only, never a whole
+                # P8 chain, and is released across the backoff sleep below --
+                # same rule as every other provider (see provider_slot).
+                with provider_slot("openrouter"), \
+                        urllib.request.urlopen(request, timeout=timeout) as response:
+                    response_body = response.read().decode("utf-8")
+                    status_code = getattr(response, "status", None)
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                message = f"openrouter call failed ({exc.code}): {error_body}"
+                if exc.code in _OPENROUTER_RETRY_STATUSES:
+                    last_exc = ProviderExecutionError(message)
+                    # Feed _retry_delay the server's own Retry-After when it
+                    # sent one -- a header is authoritative over the local
+                    # curve. It parses the delta-seconds form out of free text,
+                    # so the header is folded into the detail string.
+                    header = exc.headers.get("Retry-After") if exc.headers else None
+                    retry_detail = (
+                        f"retry-after: {header}\n{error_body}" if header else error_body
+                    )
+                else:
+                    raise ProviderExecutionError(message) from exc
+            except urllib.error.URLError as exc:
+                # Connection-level failure: no request was ever completed, so
+                # retrying cannot discard a model result.
+                last_exc = ProviderExecutionError(f"openrouter call failed: {exc.reason}")
+                last_exc.__cause__ = exc
+                retry_detail = str(exc.reason)
+            except TimeoutError as exc:
+                last_exc = ProviderExecutionError(f"openrouter call timed out after {timeout}s")
+                last_exc.__cause__ = exc
+                retry_detail = ""
+            except (http.client.HTTPException, ConnectionError) as exc:
+                # The response DIED MID-BODY: a truncated read against a
+                # declared Content-Length (IncompleteRead), a reset connection,
+                # a malformed status line. urlopen has already returned by
+                # then, so neither HTTPError nor URLError covers this and the
+                # raw exception would escape past the retry loop into the
+                # caller as something other than a ProviderExecutionError.
+                # Retryable on the same reasoning as the rest: a partial body
+                # is not a completion, so re-sending discards no model output.
+                last_exc = ProviderExecutionError(
+                    f"openrouter response body did not arrive intact: "
+                    f"{type(exc).__name__}: {exc}")
+                last_exc.__cause__ = exc
+                retry_detail = str(exc)
+            else:
+                return self._parse_chat_response(
+                    response_body,
+                    prompt_version=prompt_version,
+                    status_code=status_code,
+                    structured=output_schema is not None,
+                )
+
+            if attempt < _OPENROUTER_MAX_ATTEMPTS - 1:
+                time.sleep(_retry_delay(attempt + 1, retry_detail or ""))
+
+        assert last_exc is not None
+        raise last_exc
+
+    def _parse_chat_response(
+        self,
+        response_body: str,
+        *,
+        prompt_version: str,
+        status_code: int | None,
+        structured: bool,
+    ) -> ProviderResult:
+        try:
+            parsed = json.loads(response_body)
+        except json.JSONDecodeError as exc:
+            raise ProviderExecutionError(
+                f"openrouter returned non-JSON response: {response_body!r}"
+            ) from exc
+
+        # OpenRouter can answer 200 OK with a top-level `error` object (an
+        # upstream provider that failed after the response was committed, a
+        # moderation block). Nothing below would notice -- `choices` is absent
+        # or empty -- but the error text is the useful diagnostic, so read it
+        # first rather than reporting "no choices".
+        error = parsed.get("error")
+        if isinstance(error, Mapping):
+            raise ProviderExecutionError(
+                f"openrouter returned an error (code={error.get('code')!r}): "
+                f"{error.get('message')!r}"
+            )
+
+        choices = parsed.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        if not isinstance(choice, Mapping):
+            raise ProviderExecutionError(
+                f"openrouter response contained no choices (http {status_code})"
+            )
+        finish_reason = choice.get("finish_reason")
+        # native_finish_reason is the upstream provider's own word for it, kept
+        # because OpenRouter normalizes several distinct upstream conditions
+        # onto one value and the raw one is what makes a run diagnosable.
+        native_finish_reason = choice.get("native_finish_reason")
+        if finish_reason in _OPENROUTER_BAD_FINISH_REASONS:
+            raise ProviderExecutionError(
+                f"openrouter response was not usable (finish_reason={finish_reason!r}, "
+                f"native_finish_reason={native_finish_reason!r}); refusing to use a "
+                "partial or blocked result. Raise "
+                f"{_OPENROUTER_MAX_TOKENS_ENV} if the output is legitimately larger "
+                f"than {self.max_output_tokens} tokens."
+            )
+
+        message = choice.get("message")
+        message = message if isinstance(message, Mapping) else {}
+        raw_metadata = {
+            "response_id": parsed.get("id"),
+            "http_status": status_code,
+            "finish_reason": finish_reason,
+            "native_finish_reason": native_finish_reason,
+            # OpenRouter reports the model that ACTUALLY served the request,
+            # which can differ from the requested slug (a routed fallback). The
+            # provenance record must carry what ran, not what was asked for.
+            "served_model": parsed.get("model"),
+            "served_provider": parsed.get("provider"),
+            # Usage arrives on every response; token counts are the only way to
+            # tell a reasoning-heavy call from an output-heavy one after the fact.
+            "usage": parsed.get("usage"),
+        }
+
+        if structured:
+            arguments = _openrouter_tool_arguments(message, self.STRUCTURED_TOOL_NAME)
+            if arguments is None:
+                raise ProviderExecutionError(
+                    "openrouter did not return the forced "
+                    f"{self.STRUCTURED_TOOL_NAME} tool call "
+                    f"(finish_reason={finish_reason!r})"
+                )
+            return self._result(
+                json.dumps(arguments, ensure_ascii=False),
+                prompt_version,
+                raw_metadata,
+                finish_reason=finish_reason,
+                structured_output=arguments,
+            )
+
+        text = _openrouter_message_text(message)
+        if text is None or not text.strip():
+            # Fail closed on empty output, matching every other provider: a
+            # blank string is never a valid transcription/verdict/redaction and
+            # can mask a reasoning-only or otherwise degenerate completion.
+            raise ProviderExecutionError(
+                "openrouter response contained no usable message content "
+                f"(finish_reason={finish_reason!r})"
+            )
+        return self._result(
+            text.strip(), prompt_version, raw_metadata, finish_reason=finish_reason,
+        )
+
+    def _user_message(
+        self, prompt: str, image_paths: Sequence[Path] = ()
+    ) -> list[dict[str, Any]]:
+        if not image_paths:
+            return [{"role": "user", "content": prompt}]
+        return [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                *_chat_image_content_parts(image_paths),
+            ],
+        }]
+
+    def transcribe_image(self, image_path: Path, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._post_chat(
+            self._user_message(prompt, [image_path]),
+            prompt_version=prompt_version,
+            timeout=180,
+        )
+
+    def analyze_image_structured(
+        self,
+        image_path: Path,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        return self._post_chat(
+            self._user_message(prompt, [image_path]),
+            prompt_version=prompt_version,
+            timeout=180,
+            output_schema=output_schema,
+        )
+
+    def compare_text(
+        self, prompt: str, prompt_version: str,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> ProviderResult:
+        return self._post_chat(
+            self._user_message(prompt),
+            prompt_version=prompt_version,
+            timeout=compare_text_timeout(),
+            output_schema=output_schema,
+        )
+
+    def analyze_text_structured(
+        self,
+        prompt: str,
+        prompt_version: str,
+        output_schema: Mapping[str, Any],
+    ) -> ProviderResult:
+        return self._post_chat(
+            self._user_message(prompt),
+            prompt_version=prompt_version,
+            timeout=structured_text_timeout(),
+            output_schema=output_schema,
+        )
+
+    def classify_document(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._post_chat(
+            self._user_message(prompt), prompt_version=prompt_version, timeout=120,
+        )
+
+    def scan_intake_content(
+        self, prompt: str, prompt_version: str, image_paths: Sequence[Path] | None = None
+    ) -> ProviderResult:
+        _require_scan_images(image_paths)
+        # The D2 scan only means anything if the model SEES the pages; attach
+        # them as image parts. A bare text prompt naming file paths reaches the
+        # API as dead strings no server can open.
+        return self._post_chat(
+            self._user_message(prompt, image_paths or ()),
+            prompt_version=prompt_version,
+            timeout=180,
+        )
+
+    def redact_text(self, prompt: str, prompt_version: str) -> ProviderResult:
+        return self._post_chat(
+            self._user_message(prompt), prompt_version=prompt_version, timeout=120,
+        )
+
+
 class FixtureProvider(BaseProvider):
     provider_name = "fixture"
 
@@ -1690,6 +2102,8 @@ def build_provider(
     selected = config or parse_provider_config(env=source_env)
     provider_name = _normalize_provider_name(selected.provider_name)
 
+    if provider_name == "openrouter":
+        return OpenRouterProvider(model_name=selected.model_name, env=source_env)
     if provider_name == "claude-cli":
         return ClaudeCliProvider(
             model_name=selected.model_name,
@@ -1756,4 +2170,72 @@ def _extract_openai_output_text(response: Mapping[str, Any]) -> str | None:
                 parts.append(content["text"])
     if parts:
         return "".join(parts)
+    return None
+
+
+def _chat_image_content_parts(image_paths: Sequence[Path]) -> list[dict[str, Any]]:
+    """Image parts in the OpenAI *chat-completions* shape.
+
+    Distinct from `_image_content_parts`, which builds the *Responses* API
+    shape (`input_image` with a bare string url). The two are not
+    interchangeable: a chat-completions endpoint rejects `input_image`, and the
+    silent version of that mistake is a request that carries no image at all.
+    """
+    return [
+        {"type": "image_url", "image_url": {"url": _image_data_url(Path(p))}}
+        for p in image_paths
+    ]
+
+
+def _openrouter_message_text(message: Mapping[str, Any]) -> str | None:
+    """Assistant text from a chat-completions message.
+
+    `content` is normally a string, but a multimodal-output model can return
+    the OpenAI content-part list instead; joining the text parts covers both
+    without the caller needing to know which model served the request.
+    """
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            part["text"] for part in content
+            if isinstance(part, Mapping) and isinstance(part.get("text"), str)
+        ]
+        if parts:
+            return "".join(parts)
+    return None
+
+
+def _openrouter_tool_arguments(
+    message: Mapping[str, Any], tool_name: str
+) -> dict[str, Any] | None:
+    """The forced tool call's arguments, as a mapping, or None.
+
+    `function.arguments` is a JSON *string* in the OpenAI contract, but some
+    upstream providers hand OpenRouter a decoded object and it passes through
+    as one. Accept both; anything else (including valid JSON that is not an
+    object) is not a usable structured result and returns None so the caller
+    fails closed.
+    """
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return None
+    for call in tool_calls:
+        if not isinstance(call, Mapping):
+            continue
+        function = call.get("function")
+        if not isinstance(function, Mapping) or function.get("name") != tool_name:
+            continue
+        arguments = function.get("arguments")
+        if isinstance(arguments, Mapping):
+            return dict(arguments)
+        if isinstance(arguments, str):
+            try:
+                decoded = json.loads(arguments)
+            except json.JSONDecodeError:
+                return None
+            if isinstance(decoded, dict):
+                return decoded
+        return None
     return None
