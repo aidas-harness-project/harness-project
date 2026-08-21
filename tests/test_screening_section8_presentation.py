@@ -23,6 +23,7 @@ which is why they survived every schema and citation check:
    establish that in general, so the report states the possibility instead of
    asserting the fact.
 """
+import json
 import sys
 from pathlib import Path
 
@@ -185,3 +186,77 @@ def test_a_matched_row_does_not_get_the_absence_note():
     section = next(s for s in screening.markdown_sections(report)
                    if s["heading"].startswith("8."))
     assert "처음부터 없을 가능성" not in section["content"]
+
+
+# --- 4. the insurer's decision says what it decided ------------------------
+
+DENIAL_CONTRACT = {
+    "denial_reasons": [{
+        "reason_id": "DR_1",
+        "decision_type": "denial",
+        "decided_coverage": "시설소유자배상책임",
+        "insurer_claim_summary": "강설·결빙이라는 자연현상은 시설의 하자로 볼 수 없다는 판례에 따라 배상책임이 성립하지 않는다는 결정.",
+        "amounts": {"claimed_amount": "5,000,000원", "payable_amount": None,
+                    "denied_amount": "5,000,000원", "reduction_amount": None,
+                    "reduction_rate": None},
+        "evidence_references": [{"document_id": "DOC_007", "page": 1,
+                                 "quote": "법률상배상책임이 발생하지 않는다"}],
+    }],
+    "accepted_coverages": [],
+}
+
+
+def _section9(contract):
+    report = {"insurer_position": screening.insurer_position(contract)}
+    return next(s for s in screening.markdown_sections(report)
+                if s["heading"].startswith("9."))
+
+
+def test_the_insurers_reason_is_printed_not_just_its_id():
+    """CASE_703 rendered "거절: DR_1" and nothing else.
+
+    The id is an internal handle. The denial contract already held
+    `insurer_claim_summary`; the report layer dropped it, so the section named
+    a decision without ever stating its grounds -- the section-8 defect again.
+    """
+    section = _section9(DENIAL_CONTRACT)
+    assert "자연현상은 시설의 하자로 볼 수 없다" in section["content"]
+    assert "시설소유자배상책임" in section["content"]
+
+
+def test_stated_amounts_are_labelled_in_korean():
+    section = _section9(DENIAL_CONTRACT)
+    assert "청구금액: 5,000,000원" in section["content"]
+    assert "부지급금액: 5,000,000원" in section["content"]
+
+
+def test_null_amounts_are_omitted_not_printed_as_field_names():
+    """`amounts` is a mapping of five figures, usually mostly null.
+
+    Iterating it as a list printed five bare key names under the decision, and
+    a null is not 0원 -- it is a figure the insurer did not state.
+    """
+    contract = json.loads(json.dumps(DENIAL_CONTRACT))
+    contract["denial_reasons"][0]["amounts"] = {
+        "claimed_amount": None, "payable_amount": None, "denied_amount": None,
+        "reduction_amount": None, "reduction_rate": None}
+    section = _section9(contract)
+    for key in ("claimed_amount", "청구금액", "denied_amount", "부지급금액"):
+        assert key not in section["content"]
+
+
+def test_section9_stays_balanced_with_statements():
+    """The statement restates the reason the line already cites, so it takes no
+    marker of its own -- a second one would unbalance the section."""
+    section = _section9(DENIAL_CONTRACT)
+    assert (section["content"].count("{{E}}")
+            == len(section["evidence_references"]) == 1)
+
+
+def test_a_reason_without_a_summary_contributes_no_line():
+    contract = json.loads(json.dumps(DENIAL_CONTRACT))
+    del contract["denial_reasons"][0]["insurer_claim_summary"]
+    contract["denial_reasons"][0]["raw_reason_text"] = ""
+    section = _section9(contract)
+    assert "거절: DR_1" in section["content"]
+    assert section["content"].count("\n  - ") == 0

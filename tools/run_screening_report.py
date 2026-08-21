@@ -866,11 +866,21 @@ def insurer_position(denial_reasons: Mapping[str, Any] | None) -> dict:
             "reason_ids": denial_ids,
             "total_amount": _total_amount(reasons, "denial"),
             "evidence_references": _decision_evidence(reasons, "denial"),
+            # WHAT the insurer said, not just which reason ids it said it
+            # under. Until 2026-08-21 this section printed "거절: DR_1" and
+            # nothing else: the id is an internal handle, so the report named
+            # the insurer's decision without ever stating its grounds -- the
+            # same defect just fixed in section 8, where a clause was cited by
+            # heading and never quoted. The denial contract already holds
+            # `insurer_claim_summary` and `decided_coverage` per reason; they
+            # were dropped here rather than missing upstream.
+            "statements": _decision_statements(reasons, "denial"),
         },
         "reduction": {
             "reason_ids": reduction_ids,
             "total_amount": _total_amount(reasons, "reduction"),
             "evidence_references": _decision_evidence(reasons, "reduction"),
+            "statements": _decision_statements(reasons, "reduction"),
         },
     }
     if accepted:
@@ -888,6 +898,45 @@ def insurer_position(denial_reasons: Mapping[str, Any] | None) -> dict:
             ]),
         }
     return position
+
+
+AMOUNT_LABEL = {
+    "claimed_amount": "청구금액",
+    "payable_amount": "지급금액",
+    "denied_amount": "부지급금액",
+    "reduction_amount": "감액금액",
+    "reduction_rate": "감액비율",
+}
+
+
+def _decision_statements(
+    reasons: Sequence[Mapping[str, Any]],
+    decision_type: str,
+) -> list[dict]:
+    """One readable line per reason: what was decided, on what coverage, why.
+
+    Copied from the denial contract, never re-derived -- `insurer_claim_summary`
+    is the insurer's own statement as `denial-response` recorded it, and this
+    stage adds no characterisation of its own. `amounts` travels with it
+    because an accepted or reduced figure is the fact a reader looks for first
+    (CASE_703 carried 구내치료비 ₩2,000,000 in the contract and printed it
+    nowhere).
+    """
+    statements = []
+    for reason in reasons:
+        if reason.get("decision_type") != decision_type:
+            continue
+        summary = (reason.get("insurer_claim_summary")
+                   or reason.get("raw_reason_text") or "")
+        if not summary:
+            continue
+        statements.append({
+            "reason_id": reason.get("reason_id"),
+            "decided_coverage": reason.get("decided_coverage"),
+            "summary": summary,
+            "amounts": reason.get("amounts") or [],
+        })
+    return statements
 
 
 def _decision_evidence(
@@ -1482,6 +1531,37 @@ def markdown_sections(
         ("승인", ", ".join(acceptance.get("accepted_coverage_ids") or []) or None,
          acceptance.get("evidence_references")),
     ])
+    # The reason id is an internal handle; on its own it told the reader
+    # nothing. Each statement goes under its decision line, carrying no marker
+    # of its own -- it restates the reason the line already cites, so a second
+    # `{{E}}` would unbalance the section and tag one source twice.
+    statement_lines = {
+        "거절": denial.get("statements") or [],
+        "감액": reduction.get("statements") or [],
+    }
+    annotated: list[str] = []
+    for line in lines:
+        annotated.append(line)
+        for label, statements in statement_lines.items():
+            if not line.startswith(f"- {label}:"):
+                continue
+            for statement in statements:
+                coverage = statement.get("decided_coverage")
+                head = f"[{coverage}] " if coverage else ""
+                annotated.append(f"  - {head}{statement['summary']}")
+                # `amounts` is a mapping of five named figures, most of them
+                # null on any given reason. Only the ones the insurer actually
+                # stated are printed -- a null is not "0원", and printing the
+                # key alone (the shape this replaced) put five bare field
+                # names under the decision.
+                amounts = statement.get("amounts")
+                if isinstance(amounts, Mapping):
+                    for key, value in amounts.items():
+                        if value in (None, ""):
+                            continue
+                        annotated.append(
+                            f"    - {AMOUNT_LABEL.get(key, key)}: {value}")
+    lines = annotated
     sections.append({
         "heading": "9. 보험사 응답",
         "content": "\n".join(lines),
