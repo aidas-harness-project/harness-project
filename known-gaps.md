@@ -3753,3 +3753,33 @@ it, not to assume CASE_702 already proved it.
 Open: either wire a producer (intake records a 산재/자동차 접수 fact with its
 source), or drop `filing_evidence_references` from the consumer so the contract
 stops advertising evidence nothing supplies.
+
+## 52. The screening agent's judgement renders nowhere
+
+Measured on CASE_704 (2026-08-21), and true of every selective-lane run before it.
+
+`screening_report.json` carries the agent's whole contribution -- on CASE_704
+that is **7 warnings, 7 key_issues, and 9 review_points**. The rendered
+`screening_report.md` contains none of them. Verified by string search: no
+warning text and no "검토 포인트" heading appears in the markdown.
+
+This is structural, not a bug in the renderer. `templates/registry.json`
+defines `screening_report_selective` with exactly nine `heading_patterns` and
+`allow_extra_sections: false`, and none of the nine is an issues, review-points
+or warnings section. The template's own 「섹션별 생성 주체」 table nevertheless
+assigns 「중요도·배치·검토 포인트」 to the screening agent. So the stage
+dispatches an agent, pays for it (CASE_704: **391.4s and 117,993 tokens**), and
+the deliverable discards the result.
+
+What was lost on this case specifically: the warning that reduced P8 graded the
+두 법률의견서 unequally and a reader must not prefer the more legible side; the
+notice that `negligence_reasoning` was judged `not_material` on this run while
+CASE_702/703 confirmed it; and the framing that no line item means a payout
+decision until 성립 여부 is settled.
+
+A reviewer who reads only the .md -- which is the deliverable -- sees the facts
+and none of the cautions about how to read them.
+
+Open: either add a section to the template for the agent's judgement, or stop
+dispatching the agent for a stage whose output has no home. Doing neither means
+continuing to pay for judgement the deliverable throws away.
