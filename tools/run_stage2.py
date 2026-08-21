@@ -80,6 +80,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -204,6 +205,56 @@ def chunkable_documents(manifest: dict) -> tuple[list[str], list[str]]:
         elif doc.get("redacted_text_path"):
             text.append(doc["document_id"])
     return text, excluded
+
+
+# Default fan-out for split-child classification. Modest because each worker
+# holds a whole interpreter, and the provider's own in-flight semaphore is the
+# real ceiling anyway -- this only stops the driver from idling between calls.
+_CLASSIFY_WORKERS = 4
+
+
+def _classify_children(case_id, children, *, common, provider, workers, report):
+    """Classify every split child, several at a time, in manifest order.
+
+    Independent by construction: each child writes its own
+    `classification_result_DOC_X.json` and folds its fields into the manifest via
+    `dao.patch_manifest_document`, a read-modify-write under a single lock hold --
+    the same primitive `pool.documents` already relies on in run_document_stage.
+
+    Returns one step per child, ordered as `children` was, NOT by completion.
+    The steps list is a receipt a human reads against the manifest; ordering it
+    by whichever provider answered first would make two runs of one case produce
+    receipts that differ for no reason. Failures are returned like any other
+    step -- the caller decides what halts.
+
+    Measured cause, CASE_701: 10 children took 81.4s of wall for 60.4s of
+    provider time, the remaining 21.1s being interpreter starts serialized
+    between calls.
+    """
+    def one(child):
+        doc_id = child["document_id"]
+        argv = common([str(TOOLS / "run_checkpoint1.py"), "classify-only",
+                       case_id, doc_id])
+        if provider:
+            argv += ["--classifier-provider", provider]
+        return _run(argv, phase=f"classify:{doc_id}", progress=report)
+
+    limit = max(1, min(workers or _CLASSIFY_WORKERS, len(children)))
+    if limit == 1 or len(children) == 1:
+        return [one(child) for child in children]
+
+    with trace_mod.span("pool.classify_children", category="compute",
+                        case_id=case_id, worker_count=limit,
+                        items=len(children)):
+        # run_in_context: contextvars do not cross into pool workers, so a raw
+        # submit would orphan each child's spans at parent None.
+        submit = trace_mod.run_in_context(one)
+        with ThreadPoolExecutor(max_workers=limit) as pool:
+            futures = [pool.submit(submit, child) for child in children]
+            # Every future is waited on before any result is inspected: a child
+            # that already finished has written its contract, and abandoning the
+            # pool early would discard that work while leaving its output on disk.
+            return [future.result() for future in futures]
 
 
 def _phase_ok(step: dict) -> bool:
@@ -364,16 +415,16 @@ def run_stage2(
         children = unclassified_children(manifest)
         if children:
             report(f"phase: classify {len(children)} split child(ren)")
-        for child in children:
-            doc_id = child["document_id"]
-            argv = common([str(TOOLS / "run_checkpoint1.py"), "classify-only",
-                           case_id, doc_id])
-            if provider:
-                argv += ["--classifier-provider", provider]
-            step = _run(argv, phase=f"classify:{doc_id}", progress=report)
-            steps.append(step)
-            if not _phase_ok(step):
-                return stop(f"classify:{doc_id}", "child classification failed")
+        if children:
+            child_steps = _classify_children(
+                case_id, children, common=common, provider=provider,
+                workers=doc_workers, report=report)
+            steps.extend(child_steps)
+            # Reported in manifest order, so the halt names the same child every
+            # time regardless of which provider call returned first.
+            for step in child_steps:
+                if not _phase_ok(step):
+                    return stop(step["phase"], "child classification failed")
 
         # ---- phase 5: redact the children -----------------------------------
         if children:

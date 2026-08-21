@@ -4183,3 +4183,243 @@ def test_a_document_with_no_ocr_is_still_refused(tmp_path):
     finally:
         sc.ROOT = original_root
     assert any("OCR is" in error for error in errors)
+
+
+# ------------------------------------------- judge tier concurrency --
+
+class _ConcurrencyProbeJudge:
+    """Blocks each call until every expected call has arrived.
+
+    A judge tier that dispatches serially can never satisfy the barrier: call 1
+    waits for call 2, which is not sent until call 1 returns. So the barrier
+    timing out IS the serial-execution assertion -- no sleep-and-compare, which
+    would only measure that the machine was fast that afternoon.
+    """
+
+    provider_name = "probe"
+    model_name = "probe-model"
+
+    def __init__(self, expected):
+        import threading
+        self._barrier = threading.Barrier(expected, timeout=10)
+        self._lock = threading.Lock()
+        self.prompts = []
+        self.max_inflight = 0
+        self._inflight = 0
+        self.timed_out = False
+
+    def classify_document(self, prompt, prompt_version):
+        from llm_providers import ProviderResult
+        import threading
+        with self._lock:
+            self.prompts.append(prompt)
+            self._inflight += 1
+            self.max_inflight = max(self.max_inflight, self._inflight)
+        try:
+            self._barrier.wait()
+        except threading.BrokenBarrierError:
+            self.timed_out = True
+        finally:
+            with self._lock:
+                self._inflight -= 1
+        return ProviderResult(self.provider_name, self.model_name, prompt_version,
+                              json.dumps({"starts_new_document": False,
+                                          "confidence": 0.9, "title": None}))
+
+
+def _three_untitled_judged_pages():
+    """A medical bundle whose pages 2-4 all reach the judge.
+
+    Each is untitled and shares no table header with its predecessor, so every
+    deterministic shortcut declines and the LLM tier gets all three.
+    """
+    return [
+        "진단서\n환자성명 홍길동\n상병명 요추 염좌",
+        "이것은 제목이 없는 본문 페이지입니다\n내용이 이어집니다",
+        "또 다른 제목 없는 페이지\n다른 내용이 적혀 있습니다",
+        "세 번째 제목 없는 페이지\n전혀 다른 서술이 있습니다",
+    ]
+
+
+def test_judge_tier_dispatches_its_calls_concurrently():
+    """The CASE_701 finding: 28 boundary judgements ran strictly back-to-back.
+
+    Measured on that run, `segment.judge` self-time summed to exactly its own
+    wall span on all three bundles (48.8/48.8, 77.0/77.0, 29.4/29.4) -- zero
+    overlap -- for 169s of the stage's 411s. Which pages reach the judge is
+    decidable from page text and the contents-page map alone, so the verdicts
+    can be fetched together even though `previous_title` stays sequential.
+    """
+    pages = _three_untitled_judged_pages()
+    judged = []
+    judge = _ConcurrencyProbeJudge(expected=3)
+
+    found = sc.boundaries_from_page_texts(pages, medical=True, judge=judge,
+                                          judged=judged)
+
+    assert judged == [2, 3, 4], "all three untitled pages must reach the judge"
+    assert not judge.timed_out, (
+        "the judge tier dispatched serially: three independent page-pair "
+        "verdicts never overlapped")
+    assert judge.max_inflight == 3
+    # Every verdict said 'continues', so only page 1 opens a document.
+    assert set(found) == {1}
+
+
+def test_prefetched_judge_verdicts_match_the_sequential_result():
+    """Concurrency must not move a boundary.
+
+    Same pages, same scripted verdicts, and the boundary set plus the recorded
+    `judged` list must be what the one-at-a-time loop produced.
+    """
+    pages = _three_untitled_judged_pages()
+    verdicts = [
+        {"starts_new_document": False, "confidence": 0.9, "title": None},
+        {"starts_new_document": True, "confidence": 0.9, "title": "소견서"},
+        {"starts_new_document": False, "confidence": 0.9, "title": None},
+    ]
+    judged = []
+    judge = _FakeBoundaryJudge(verdicts)
+    found = sc.boundaries_from_page_texts(pages, medical=True, judge=judge,
+                                          judged=judged)
+
+    assert judged == [2, 3, 4]
+    assert len(judge.prompts) == 3, "one call per judged page, no duplicates"
+    assert set(found) == {1, 3}
+    assert found[3] == "소견서"
+
+
+def test_a_judge_failure_still_splits_and_flags_when_prefetched():
+    """Fail-toward-splitting survives the concurrent path.
+
+    A provider that raises must still be recorded as a judge failure and leave
+    the page in `undecided`, not vanish into a swallowed future.
+    """
+    class _Exploding:
+        provider_name = "boom"
+        model_name = "boom-model"
+
+        def classify_document(self, prompt, prompt_version):
+            raise RuntimeError("provider is down")
+
+    pages = _three_untitled_judged_pages()
+    judge = _Exploding()
+    undecided = sc.undecided_pages(pages, medical=True, judge=judge)
+
+    assert undecided == [2, 3, 4], "every failed judgement is flagged undecided"
+    assert len(sc.judge_failures(judge)) == 3
+
+
+class _PureJudge:
+    """Verdict is a pure function of the prompt: same page pair, same answer.
+
+    Deliberately stateless. A first attempt at this stub drew from a shared
+    `random.Random` the first time it saw each prompt, so a different arrival
+    order handed the same page a different verdict -- it reported 27 of 60 seeds
+    as mismatched when the code under test was correct and the STUB was the
+    order-dependent thing. A differential test whose oracle depends on ordering
+    cannot say anything about ordering.
+    """
+
+    provider_name = "pure"
+    model_name = "pure-model"
+
+    def __init__(self, seed):
+        self._seed = seed
+
+    def classify_document(self, prompt, prompt_version):
+        from llm_providers import ProviderResult
+        digest = hashlib.sha256(f"{self._seed}|{prompt}".encode()).digest()
+        new = digest[0] < 102  # ~40% of pages start a document
+        return ProviderResult(self.provider_name, self.model_name, prompt_version,
+                              json.dumps({"starts_new_document": new,
+                                          "confidence": 0.9,
+                                          "title": "소견서" if new else None}))
+
+
+@pytest.mark.parametrize("seed", range(24))
+def test_concurrent_judging_gives_the_same_boundaries_as_serial(seed, monkeypatch):
+    """Prefetching must be invisible in the result, not merely faster.
+
+    `previous_title` is still threaded one page at a time; only the provider
+    calls overlap. Boundaries, the judged-page list, and the undecided list must
+    all come back identical to the one-at-a-time path on the same input.
+    """
+    import random
+
+    rng = random.Random(seed)
+    pages = ["진단서\n환자성명 홍길동"]
+    for i in range(rng.randint(3, 20)):
+        if rng.random() < 0.3:
+            pages.append(f"진료비 세부산정내역\n등록번호 {i}\n01.진찰료 | {i}")
+        else:
+            pages.append(f"제목없는 페이지 {i}\n본문 내용 {rng.random()}")
+    lines = [p.split("\n") for p in pages]
+
+    results = {}
+    for workers in (1, 8):
+        monkeypatch.setattr(sc, "_JUDGE_WORKERS", workers)
+        judged, undecided = [], []
+        boundaries = sc._boundaries_from_page_lines(
+            lines, medical=True, judge=_PureJudge(seed), page_texts=pages,
+            undecided=undecided, judged=judged)
+        results[workers] = (boundaries, judged, undecided)
+
+    assert results[1] == results[8]
+
+
+def test_prefetch_asks_about_exactly_the_pages_the_loop_judges():
+    """The prefetch page set must EQUAL what the sequential loop asks about.
+
+    Set equality, not sufficiency. Over-fetching is invisible to any boundary
+    assertion -- the loop simply ignores entries it never looks up -- so it
+    would ship as a correct answer that quietly pays for extra model calls.
+    Verified by deleting the table-continuation gate from
+    `_pages_needing_judgement`: with the earlier fixture the test still passed,
+    because that fixture never produced a continuation page at all.
+    """
+    import random
+
+    # Table-continuation pages are the reason this is not merely "every untitled
+    # page": they carry no form title but repeat the previous page's column
+    # header, and the loop skips them WITHOUT asking -- 15 of 34 judged pages on
+    # CASE_047 DOC_001. The fixture must contain them for the equality to bite.
+    fixtures = []
+    for seed in range(12):
+        rng = random.Random(seed)
+        pages = ["진단서\n환자성명 홍길동"]
+        for i in range(rng.randint(3, 16)):
+            roll = rng.random()
+            if roll < 0.25:
+                pages.append(_TABLE_TITLE_PAGE)
+            elif roll < 0.50:
+                pages.append(_TABLE_CONT_PAGE)
+            elif roll < 0.65:
+                pages.append(f"진료비 세부산정내역\n등록번호 {i}\n01.진찰료 | {i}")
+            else:
+                pages.append(f"제목없는 페이지 {i}\n본문 내용 {rng.random()}")
+        fixtures.append(pages)
+
+    # The gate is only under test if the corpus actually reaches it.
+    reached = 0
+    for pages in fixtures:
+        lines = [p.split("\n") for p in pages]
+        for index in range(1, len(lines)):
+            if sc._medical_header_title(lines[index]) is None and sc._continues_table(
+                    sc._table_header_cells(lines[index - 1]),
+                    sc._table_header_cells(lines[index])):
+                reached += 1
+    assert reached >= 5, (
+        f"fixture never exercises the table-continuation skip ({reached} hits); "
+        "the equality assertion below would pass on an over-fetching prefetch")
+
+    for seed, pages in enumerate(fixtures):
+        lines = [p.split("\n") for p in pages]
+        judged = []
+        sc._boundaries_from_page_lines(lines, medical=True, judge=_PureJudge(seed),
+                                       page_texts=pages, judged=judged)
+        # `judged` holds page numbers, the prefetch holds indexes.
+        toc = [sc._is_toc_page(line_set) for line_set in lines]
+        predicted = sc._pages_needing_judgement(lines, toc, medical=True)
+        assert [i + 1 for i in predicted] == judged, f"seed {seed}"
+        assert len(predicted) == len(set(predicted))

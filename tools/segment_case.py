@@ -35,6 +35,7 @@ import hashlib
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # tools/trace.py, not the stdlib `trace` module.
@@ -1097,6 +1098,87 @@ def undecided_pages(
     return collected
 
 
+# How many boundary judgements to keep in flight. Each is an independent
+# (page N-1, page N) comparison against the provider, so the ceiling is the
+# provider's own concurrency, not ours -- `llm_providers` already holds a global
+# in-flight semaphore, and this pool queues behind it rather than around it.
+# Measured cause, CASE_701: 28 judgements ran strictly back-to-back across three
+# bundles (segment.judge self-time equalled its own wall span on every one --
+# 48.8/48.8, 77.0/77.0, 29.4/29.4), spending 169s of that stage's 411s waiting
+# on calls that never needed to wait for each other.
+_JUDGE_WORKERS = 8
+
+
+def _pages_needing_judgement(
+    pages: list[list[str]], toc: list[bool], *, medical: bool,
+) -> list[int]:
+    """Indexes whose boundary the deterministic rules cannot settle.
+
+    Safe to compute before the boundary loop runs because every gate on the
+    path to the judge reads page text and `toc` only. The one loop-carried
+    value, `previous_title`, is read solely by the titled-page branch -- which
+    always `continue`s before reaching the judge -- so no verdict can change
+    which pages appear here. That is what makes prefetching legitimate rather
+    than a race: this returns the same list the sequential loop would ask about,
+    in the same order.
+
+    Non-medical bundles never reach the judge, so the answer there is empty.
+    """
+    if not medical:
+        return []
+    needed: list[int] = []
+    for index, lines in enumerate(pages):
+        if index == 0 or toc[index]:
+            continue
+        title = _medical_header_title(lines)
+        if title is not None and _title_key(title) is not None:
+            continue
+        if title is None and _continues_table(
+            _table_header_cells(pages[index - 1]), _table_header_cells(lines)
+        ):
+            continue
+        needed.append(index)
+    return needed
+
+
+def _prefetch_judgements(
+    indexes: list[int], page_texts: list[str], judge,
+) -> dict[int, dict | None]:
+    """Fetch every boundary verdict up front, concurrently.
+
+    Returns index -> verdict, with None kept for the unusable ones so the
+    caller's fail-toward-splitting branch behaves exactly as it did serially.
+    `_judge_boundary` already converts every failure mode to None and records
+    provider errors on the judge, so nothing is swallowed by running it here.
+    """
+    if not indexes:
+        return {}
+    if len(indexes) == 1:
+        return {indexes[0]: _judge_boundary(
+            page_texts[indexes[0] - 1], page_texts[indexes[0]], judge)}
+
+    verdicts: dict[int, dict | None] = {}
+    workers = min(_JUDGE_WORKERS, len(indexes))
+    with trace_mod.span("pool.judge", category="compute",
+                        worker_count=workers, items=len(indexes)):
+        # run_in_context: concurrent.futures does not carry contextvars into
+        # workers, so a raw submit would orphan every segment.judge span at
+        # parent None -- and this pool is now the stage's largest single cost,
+        # exactly the part a trace must be able to explain.
+        submit = trace_mod.run_in_context(_judge_boundary)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(submit, page_texts[i - 1], page_texts[i], judge): i
+                for i in indexes
+            }
+            for future, index in futures.items():
+                # _judge_boundary catches provider failures itself; anything
+                # escaping it is a real bug and must not be turned into a
+                # silent "undecided", which would look like an ambiguous page.
+                verdicts[index] = future.result()
+    return verdicts
+
+
 def _boundaries_from_page_lines(
     pages: list[list[str]], *, medical: bool = False, judge=None,
     page_texts: list[str] | None = None, undecided: list[int] | None = None,
@@ -1141,6 +1223,16 @@ def _boundaries_from_page_lines(
         # null on page 1 loses nothing.
         boundaries[1] = _medical_header_title(pages[0])
         previous_title = _title_key(boundaries[1])
+    # Every verdict fetched before the loop starts, so the calls overlap. The
+    # loop below stays sequential and reads them from this map -- `previous_title`
+    # is still threaded one page at a time, and takes the same values it would
+    # have taken had each call blocked in place.
+    prefetched = (
+        _prefetch_judgements(
+            _pages_needing_judgement(pages, toc, medical=bool(medical)),
+            page_texts, judge)
+        if judge is not None else {}
+    )
     for index, lines in enumerate(pages):
         page = index + 1
         if page == 1 or toc[index]:
@@ -1208,7 +1300,15 @@ def _boundaries_from_page_lines(
                 continue
             if judged is not None:
                 judged.append(page)
-            verdict = _judge_boundary(page_texts[index - 1], page_texts[index], judge)
+            # Already fetched above. The fallback call covers a caller that
+            # reached this page outside the prefetch's view; it cannot fire on
+            # the normal path, where the two agree on the page set by
+            # construction, but a silent extra call is cheaper than a KeyError.
+            if index in prefetched:
+                verdict = prefetched[index]
+            else:
+                verdict = _judge_boundary(
+                    page_texts[index - 1], page_texts[index], judge)
             if verdict is None:
                 # Fail toward splitting. Over-splitting is undone by a human
                 # merging two segments at the approval gate; over-merging fuses
