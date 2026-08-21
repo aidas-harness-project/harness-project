@@ -37,6 +37,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -243,6 +244,34 @@ _OPENROUTER_MAX_TOKENS_DEFAULT = 16_000
 # Both are opt-in: unset means the call is simply unattributed, never rejected.
 _OPENROUTER_REFERER_ENV = "HARNESS_OPENROUTER_REFERER"
 _OPENROUTER_TITLE_ENV = "HARNESS_OPENROUTER_TITLE"
+
+# PII posture. Case material is Korean insurance-claim content, and OCR sends
+# page images BEFORE redaction -- there is no earlier point at which a page can
+# be read. OpenRouter's default routing (`data_collection: "allow"`) permits
+# providers that RETAIN prompts, including for training; the CLI transports this
+# replaces reached one vendor under that vendor's API terms and had no such
+# fan-out. So the default here is `deny`, which restricts routing to providers
+# that do not collect prompt data. It narrows the eligible provider pool and can
+# make a model unroutable -- that is the intended direction for this corpus, and
+# `HARNESS_OPENROUTER_DATA_COLLECTION=allow` is the deliberate, recorded opt-out.
+# `HARNESS_OPENROUTER_ZDR=1` additionally pins routing to zero-data-retention
+# endpoints. Neither replaces open-decisions.md #3: every one of these providers
+# is still an external service receiving the page.
+_OPENROUTER_DATA_COLLECTION_ENV = "HARNESS_OPENROUTER_DATA_COLLECTION"
+_OPENROUTER_DATA_COLLECTION_DEFAULT = "deny"
+_OPENROUTER_DATA_COLLECTION_VALUES = ("deny", "allow")
+_OPENROUTER_ZDR_ENV = "HARNESS_OPENROUTER_ZDR"
+
+# A base URL is where the Bearer key is sent. Plain http would put it, and the
+# case material, on the wire in clear. Refused unless the host is loopback (the
+# test server, a local proxy on the same machine).
+_OPENROUTER_INSECURE_OPT_OUT_ENV = "HARNESS_OPENROUTER_ALLOW_INSECURE_BASE_URL"
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+# Server-supplied diagnostics are echoed into the exception message, and a 4xx
+# body can quote back part of the request -- which is a page of claim text.
+# Enough to diagnose, not enough to spill a document into a console or CI log.
+_OPENROUTER_ERROR_BODY_MAX_CHARS = 2_000
 
 # urllib would otherwise send `Python-urllib/3.x`, which edge protection in
 # front of a public API is entitled to challenge or block. Naming the client
@@ -1662,6 +1691,16 @@ class OpenRouterProvider(_ApiProviderStub):
         self.base_url = (
             base_url or env.get("OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_BASE_URL
         ).rstrip("/")
+        _require_transport_security(self.base_url, env)
+        collection = (env.get(_OPENROUTER_DATA_COLLECTION_ENV)
+                      or _OPENROUTER_DATA_COLLECTION_DEFAULT).strip().lower()
+        if collection not in _OPENROUTER_DATA_COLLECTION_VALUES:
+            raise ProviderConfigError(
+                f"{_OPENROUTER_DATA_COLLECTION_ENV} must be one of "
+                f"{', '.join(_OPENROUTER_DATA_COLLECTION_VALUES)}, got {collection!r}"
+            )
+        self.data_collection = collection
+        self.zero_data_retention = str(env.get(_OPENROUTER_ZDR_ENV, "")).strip() == "1"
         raw_cap = env.get(_OPENROUTER_MAX_TOKENS_ENV, "")
         try:
             cap = int(raw_cap) if raw_cap else _OPENROUTER_MAX_TOKENS_DEFAULT
@@ -1702,10 +1741,16 @@ class OpenRouterProvider(_ApiProviderStub):
         timeout: int,
         output_schema: Mapping[str, Any] | None = None,
     ) -> ProviderResult:
+        routing: dict[str, Any] = {"data_collection": self.data_collection}
+        if self.zero_data_retention:
+            routing["zdr"] = True
         payload: dict[str, Any] = {
             "model": self.model_name,
             "messages": messages,
             "max_tokens": self.max_output_tokens,
+            # Sent on EVERY call, never only on the ones handling images: a
+            # redaction prompt carries the same material the page did.
+            "provider": routing,
         }
         if output_schema is not None:
             payload["tools"] = [{
@@ -1742,7 +1787,8 @@ class OpenRouterProvider(_ApiProviderStub):
                     response_body = response.read().decode("utf-8")
                     status_code = getattr(response, "status", None)
             except urllib.error.HTTPError as exc:
-                error_body = exc.read().decode("utf-8", errors="replace")
+                error_body = _openrouter_error_body(
+                    exc.read().decode("utf-8", errors="replace"))
                 message = f"openrouter call failed ({exc.code}): {error_body}"
                 if exc.code in _OPENROUTER_RETRY_STATUSES:
                     last_exc = ProviderExecutionError(message)
@@ -1853,6 +1899,10 @@ class OpenRouterProvider(_ApiProviderStub):
             # provenance record must carry what ran, not what was asked for.
             "served_model": parsed.get("model"),
             "served_provider": parsed.get("provider"),
+            # The PII posture the call was made under, recorded with the call
+            # rather than inferred later from whatever the env holds today.
+            "data_collection": self.data_collection,
+            "zdr": self.zero_data_retention,
             # Usage arrives on every response; token counts are the only way to
             # tell a reasoning-heavy call from an output-heavy one after the fact.
             "usage": parsed.get("usage"),
@@ -2185,6 +2235,41 @@ def _chat_image_content_parts(image_paths: Sequence[Path]) -> list[dict[str, Any
         {"type": "image_url", "image_url": {"url": _image_data_url(Path(p))}}
         for p in image_paths
     ]
+
+
+def _openrouter_error_body(text: str) -> str:
+    """A server diagnostic, bounded, for an exception message.
+
+    A 400 can quote the offending request back, and the offending request is a
+    page of claim material. The message has to stay diagnosable without turning
+    every provider error into an unredacted document dump in a terminal log.
+    """
+    if len(text) <= _OPENROUTER_ERROR_BODY_MAX_CHARS:
+        return text
+    return (text[:_OPENROUTER_ERROR_BODY_MAX_CHARS]
+            + f"... [{len(text) - _OPENROUTER_ERROR_BODY_MAX_CHARS} more chars omitted]")
+
+
+def _require_transport_security(base_url: str, env: Mapping[str, str]) -> None:
+    """Refuse a base URL that would send the API key in clear.
+
+    https always passes. http passes only for a loopback host -- the loopback
+    test server, or a proxy on the same machine, neither of which puts anything
+    on a network. Any other scheme is refused outright rather than attempted.
+    """
+    parts = urllib.parse.urlsplit(base_url)
+    if parts.scheme == "https":
+        return
+    if str(env.get(_OPENROUTER_INSECURE_OPT_OUT_ENV, "")).strip() == "1":
+        return
+    host = (parts.hostname or "").lower()
+    if parts.scheme == "http" and host in _LOOPBACK_HOSTS:
+        return
+    raise ProviderConfigError(
+        f"openrouter base URL {base_url!r} is not https. The API key and the "
+        "case material would travel in clear. Use https, or set "
+        f"{_OPENROUTER_INSECURE_OPT_OUT_ENV}=1 to accept that deliberately."
+    )
 
 
 def _openrouter_message_text(message: Mapping[str, Any]) -> str | None:

@@ -121,6 +121,22 @@ against it is refused, never used partially), `OPENROUTER_BASE_URL`, the
 `HARNESS_OPENROUTER_REFERER` / `HARNESS_OPENROUTER_TITLE` attribution headers,
 and `HARNESS_OPENROUTER_USER_AGENT`.
 
+**PII posture.** OCR sends the page image *before* redaction -- there is no
+earlier point at which a page can be read -- and OpenRouter's own default
+routing (`data_collection: "allow"`) permits upstream providers that retain
+prompts, including for training. Every call therefore carries
+`provider: {"data_collection": "deny"}`, on the text paths as well as the image
+ones, since a redaction prompt holds the same material the page did. Set
+`HARNESS_OPENROUTER_ZDR=1` to additionally pin routing to zero-data-retention
+endpoints, or `HARNESS_OPENROUTER_DATA_COLLECTION=allow` to accept retention
+deliberately. The posture in force is recorded per result in `raw_metadata`.
+`deny` narrows the eligible provider pool; how far is unmeasured (it needs a
+key). None of this resolves `open-decisions.md` #3 -- the page still leaves the
+machine. A `base_url` that is not https is refused before any call, because the
+Bearer key and the case material would both travel in clear; loopback is the
+one exception, and `HARNESS_OPENROUTER_ALLOW_INSECURE_BASE_URL=1` is the
+explicit opt-out.
+
 **Check the model's output cap before pointing the harness at it.** The 16000
 default is sent on every call, and of the 420 models in the live catalogue on
 2026-08-22, 40 declare a lower `top_provider.max_completion_tokens` -- as low
