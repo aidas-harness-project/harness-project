@@ -3848,3 +3848,53 @@ Open: whether the field's prompt or its route priority needs work, or whether
 「부상 (발병)일」 as a form-label variant of 사고일 is simply not in the
 extraction's vocabulary. Needs a targeted A/B on this page before changing
 anything -- a blind prompt edit would be guessing.
+
+## 55. Dates on a 진료비 내역 are billing columns, not stated dates
+
+Tested and reverted on 2026-08-22 (fix 1f5fc54, revert in the next commit).
+
+CASE_705 published `surgery_or_procedure_date` and `treatment_period` as
+unavailable while CASE_907, on identical source material, had 2023-12-05 and
+2024-06-28. The values exist only on the 진료비 세부산정내역 pages, which the
+selective lane blocks as cost documents. That much is confirmed: searching the
+whole case for "2024-06-28" returns one hit, on a receipt, and the surgical
+note records `Plan> admission, 내일 Op.` -- "surgery tomorrow", no date.
+
+**So the block was narrowed to let five date fields read a cost document on the
+last priority rung, and it recovered nothing.** Measured on CASE_713, same
+source as CASE_705/907:
+
+* `surgery_or_procedure_date`: `documents_read` 3 -> 9. The six receipts were
+  planned, opened, and asked. Still `sources_exhausted` / `not_mentioned`,
+  zero observations.
+* `provider_calls`: 7 -> 13. **+86% on the stage for zero fields recovered.**
+* `treatment_period` did become `asserted`, but from DOC_017 (입퇴원요약) at
+  rank 2, and the value is the admission span 2023-12-04~12-07 -- it stopped on
+  a trusted value before any receipt was consulted. The fix is not what
+  produced it.
+
+**Why it failed.** The receipt states dates as line-item columns
+(`2023-12-05 | KK052 | 정격주사(100ml~500ml) | 3,400 …`), attached to
+injections and drugs. Nothing on the page labels 2023-12-05 as the date of
+surgery. The extraction prompt asks for 수술·처치일 and the model correctly
+answers `not_mentioned`: inferring that a titanium-screw billing line dated
+2023-12-05 *is* the surgery date is precisely the inference the prompt forbids.
+CASE_907 got the value because a human-shaped legacy pass read all 19 pages
+together and made that cross-reference itself.
+
+Recovering these dates therefore needs a **reading strategy**, not a routing
+permission -- something that correlates a procedure code or drug name against
+the clinical narrative. That is a design decision with its own error modes
+(a billing date is the date of CHARGE, which is not always the date of care),
+so it is recorded here rather than attempted.
+
+Two further findings from the same experiment, worth keeping:
+
+* `imaging_date` **does not exist** in the routing config's 62 fields, and
+  `first_visit_date` is `activation: deferred`. The reverted fix named both.
+  Check a field id against the config before building routing around it.
+* `run_claim_analysis_selective.py`'s trace-labelling loop marks a document
+  `presence_only` / `not_read` from its KIND alone, without consulting whether
+  it was actually read. Under the reverted fix the trace reported 7 documents
+  read while `field_stops` recorded 9. Latent while cost documents are blocked
+  outright; it would misreport immediately if the block is ever narrowed again.
