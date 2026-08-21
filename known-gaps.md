@@ -3783,3 +3783,68 @@ and none of the cautions about how to read them.
 Open: either add a section to the template for the agent's judgement, or stop
 dispatching the agent for a stage whose output has no home. Doing neither means
 continuing to pay for judgement the deliverable throws away.
+
+## 53. `other` documents are never routed, and the pack's own numbers go unread
+
+Measured on CASE_712 (2026-08-21), a 16-page TA 손해사정서 segmented into 11
+children.
+
+DOC_012 is 「교통사고사항 및 지급결의확인서」 -- the insurer's own
+payment-decision confirmation. It states 진료비합계 19,730,710원 already paid,
+입원 만60일 / 통원 77일, plus 사고형태, 상해등급 and 장해등급. Stage 2 typed it
+`other` at 0.82 confidence, and the trace's disposition reads verbatim:
+
+    "disposition": "skipped", "wave": "not_read",
+    "reason": "no medical classification, so no route reaches it",
+    "field_ids": []
+
+Not read-and-empty: **never routed**. Zero of 56 fields cite it. Meanwhile §5
+of the screening report lists `medical_expense_itemization`,
+`medical_expense_receipt` and `pharmacy_payment_confirmation` as 미확인. The
+case holds the numbers; the type label hid them.
+
+The irony sharpens it: `traffic_accident` came back `applicable` on a medical
+record's narrative sentence ("비보호 좌회전 하다가 직진하는 차량과 부딪혀"),
+while the document literally titled 교통사고사항확인서 contributed nothing.
+
+**Why this is not just a classifier miss.** `other` is a real bucket -- some
+documents genuinely are miscellaneous -- but nothing downstream ever opens one,
+so a misclassification into `other` is silently terminal. CLAUDE.md already
+records this shape starving claim analysis on CASE_053. The routing config
+gives `other_medical` a read mode of `content`, but plain `other` is not a
+medical kind at all and reaches no route.
+
+Open, and genuinely a design question rather than a bug fix:
+* give `insurer_response`-adjacent administrative forms (지급결의확인서,
+  지급내역서) a type of their own, since they carry paid amounts and treatment
+  spans that several fields want; or
+* let a case-type-conditional round open `other` documents the way stage 3-a
+  opens `legal_opinion` for liability cases; or
+* accept it, and make the checklist say "the case holds an untyped document
+  that may be this kind" rather than 미확인 -- the reader can then ask for it.
+
+The third is the cheapest and is already half-built: the checklist's
+`ambiguous` reason string does point at an untyped document. It just does not
+name WHICH one, so a reviewer cannot act on it.
+
+## 54. `accident_date` was reported absent on a case that states it
+
+CASE_712 (2026-08-21). The screening report's §7 lists 사고일 as 미확인
+(`unavailable` / `not_mentioned`), and §1 prints 「사고일: 확인 불가」.
+
+DOC_002 p.1 states it: 「부상 (발병)일 | 2024년 11월 13일」, verified with
+`dao.py search-document-text CASE_712 DOC_002 "발병"`.
+
+This is **not** a routing gap, which is what makes it worth recording. The
+trace shows DOC_002 `disposition: read`, opened once for 11 routed fields, and
+`accident_date` itself stopped `sources_exhausted` after `documents_read: 4`.
+The document was read for this field and the extraction did not return the
+value on the page.
+
+Consequence: the report tells a 손해사정사 to go find a date the pack already
+contains, and 보험기간 / 소멸시효 / treatment-gap questions all hang off it.
+
+Open: whether the field's prompt or its route priority needs work, or whether
+「부상 (발병)일」 as a form-label variant of 사고일 is simply not in the
+extraction's vocabulary. Needs a targeted A/B on this page before changing
+anything -- a blind prompt edit would be guessing.
