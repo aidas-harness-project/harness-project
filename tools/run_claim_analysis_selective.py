@@ -1681,8 +1681,21 @@ def run(
     # 「피해자의 과실비율」 section that declined to set a rate -- which is a
     # records finding, not a routing defect. `not_mentioned` is the honest
     # code: sources WERE read and none stated the value.
-    asked_for = additional_mod.eligible_field_ids(
+    #
+    # Gated on whether the round actually OPENED anything, not merely on which
+    # fields were eligible. A case with no `legal_opinion` and no
+    # `insurer_response` makes every liability field eligible and gives the
+    # round nothing to read, so `type_conditional_calls` is 0 -- and the
+    # earlier shape rewrote the reason anyway. CASE_712 (2026-08-21) then
+    # printed 「사건유형별 추가 확인 출처를 열람했으나 이 항목을 기재한 내용이
+    # 없습니다」 on six fields while the trace recorded
+    # `type_conditional_documents_read: 0`. Prose asserting a read that never
+    # happened is worse than the stale reason it replaced: it tells a
+    # 손해사정사 the sources were checked and empty when no such source is in
+    # the pack at all, which is the very distinction section 7 exists to draw.
+    asked_for = (additional_mod.eligible_field_ids(
         config, first_pass, {o.field_id: o for o in outcomes})
+        if type_conditional_calls else {})
     for outcome in outcomes:
         if (outcome.field_id in asked_for
                 and outcome.status == "unavailable"

@@ -220,3 +220,29 @@ def test_no_withdrawals_changes_nothing():
     requirement = rows[0]["requirements"][0]
     assert requirement["evidence_status"] == "conflict"
     assert requirement["conflict_candidate_ids"] == ["CAC_0001"]
+
+
+# --- 4. never claim a read that did not happen -----------------------------
+
+def test_the_reason_rewrite_is_gated_on_an_actual_read():
+    """My own CASE_704 fix over-reached, and CASE_712 caught it.
+
+    The rewrite turns `source_document_missing` into `not_mentioned` for fields
+    the type-conditional round asked for, on the ground that the round DID open
+    the 법률의견서 / 보험사 문서 those fields route to. But a case holding
+    neither document makes the same fields eligible and gives the round nothing
+    to read: CASE_712 recorded `type_conditional_documents_read: 0` while six
+    fields printed 「사건유형별 추가 확인 출처를 열람했으나 이 항목을 기재한
+    내용이 없습니다」.
+
+    Prose asserting a read that never happened is worse than the stale reason
+    it replaced -- it is the exact "read but absent" vs "never routed"
+    confusion section 7 exists to draw. So the rewrite is gated on the round's
+    real call count, not on eligibility.
+    """
+    source = (ROOT / "tools" / "run_claim_analysis_selective.py").read_text(
+        encoding="utf-8")
+    marker = "if type_conditional_calls else {}"
+    assert marker in source, (
+        "the reason rewrite must be gated on the type-conditional round "
+        "having actually opened a document")
