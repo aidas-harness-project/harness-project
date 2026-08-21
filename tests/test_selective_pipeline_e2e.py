@@ -150,13 +150,33 @@ def test_stage2_classification_feeds_the_planner() -> None:
     assert routing.medical_kind_from_title("수 술 기 록") == "surgery_procedure_record"
 
 
-def test_claim_analysis_produces_a_valid_result_and_never_reads_cost_documents() -> None:
+def test_claim_analysis_produces_a_valid_result_and_reads_cost_documents_only_for_dates() -> None:
+    """A cost document answers date fields and nothing else.
+
+    Until 2026-08-22 this asserted the receipt was never opened at all. That
+    absolute rule cost real data: measured on CASE_705 against CASE_907 over
+    the same source material, `surgery_or_procedure_date`, `imaging_date` and
+    `treatment_period`'s end date exist ONLY on the 진료비 세부산정내역 pages --
+    the clinical note says `Plan> admission, 내일 Op.` with no date -- so the
+    selective lane published three fields as unavailable while the legacy lane
+    had them. The block now means "never opened for an AMOUNT".
+    """
     config = _config()
     result, _, read_documents, _ = _run_claim_analysis(config)
 
     assert _errors(result, "claim_analysis_result.schema.json") == []
-    # The receipt is required-document evidence, never opened for content.
-    assert "DOC_004" not in read_documents
+
+    fields_using_cost_doc = {
+        row["field_id"]
+        for row in result["claim_facts"]
+        for observation in row.get("observations") or []
+        for reference in observation.get("evidence_references") or []
+        if reference.get("document_id") == "DOC_004"
+    }
+    assert fields_using_cost_doc <= selection.COST_DOCUMENT_DATE_FIELDS, (
+        "a cost document answered a field that is not a date field: "
+        f"{sorted(fields_using_cost_doc - selection.COST_DOCUMENT_DATE_FIELDS)}"
+    )
 
 
 def test_a_real_disagreement_survives_as_a_candidate_with_both_readings() -> None:

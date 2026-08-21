@@ -122,11 +122,25 @@ def test_both_waves_are_planned_before_the_first_read() -> None:
     assert "A" in asked and "B" in asked
 
 
-def test_cost_documents_are_never_opened() -> None:
+def test_a_cost_document_is_opened_only_for_date_fields() -> None:
+    """Narrowed 2026-08-22 from "never opened".
+
+    Measured on CASE_705 against CASE_907, same source material: the surgery
+    date, the imaging date and the treatment-period end date exist only on the
+    진료비 세부산정내역 pages. Blocking the document outright published all
+    three as unavailable while the legacy lane, which read it whole, had them.
+    """
     recorder = _Recorder()
-    _, cache = _run(recorder)
-    assert "DOC_004" not in recorder.documents
-    assert cache.calls.get("DOC_004", 0) == 0
+    _run(recorder)
+    asked = {
+        field_id
+        for document_id, field_ids in recorder.calls
+        if document_id == "DOC_004"
+        for field_id in field_ids
+    }
+    assert asked <= selection.COST_DOCUMENT_DATE_FIELDS, (
+        "a cost document was opened for a non-date field: "
+        f"{sorted(asked - selection.COST_DOCUMENT_DATE_FIELDS)}")
 
 
 def test_a_document_no_field_routes_to_is_not_opened() -> None:

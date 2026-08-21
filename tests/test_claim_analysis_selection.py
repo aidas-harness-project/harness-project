@@ -96,8 +96,17 @@ def test_d_grade_fields_are_absent_from_every_search_wave() -> None:
         assert field_id not in searched
 
 
-def test_cost_documents_never_enter_a_read_plan() -> None:
+def test_cost_documents_enter_a_read_plan_only_for_date_fields() -> None:
+    """Narrowed 2026-08-22 from "never enter a plan".
+
+    A 진료비 세부산정내역 is `date + 수가코드 + 항목명 + 금액` per line, and on
+    CASE_705 it was the ONLY source of the surgery date, the imaging date and
+    the treatment-period end date -- the clinical note recorded
+    `Plan> admission, 내일 Op.` with no date at all. Blocking it outright
+    published three fields as unavailable on a case that stated them.
+    """
     config = _config()
+    cost_ids = {"DOC_001", "DOC_002", "DOC_003"}
     documents = _docs(
         ("DOC_001", "medical_expense_receipt"),
         ("DOC_002", "medical_expense_itemization"),
@@ -105,10 +114,12 @@ def test_cost_documents_never_enter_a_read_plan() -> None:
     )
     for wave in selection.SEARCHING_WAVES:
         for plan in selection.plan_wave(config, documents, wave):
-            for step in plan.steps:
-                assert not set(step.document_ids) & {
-                    "DOC_001", "DOC_002", "DOC_003"
-                }, f"{plan.field_id} planned a cost document read"
+            planned = {doc for step in plan.steps for doc in step.document_ids}
+            if not planned & cost_ids:
+                continue
+            assert selection.cost_documents_readable_for(plan.field_id), (
+                f"{plan.field_id} planned a cost document read but is not a "
+                "date field")
 
 
 def test_a_cost_kind_forced_into_a_route_is_still_refused_at_runtime() -> None:
