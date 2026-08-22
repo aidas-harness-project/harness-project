@@ -36,6 +36,16 @@ What this module deliberately does NOT do is decide a stated absence. A
 `explicitly_absent` verdict rests on reading a sentence that denies the thing,
 and pattern-matching a negation ("수술 시행하지 않음" vs "수술 부위 감염 없음")
 is exactly the judgement the model is better at. Rules assert or stay quiet.
+
+The failure a unit test cannot show is a pattern firing where it should not --
+a 소견서 quoting a rate in prose, a policy clause defining how one is
+calculated. Swept across all 2416 processed documents in `data/processed`
+(2026-08-22): 133 documents matched, every one of them the 후유장애
+진단서(Mc Bride) page or the unsplit bundle still containing it. Nothing fired
+in 511 insurance_policy, 352 receipt, 318 medical_record, 172 imaging_report or
+123 insurer_response documents. Re-run that sweep before widening any pattern
+here -- the label anchor is what keeps the rules this quiet, and a pattern
+loosened to catch one more form is exactly how that stops being true.
 """
 from __future__ import annotations
 
