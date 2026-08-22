@@ -181,17 +181,52 @@ def _proposal(case_id: str, doc_id: str) -> dict | None:
         case_id, f"segmentation_proposal_{doc_id}.json")
 
 
-def unclassified_children(manifest: dict) -> list[dict]:
+def unclassified_children(manifest: dict,
+                          reclassify: str | None = None) -> list[dict]:
     """Split children that still owe a classification.
 
     A child inherits its pages from the bundle, so it must be classified with
     `classify-only`; `run` would re-OCR pages it already owns and overwrite
     their P8 history (this really happened to CASE_909's DOC_006-013).
+
+    `reclassify` re-opens children that ALREADY carry a type, which the default
+    selection skips. It exists because a document's type is a verdict under one
+    taxonomy, and the taxonomy changes: `legal_opinion`/`legal_reference` were
+    added 2026-08-20 and three administrative codes 2026-08-22, but every case
+    processed before those dates keeps its old answer forever, because
+    `not document_type` is false for it. Measured on a CASE_701 fork the day
+    after the second change: Stage 2 completed, made ZERO classification calls,
+    and the manifest came out byte-identical -- a run that looked like a
+    revalidation and revalidated nothing.
+
+    Two values, and the narrow one is the default worth reaching for:
+
+    * `"other"` -- only documents that landed in the catch-all bucket. This is
+      the taxonomy-change case: a code was added, and the question is whether
+      anything previously homeless now has a home. It cannot change a verdict
+      that already succeeded, so it is safe to run broadly.
+    * `"all"` -- every classified child. Re-opens verdicts that are already
+      settled and may CHANGE them, since a classifier call is not deterministic.
+      For a prompt or model change, where the old answers are what is in doubt.
+
+    Neither touches a `superseded_bundle`: its children own its pages, and it
+    carries `document_type: null` by construction rather than by omission.
     """
+    if reclassify not in (None, "other", "all"):
+        raise ValueError(f"unknown reclassify mode: {reclassify!r}")
+
+    def wants(document: dict) -> bool:
+        document_type = document.get("document_type")
+        if not document_type:
+            return True
+        if reclassify == "all":
+            return True
+        return reclassify == "other" and document_type == "other"
+
     return [d for d in manifest.get("documents", [])
             if d.get("source_file_name")
             and d.get("downstream_disposition") != "superseded_bundle"
-            and not d.get("document_type")]
+            and wants(d)]
 
 
 def chunkable_documents(manifest: dict) -> tuple[list[str], list[str]]:
@@ -283,6 +318,7 @@ def run_stage2(
     skip_redaction: bool | None = None,
     auto_approve_segmentation: bool = False,
     segmentation_reviewer: str | None = None,
+    reclassify: str | None = None,
     progress=None,
 ) -> dict:
     report = progress or (lambda msg: print(msg, file=sys.stderr, flush=True))
@@ -412,7 +448,7 @@ def run_stage2(
 
         # ---- phase 4: classify split children -------------------------------
         manifest = _manifest(case_id)
-        children = unclassified_children(manifest)
+        children = unclassified_children(manifest, reclassify)
         if children:
             report(f"phase: classify {len(children)} split child(ren)")
         if children:
@@ -541,6 +577,12 @@ def main(argv=None):
         help="No-op since 2026-08-20: boundary approval is no longer a gate, so "
              "a pending proposal is auto-approved either way. Still accepted so "
              "existing invocations keep working.")
+    ap.add_argument(
+        "--reclassify", choices=("other", "all"), default=None,
+        help="Re-run classification on children that ALREADY carry a type, "
+             "which is otherwise skipped. 'other' re-opens only the catch-all "
+             "bucket -- the taxonomy-change case, and the one to reach for. "
+             "'all' re-opens every settled verdict and may change them.")
     ap.add_argument("--segmentation-reviewer", default=None,
                     help="Reviewer name recorded on an auto-approved proposal "
                          "(default: '<held_by> (auto-approved)')")
@@ -556,6 +598,7 @@ def main(argv=None):
         skip_redaction=args.skip_redaction,
         auto_approve_segmentation=args.auto_approve_segmentation,
         segmentation_reviewer=args.segmentation_reviewer,
+        reclassify=args.reclassify,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["status"] == "success" else 1

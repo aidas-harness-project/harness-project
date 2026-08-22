@@ -126,6 +126,62 @@ class TestSelectors:
         ]}
         assert s2.unclassified_children(manifest) == []
 
+    # ------------------------------------------------ reclassification --
+
+    def _mixed(self):
+        return {"documents": [
+            _doc("DOC_006", source_file_name="b.pdf", document_type=None),
+            _doc("DOC_007", source_file_name="b.pdf", document_type="other"),
+            _doc("DOC_008", source_file_name="b.pdf",
+                 document_type="diagnosis_certificate"),
+            _doc("DOC_005", source_file_name="orig.pdf", document_type=None,
+                 downstream_disposition="superseded_bundle"),
+        ]}
+
+    def test_reclassify_other_reopens_only_the_catch_all_bucket(self) -> None:
+        """The taxonomy-change case.
+
+        A document's type is a verdict under one taxonomy, and the taxonomy
+        moves: three administrative codes were added 2026-08-22, and every case
+        classified earlier keeps its old answer because `not document_type` is
+        false for it. Measured on a CASE_701 fork the next day -- Stage 2
+        completed, made zero classification calls, and the manifest came out
+        byte-identical.
+
+        `other` is the safe width: a document already in the catch-all has no
+        verdict to lose.
+        """
+        assert [d["document_id"] for d in
+                s2.unclassified_children(self._mixed(), "other")] == [
+                    "DOC_006", "DOC_007"]
+
+    def test_reclassify_all_reopens_settled_verdicts_too(self) -> None:
+        """For a prompt or model change, where the old answers are in doubt."""
+        assert [d["document_id"] for d in
+                s2.unclassified_children(self._mixed(), "all")] == [
+                    "DOC_006", "DOC_007", "DOC_008"]
+
+    def test_reclassify_never_touches_a_superseded_bundle(self) -> None:
+        """`all` must not be read as "everything".
+
+        A bundle's `document_type` is null by construction, not by omission,
+        and `run` on one would re-OCR pages its children already own.
+        """
+        for mode in (None, "other", "all"):
+            picked = [d["document_id"] for d in
+                      s2.unclassified_children(self._mixed(), mode)]
+            assert "DOC_005" not in picked, mode
+
+    def test_default_selection_is_unchanged(self) -> None:
+        """Omitting the flag must behave exactly as before it existed."""
+        assert [d["document_id"] for d in
+                s2.unclassified_children(self._mixed())] == ["DOC_006"]
+
+    def test_an_unknown_mode_is_refused_rather_than_ignored(self) -> None:
+        """A typo must not silently select the default set."""
+        with pytest.raises(ValueError, match="reclassify"):
+            s2.unclassified_children(self._mixed(), "everything")
+
     def test_chunkable_splits_text_from_excluded(self) -> None:
         manifest = {"documents": [
             _doc("DOC_001", redacted_text_path="p/x.md"),
