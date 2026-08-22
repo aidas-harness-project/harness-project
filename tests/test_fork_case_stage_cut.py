@@ -296,7 +296,15 @@ def test_fork_run_state_resumes_after_document_processing(tmp_path, monkeypatch,
     # No inherited attempt history, and no fabricated human review.
     assert "human_input_status" not in state
     assert all("current_attempt_started_at" not in s for s in state["stages"])
-    assert all("started_at" not in s and "completed_at" not in s
+    # PRESENT and null, not absent. The intent here is unchanged -- the fork
+    # inherited this stage's output and did not run it, so it claims no start
+    # or completion time -- but absence was the wrong way to say it: the stage
+    # item declares both nullable and names no `required` list, so an entry
+    # missing them validated, and `_update_run_state` then read
+    # `entry["started_at"]` directly and raised KeyError on the first
+    # `in_progress` transition of every forked case (CASE_054, 2026-08-22).
+    # Null says the same thing and survives the round trip.
+    assert all(s["started_at"] is None and s["completed_at"] is None
                for s in state["stages"])
     # The source recorded 2 attempts for document_processing; the fork has
     # made none of them, so P9's budget is not pre-spent.
@@ -310,6 +318,43 @@ def test_fork_run_state_resumes_after_document_processing(tmp_path, monkeypatch,
         "policy_clause_processing", "in_progress", state)
     # claim_analysis stays blocked on its real prerequisite -- documented, not a bug.
     assert stage_dependencies.check_dependencies("claim_analysis", "in_progress", state)
+
+
+def test_the_fork_survives_its_first_real_stage_transition(
+        tmp_path, monkeypatch, capsys):
+    """The gap every other test in this file left open.
+
+    They all read the written file and assert its shape. None of them fed that
+    file back to the DAO, so nothing noticed that `_update_run_state` reads
+    `entry["started_at"]` unguarded: the fork reported success, every artifact
+    validated, and the failure surfaced later in an unrelated command --
+
+        File "tools/dao.py", line 7008, in _update_run_state
+          entry["started_at"] = entry["started_at"] or now
+        KeyError: 'started_at'
+
+    -- which blocked EVERY forked case at its first `in_progress` transition
+    (CASE_054, 2026-08-22). A shape assertion cannot catch a shape the writer
+    and the reader disagree about; only the round trip can.
+
+    The stage re-opened here is an INHERITED one. A fresh stage gets a
+    default-constructed entry that carries the key either way, so opening one
+    of those passes with the defect in place and proves nothing; only a
+    rebuilt entry exercises the disagreement.
+    """
+    _seed_completed_case(tmp_path)
+    dest = _run_cut(tmp_path, monkeypatch)
+    case_id = dest.name
+
+    dao._update_run_state(
+        case_id, "RUN_20260813_200", "document_processing",
+        "in_progress", "orchestrator")
+
+    state = json.loads((dest / "_run_state.json").read_text(encoding="utf-8"))
+    reopened = next(s for s in state["stages"]
+                    if s["stage_name"] == "document_processing")
+    assert reopened["status"] == "in_progress"
+    assert reopened["started_at"], "an opened attempt must carry a start time"
 
 
 def test_backup_path_points_inside_the_fork_and_the_snapshot_exists(

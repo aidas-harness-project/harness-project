@@ -5,6 +5,7 @@ primary key almost everywhere in the DAO (no run_id-scoped branching).
 """
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -80,35 +81,74 @@ def test_next_free_case_id_scans_all_four_roots(tmp_path):
     assert fc.next_free_case_id() == "CASE_010"
 
 
-def test_next_free_case_id_never_exceeds_three_digits(tmp_path):
-    """CASE_999 on disk must not produce CASE_1000.
+def test_a_minted_id_always_satisfies_the_strictest_schema(tmp_path):
+    """The real invariant: never mint an id some schema will later refuse.
 
-    human_review_ledger.schema.json pins case_id to ^CASE_[0-9]{3}$ --
-    exactly three digits, unlike the ^CASE_[0-9]+$ every other schema uses.
-    Plain max+1 returned CASE_1000, and fork_case discovered this only AFTER
-    copying every file and rewriting the case_id into each one: the fork
-    "succeeded" and left behind a case that could never accept a
-    human-review write.
+    `human_review_ledger.schema.json` carries the tightest case_id pattern in
+    the repo, so it is read here rather than restated -- a test naming a width
+    would have to be edited every time the pattern moves, which is exactly how
+    it drifted before.
 
-    Above the ceiling the id must fall back to a free lower number instead.
+    Until 2026-08-22 that pattern was ^CASE_[0-9]{3}$ and CASE_999 on disk made
+    max+1 return CASE_1000, discovered only AFTER every file was copied and the
+    case_id rewritten into each: the fork "succeeded" and left a case that could
+    never accept a human-review write. The guard against that was to fall back
+    to the lowest free id, which became the normal path once CASE_9001/9200/9401
+    existed -- so every fork silently reused a gap (CASE_054, 2026-08-22).
+
+    The pattern is now ^CASE_[0-9]{3,4}$ and the fallback is gone. What must
+    still hold is this: whatever id is minted, the ledger accepts it.
     """
+    # From this file, not from dao's roots -- conftest repoints those at
+    # tmp_path, which holds no schemas.
+    schema_path = (Path(__file__).resolve().parent.parent / "schemas"
+                   / "human_review_ledger.schema.json")
+    pattern = json.loads(schema_path.read_text(encoding="utf-8"))[
+        "properties"]["case_id"]["pattern"]
+
     (tmp_path / "outputs" / "CASE_999").mkdir(parents=True)
     (tmp_path / "outputs" / "CASE_001").mkdir(parents=True)
     got = fc.next_free_case_id()
-    assert re.fullmatch(r"CASE_\d{3}", got), (
-        f"{got} is not a 3-digit case id and would fail the human-review "
-        "ledger schema the moment that ledger is written"
+
+    assert re.fullmatch(pattern, got), (
+        f"{got} does not satisfy {pattern}; the human-review ledger would "
+        "refuse it the moment that ledger is written"
     )
-    assert got == "CASE_002", "should take the lowest free id once at the ceiling"
 
 
-def test_next_free_case_id_prefers_max_plus_one_below_the_ceiling(tmp_path):
-    """Gap-filling is the CEILING FALLBACK, not the normal rule.
+def test_passing_the_old_ceiling_keeps_counting_up(tmp_path):
+    """CASE_999 now yields CASE_1000, not a reused low gap.
+
+    Chronological order is the point: a fork's id should sit above everything
+    on disk so the numbering says when it was made. Reusing a gap can also
+    resurrect an id with history attached -- CASE_002 is free in the real tree
+    only because its files were rejected in the D1 incident.
+    """
+    (tmp_path / "outputs" / "CASE_999").mkdir(parents=True)
+    (tmp_path / "outputs" / "CASE_001").mkdir(parents=True)
+
+    assert fc.next_free_case_id() == "CASE_1000"
+
+
+def test_three_digit_ids_stay_zero_padded(tmp_path):
+    """Backward compatibility: CASE_002, never CASE_2.
+
+    Every id on disk is zero-padded to three, and a bare `str(n)` would make
+    the fork's id inconsistent with the whole existing tree.
+    """
+    (tmp_path / "outputs" / "CASE_001").mkdir(parents=True)
+
+    assert fc.next_free_case_id() == "CASE_002"
+
+
+def test_next_free_case_id_takes_max_plus_one_over_a_gap(tmp_path):
+    """max+1 always, never gap-filling.
 
     Reusing a gap loses chronological ordering and can resurrect an id that
     has history attached -- CASE_002 is free in the real tree only because
-    its files were rejected in the D1 incident. So below 999 a fork still
-    takes a fresh id above everything on disk.
+    its files were rejected in the D1 incident. This was the rule below 999
+    and the ceiling fallback broke it above; since 2026-08-22 there is no
+    fallback and no ceiling below 9999, so it is simply the rule.
     """
     (tmp_path / "outputs" / "CASE_001").mkdir(parents=True)
     (tmp_path / "outputs" / "CASE_009").mkdir(parents=True)

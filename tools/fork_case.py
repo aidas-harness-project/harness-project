@@ -668,22 +668,33 @@ def next_free_case_id() -> str:
     CASE_SMOKE) are ignored -- they predate or fall outside the
     ^CASE_[0-9]+$ schema pattern and aren't part of this numbering.
 
-    Normally max+1, so a fork gets a fresh id above everything on disk and
-    numbering stays chronological.
+    Always max+1, so a fork gets a fresh id above everything on disk and
+    numbering stays chronological. Ids below 1000 stay zero-padded to three
+    digits, matching every existing CASE_001/CASE_002 on disk; above that they
+    are their natural four digits.
 
-    The 3-digit ceiling is real and load-bearing:
-    `human_review_ledger.schema.json` pins case_id to ^CASE_[0-9]{3}$ --
-    exactly three digits, unlike the ^CASE_[0-9]+$ every other schema uses.
-    With CASE_999 present, plain max+1 returned CASE_1000; the fork then
-    copied every file, rewrote the case_id into each, and only afterwards
-    reported that the id it had just chosen was invalid -- leaving a case
-    that could never accept a human-review write.
+    **The ceiling was 999 until 2026-08-22**, because
+    `human_review_ledger.schema.json` pinned case_id to ^CASE_[0-9]{3}$ --
+    exactly three digits, the sole outlier among the ^CASE_[0-9]+$ every other
+    schema uses. This function must never mint an id some schema will later
+    refuse: with CASE_999 present, plain max+1 returned CASE_1000, the fork
+    copied every file and rewrote the case_id into each, and only afterwards
+    reported the id was invalid -- leaving a case that could never accept a
+    human-review write.
 
-    So above the ceiling it falls back to the lowest free id rather than
-    emitting an unusable one. That is a deliberate second choice: reusing a
-    gap loses chronological ordering and can resurrect an id with history
-    attached (CASE_002 is free only because its files were rejected in the
-    D1 incident), which is why it is the fallback and not the rule.
+    The old guard against that was to fall back to the LOWEST FREE id above
+    the ceiling, which turned out to be worse than the problem. CASE_9001/9200/
+    9401 exist on disk, so max+1 exceeded 999 permanently and the fallback was
+    not an edge case but the normal path: every fork silently reused a gap,
+    losing chronological order and risking an id with history attached
+    (CASE_002 is free only because its files were rejected in the D1 incident).
+    Observed 2026-08-22, when a fork of CASE_701 was assigned CASE_054.
+
+    The pin is now ^CASE_[0-9]{3,4}$, so four digits are valid everywhere and
+    max+1 needs no fallback. Existing 3-digit ids remain valid and nothing was
+    renamed. Five digits is still out of range, and this raises rather than
+    minting one, because a silently-unusable id is what the fallback was
+    written to prevent.
     """
     used: set[int] = set()
     for root in (OUTPUTS, DATA / "raw", DATA / "processed", DATA / "ground_truth"):
@@ -694,17 +705,16 @@ def next_free_case_id() -> str:
             if m:
                 used.add(int(m.group(1)))
     candidate = (max(used) + 1) if used else 1
-    if candidate <= 999:
-        return f"CASE_{candidate:03d}"
-    for n in range(1, 1000):
-        if n not in used:
-            return f"CASE_{n:03d}"
-    raise RuntimeError(
-        "no free CASE_NNN id remains: CASE_001..CASE_999 are all in use. The "
-        "3-digit ceiling is a schema constraint (human_review_ledger.schema"
-        ".json pins ^CASE_[0-9]{3}$), so going wider needs a schema change, "
-        "not a change here."
-    )
+    if candidate > 9999:
+        raise RuntimeError(
+            f"the next free case id would be CASE_{candidate}, which is five "
+            "digits and outside ^CASE_[0-9]{3,4}$. Widening again means "
+            "changing that pattern in human_review_ledger.schema.json, "
+            "draft_report_metadata.schema.json and document_assembly.py "
+            "together -- minting the id here first would produce a case whose "
+            "human-review writes are refused after every file is copied."
+        )
+    return f"CASE_{candidate:03d}"
 
 
 def resolve_source_root(source_case_id: str, from_step: int | None) -> Path:

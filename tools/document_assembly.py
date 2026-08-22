@@ -74,7 +74,7 @@ TEMPLATE_REGISTRY = ROOT / "templates" / "registry.json"
 
 
 _CASE_OUTPUT_PATH_RE = re.compile(
-    r"^outputs/(?P<case_id>CASE_[0-9]{3})/[^/]+$"
+    r"^outputs/(?P<case_id>CASE_[0-9]{3,4})/[^/]+$"
 )
 REFERENCE_HEADING = "---\n\n**출처**\n"
 
@@ -139,7 +139,7 @@ def render_reference_list(citations, case_id):
 
 
 _DRAFT_REPORT_PATH_RE = re.compile(
-    r"^outputs/(?P<case_id>CASE_[0-9]{3})/draft_report_v(?P<version>[12])\.md$"
+    r"^outputs/(?P<case_id>CASE_[0-9]{3,4})/draft_report_v(?P<version>[12])\.md$"
 )
 
 
