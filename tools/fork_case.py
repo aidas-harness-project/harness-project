@@ -91,7 +91,7 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
 from dao import (case_dir, atomic_write_json, make_history_boundary, now_iso,
-                 OUTPUTS, DATA)
+                 _canonical_json_bytes, OUTPUTS, DATA)
 from _validation import load_registry, validate_instance, schema_name_for
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
@@ -197,6 +197,57 @@ def _rewrite_reconstructed_value(value, source_case_id: str, new_case_id: str):
     if isinstance(value, str):
         return _rewrite_case_paths(value, source_case_id, new_case_id)
     return value
+
+
+def rebind_ledger_operations(data: dict, source_case_id: str,
+                             new_case_id: str) -> bool:
+    """Re-point a copied ledger's operation requests at the fork, and re-seal.
+
+    A ledger operation is bound three ways: `request.case_id` must equal the
+    ledger's `case_id`, `request.operation_id` must equal the operation's, and
+    `request_sha256` must be the digest of the request's canonical bytes. A
+    copy that rewrites only the top-level `case_id` breaks the first binding,
+    and rewriting the nested id alone breaks the third -- so `check-source-
+    ledger-clear` refused every forked case with "ledger operation request
+    binding is invalid" (CASE_9403, 2026-08-22), which in turn meant no
+    `sla.phase1.start` marker and `active_s: n/a` on any fork.
+
+    Recomputing the digest is the honest move rather than a weakening of it.
+    The digest seals WHAT WAS REQUESTED against later editing; it is not a
+    claim about which case the request was filed under, and the case id is
+    exactly the field a fork is entitled to change. What must survive is the
+    human decision -- reviewer, status, timestamp, and the file it was about --
+    and every one of those lives in `payload`/`result`/`completed_at` and is
+    copied untouched here. A fork that silently dropped the operations would
+    lose the D2 review it is meant to inherit; one that kept them unbound
+    produces a ledger the DAO refuses to read at all.
+
+    Idempotent, and deliberately keyed on the DIGEST rather than on the id:
+    callers may run `_rewrite_reconstructed_value` first, which already sets
+    the nested id, so a request that "still names the source case" is not a
+    reliable signal that resealing is outstanding. Re-sealing a request whose
+    digest already matches is a no-op.
+
+    Returns True when anything changed, so the caller only rewrites files it
+    had a reason to touch.
+    """
+    operations = data.get("operations")
+    if not isinstance(operations, list):
+        return False
+    changed = False
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        request = operation.get("request")
+        if not isinstance(request, dict):
+            continue
+        if request.get("case_id") in (source_case_id, new_case_id):
+            request["case_id"] = new_case_id
+        digest = hashlib.sha256(_canonical_json_bytes(request)).hexdigest()
+        if digest != operation.get("request_sha256"):
+            operation["request_sha256"] = digest
+            changed = True
+    return changed
 
 
 def _source_json(path: Path, failures: list[str]):
@@ -630,7 +681,18 @@ def copy_stage_cut_outputs(source_root: Path, new_case_id: str,
         if not isinstance(data, dict):
             continue
         if data.get("case_id") is not None:
+            source_case_id = source_root.name
+            # Nested identity and case-root paths, not just the top-level
+            # field. Rewriting only the latter left every `request.case_id`
+            # and every `outputs/CASE_SOURCE/...` path pointing at the parent
+            # -- which made the ledger unreadable to the DAO and the manifest's
+            # paths misleading to a human (CASE_9403, 2026-08-22). The full
+            # copy path has done this since 2026-08-14; the stage-cut path
+            # never did.
+            data = _rewrite_reconstructed_value(
+                data, source_case_id, new_case_id)
             data["case_id"] = new_case_id
+            rebind_ledger_operations(data, source_case_id, new_case_id)
             atomic_write_json(json_path, data)
         schema_name = schema_name_for(json_path)
         if schema_name:
@@ -774,6 +836,10 @@ def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str,
             continue
         if source_case_id and json_path.name != "_fork_record.json":
             data = _rewrite_reconstructed_value(data, source_case_id, new_case_id)
+            # The rewrite above changes `request.case_id`, which changes the
+            # bytes the operation's digest seals -- so the ledger needs
+            # re-sealing in the same pass or it validates as tampered.
+            rebind_ledger_operations(data, source_case_id, new_case_id)
         data["case_id"] = new_case_id
         if json_path.name == "_run_state.json":
             data = _enforce_medical_gate_on_fork(data)
