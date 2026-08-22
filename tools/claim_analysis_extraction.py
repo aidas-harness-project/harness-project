@@ -29,6 +29,8 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Mapping, Sequence
 
+import claim_analysis_deterministic as deterministic
+
 PROMPT_VERSION = "claim_analysis_selective_extraction.v0.1"
 
 # The accident narrative comes from the record that states it, in this order.
@@ -307,6 +309,22 @@ def make_reader(
         ) or []
         if not pages or not field_rows:
             return {}
+
+        # Rule-first: a field whose Korean form prints a fixed label is a
+        # lookup, and asking a model to perform it costs a call and is not
+        # repeatable (see claim_analysis_deterministic for the measurement).
+        # Whatever the rules settle is subtracted from the prompt; anything
+        # they leave -- including every field with no rule at all -- is asked
+        # exactly as before. A document the rules settle ENTIRELY skips the
+        # provider call, which is why `settled` is checked before the request
+        # is built rather than merged into its result afterwards.
+        settled = deterministic.extract(pages, field_rows)
+        remaining = [row for row in field_rows
+                     if row.get("field_id") not in settled]
+        if not remaining:
+            return dict(settled)
+        field_rows = remaining
+
         prompt = build_prompt(document_id=document_id, document_kind=kind,
                               pages=pages, field_rows=field_rows,
                               document_type=document_type)
@@ -318,6 +336,9 @@ def make_reader(
                 structured = json.loads(result.text)
             except json.JSONDecodeError:
                 structured = None
-        return parse_result(structured, field_rows)
+        # Deterministic readings win on collision, but there is none to win:
+        # a settled field was removed from `field_rows`, so `parse_result`
+        # drops any reading the model volunteered for it as an unknown field.
+        return {**parse_result(structured, field_rows), **settled}
 
     return extract
