@@ -129,14 +129,66 @@ class TestSelectors:
     # ------------------------------------------------ reclassification --
 
     def _mixed(self):
+        """A manifest with both split children and a top-level document.
+
+        Every real document carries `file_path`; the fixtures above omit it
+        because the default selection never reads it.
+        """
         return {"documents": [
-            _doc("DOC_006", source_file_name="b.pdf", document_type=None),
-            _doc("DOC_007", source_file_name="b.pdf", document_type="other"),
+            _doc("DOC_006", source_file_name="b.pdf", document_type=None,
+                 file_path="data/raw/CASE_X/b.pdf"),
+            _doc("DOC_007", source_file_name="b.pdf", document_type="other",
+                 file_path="data/raw/CASE_X/b.pdf"),
             _doc("DOC_008", source_file_name="b.pdf",
-                 document_type="diagnosis_certificate"),
+                 document_type="diagnosis_certificate",
+                 file_path="data/raw/CASE_X/b.pdf"),
             _doc("DOC_005", source_file_name="orig.pdf", document_type=None,
-                 downstream_disposition="superseded_bundle"),
+                 downstream_disposition="superseded_bundle",
+                 file_path="data/raw/CASE_X/orig.pdf"),
+            # Never split -- one PDF, one document. No source_file_name.
+            _doc("DOC_001", document_type="other",
+                 file_path="data/raw/CASE_X/DOC_001.pdf"),
         ]}
+
+    def test_reclassify_reaches_a_top_level_document(self) -> None:
+        """The gap the first corpus pass fell into.
+
+        `source_file_name` is the right filter for "who still owes a verdict",
+        because a top-level document is classified inside checkpoint 1. It is
+        the wrong filter for "whose verdict predates the taxonomy": that is
+        answered identically whether a PDF held one document or thirty.
+
+        Carrying the child-only filter into reclassification silently skipped
+        13 of the corpus's 184 `other` documents -- ten of them 법률질의회신서
+        read at 0.95 confidence, whose `legal_opinion` bucket had existed since
+        2026-08-20. Nothing failed; they were simply never attempted.
+        """
+        picked = [d["document_id"] for d in
+                  s2.unclassified_children(self._mixed(), "other")]
+
+        assert "DOC_001" in picked
+
+    def test_default_selection_still_ignores_a_top_level_document(self) -> None:
+        """Widening is scoped to reclassification.
+
+        In the default pass a top-level document has already been classified by
+        checkpoint 1, so selecting it would re-run work that just happened.
+        """
+        picked = [d["document_id"] for d in
+                  s2.unclassified_children(self._mixed())]
+
+        assert "DOC_001" not in picked
+
+    def test_expert_review_only_is_never_reclassified(self) -> None:
+        """Excluded from the text pipeline, so a new type changes nothing."""
+        manifest = {"documents": [
+            _doc("DOC_010", document_type="other",
+                 file_path="data/raw/CASE_X/DOC_010.pdf",
+                 downstream_disposition="expert_review_only"),
+        ]}
+
+        for mode in (None, "other", "all"):
+            assert s2.unclassified_children(manifest, mode) == [], mode
 
     def test_reclassify_other_reopens_only_the_catch_all_bucket(self) -> None:
         """The taxonomy-change case.
@@ -153,13 +205,13 @@ class TestSelectors:
         """
         assert [d["document_id"] for d in
                 s2.unclassified_children(self._mixed(), "other")] == [
-                    "DOC_006", "DOC_007"]
+                    "DOC_006", "DOC_007", "DOC_001"]
 
     def test_reclassify_all_reopens_settled_verdicts_too(self) -> None:
         """For a prompt or model change, where the old answers are in doubt."""
         assert [d["document_id"] for d in
                 s2.unclassified_children(self._mixed(), "all")] == [
-                    "DOC_006", "DOC_007", "DOC_008"]
+                    "DOC_006", "DOC_007", "DOC_008", "DOC_001"]
 
     def test_reclassify_never_touches_a_superseded_bundle(self) -> None:
         """`all` must not be read as "everything".

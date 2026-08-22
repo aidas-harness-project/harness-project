@@ -211,6 +211,21 @@ def unclassified_children(manifest: dict,
 
     Neither touches a `superseded_bundle`: its children own its pages, and it
     carries `document_type: null` by construction rather than by omission.
+
+    **Reclassification is not restricted to split children.** The default
+    selection requires `source_file_name` because a top-level document is
+    classified inside checkpoint 1, at the moment it is OCR'd -- so "not yet
+    classified" really does mean "a split child". Re-classification asks a
+    different question: not "who still owes a verdict" but "whose verdict was
+    reached under the old taxonomy", and that is answered the same way whether
+    a PDF held one document or thirty.
+
+    Restricting it anyway is what the first corpus pass did, and it silently
+    skipped 13 of the 184 `other` documents -- among them ten 법률질의회신서
+    read at 0.95 confidence whose `legal_opinion` bucket had existed since
+    2026-08-20. They were never attempted, so nothing reported a failure; they
+    simply stayed in the catch-all. A document qualifies here by having pages
+    of its own, which is what `file_path` records, not by how it came to exist.
     """
     if reclassify not in (None, "other", "all"):
         raise ValueError(f"unknown reclassify mode: {reclassify!r}")
@@ -223,10 +238,20 @@ def unclassified_children(manifest: dict,
             return True
         return reclassify == "other" and document_type == "other"
 
+    def in_scope(document: dict) -> bool:
+        if document.get("downstream_disposition") == "superseded_bundle":
+            return False
+        # `expert_review_only` is a decision about the document, not a missing
+        # verdict: it is excluded from the text pipeline entirely, so
+        # re-typing it would change nothing downstream.
+        if document.get("downstream_disposition") == "expert_review_only":
+            return False
+        if reclassify:
+            return bool(document.get("file_path"))
+        return bool(document.get("source_file_name"))
+
     return [d for d in manifest.get("documents", [])
-            if d.get("source_file_name")
-            and d.get("downstream_disposition") != "superseded_bundle"
-            and wants(d)]
+            if in_scope(d) and wants(d)]
 
 
 def chunkable_documents(manifest: dict) -> tuple[list[str], list[str]]:
