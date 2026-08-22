@@ -212,6 +212,30 @@ def test_every_document_type_copy_matches_the_schema():
     ), "every document type needs a non-empty Korean label"
 
 
+def test_the_denial_prompt_lists_every_document_type():
+    """The FOURTH copy, which this test was named for and did not check.
+
+    `run_denial_response_driver._prompt` renders the type codes into the
+    instruction for `requested_documents`, so a code missing there is a
+    document the insurer can ask for and the driver cannot name -- the same
+    unchoosable-bucket failure as the classifier list, one stage later.
+
+    It was found on 2026-08-22 while adding `power_of_attorney` /
+    `accident_statement` / `public_benefit_certificate`: the docstring above
+    said "all THREE literal copies" while a fourth sat in a prompt string that
+    no test read. Copies are found by grepping the enum, not by counting the
+    ones a previous change happened to touch.
+    """
+    import run_denial_response_driver
+
+    prompt = run_denial_response_driver._prompt([])
+
+    for code in sorted(_schema_document_types()):
+        assert code in prompt, (
+            f"{code} is in the schema enum but never named in the denial "
+            "prompt; the model cannot report a document type it is not shown")
+
+
 def test_the_classifier_prompt_names_every_type_it_offers():
     """A code in the list but absent from the guidance is a silent bucket.
 

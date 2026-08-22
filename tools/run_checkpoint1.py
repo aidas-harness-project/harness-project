@@ -90,7 +90,8 @@ ROOT = Path(__file__).resolve().parent.parent
 DOCUMENT_TYPES = ["insurance_certificate", "insurance_policy", "application_form",
                    "diagnosis_certificate", "medical_record", "imaging_report",
                    "receipt", "insurer_response", "legal_opinion",
-                   "legal_reference", "other"]
+                   "legal_reference", "power_of_attorney", "accident_statement",
+                   "public_benefit_certificate", "other"]
 CLASSIFICATION_PROMPT_VERSION = "classification_v0.2"
 MEDICAL_CLASSIFICATION_PROMPT_VERSION = "classification_v0.3_medical_v0.1"
 
@@ -111,6 +112,11 @@ Three non-medical types a liability case turns on -- distinguish them by WHO WRO
 - insurer_response (보험사 회신 공문): a letter the insurer sends -- 손해사정 업무 협조요청, 부지급/지급 통보, 조사 진행 안내. It may SUMMARIZE or attach a legal opinion ("법률자문 결과 ..."), but the letter itself is correspondence, not the legal analysis.
 - legal_opinion (법률의견서): the legal ANSWER itself -- 법률질의회신서, 법률자문 회신, a 제목 like "[시설소유자배상책임] ...". It cites 민법 조문 (제750조, 제758조) and 대법원 판례, works through 질의사항 in order, and ends in a reasoned verdict ("... 배상책임이 있다고 판단됩니다" / "... 부담하지 않는다고 판단됩니다"). Classify it here whichever side commissioned it -- both parties' opinions are evidence, and the 수신/발신 block is often masked.
 - legal_reference (법률참고자료): published reference material a party ATTACHED rather than authored -- a court's 위자료 산정기준표, a 노동능력상실률/맥브라이드 표, a 판례 모음. It states general standards with no 질의 and no verdict about THIS accident. Disability-rate and 위자료 calculation cite it.
+
+Three administrative types, distinguished by WHO ISSUED IT:
+- power_of_attorney (위임장): the claimant's mandate authorising someone to act -- 위 임 장 as a heading, 위임인/수임인 blocks, a 보험업법 제188조 reference, the scope of delegated 손해사정 업무. It grants authority; it states no fact about the accident or the injury.
+- accident_statement (사고경위서): a PARTY's own written account of how the accident happened -- 사 고 경 위 서 as a heading, a first-person narrative, a signature. It is evidence ABOUT the event, never an authority on it: it is what someone says happened, which is why it is not a medical_record and not a legal_opinion.
+- public_benefit_certificate (공적급여 지급확인원): a STATE body's record of benefits actually paid -- 근로복지공단's 보험급여 지급확인원, a 교통사고사항 및 지급결의확인서, 국민건강보험공단 급여내역. It certifies what a public scheme already paid, which is what a 산재 or a 공제 finding rests on. Not an insurer's letter (that is insurer_response) and not a hospital's bill (that is receipt).
 
 Reply with ONLY a JSON object, no other text, in exactly this shape:
 {{"predicted_document_type": "<one of the types above>", "document_type_label": "<Korean display label>",

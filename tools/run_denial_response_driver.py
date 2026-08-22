@@ -303,7 +303,8 @@ requested_documents is an array of document-type codes (use [] when none were re
 entry is exactly one of these literal codes, not a Korean document name:
   insurance_certificate, insurance_policy, application_form, diagnosis_certificate,
   medical_record, imaging_report, receipt, insurer_response, legal_opinion,
-  legal_reference, other
+  legal_reference, power_of_attorney, accident_statement,
+  public_benefit_certificate, other
 
 Each accepted_coverages entry needs accepted_coverage_id, coverage_name, payment_status,
 accepted_amount (a number, or null when the insurer accepts without naming a figure),

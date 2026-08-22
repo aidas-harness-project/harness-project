@@ -110,6 +110,9 @@ DOCUMENT_TYPE_LABEL_KO: dict[str, str] = {
     "insurer_response": "보험사 회신",
     "legal_opinion": "법률의견서",
     "legal_reference": "법률참고자료",
+    "power_of_attorney": "위임장",
+    "accident_statement": "사고경위서",
+    "public_benefit_certificate": "공적급여 지급확인원",
     "other": "기타",
 }
 

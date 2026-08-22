@@ -86,7 +86,9 @@ DEFAULT_GRID_ROWS = 4
 DOCUMENT_TYPES = frozenset({
     "insurance_certificate", "insurance_policy", "application_form",
     "diagnosis_certificate", "medical_record", "imaging_report", "receipt",
-    "insurer_response", "legal_opinion", "legal_reference", "other",
+    "insurer_response", "legal_opinion", "legal_reference",
+    "power_of_attorney", "accident_statement", "public_benefit_certificate",
+    "other",
 })
 
 
