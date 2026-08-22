@@ -7005,7 +7005,14 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
                 # started_at keeps the stage's first explicit origin;
                 # current_attempt_started_at tracks this dispatch only.
                 now = now_iso()
-                entry["started_at"] = entry["started_at"] or now
+                # `.get` because `started_at` is declared nullable and the item
+                # schema names no `required` list, so an entry that OMITS the
+                # key is schema-valid -- which `fork_case.py` produced, and a
+                # bare `entry["started_at"]` then raised KeyError on the first
+                # `in_progress` transition of every forked case (CASE_054,
+                # 2026-08-22). Absent and null mean the same thing here: no
+                # explicit attempt has begun yet.
+                entry["started_at"] = entry.get("started_at") or now
                 entry["current_attempt_started_at"] = now
                 entry["attempt_count"] += 1
                 marker_attempt = entry["attempt_count"]

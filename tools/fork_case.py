@@ -507,6 +507,15 @@ def build_stage_cut_run_state(*, new_case_id: str, run_id: str,
         return {
             "stage_name": stage,
             "status": "passed",
+            # Explicit nulls, not omitted keys. The stage-item schema declares
+            # both as nullable and names no `required` list, so omitting them
+            # validated -- and the DAO's `in_progress` path then read
+            # `entry["started_at"]` directly and raised KeyError on the first
+            # transition of every forked case (CASE_054, 2026-08-22). Null is
+            # the honest value: the fork inherited this stage's OUTPUT, it did
+            # not run it, so there is no start or completion time to claim.
+            "started_at": None,
+            "completed_at": None,
             "attempt_count": 1,
             "backup_path": fork_origin_backup_path(new_case_id, stage),
         }
