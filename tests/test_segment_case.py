@@ -3564,6 +3564,34 @@ def test_a_judgment_cited_inside_an_opinion_is_not_a_reference_document():
     ) is None
 
 
+def test_an_issuance_stamp_does_not_become_the_title_stem():
+    """A clinic's copy stamp names the COPY, not the form.
+
+    `medical_form_title` stripped these before deciding a line was a title, but
+    `document_type_from_title` then computed its stem from the UNSTRIPPED text,
+    so the stem ended in 원본 and matched nothing. 49 후유장애 진단서 in this
+    corpus were recognised as titles and typed by the model anyway -- a gate
+    passing and the mapping failing on the same string.
+    """
+    assert (sc.document_type_from_title("후유장애 진단서(Mc Bride)     원본")
+            == "diagnosis_certificate")
+    assert (sc.document_type_from_title("후유장애 진단서(Mc Bride)   원본대조필 인")
+            == "diagnosis_certificate")
+
+
+def test_bare_pagination_is_stripped_like_the_worded_form():
+    """진료비 세부산정내역 prints "1 / 6" without the word "Page".
+
+    The stripper handled "Page 1 / 6" only, so the collapsed stem ended in the
+    page number.
+    """
+    assert (sc.document_type_from_title("진료비 세부산정내역　　　1 / 6")
+            == "receipt")
+    # A title that genuinely ends in a number keeps it: the strip requires
+    # whitespace before the run, and a lone trailing digit is not a fraction.
+    assert sc.document_type_from_title("주위재산 추가특별약관2") == "insurance_policy"
+
+
 def test_a_form_issued_by_either_an_insurer_or_a_public_scheme_declines():
     """지급결의확인서 does not say who issued it.
 

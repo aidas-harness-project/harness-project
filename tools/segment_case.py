@@ -518,7 +518,15 @@ _TABLE_HEADER_MIN_MATCH = 6
 # DOC_020 ends "진료비 세부산정내역  Page 1 / 1" and DOC_021/DOC_022 end
 # "진료비 계산서·영수증  [재발행]".
 _TITLE_LAYOUT_SUFFIX_RE = re.compile(
-    r"(?:\s+(?:Page\s+\d+\s*/\s*\d+|\[재발행\]))+\s*$",
+    # A bare "1 / 6" as well as "Page 1 / 6": the same pagination, printed
+    # without the word on 진료비 세부산정내역. Requires surrounding whitespace,
+    # so a title that genuinely ends in a number is untouched.
+    r"(?:\s+(?:(?:Page\s+)?\d+\s*/\s*\d+|\[재발행\]"
+    # Issuance and copy stamps a clinic prints beside the title. These name the
+    # COPY, not the form -- "후유장애 진단서(Mc Bride)  원본" is a 진단서 -- and
+    # left in place they become the stem the suffix table matches on, so the
+    # document falls through to the model. 49 후유장애 진단서 in this corpus.
+    r"|원본|사본|대조필|원본대조필(?:\s*인)?))+\s*$",
     re.IGNORECASE,
 )
 
@@ -584,6 +592,7 @@ _TITLE_TYPE_SUFFIXES = (
     ("퇴원확인서", "medical_record"),
     ("납입확인서", "receipt"),
     ("수납확인서", "receipt"),
+    ("진료비내역확인서", "receipt"),
     # NOT mapped, deliberately:
     #
     # * 판결문 / "...지방법원 ... 선고 ... 판결" -- a court judgment IS
@@ -617,7 +626,10 @@ _GENRE_ONLY_TITLES = frozenset({"report", "summary", "보고서", "결과지", "
 # that mentions a 약관 or cites a 판결 is not a title.
 _NONMEDICAL_TITLE_RE = re.compile(
     r"(회신서|의견서|기준표|위임장|경위서|확인원|약관|특약|증권)"
-    r"\s*(?:\([^)]*\))?\s*(?:\d+\s*/\s*\d+)?"
+    # A trailing edition marker: "(Ⅰ)", "2", or "1 / 6". A publisher numbers
+    # repeated 약관 both ways -- "경비업자 특별약관(Ⅰ)" and "주위재산 추가특별
+    # 약관2" -- and only the parenthesised form was admitted.
+    r"\s*(?:\([^)]*\))?\s*(?:\d+\s*/\s*\d+|\d{1,2})?"
     r"(?:\s+[가-힣A-Za-z]{1,6}){0,3}\s*$"
 )
 
@@ -658,6 +670,13 @@ def document_type_from_title(title: str | None) -> str | None:
     """
     if not title:
         return None
+    # Strip layout/issuance annotations BEFORE collapsing. Both recognisers
+    # already do this internally, so a title with a stamp passed the gate and
+    # then failed the suffix match, because the stem was computed from the
+    # unstripped text and ended in 원본 rather than 진단서 -- 49 후유장애
+    # 진단서 in this corpus were recognised as titles and typed by the model
+    # anyway.
+    title = _TITLE_LAYOUT_SUFFIX_RE.sub("", title).strip()
     collapsed = re.sub(r"[\s·ㆍ・]+", "", title)
     if not collapsed or len(collapsed) > _MEDICAL_TITLE_MAX_CHARS:
         return None
@@ -673,8 +692,12 @@ def document_type_from_title(title: str | None) -> str | None:
     if medical_form_title(title) is None and _nonmedical_form_title(title) is None:
         return None
     # Strip a trailing parenthetical/ordinal so "진료비 내역서(외래)" matches on
-    # 내역서 rather than on whatever the scope note ends with.
+    # 내역서 rather than on whatever the scope note ends with. The bare ordinal
+    # is stripped too: a publisher numbers repeated 약관 as "주위재산 추가특별
+    # 약관2" with no parenthetical, and that digit is the same edition marker
+    # as the "(Ⅰ)" in "경비업자 특별약관(Ⅰ)", which already matched.
     stem = re.sub(r"\([^)]*\)\s*\d*$", "", collapsed).strip()
+    stem = re.sub(r"\d+$", "", stem).strip() or stem
     for suffix, doc_type in sorted(_TITLE_TYPE_SUFFIXES, key=lambda x: -len(x[0])):
         if stem.endswith(suffix):
             return doc_type
