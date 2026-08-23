@@ -32,6 +32,9 @@ the same pass.
 | 46 | PARTIAL | P8 billing-table disagreements: dpi rejected by measurement; reader stability still open |
 | 47 | OPEN | P8 correlated error observed live: both readers invented the same caption |
 | 48 | PARTIAL | Merge 3569d50 discarded parent2's dao.py wholesale; halves still inconsistent |
+| 56 | OPEN | Mid-document pages classified as documents (segmentation, ~40 docs) |
+| 57 | OPEN | Classification concurrency is not instrumented |
+| 58 | OPEN | Worker-width gains measured on the bench, not the real path |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
@@ -3898,3 +3901,84 @@ Two further findings from the same experiment, worth keeping:
   it was actually read. Under the reverted fix the trace reported 7 documents
   read while `field_stops` recorded 9. Latent while cost documents are blocked
   outright; it would misreport immediately if the block is ever narrowed again.
+
+## 56. OPEN -- Mid-document pages are classified as if they were documents
+
+**What.** About 40 of the documents the title-anchor rule declines are not
+first pages at all. Their processed text opens with a page number or a body
+heading:
+
+```
+- 7 - | (3) 서울중앙지방법원 2022나1137 판결 | [기초사실]
+Ⅲ. 구체적 검토 | 1. 피보험자의 법률상 배상책임 성립 여부
+3. 결론
+```
+
+These carry a `document_type` from the classifier -- `legal_reference` 22,
+`legal_opinion` 19 -- reached by reading body content, because no title is
+present to read.
+
+**Why it is not a classification defect.** The classifier is answering
+correctly about the text it was given. The error is upstream: a single
+법률의견서 was cut into several documents, so its later pages became documents
+in their own right. Nothing downstream can tell that from a manifest, and the
+per-document reads that claim analysis performs will open the same opinion
+several times as if they were independent sources -- which is also how a single
+author's argument could be double-counted as agreement between two.
+
+**How to fix.** Two candidate signals, both cheap and neither yet tested:
+
+* A page whose first non-empty line is a bare page marker (`- 7 -`, `Page 7`)
+  or a mid-outline heading (`3. 결론`, `Ⅲ.`) is a CONTINUATION, and
+  `text_anchor_boundaries` should merge it into the preceding segment rather
+  than opening a new one.
+* The judge tier already exists for pages the deterministic rule cannot settle.
+  These pages reach it and it answers "new document" -- so the prompt, not the
+  routing, is what needs the continuation case named.
+
+Measure against `tools/score_title_anchors.py`'s decline list before and after:
+the 40 should move out of `legal_*` and into their parent documents, and the
+manifest's document count for those cases should drop.
+
+## 57. OPEN -- Classification concurrency is not instrumented
+
+**What.** `_timing_summary.json` records `worker_config` and
+`observed_max_concurrency` for `ocr_pages`, `redact_pages`, `documents` and
+`redaction` -- and nothing for classification. Both classification pools
+(`pool.classification` in run_document_stage, `pool.classify_children` in
+run_stage2) emit a span, so the phase is visible, but the width it actually
+reached is not.
+
+**Why it matters now.** `DEFAULT_CLASSIFY_WORKERS` was raised 4 -> 8 on
+2026-08-24 from a bench measurement. Whether a real run ever reaches 8 cannot
+be answered from retained records -- only from the bench, which is exactly the
+gap that let the old value's justification ("the semaphore is the real ceiling
+anyway") stand unchallenged for as long as it did.
+
+**How to fix.** The aggregator already derives both fields for the other pools;
+classification needs the same treatment, keyed on the two span names above. The
+check afterwards is a single real run: configured 8 and observed 8 means the
+pool is saturated, observed < 8 means something upstream is serialising it and
+the raise bought less than the bench implies.
+
+## 58. OPEN -- The width measurements are bench-only
+
+**What.** Both worker raises this session (classification 4 -> 8, OCR documents
+3 -> 12) were measured with `tools/bench_classify_workers.py` and
+`tools/bench_ocr_doc_workers.py`, which call the provider directly and discard
+the result. They deliberately write nothing -- running the real tools repeatedly
+would rewrite the corpus and make it a function of a benchmark.
+
+**What that leaves unmeasured.** The real path adds a manifest patch under a
+lock per document, plus contract validation and writes. Those serialise where
+the bench does not, so the measured curves are an upper bound on the gain. The
+knee could also sit lower in the real path: lock contention grows with width in
+a way provider latency does not.
+
+**How to fix.** One case, run twice at the old and new widths, comparing
+`_timing_summary.json` stage attempt wall time rather than bench numbers. It
+needs a fork so the second arm starts cold (`fork_case.py --through-stage
+document_processing`), and both arms must use the same case to hold document
+count and page mix fixed. Report the delta as the real figure and treat the
+bench numbers as what they are -- the reason to try the width, not evidence of
+what it achieves.
