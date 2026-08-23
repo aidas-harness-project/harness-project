@@ -55,7 +55,35 @@ from run_checkpoint1 import (
 
 ROOT = Path(__file__).resolve().parent.parent
 
-DEFAULT_DOC_WORKERS = 3
+# Document-level fan-out for OCR and redaction. Measured 2026-08-24 on a fixed
+# 12-document workload of SINGLE-PAGE scans -- the shape that dominates this
+# corpus (1,170 of 1,797 scanned documents are one page) and the case where
+# page-level parallelism provably cannot help, since `min(workers, pages)`
+# collapses the 24-wide page pool to width 1 for each of them:
+#
+#     doc_workers   wall (s)                     mean per call
+#     3            78.8, 79.4                    18.9s
+#     6            45.4                          19.2s
+#     8            39.1, 43.7, 41.6, 39.8        20.6-21.2s
+#     12           30.5, 31.5, 34.2              21.1-23.6s   <- knee
+#     16           34.0                          23.8s
+#
+# 12 is 59% below the old default of 3 and 22% below 8, and it replicated three
+# times with the same spread as 8. Per-call latency rises only 12% from width 3
+# to 12, unlike classification (+50% by width 16) -- an OCR call waits ~20s on
+# the model, so added contention is a small share of it.
+#
+# The reason this mattered: 100 of 118 cases hold more than 3 scanned
+# documents, so nearly every case was clamped at 3 while the page pool it was
+# multiplied against sat idle on one-page documents.
+#
+# Interaction with the provider semaphore is already handled: in-flight is
+# doc_workers x min(page_workers, pages), and `DEFAULT_LLM_MAX_INFLIGHT` caps
+# the product at 24. A 19-page document at width 12 would demand 228; the
+# semaphore holds it to 24, which is the width its own curve measured as the
+# knee. Raising this value therefore lifts the one-page case without changing
+# what a multi-page document actually runs at.
+DEFAULT_DOC_WORKERS = 12
 DOC_WORKERS_ENV = "HARNESS_DOC_WORKERS"
 
 # Classification's own width. Measured 2026-08-23 on a fixed 24-document

@@ -297,14 +297,44 @@ def test_classification_default_is_eight_measured():
     assert run_stage2._CLASSIFY_WORKERS == rds.DEFAULT_CLASSIFY_WORKERS
 
 
-def test_default_is_three_measured(monkeypatch):
-    """3 rather than the plan's proposed 2: measured on CASE_953, 3 workers
-    reached 2.50x against a sequential baseline versus 1.58x at 2, with zero
-    rate-limit errors, and the total in-flight risk the plan cited as the
-    reason for 2 is now bounded by HARNESS_LLM_MAX_INFLIGHT instead."""
+def test_default_is_twelve_measured(monkeypatch):
+    """12, raised from 3 on 2026-08-24.
+
+    The previous value was itself measured -- on CASE_953, 3 workers reached
+    2.50x against a sequential baseline versus 1.58x at 2 -- but that comparison
+    only ever ran 2 against 3, so it established 3 as the better of two low
+    numbers rather than as a knee.
+
+    Re-measured on a fixed 12-document workload of SINGLE-PAGE scans, the shape
+    that dominates this corpus (1,170 of 1,797) and the one where page-level
+    parallelism provably cannot help, since `min(workers, pages)` collapses the
+    24-wide page pool to width 1:
+
+        3  -> 78.8, 79.4       6  -> 45.4        8  -> 39.1, 43.7, 41.6, 39.8
+        12 -> 30.5, 31.5, 34.2                   16 -> 34.0
+
+    12 is 59% below 3 and 22% below 8, and it replicated three times with the
+    same spread as 8. It matters because 100 of 118 cases hold more than 3
+    scanned documents, so nearly every case was clamped at 3.
+    """
     monkeypatch.delenv(rds.DOC_WORKERS_ENV, raising=False)
-    assert rds.DEFAULT_DOC_WORKERS == 3
-    assert rds._resolve_doc_workers(None) == 3
+    assert rds.DEFAULT_DOC_WORKERS == 12
+    assert rds._resolve_doc_workers(None) == 12
+
+
+def test_the_in_flight_product_stays_under_the_provider_cap():
+    """Raising doc_workers must not multiply past the semaphore.
+
+    In-flight OCR is `doc_workers x min(page_workers, pages)`, so a 19-page
+    document at width 12 would demand 228. That is bounded elsewhere -- by
+    `llm_providers.DEFAULT_LLM_MAX_INFLIGHT` -- and this pins the two together
+    so a future raise here cannot silently outrun the cap that makes it safe.
+    """
+    import llm_providers
+
+    assert llm_providers.DEFAULT_LLM_MAX_INFLIGHT == 24
+    assert rds.DEFAULT_DOC_WORKERS <= llm_providers.DEFAULT_LLM_MAX_INFLIGHT
+    assert rds.DEFAULT_CLASSIFY_WORKERS <= llm_providers.DEFAULT_LLM_MAX_INFLIGHT
 
 
 def test_already_extracted_is_not_a_failure(five_docs, monkeypatch):
