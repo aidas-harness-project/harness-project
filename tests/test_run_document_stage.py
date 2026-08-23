@@ -249,6 +249,54 @@ def test_explicit_worker_argument_wins_over_env(monkeypatch):
     assert rds._resolve_doc_workers(2) == 2
 
 
+# --- classification has its own width ----------------------------------------
+
+@pytest.mark.parametrize("raw,expected", [
+    ("", rds.DEFAULT_CLASSIFY_WORKERS), ("5", 5), ("0", 1), ("-3", 1),
+    ("junk", rds.DEFAULT_CLASSIFY_WORKERS),
+])
+def test_classify_worker_resolution(monkeypatch, raw, expected):
+    monkeypatch.setenv(rds.CLASSIFY_WORKERS_ENV, raw)
+    assert rds._resolve_classify_workers() == expected
+
+
+def test_classification_width_is_independent_of_doc_workers(monkeypatch):
+    """The two must not be one knob, and this is the reason.
+
+    `doc_workers` also drives OCR and redaction, and redaction multiplies it by
+    its page workers -- so setting it to classification's measured optimum of 8
+    would put 8 x 4 = 32 redaction calls in flight against a provider semaphore
+    of 24 (`llm_providers.DEFAULT_LLM_MAX_INFLIGHT`), a regime nothing was
+    measured in. Raising one must therefore leave the other alone.
+    """
+    monkeypatch.delenv(rds.DOC_WORKERS_ENV, raising=False)
+    monkeypatch.setenv(rds.CLASSIFY_WORKERS_ENV, "12")
+
+    assert rds._resolve_classify_workers() == 12
+    assert rds._resolve_doc_workers(None) == rds.DEFAULT_DOC_WORKERS
+
+
+def test_classification_default_is_eight_measured():
+    """8 rather than 4, and rather than the 12 a single run first suggested.
+
+    Measured 2026-08-23 on a fixed 24-document workload, each width run twice:
+    4 -> 49.8/50.0s, 8 -> 28.9s, 12 -> 22.5/28.0/31.0s, 16 -> 24.1/29.9s.
+
+    Width 4 reproduced to 0.4%, so the 4 -> 8 gain of -42% is real. Beyond 8
+    the wall clock lands in the same 27-31s band while the spread grows to 38%
+    -- contention, not headroom. The first run alone showed 22.5s at width 12
+    and would have justified 12; repeating it is what showed that was one lucky
+    sample. The lower width is chosen because it is the one that reproduces.
+
+    Also pinned against the two drifting apart: `run_stage2` classifies split
+    children with its own constant, and the two paths should fan out alike.
+    """
+    import run_stage2
+
+    assert rds.DEFAULT_CLASSIFY_WORKERS == 8
+    assert run_stage2._CLASSIFY_WORKERS == rds.DEFAULT_CLASSIFY_WORKERS
+
+
 def test_default_is_three_measured(monkeypatch):
     """3 rather than the plan's proposed 2: measured on CASE_953, 3 workers
     reached 2.50x against a sequential baseline versus 1.58x at 2, with zero

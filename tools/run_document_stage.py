@@ -58,6 +58,16 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DOC_WORKERS = 3
 DOC_WORKERS_ENV = "HARNESS_DOC_WORKERS"
 
+# Classification's own width. Measured 2026-08-23 on a fixed 24-document
+# workload, each width run twice: 4 -> 49.9s, 8 -> 28.9s, 12 -> 27.2s mean,
+# 16 -> 27.0s mean. The 4 -> 8 gain (-42%) reproduced; beyond 8 the wall lands
+# in the same band while the spread grows to 38%, which is contention rather
+# than headroom. Kept apart from DOC_WORKERS because that value also drives
+# OCR and redaction, and redaction multiplies it by page workers -- 8 there
+# would put 32 redaction calls in flight against a provider semaphore of 24.
+DEFAULT_CLASSIFY_WORKERS = 8
+CLASSIFY_WORKERS_ENV = "HARNESS_CLASSIFY_WORKERS"
+
 # Statuses that do NOT represent a failure of this step. Kept as an explicit
 # allowlist rather than "not blocked_*" so a status added upstream shows up as
 # an unknown value to look at instead of being silently counted as a pass.
@@ -72,6 +82,21 @@ DOC_WORKERS_ENV = "HARNESS_DOC_WORKERS"
 # manifest disagrees with the filter and it is left OUT of this set on
 # purpose: that is worth surfacing.
 _OK_STATUSES = {"success", "passed", "bundle_ocr_complete", "already_extracted"}
+
+
+def _resolve_classify_workers() -> int:
+    """Classification's own fan-out: HARNESS_CLASSIFY_WORKERS, else the default.
+
+    Separate from `doc_workers` because the two phases saturate at different
+    widths and because doc_workers is multiplied by page workers in redaction.
+    See `DEFAULT_CLASSIFY_WORKERS` for the measurement.
+    """
+    raw = os.environ.get(CLASSIFY_WORKERS_ENV, "")
+    try:
+        value = int(raw) if raw.strip() else None
+    except ValueError:
+        value = None
+    return max(1, value) if value is not None else DEFAULT_CLASSIFY_WORKERS
 
 
 def _resolve_doc_workers(explicit: int | None) -> int:
@@ -239,7 +264,15 @@ def run_classification_stage(
         return {"status": "success", "case_id": case_id, "documents": [],
                 "note": "no documents required classification"}
 
-    workers = _resolve_doc_workers(doc_workers)
+    # Classification gets its own width, not `doc_workers`. That value is
+    # shared with OCR and redaction, and redaction multiplies it by its page
+    # workers (doc_workers x page_workers in flight), so raising it here to the
+    # measured classification optimum would push redaction to 8 x 4 = 32
+    # concurrent calls -- past the provider semaphore of 24 and into a regime
+    # this was never measured in. An explicit `--doc-workers` still wins, so a
+    # caller who wants one number for the whole stage keeps getting it.
+    workers = (_resolve_doc_workers(doc_workers) if doc_workers is not None
+               else _resolve_classify_workers())
     report(f"classification: {len(targets)} document(s), {workers} document worker(s)")
 
     slots: list[dict | None] = [None] * len(targets)

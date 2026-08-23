@@ -267,10 +267,29 @@ def chunkable_documents(manifest: dict) -> tuple[list[str], list[str]]:
     return text, excluded
 
 
-# Default fan-out for split-child classification. Modest because each worker
-# holds a whole interpreter, and the provider's own in-flight semaphore is the
-# real ceiling anyway -- this only stops the driver from idling between calls.
-_CLASSIFY_WORKERS = 4
+# Default fan-out for split-child classification. Measured 2026-08-23 on a
+# fixed 24-document workload, each width run twice:
+#
+#     workers   wall (s)               mean per call
+#     4         49.8, 50.0             7.65s
+#     8         28.9                   8.90s
+#     12        22.5, 28.0, 31.0       9.85-13.89s
+#     16        24.1, 29.9             11.49-13.86s
+#
+# 8 is where the reproducible gain stops. Width 4 repeated to 0.4%, so the
+# 4 -> 8 improvement (-42%) is real; 12 and 16 land in the same 27-31s band as
+# 8 while their spread grows to 38%, which is contention, not headroom. A first
+# single run showed 22.5s at width 12 and would have justified 12 on its own --
+# repeating it is what showed that number was one lucky sample.
+#
+# The value this replaced was 4, chosen on the reasoning that "the provider's
+# own in-flight semaphore is the real ceiling anyway". It is not: that
+# semaphore is 24 (`DEFAULT_LLM_MAX_INFLIGHT`, whose comment records it as the
+# measured OCR knee), and nothing in this range ever reaches it. Classification
+# saturates at a third of OCR's width because the calls are shorter -- 7.6s of
+# text against 23s of image -- so per-call latency growth overtakes the
+# parallel gain much sooner.
+_CLASSIFY_WORKERS = 8
 
 
 def _classify_children(case_id, children, *, common, provider, workers, report):
