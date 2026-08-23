@@ -311,7 +311,7 @@ def _settle(readings_by_document):
             for field_id, value in readings_by_document[document_id].items()
         }
 
-    settled, calls = driver.extract_additional(
+    settled, calls, _plan = driver.extract_additional(
         config=_config(), documents=docs, assessments=_assessments(),
         outcomes_by_field={}, extract=extract, page_text=page_text,
         observation_ids=driver._observation_id_sequence())

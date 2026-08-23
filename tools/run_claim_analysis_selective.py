@@ -988,7 +988,7 @@ def extract_additional(
     extract,
     page_text: MutableMapping[tuple[str, int], str],
     observation_ids,
-) -> tuple[list[FieldExtractionOutcome], int]:
+) -> tuple[list[FieldExtractionOutcome], int, list[Mapping[str, Any]]]:
     """Stage 3-a: re-open unavailable fields from non-medical sources.
 
     Runs AFTER case-type assessment, because which sources are worth opening
@@ -998,11 +998,21 @@ def extract_additional(
 
     Returns REPLACEMENT outcomes for the fields it settled; a field it could
     not settle keeps the common pass's outcome untouched.
+
+    The PLAN is returned as a third element, not because this function needs
+    it, but because the trace's `documents` array is built BEFORE this round
+    runs and therefore cannot see the documents it opened. Without the plan,
+    every 법률의견서 stage 3-a reads is labelled `skipped / not_read / "no
+    medical classification, so no route reaches it"` while the same run's
+    result file carries its verbatim quotes -- observed on CASE_713, where all
+    three of DOC_006/007/008 were recorded as unread. Recomputing the plan at
+    the trace site is not an option: `read_plan` keys off the PRE-3-a outcome
+    statuses, which the caller has already replaced by then. See the caller.
     """
     plan = additional_mod.read_plan(
         config, assessments, outcomes_by_field, documents)
     if not plan:
-        return [], 0
+        return [], 0, []
 
     by_field_row = {row["field_id"]: row for row in config.get("fields") or []}
     replacements: dict[str, FieldExtractionOutcome] = {}
@@ -1084,7 +1094,7 @@ def extract_additional(
         settled.append(outcome)
     # One provider call per planned document -- the round batches exactly as
     # the common pass does, so calls equal documents opened.
-    return settled, len(plan)
+    return settled, len(plan), plan
 
 
 def _observation_id_sequence(start: int = 1):
@@ -1300,6 +1310,42 @@ def build_result(
     return result
 
 
+def _restamp_type_conditional(
+    dispositions: list[dict],
+    plan: Sequence[Mapping[str, Any]],
+) -> None:
+    """Mark the documents stage 3-a opened as read, in place.
+
+    The disposition rows are built from the medical waves' plan, which runs
+    before stage 3-a exists, so a 법률의견서 it opens keeps whatever label the
+    earlier pass gave it -- `skipped / not_read` with "no medical
+    classification, so no route reaches it". That is the opposite of what
+    happened, and it is the trace, not the result, that a reviewer reads to
+    ask what this stage cost.
+
+    Only rows the plan names are touched, and `field_ids` is the UNION of the
+    medical routing and this round's asks: a field can be routed medically and
+    still be re-opened here, and dropping either side would understate one.
+    """
+    if not plan:
+        return
+    by_document = {row["document_id"]: row for row in dispositions}
+    for entry in plan:
+        row = by_document.get(entry["document_id"])
+        if row is None:
+            # A planned document with no disposition row cannot happen today
+            # (both are built from the same `documents` list), but silently
+            # inventing a row would hide a real desync if that ever changes.
+            continue
+        asked = [field_id for field_id in entry.get("field_ids") or []]
+        row["disposition"] = "read"
+        row["wave"] = "type_conditional"
+        row["field_ids"] = sorted(set(row.get("field_ids") or []) | set(asked))
+        row["reason"] = (
+            f"stage 3-a opened it as a {entry['source_type']} for "
+            f"{len(asked)} type-conditional field(s)")
+
+
 def build_trace(
     *,
     case_id: str,
@@ -1319,8 +1365,16 @@ def build_trace(
         1 for row in document_dispositions
         if row.get("disposition") == "presence_only"
     )
+    # `documents_read` is the COMMON pass's count and stays that way: the
+    # schema keeps `type_conditional_documents_read` separate on purpose, so
+    # that an SLA regression in 3-a (whose cost scales with case types in play)
+    # cannot hide inside a number that scales with the field catalogue. Since
+    # 3-a's documents are now stamped `read`, they have to be excluded here by
+    # wave, or the two metrics would double-count the same open.
     read = sum(
-        1 for row in document_dispositions if row.get("disposition") == "read"
+        1 for row in document_dispositions
+        if row.get("disposition") == "read"
+        and row.get("wave") != "type_conditional"
     )
     return {
         "case_id": case_id,
@@ -1660,10 +1714,17 @@ def run(
     # verdicts that get published, since a field it settles can change one.
     first_pass = case_types_mod.assess_case_types(
         _interim(outcomes), filing_status_by_type=filing_status_by_case_type())
-    settled, type_conditional_calls = extract_additional(
+    settled, type_conditional_calls, type_conditional_plan = extract_additional(
         config=config, documents=documents, assessments=first_pass,
         outcomes_by_field={o.field_id: o for o in outcomes}, extract=extract,
         page_text=page_text, observation_ids=observation_ids)
+    # The dispositions above were computed BEFORE this round ran, so every
+    # document stage 3-a opened is still labelled `skipped / not_read`. Restamp
+    # them from the plan: the trace and the result must not disagree about
+    # whether a document was read (CASE_713 had DOC_006/007/008 recorded as
+    # unread while their quotes sat in `claim_facts`). `wave` gets the schema's
+    # `type_conditional` member, which existed for this and had no writer.
+    _restamp_type_conditional(dispositions, type_conditional_plan)
     if settled:
         replaced = {outcome.field_id: outcome for outcome in settled}
         outcomes = [replaced.pop(outcome.field_id, outcome)
