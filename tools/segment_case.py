@@ -537,6 +537,70 @@ _TITLE_TYPE_SUFFIXES = (
     ("내역", "receipt"),
     ("명세서", "receipt"),
     ("영수증", "receipt"),
+    # Non-medical forms, added 2026-08-23. Same rule as the medical ones and
+    # for the same reason: the title is printed by a publisher who had no
+    # choice about it -- a 법률질의회신서 is headed that because that is what
+    # the form is called -- so reading it is a lookup, and a model asked to
+    # re-read the same line is giving a second opinion on evidence already
+    # held exactly.
+    #
+    # Measured before adding: across 1,214 model-classified documents a title
+    # anchor matched 823 (68%) and agreed with the model on 817 of them
+    # (99.3%). Of the 6 disagreements, 4 were documents the model itself
+    # labelled correctly in prose ("기타 (법원 위자료 산정기준표)") and could
+    # not type because the code did not exist yet, and 1 was a rule that was
+    # too wide (see 판결문 below). Only 1 was genuinely contested.
+    ("법률질의회신서", "legal_opinion"),
+    ("법률질의회신", "legal_opinion"),
+    ("법률의견서", "legal_opinion"),
+    ("법률자문회신", "legal_opinion"),
+    ("산정기준표", "legal_reference"),
+    ("위임장", "power_of_attorney"),
+    ("사고경위서", "accident_statement"),
+    ("지급확인원", "public_benefit_certificate"),
+    ("보통약관", "insurance_policy"),
+    ("특별약관", "insurance_policy"),
+    ("특약", "insurance_policy"),
+    ("보험증권", "insurance_certificate"),
+    ("공제등록증권", "insurance_certificate"),
+    # 공동인수 특별약관 is titled like a clause and is not one: CASE_112's
+    # DOC_091/DOC_194 open "공동인수 특별약관" and continue "이 보험증권은 아래의
+    # 회사들을 대리하여 우리회사가 발행하며" -- the co-insurance panel printed on
+    # the CERTIFICATE, naming who carries which share. Both were the only
+    # 특별약관 hits the model called `insurance_certificate`, and it was right.
+    # Listed before the generic 특별약관 entry has no effect (the table is
+    # sorted longest-first), which is what makes the specific case win.
+    ("공동인수특별약관", "insurance_certificate"),
+    # `확인서` was reachable as a TITLE (the vocabulary has carried it since the
+    # medical rules) but mapped to nothing, so every 입·퇴원확인서 fell through
+    # to the model -- 156 documents, the third-largest declining group. The two
+    # kinds are separated by their own stems rather than by the shared suffix:
+    # 입퇴원/입원/퇴원 is a hospital record of a stay, 납입/수납 is a payment
+    # receipt. A bare "확인서" maps to neither and still goes to the model,
+    # because the word alone names no form.
+    ("입퇴원확인서", "medical_record"),
+    ("입퇴원사실확인서", "medical_record"),
+    ("입원확인서", "medical_record"),
+    ("퇴원확인서", "medical_record"),
+    ("납입확인서", "receipt"),
+    ("수납확인서", "receipt"),
+    # NOT mapped, deliberately:
+    #
+    # * 판결문 / "...지방법원 ... 선고 ... 판결" -- a court judgment IS
+    #   `legal_reference`, but the phrase appears far more often INSIDE a
+    #   법률의견서 citing precedent than as a document's own heading. On
+    #   CASE_046/DOC_007 the model said `legal_opinion` and a 지방법원.*판결
+    #   rule said `legal_reference`; the model was right -- the line was
+    #   "다. 유사 사안에 대한 판례 (1) 서울남부지방법원 ... 판결", body text
+    #   under an outline marker. The header window keeps most such lines out,
+    #   but a judgment attached as its own exhibit and one cited in an opinion
+    #   are not separable by the title alone, so this stays with the model.
+    #
+    # * 지급결의확인서 -- 교통사고사항 및 지급결의확인서 is issued both by a
+    #   public scheme and by an insurer, and the title does not say which.
+    #   CASE_319/DOC_012 came back `insurer_response` at 0.72 while the same
+    #   form name elsewhere read `public_benefit_certificate`. A rule here
+    #   would harden a coin flip; the model at least reports its uncertainty.
 )
 
 # Titles that name a GENRE rather than a form. "REPORT" says a report exists,
@@ -544,6 +608,43 @@ _TITLE_TYPE_SUFFIXES = (
 # sits on lab and pathology reports too, and the model reading the page can tell
 # them apart. Mapping these would encode one bundle's coincidence as a rule.
 _GENRE_ONLY_TITLES = frozenset({"report", "summary", "보고서", "결과지", "판독지"})
+
+
+# Non-medical form names, 2026-08-23. Separate from `_MEDICAL_TITLE_RE`
+# because that one also drives medical boundary detection; this one only ever
+# gates `document_type_from_title`. Same shape as its medical counterpart: the
+# stem must END the line (allowing a short trailing annotation), so a sentence
+# that mentions a 약관 or cites a 판결 is not a title.
+_NONMEDICAL_TITLE_RE = re.compile(
+    r"(회신서|의견서|기준표|위임장|경위서|확인원|약관|특약|증권)"
+    r"\s*(?:\([^)]*\))?\s*(?:\d+\s*/\s*\d+)?"
+    r"(?:\s+[가-힣A-Za-z]{1,6}){0,3}\s*$"
+)
+
+
+def _nonmedical_form_title(line: str) -> str | None:
+    """The line itself if it reads as a non-medical form's name, else None.
+
+    Mirrors `medical_form_title`'s letter-spacing handling -- Korean official
+    forms space their titles out ("위 임 장", "사 고 경 위 서") -- and reuses its
+    length cap and field-label rejection so the two behave alike.
+    """
+    if not line:
+        return None
+    line = _TITLE_LAYOUT_SUFFIX_RE.sub("", line).strip()
+    collapsed = re.sub(r"[\s·ㆍ・]+", "", line)
+    if not collapsed or len(collapsed) > _MEDICAL_TITLE_MAX_CHARS:
+        return None
+    if _MEDICAL_FIELD_LABEL_RE.match(collapsed):
+        return None
+    if _NONMEDICAL_TITLE_RE.search(collapsed):
+        return line
+    squeezed = re.sub(r"[ \t·ㆍ・]+", " ", line).strip()
+    if _NONMEDICAL_TITLE_RE.search(squeezed):
+        return line
+    unspaced = re.sub(r"(?:(?<=\s)|^)((?:[가-힣] ){1,}[가-힣])(?=\s|$)",
+                      lambda m: m.group(1).replace(" ", ""), squeezed)
+    return line if _NONMEDICAL_TITLE_RE.search(unspaced) else None
 
 
 def document_type_from_title(title: str | None) -> str | None:
@@ -563,7 +664,13 @@ def document_type_from_title(title: str | None) -> str | None:
     if collapsed.lower() in _GENRE_ONLY_TITLES:
         return None
     # Only a real title maps -- a sentence that merely mentions a form does not.
-    if medical_form_title(title) is None:
+    # Two vocabularies, because the medical one has a second job: it also
+    # decides where a MEDICAL bundle's documents begin (`text_anchor_boundaries`
+    # merges consecutive pages repeating one title). Adding 약관/증권 there made
+    # policy pages look like medical form titles and changed which pages the
+    # boundary judge was asked about. So non-medical titles are recognised on
+    # their own terms and only for the purpose of naming a type.
+    if medical_form_title(title) is None and _nonmedical_form_title(title) is None:
         return None
     # Strip a trailing parenthetical/ordinal so "진료비 내역서(외래)" matches on
     # 내역서 rather than on whatever the scope note ends with.

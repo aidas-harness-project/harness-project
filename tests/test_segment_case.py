@@ -3490,9 +3490,88 @@ def test_a_genre_naming_title_is_left_to_the_classifier():
 
 def test_an_unmapped_title_returns_none_rather_than_guessing():
     """Absence of a mapping is not a type. Unknown falls through to the model."""
-    assert sc.document_type_from_title("입 · 퇴 원 확 인 서") is None
-    assert sc.document_type_from_title("위자료 산정기준표") is None
+    assert sc.document_type_from_title("업무내용") is None
+    assert sc.document_type_from_title("중기명세") is None
     assert sc.document_type_from_title(None) is None
+
+
+# --- non-medical form titles, 2026-08-23 --------------------------------------
+#
+# The rule was medical-only, which was a scope accident rather than a decision:
+# a 법률질의회신서 is headed that because that is the form's name, exactly as a
+# 진단서 is. Scored against every model verdict on disk before extending --
+# coverage of model-classified documents went 18.4% -> 48.8% at 98.1%
+# agreement, and each of the 11 remaining disagreements was read individually.
+
+
+def test_legal_and_administrative_titles_map_to_their_type():
+    assert sc.document_type_from_title("법률질의회신서") == "legal_opinion"
+    assert sc.document_type_from_title("법 률 질 의 회 신 서") == "legal_opinion"
+    assert sc.document_type_from_title("위자료 산정기준표") == "legal_reference"
+    assert sc.document_type_from_title("위 임 장") == "power_of_attorney"
+    assert sc.document_type_from_title("사 고 경 위 서") == "accident_statement"
+    assert (sc.document_type_from_title("보험급여 지급확인원")
+            == "public_benefit_certificate")
+
+
+def test_policy_and_certificate_titles_are_separated():
+    assert sc.document_type_from_title("영업배상책임보험 보통약관") == "insurance_policy"
+    assert sc.document_type_from_title("시설소유(관리)자 특별약관") == "insurance_policy"
+    assert sc.document_type_from_title("보험증권") == "insurance_certificate"
+    assert sc.document_type_from_title("공 제 등 록 증 권") == "insurance_certificate"
+
+
+def test_co_insurance_panel_is_a_certificate_despite_its_clause_title():
+    """The one case where the generic 특별약관 rule was measurably wrong.
+
+    CASE_112's DOC_091/DOC_194 open "공동인수 특별약관" and continue "이
+    보험증권은 아래의 회사들을 대리하여 우리회사가 발행하며" -- the co-insurance
+    panel printed on the certificate, naming who carries which share. They were
+    the only 특별약관 documents the model called `insurance_certificate`, and it
+    was right. The table is sorted longest-first, so the specific entry wins.
+    """
+    assert (sc.document_type_from_title("공동인수 특별약관")
+            == "insurance_certificate")
+    assert (sc.document_type_from_title("공동비율 특별약관")
+            == "insurance_policy")
+
+
+def test_confirmation_forms_split_by_their_own_stem_not_the_shared_suffix():
+    """`확인서` alone names no form -- two unrelated kinds share it.
+
+    It was reachable as a title but mapped to nothing, so all 156 입퇴원확인서
+    went to the model. 입퇴원/입원/퇴원 is a record of a hospital stay;
+    납입/수납 is a payment receipt. A bare 확인서 still declines.
+    """
+    assert sc.document_type_from_title("입 · 퇴 원 확 인 서") == "medical_record"
+    assert sc.document_type_from_title("입 퇴 원 사 실 확 인 서") == "medical_record"
+    assert sc.document_type_from_title("진료비(약제비) 납입 확인서") == "receipt"
+    assert sc.document_type_from_title("확인서") is None
+
+
+def test_a_judgment_cited_inside_an_opinion_is_not_a_reference_document():
+    """The disagreement that proved the model right.
+
+    On CASE_046/DOC_007 a `지방법원.*판결` rule said `legal_reference` while the
+    model said `legal_opinion`. The model was right: the line was "다. 유사
+    사안에 대한 판례 (1) 서울남부지방법원 ... 판결" -- body text under an outline
+    marker, an opinion citing precedent. A judgment filed as its own exhibit and
+    one quoted inside an opinion are not separable by title alone, so 판결문 is
+    deliberately unmapped.
+    """
+    assert sc.document_type_from_title(
+        "다. 유사 사안에 대한 판례 (1) 서울남부지방법원 2022. 1. 13. 선고 2020나69036 판결"
+    ) is None
+
+
+def test_a_form_issued_by_either_an_insurer_or_a_public_scheme_declines():
+    """지급결의확인서 does not say who issued it.
+
+    CASE_319/DOC_012 came back `insurer_response` at 0.72 while the same form
+    name elsewhere read `public_benefit_certificate`. A rule here would harden a
+    coin flip; the model at least reports its uncertainty.
+    """
+    assert sc.document_type_from_title("교통사고사항 및 지급결의확인서") is None
     assert sc.document_type_from_title("") is None
 
 
