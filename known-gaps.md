@@ -32,7 +32,7 @@ the same pass.
 | 46 | PARTIAL | P8 billing-table disagreements: dpi rejected by measurement; reader stability still open |
 | 47 | OPEN | P8 correlated error observed live: both readers invented the same caption |
 | 48 | PARTIAL | Merge 3569d50 discarded parent2's dao.py wholesale; halves still inconsistent |
-| 56 | OPEN | Mid-document pages classified as documents (segmentation, ~40 docs) |
+| 56 | PARTIAL | Mid-document pages classified as documents -- detector built, 25 pairs found; merge step not built |
 | 58 | PARTIAL | Classification width 8 measured SLOWER than 4 on the real path; OCR width untested |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
@@ -3901,7 +3901,7 @@ Two further findings from the same experiment, worth keeping:
   read while `field_stops` recorded 9. Latent while cost documents are blocked
   outright; it would misreport immediately if the block is ever narrowed again.
 
-## 56. OPEN -- Mid-document pages are classified as if they were documents
+## 56. PARTIAL -- Mid-document pages are classified as if they were documents
 
 **What.** About 40 of the documents the title-anchor rule declines are not
 first pages at all. Their processed text opens with a page number or a body
@@ -3938,6 +3938,61 @@ author's argument could be double-counted as agreement between two.
 Measure against `tools/score_title_anchors.py`'s decline list before and after:
 the 40 should move out of `legal_*` and into their parent documents, and the
 manifest's document count for those cases should drop.
+
+**Investigated 2026-08-24. The diagnosis above is wrong on its central point,
+and both proposed fixes would have been applied in the wrong place.**
+
+*It is not a segmentation defect.* All 25 affected pairs arrived as SEPARATE
+RAW PDFs. None carries a `segmentation_proposal_*.json` or a parent document
+id, so `text_anchor_boundaries` and the judge tier never ran on them -- neither
+could have merged what it never saw. CASE_002 DOC_006 is `data/raw/.../DOC_006.pdf`
+and DOC_007 is a second file. The split is in the source material: a 10-page
+legal opinion was scanned into two files before intake. A fix belongs at intake
+or in a merge step, not in `segment_case.py`.
+
+*The proposed signal is both too broad and too narrow.* "First line is a bare
+page marker or a mid-outline heading", measured against the 47 declining
+`legal_*` documents:
+
+  * too broad -- 11 open `번    호 :`, the first field of a legal-opinion
+    letterhead, and 2 open `Ⅰ. 사안의 요지 및 질의내용`. Those are document
+    STARTS; merging them would destroy real boundaries.
+  * too narrow -- 6 open mid-sentence (`의 피고 H의 주의의무 ...`) with no
+    marker and no heading at all.
+
+**The signal that works: continuity of the printed page number.** A document
+whose page 1 prints `- 7 -` after a predecessor ending `- 6 -` is that
+document's second half. Measured over all 127 cases:
+
+    133  documents printing `- 1 -` on page 1   -> untouched (real starts)
+     25  documents continuing a predecessor      -> reported
+      0  documents printing > 1 that do NOT continue
+
+The zero is what makes it usable -- no ambiguous middle on this corpus, so a
+hit is a hit. 23 of the 25 are typed DIFFERENTLY on each side
+(`legal_opinion` | `legal_reference`), which is the double-counting this item
+was filed about: one author's single argument reaching claim analysis as two
+independent sources. CASE_046 holds a four-way split (DOC_006/007/008/009 =
+pages 1-2/3-4/5-6/7-10).
+
+Affected: 21 real cases (CASE_002, 010, 012-020, 046, 133, 140, 141, 200, 201,
+300, 301, 600, 601) plus two forks. **None in the 700-series** -- CASE_713's
+DOC_006 is a whole 10-page opinion, so the newer intake produced intact
+documents and this may be historical rather than live.
+
+**Built:** `tools/score_document_continuity.py` (read-only, zero provider
+calls) and `tests/test_score_document_continuity.py` (13 tests, verified by
+reintroducing four defect classes: unanchored marker, gap tolerance, hardcoded
+type comparison, scanning past the first line -- each caught by its own test).
+
+**Still OPEN, which is why this is PARTIAL:** nothing merges them. The detector
+reports and exits 0 deliberately -- merging documents is a decision about
+source material, and a stage should not fail over it. What a merge needs and
+does not yet have: a DAO path to combine two manifest entries and their page
+directories, renumbering the child's pages onto the parent, plus a decision on
+which of the two `document_type` values survives. Whether it is worth building
+depends on the 700-series answer above -- if new intake no longer produces
+these, the 21 cases are better repaired individually than automated.
 
 ## 57. FIXED -- Classification concurrency is not instrumented
 
