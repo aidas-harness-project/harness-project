@@ -33,7 +33,6 @@ the same pass.
 | 47 | OPEN | P8 correlated error observed live: both readers invented the same caption |
 | 48 | PARTIAL | Merge 3569d50 discarded parent2's dao.py wholesale; halves still inconsistent |
 | 56 | OPEN | Mid-document pages classified as documents (segmentation, ~40 docs) |
-| 57 | OPEN | Classification concurrency is not instrumented |
 | 58 | OPEN | Worker-width gains measured on the bench, not the real path |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
@@ -3940,7 +3939,7 @@ Measure against `tools/score_title_anchors.py`'s decline list before and after:
 the 40 should move out of `legal_*` and into their parent documents, and the
 manifest's document count for those cases should drop.
 
-## 57. OPEN -- Classification concurrency is not instrumented
+## 57. FIXED -- Classification concurrency is not instrumented
 
 **What.** `_timing_summary.json` records `worker_config` and
 `observed_max_concurrency` for `ocr_pages`, `redact_pages`, `documents` and
@@ -3960,6 +3959,30 @@ classification needs the same treatment, keyed on the two span names above. The
 check afterwards is a single real run: configured 8 and observed 8 means the
 pool is saturated, observed < 8 means something upstream is serialising it and
 the raise bought less than the bench implies.
+
+**Fixed 2026-08-24.** Both pools now carry a `ConcurrencyProbe`, entered around
+the per-item region and reported on the pool span after the pool drains -- the
+same shape `pool.ocr_pages` and `pool.redact_pages` already used. The
+aggregator needed no change: it derives `worker_config` and
+`observed_max_concurrency` from any `pool.*` span generically, and the schema's
+two maps are open and keyed by pool name, so `classification` and
+`classify_children` land in `_timing_summary.json` on their own.
+
+One thing the fix had to add beyond the probe: `pool.classification` was not
+recording `items`. Every one of these pools is capped by `min(workers, items)`,
+so an observed 3 against a configured 8 is only a finding when the workload
+held more than 3 documents -- without `items`, "serialised" and "only had three
+documents" are the same record.
+
+`tests/test_classification_concurrency_instrumented.py` (12 tests). Note that
+the first 8 drive a synthetic pool and passed against the UNFIXED tools -- they
+pin the probe and the aggregator, not the call sites. The last 4 assert on the
+real source and fail without the fix, which is what verified it.
+
+**Still not answered, and this gap was half about it:** whether a real run ever
+reaches 8. That needs one real case run and its `_timing_summary.json` read
+back; the instrumentation now makes the question answerable, it does not answer
+it. Carried by #58, which needs the same run.
 
 ## 58. OPEN -- The width measurements are bench-only
 

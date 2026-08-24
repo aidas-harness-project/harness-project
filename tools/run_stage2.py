@@ -310,13 +310,16 @@ def _classify_children(case_id, children, *, common, provider, workers, report):
     provider time, the remaining 21.1s being interpreter starts serialized
     between calls.
     """
+    concurrency = trace_mod.ConcurrencyProbe()
+
     def one(child):
         doc_id = child["document_id"]
         argv = common([str(TOOLS / "run_checkpoint1.py"), "classify-only",
                        case_id, doc_id])
         if provider:
             argv += ["--classifier-provider", provider]
-        return _run(argv, phase=f"classify:{doc_id}", progress=report)
+        with concurrency.enter():
+            return _run(argv, phase=f"classify:{doc_id}", progress=report)
 
     limit = max(1, min(workers or _CLASSIFY_WORKERS, len(children)))
     if limit == 1 or len(children) == 1:
@@ -324,7 +327,7 @@ def _classify_children(case_id, children, *, common, provider, workers, report):
 
     with trace_mod.span("pool.classify_children", category="compute",
                         case_id=case_id, worker_count=limit,
-                        items=len(children)):
+                        items=len(children)) as pool_span:
         # run_in_context: contextvars do not cross into pool workers, so a raw
         # submit would orphan each child's spans at parent None.
         submit = trace_mod.run_in_context(one)
@@ -333,7 +336,12 @@ def _classify_children(case_id, children, *, common, provider, workers, report):
             # Every future is waited on before any result is inspected: a child
             # that already finished has written its contract, and abandoning the
             # pool early would discard that work while leaving its output on disk.
-            return [future.result() for future in futures]
+            steps = [future.result() for future in futures]
+        # Bound rather than returned directly: the probe's maximum is only final
+        # once every worker has left, so the attribute has to be set after the
+        # pool exits and before this span closes.
+        pool_span.set(observed_max_concurrency=concurrency.max_observed)
+        return steps
 
 
 def _phase_ok(step: dict) -> bool:

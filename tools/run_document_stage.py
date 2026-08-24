@@ -305,11 +305,12 @@ def run_classification_stage(
 
     slots: list[dict | None] = [None] * len(targets)
     lock = threading.Lock()
+    concurrency = trace_mod.ConcurrencyProbe()
 
     def process(index: int, doc: dict) -> None:
         doc_id = doc["document_id"]
         with trace_mod.span("stage.classification", category="compute",
-                            case_id=case_id, doc_id=doc_id):
+                            case_id=case_id, doc_id=doc_id), concurrency.enter():
             try:
                 result = classify_existing(case_id, doc_id, held_by=held_by,
                                             run_id=run_id, classifier=classifier)
@@ -334,12 +335,16 @@ def run_classification_stage(
             process(index, doc)
     else:
         with trace_mod.span("pool.classification", category="compute",
-                            case_id=case_id, worker_count=workers):
+                            case_id=case_id, worker_count=workers,
+                            items=len(targets)) as pool_span:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [pool.submit(trace_mod.run_in_context(process), i, d)
                            for i, d in enumerate(targets)]
                 for future in concurrent.futures.as_completed(futures):
                     future.result()
+            # Set after the pool drains, matching pool.ocr_pages/pool.redact_pages:
+            # the probe's maximum is only final once every worker has left.
+            pool_span.set(observed_max_concurrency=concurrency.max_observed)
 
     results = [r for r in slots if r is not None]
     blocked = [r for r in results if r.get("status") not in _OK_STATUSES]
