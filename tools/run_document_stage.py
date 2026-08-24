@@ -93,6 +93,21 @@ DOC_WORKERS_ENV = "HARNESS_DOC_WORKERS"
 # than headroom. Kept apart from DOC_WORKERS because that value also drives
 # OCR and redaction, and redaction multiplies it by page workers -- 8 there
 # would put 32 redaction calls in flight against a provider semaphore of 24.
+#
+# CONTRADICTED ON THE REAL PATH, 2026-08-24 (known-gaps #58). Two forks of
+# CASE_133, 193 documents each, classification only (OCR already complete):
+# width 4 ran 206s, width 8 ran 218s -- 8 was 6% SLOWER, not 42% faster. Both
+# arms reached their configured width, so the pool is saturated, not
+# serialised. The cost moved into `lock.acquire`: 482s of self-time at width 4
+# (63% of total) against 1024s at width 8 (78%), for the same ~773 acquires --
+# one manifest lock hold per document, which the bench does not take because it
+# discards its results. Only 35 of 193 documents reach the model at all, so
+# provider latency is not the constraint at this width.
+#
+# The value is LEFT AT 8 deliberately: lowering it is a guess at the knee, and
+# no width below 4 has been measured. The lock breakdown says the fix is to
+# batch the manifest patches rather than to narrow the pool. Do not cite the
+# bench's -42% as a real-path figure.
 DEFAULT_CLASSIFY_WORKERS = 8
 CLASSIFY_WORKERS_ENV = "HARNESS_CLASSIFY_WORKERS"
 

@@ -33,7 +33,7 @@ the same pass.
 | 47 | OPEN | P8 correlated error observed live: both readers invented the same caption |
 | 48 | PARTIAL | Merge 3569d50 discarded parent2's dao.py wholesale; halves still inconsistent |
 | 56 | OPEN | Mid-document pages classified as documents (segmentation, ~40 docs) |
-| 58 | OPEN | Worker-width gains measured on the bench, not the real path |
+| 58 | PARTIAL | Classification width 8 measured SLOWER than 4 on the real path; OCR width untested |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
@@ -3984,7 +3984,7 @@ reaches 8. That needs one real case run and its `_timing_summary.json` read
 back; the instrumentation now makes the question answerable, it does not answer
 it. Carried by #58, which needs the same run.
 
-## 58. OPEN -- The width measurements are bench-only
+## 58. PARTIAL -- The width measurements were bench-only; the real path disagrees
 
 **What.** Both worker raises this session (classification 4 -> 8, OCR documents
 3 -> 12) were measured with `tools/bench_classify_workers.py` and
@@ -4005,3 +4005,55 @@ document_processing`), and both arms must use the same case to hold document
 count and page mix fixed. Report the delta as the real figure and treat the
 bench numbers as what they are -- the reason to try the width, not evidence of
 what it achieves.
+
+**Measured 2026-08-24 -- classification only. The bench number does not hold.**
+
+Two forks of CASE_133 (CASE_9406, CASE_9407), 193 classifiable documents each,
+`document_type` cleared through `dao.patch_manifest_document` so classification
+was genuinely pending in both. OCR was NOT re-run: every document already had
+`ocr_status: completed` and `redacted_text.md` on disk, which isolates
+classification from extraction cost. Same corpus, same provider, run
+back to back.
+
+| arm | `--doc-workers` | observed | wall | lock acquires | total lock wait | max wait |
+|---|---|---|---|---|---|---|
+| CASE_9406 | 4 | 4 | **206s** | 774 | 482.2s | 90s |
+| CASE_9407 | 8 | 8 | **218s** | 772 | 1023.7s | 210s |
+
+Width 8 was **6% SLOWER**, against a bench that predicted -42%. Both arms
+reached their configured width, so this is not a serialised pool -- #57's
+instrumentation is what establishes that, and it is the reading that makes the
+result interpretable rather than ambiguous.
+
+**Where it goes instead of into throughput:** `lock.acquire` is 482s of
+self-time at width 4 (63% of total) and 1024s at width 8 (78%), for the same
+~773 acquires. Doubling the width did not change how much locking there is; it
+doubled how long each acquire waits. `provider_calls` was 35 in both arms --
+only 35 of 193 documents reach the model at all, the rest being settled by the
+printed-form-title rule -- so the model is not the constraint at this width.
+The manifest patch is: one lock hold per document, on one file, which every
+worker needs.
+
+This is precisely the divergence the gap predicted: "the real path adds a
+manifest patch under a lock per document ... those serialise where the bench
+does not". The bench discards its results and takes no lock, so it measured
+provider latency alone.
+
+A lock-contention failure also surfaced at width 4 -- DOC_152 died with
+`PermissionError` on `document_manifest.json.lock` and had to be classified
+separately. One occurrence, not characterised; noted because it is the same
+contention the timings show, appearing as a hard failure rather than a delay.
+
+**What this does and does not settle.** It settles classification: 8 is not
+supported by the real path on this workload, and `DEFAULT_CLASSIFY_WORKERS = 8`
+now rests on a bench figure the real path contradicts. It does NOT settle the
+OCR raise (documents 3 -> 12), which was not measured here and whose calls are
+~20s of model time against classification's much shorter ones -- the balance
+between provider latency and lock wait is different there, so this result does
+not transfer. That, and the choice of what classification width should actually
+be, are what keep this PARTIAL rather than RESOLVED.
+
+Not yet done: no width below 4 was tried, so the knee is unlocated -- 206s at
+width 4 may itself be past it. The fix suggested by the lock breakdown is to
+batch the manifest patches rather than to lower the width, which would change
+what is being measured and is a separate piece of work.
