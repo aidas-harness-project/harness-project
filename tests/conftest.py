@@ -19,6 +19,20 @@ import llm_providers
 import policy_uid_resolver
 
 
+# Dummy credentials for the DEFAULT provider (openrouter), which -- unlike the
+# CLI default it replaced -- refuses to build without an API key and a model
+# slug. Tests that exercise a code path which constructs the default provider
+# were relying on "a CLI needs no credentials"; that property went away with
+# the transport, not with the test's intent. Nothing here reaches the network:
+# every provider call in the suite is stubbed, and a test that means to check
+# the missing-credential behaviour passes an explicit `env=` and so is
+# unaffected by these.
+@pytest.fixture(autouse=True)
+def _default_provider_credentials(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-a-real-credential")
+    monkeypatch.setenv("OPENROUTER_MODEL", "vendor/test-model")
+
+
 @pytest.fixture
 def isolated_dao(tmp_path, monkeypatch):
     """Points dao.py's module-level OUTPUTS/DATA at a tmp dir for this test.

@@ -38,6 +38,7 @@ import dao
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
 from llm_providers import (
+    DEFAULT_PROVIDER,
     ProviderConfig,
     ProviderConfigError,
     ProviderExecutionError,
@@ -51,13 +52,15 @@ from redaction import (PROMPT_VERSION, DevNoLlmRedactor, LlmRedactor,
 
 ROOT = Path(__file__).resolve().parent.parent
 DAO = ROOT / "tools" / "dao.py"
-# claude-cli, not codex-cli: on Windows the codex npm shim installs as
-# `codex.CMD`, which `shutil.which` resolves but `subprocess.run(["codex"])`
-# cannot launch (WinError 2) -- a batch file needs a shell, not execve. The
-# default has to be a provider that actually starts, so an operator who passes
-# no --provider gets a working redaction rather than a FileNotFoundError.
-# codex-cli remains selectable via --provider / HARNESS_REDACTION_PROVIDER.
-DEFAULT_REDACTION_PROVIDER = "claude-cli"
+# Follows the harness-wide default rather than pinning its own. The pin it
+# replaces existed for a CLI-only reason: on Windows the codex npm shim
+# installs as `codex.CMD`, which `shutil.which` resolves but
+# `subprocess.run(["codex"])` cannot launch (WinError 2), so the default had to
+# be a CLI that actually starts. An HTTP provider has no shim to launch, so
+# that constraint no longer selects the default -- and keeping a second copy of
+# "the default provider" here would silently diverge from llm_providers.py.
+# Any provider remains selectable via --provider / HARNESS_REDACTION_PROVIDER.
+DEFAULT_REDACTION_PROVIDER = DEFAULT_PROVIDER
 
 
 # Bumped when the CACHE ENTRY's own shape changes (not when redaction changes

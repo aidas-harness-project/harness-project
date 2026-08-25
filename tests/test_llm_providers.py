@@ -9,11 +9,18 @@ import pytest
 import llm_providers as providers
 
 
-def test_parse_provider_config_defaults_to_claude_cli():
+def test_parse_provider_config_defaults_to_openrouter():
     config = providers.parse_provider_config(env={})
 
-    assert config.provider_name == "claude-cli"
+    assert config.provider_name == "openrouter"
     assert config.model_name is None
+
+
+def test_claude_cli_is_still_selectable_after_the_default_moved():
+    config = providers.parse_provider_config(
+        SimpleNamespace(provider="claude-cli", model=None), env={})
+
+    assert config.provider_name == "claude-cli"
 
 
 def test_parse_provider_config_prefers_cli_args_over_environment():
@@ -37,11 +44,22 @@ def test_parse_provider_config_reads_environment_when_args_omitted():
     assert config.model_name == "fixture-v1"
 
 
-def test_build_provider_selects_claude_cli_by_default(tmp_path):
-    provider = providers.build_provider(env={}, root=tmp_path)
+def test_build_provider_selects_openrouter_by_default(tmp_path):
+    provider = providers.build_provider(
+        env={"OPENROUTER_API_KEY": "secret", "OPENROUTER_MODEL": "vendor/model-test"},
+        root=tmp_path,
+    )
+
+    assert isinstance(provider, providers.OpenRouterProvider)
+    assert provider.provider_name == "openrouter"
+    assert provider.model_name == "vendor/model-test"
+
+
+def test_build_provider_still_builds_claude_cli_when_asked(tmp_path):
+    provider = providers.build_provider(
+        providers.ProviderConfig(provider_name="claude-cli"), env={}, root=tmp_path)
 
     assert isinstance(provider, providers.ClaudeCliProvider)
-    assert provider.provider_name == "claude-cli"
     assert provider.model_name == "claude-cli"
     assert provider.root == tmp_path
 
