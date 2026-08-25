@@ -2177,6 +2177,35 @@ def build_provider(
     raise ProviderConfigError(f"unsupported provider {selected.provider_name!r}")
 
 
+def preflight(specs, *, env: Mapping[str, str] | None = None, root: Path = ROOT) -> list[str]:
+    """Try to BUILD each role, and report the ones that cannot be built.
+
+    `specs` is an iterable of `(label, provider_name, model_name)`; the caller
+    resolves those the way the role's own code path resolves them, because that
+    resolution differs per role and asking one generic question would give false
+    assurance for a partially configured environment.
+
+    Construction is local -- no network call, no provider round trip -- so this
+    costs nothing and turns "credentials or model missing" from a failure
+    partway through a paid run into a refusal before the first call. Only
+    ProviderConfigError is caught: that is the "cannot be configured" class. A
+    genuine execution failure is not a preflight matter and must surface where
+    it happens.
+
+    Returns a list of human-readable failures; empty means every role built.
+    """
+    source_env = os.environ if env is None else env
+    failures: list[str] = []
+    for label, provider_name, model_name in specs:
+        try:
+            build_provider(
+                ProviderConfig(provider_name or DEFAULT_PROVIDER, model_name),
+                env=source_env, root=root)
+        except ProviderConfigError as exc:
+            failures.append(f"{label}: {exc}")
+    return failures
+
+
 def _normalize_provider_name(provider_name: str) -> str:
     normalized = provider_name.strip().lower()
     if normalized not in SUPPORTED_PROVIDERS:

@@ -4,19 +4,21 @@ truth via a per-file, human-approved ledger (harness-guardrails-dev D2).
 Workflow:
     1. Dry run (default): propose a raw/ground_truth classification per file,
        by filename pattern. Nothing is written yet.
-    2. --init-ledger: for every file proposed as 'raw' (PDFs only -- see
-       below), run a cheap content pre-check (one vision call over the
-       document's first few pages) before writing the ledger -- filename
-       patterns alone missed a real case (see known-gaps.md item 2:
-       CASE_002's DOC_002/DOC_003, filenames looked like plain claim docs
-       but were actually completed third-party loss-adjustment reports with
-       stated payout figures). A flagged file gets `content_warning` set in
-       its ledger entry -- this does NOT auto-reject it, it makes the risk
-       visible for the human review step below, which is still mandatory
-       either way. Writes outputs/CASE_XXX/_source_ledger.json with every
+    2. --init-ledger: writes outputs/CASE_XXX/_source_ledger.json with every
        file's proposed classification and review_status: pending.
 
-       Scope of the content pre-check, deliberately narrow: only files
+       **The vision content pre-check that used to run here was removed
+       2026-08-20** (PoC owner's decision; see the comment at its former call
+       site). It made one vision call over each raw-proposed PDF's first pages
+       and set `content_warning` on a file whose contents looked like a
+       completed third-party loss-adjustment report -- the failure filename
+       patterns alone had missed (known-gaps.md item 2: CASE_002's
+       DOC_002/DOC_003). It was advisory only and never auto-rejected a file.
+       `content_warnings` is still an accepted input, so a ledger written while
+       the scan ran still validates and still shows its warning, and the
+       per-file HUMAN review gate below is unchanged and still mandatory.
+
+       Historical scope of that pre-check, deliberately narrow: only files
        proposed as 'raw' (a file already proposed as ground_truth is
        already headed for isolation, not the risk this catches), only PDFs
        (the only format this project's raw case files come in; a .txt/.md
@@ -74,14 +76,11 @@ from dao import (
     acquire_lock_blocking, release_lock,
 )
 from _validation import load_registry, validate_instance
-from llm_providers import (
-    DEFAULT_PROVIDER,
-    ProviderConfig,
-    ProviderConfigError,
-    ProviderExecutionError,
-    SUPPORTED_PROVIDERS,
-    build_provider,
-)
+# Only ProviderExecutionError is still used here: the vision content
+# pre-check that needed a provider was removed 2026-08-20, and importing
+# DEFAULT_PROVIDER / ProviderConfig / build_provider / SUPPORTED_PROVIDERS
+# after that left this module looking like it still selects one.
+from llm_providers import ProviderExecutionError
 from ocr_extract import scratch_dir, split_to_page_images
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod

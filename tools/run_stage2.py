@@ -89,6 +89,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 import dao as _dao
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
+import llm_providers
 import ocr_extract
 import redact_document
 from llm_providers import (DEFAULT_PROVIDER, ProviderConfig, ProviderConfigError,
@@ -241,30 +242,35 @@ def _preflight_providers(provider: str | None, model: str | None, *,
     source_env = os.environ if env is None else env
     failures: list[str] = []
 
-    def attempt(role: str, build):
-        try:
-            build()
-        except ProviderConfigError as exc:
-            failures.append(f"{role}: {exc}")
+    # The OCR trio keeps its own construction: build_ocr_providers applies the
+    # per-reader env chain (HARNESS_OCR_READER_A_MODEL and friends) that a
+    # generic build would not see.
+    try:
+        ocr_extract.build_ocr_providers(
+            reader_a_name=provider, reader_b_name=provider, comparator_name=provider,
+            reader_a_model=model, reader_b_model=model, comparator_model=model,
+            env=source_env)
+    except ProviderConfigError as exc:
+        failures.append(f"checkpoint 1 readers/comparator: {exc}")
 
-    attempt("checkpoint 1 readers/comparator", lambda: ocr_extract.build_ocr_providers(
-        reader_a_name=provider, reader_b_name=provider, comparator_name=provider,
-        reader_a_model=model, reader_b_model=model, comparator_model=model,
-        env=source_env))
     # The classifier, the segmentation judge and the split-child classification
     # all take the forwarded pair and otherwise fall back to the provider's own
     # env names -- one construction covers the three.
-    attempt("classifier / segmentation judge", lambda: build_provider(
-        ProviderConfig(provider or source_env.get("HARNESS_LLM_PROVIDER") or DEFAULT_PROVIDER,
-                       model or source_env.get("HARNESS_LLM_MODEL")),
-        env=source_env, root=ROOT))
+    specs = [("classifier / segmentation judge",
+              provider or source_env.get("HARNESS_LLM_PROVIDER"),
+              model or source_env.get("HARNESS_LLM_MODEL"))]
     if skip_redaction is not True:
-        attempt("checkpoint 2 redaction", lambda: build_provider(
-            ProviderConfig(
-                provider or source_env.get("HARNESS_REDACTION_PROVIDER")
-                or redact_document.DEFAULT_REDACTION_PROVIDER,
-                model or source_env.get("HARNESS_REDACTION_MODEL")),
-            env=source_env, root=ROOT))
+        # A case whose documents are ALL of a PII-free class would never call
+        # the redaction model, so this can in principle refuse a run that would
+        # have succeeded. Accepted deliberately: classification runs AFTER
+        # redaction precisely so the classifier reads the redacted layer, so at
+        # this point document_type is mostly unknown and the PII-free
+        # short-circuit almost never applies to a whole case.
+        specs.append(("checkpoint 2 redaction",
+                      provider or source_env.get("HARNESS_REDACTION_PROVIDER")
+                      or redact_document.DEFAULT_REDACTION_PROVIDER,
+                      model or source_env.get("HARNESS_REDACTION_MODEL")))
+    failures.extend(llm_providers.preflight(specs, env=source_env, root=ROOT))
     return failures
 
 

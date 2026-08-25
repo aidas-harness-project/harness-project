@@ -57,7 +57,14 @@ _VALUE_SHAPE_HINT = {
 def output_schema(field_rows: Sequence[Mapping[str, Any]]) -> dict:
     """The structured shape one document read must return.
 
-    A TRANSPORT schema, deliberately compact: claude-cli accepts --json-schema
+    A TRANSPORT schema, deliberately compact. The two constraints below are
+    claude-cli's, and they do NOT bind the default HTTP transport -- an
+    OpenRouter request carries its schema in the JSON body, with no argv cap,
+    and its function-parameters validator is permissive where ajv strict is
+    not. They are kept because the shape they force is legal everywhere and
+    the schema must stay sendable on every selectable provider; being tighter
+    than one transport requires is the safe direction. Concretely: claude-cli
+    accepts --json-schema
     only as an inline argv value under a conservative cap, and enumerating all
     eight member keys per field grew this ~400 chars per field. CASE_489's
     first real selective run built one of 16,868 chars against the 8,000 limit

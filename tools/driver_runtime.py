@@ -82,28 +82,80 @@ def make_receipt(*, case_id: str, run_id: str, stage: str, unit_id: str,
 _USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens",
                "cache_creation_input_tokens", "total_tokens")
 
+# The OpenAI-compatible vocabulary, renamed onto the canonical one above.
+# Anthropic-shaped backends (claude-cli, anthropic-api) already speak the
+# canonical names; openrouter and openai-api do not, and until this mapping
+# existed a receipt from the DEFAULT provider kept `total_tokens` and dropped
+# everything else -- verified by feeding a real OpenRouter usage block through
+# the old code, which returned `{'total_tokens': 1540}` from a block carrying
+# prompt, completion, cached and reasoning counts.
+#
+# A rename is not an estimate: `prompt_tokens` and `input_tokens` name the same
+# billed quantity. What would be an estimate is deriving one from the other, or
+# filling a missing figure with a zero -- neither happens here. Normalizing is
+# also the only thing that keeps two runs on different providers comparable,
+# which is the whole point of recording usage.
+_USAGE_ALIASES = (
+    ("prompt_tokens", "input_tokens"),
+    ("completion_tokens", "output_tokens"),
+)
+# Nested one level down, per provider family.
+_USAGE_NESTED_ALIASES = (
+    # (container key, source key, canonical key)
+    ("output_tokens_details", "thinking_tokens", "thinking_tokens"),
+    ("completion_tokens_details", "reasoning_tokens", "thinking_tokens"),
+    ("prompt_tokens_details", "cached_tokens", "cache_read_input_tokens"),
+    ("prompt_tokens_details", "cache_write_tokens", "cache_creation_input_tokens"),
+)
+_USAGE_COST_KEY = "cost"
 
-def _normalize_usage(usage: Mapping[str, Any] | None) -> dict[str, int]:
-    """Pull the integer token counts out of a provider usage mapping.
 
-    Copies only keys the receipt schema declares and only when the value is a
-    real non-boolean integer, so a provider that reports a partial or oddly
-    shaped usage block yields fewer fields rather than a fabricated zero.
-    `thinking_tokens` is nested under `output_tokens_details` in the claude-cli
-    envelope, so it is lifted explicitly.
+def _usage_int(value: Any) -> int | None:
+    """A real non-boolean, non-negative integer, or nothing.
+
+    Anything else yields no field at all rather than a fabricated zero -- a
+    provider that reports a partial or oddly shaped usage block must leave the
+    figure MISSING, which is distinguishable from a measured value.
+    """
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _normalize_usage(usage: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Pull the token counts out of a provider usage mapping, one vocabulary.
+
+    Copies only keys the receipt schema declares. The canonical names are taken
+    verbatim where the provider already uses them; the OpenAI-compatible names
+    are renamed onto them (see _USAGE_ALIASES). A canonical key already present
+    is never overwritten by an alias, so a provider that reports both keeps the
+    one it named directly.
     """
     if not isinstance(usage, Mapping):
         return {}
-    out: dict[str, int] = {}
+    out: dict[str, Any] = {}
     for key in _USAGE_KEYS:
-        value = usage.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        value = _usage_int(usage.get(key))
+        if value is not None:
             out[key] = value
-    details = usage.get("output_tokens_details")
-    if isinstance(details, Mapping):
-        thinking = details.get("thinking_tokens")
-        if isinstance(thinking, int) and not isinstance(thinking, bool) and thinking >= 0:
-            out["thinking_tokens"] = thinking
+    for source, canonical in _USAGE_ALIASES:
+        if canonical in out:
+            continue
+        value = _usage_int(usage.get(source))
+        if value is not None:
+            out[canonical] = value
+    for container, source, canonical in _USAGE_NESTED_ALIASES:
+        if canonical in out:
+            continue
+        details = usage.get(container)
+        if not isinstance(details, Mapping):
+            continue
+        value = _usage_int(details.get(source))
+        if value is not None:
+            out[canonical] = value
+    cost = usage.get(_USAGE_COST_KEY)
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
+        out["cost_usd"] = float(cost)
     return out
 
 

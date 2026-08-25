@@ -45,7 +45,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 import dao as _dao
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
-from llm_providers import SUPPORTED_PROVIDERS
+import llm_providers
+import ocr_extract
+from llm_providers import ProviderConfigError, SUPPORTED_PROVIDERS
 import redact_document as redact_document_mod
 from run_checkpoint1 import (
     build_classifier_provider,
@@ -464,6 +466,47 @@ def run_document_stage(
     }
 
 
+def _preflight_for(args) -> list[str]:
+    """Every provider this invocation will actually use, built before any work.
+
+    Roles differ per checkpoint, and each resolves its model from its own env
+    chain, so a partial environment could satisfy one checkpoint and fail the
+    next -- after the first had already been paid for. Only the roles this
+    invocation genuinely reaches are checked: `classify` never opens a reader,
+    and checkpoint 1 never opens the redaction model.
+
+    `classify` is checked ONLY when a classifier was named explicitly. Without
+    one the provider is built lazily on purpose -- a printed form title settles
+    most document types with no model call at all -- and demanding credentials
+    up front would break a path that legitimately never calls a model.
+    """
+    if args.checkpoint == "1":
+        try:
+            ocr_extract.build_ocr_providers(
+                reader_a_name=args.reader_a, reader_b_name=args.reader_b,
+                comparator_name=args.comparator,
+                reader_a_model=args.reader_a_model,
+                reader_b_model=args.reader_b_model,
+                comparator_model=args.comparator_model,
+                env=os.environ)
+        except ProviderConfigError as exc:
+            return [f"checkpoint 1 readers/comparator: {exc}"]
+        return []
+    if args.checkpoint == "2":
+        if args.skip_redaction is True:
+            return []
+        return llm_providers.preflight([(
+            "checkpoint 2 redaction",
+            args.provider or os.environ.get("HARNESS_REDACTION_PROVIDER")
+            or redact_document_mod.DEFAULT_REDACTION_PROVIDER,
+            args.model or os.environ.get("HARNESS_REDACTION_MODEL"),
+        )])
+    if args.classifier_provider or args.classifier_model:
+        return llm_providers.preflight([(
+            "classification", args.classifier_provider, args.classifier_model)])
+    return []
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -496,7 +539,7 @@ def main(argv=None):
              "document (default 4, or HARNESS_REDACT_WORKERS).")
     ap.add_argument(
         "--provider", choices=SUPPORTED_PROVIDERS, default=None,
-        help="Checkpoint 2 only: redaction provider (default claude-cli).")
+        help="Checkpoint 2 only: redaction provider. Defaults to HARNESS_REDACTION_PROVIDER, then to llm_providers.DEFAULT_PROVIDER -- not to any one named CLI.")
     ap.add_argument(
         "--model", default=None,
         help="Checkpoint 2 only: redaction model.")
@@ -555,6 +598,18 @@ def main(argv=None):
             "arise for --on-disagreement to resolve.")
 
     trace_mod.configure(args.case_id, args.run_id)
+
+    unresolvable = _preflight_for(args)
+    if unresolvable:
+        print(json.dumps({
+            "status": "failed",
+            "case_id": args.case_id,
+            "run_id": args.run_id,
+            "stopped_at": "preflight",
+            "reason": "the checkpoint cannot construct every provider it needs, "
+                      "so nothing was run: " + "; ".join(unresolvable),
+        }, ensure_ascii=False, indent=2))
+        return 1
 
     if args.checkpoint == "classify":
         classifier = None

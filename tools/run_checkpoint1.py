@@ -1671,6 +1671,24 @@ def main(argv=None):
             "throughput run with P8 off, or --on-disagreement for a dual-read run "
             "that defers the human adjudication."
         )
+    if args.command == "run":
+        # Preflight the readers, which this command certainly calls. Deliberately
+        # NOT applied to classify-only below: that path builds its provider
+        # lazily because a printed form title settles most document types with
+        # no model call, and demanding credentials up front would break a run
+        # that legitimately never calls a model.
+        try:
+            build_ocr_providers(
+                reader_a_name=args.reader_a, reader_b_name=args.reader_b,
+                comparator_name=args.comparator,
+                reader_a_model=args.reader_a_model,
+                reader_b_model=args.reader_b_model,
+                comparator_model=args.comparator_model,
+                env=os.environ)
+        except ProviderConfigError as exc:
+            sys.exit(f"error: checkpoint 1 readers/comparator cannot be built, "
+                     f"so nothing was run: {exc}")
+
     if args.command == "classify-only":
         # The provider is built lazily: a printed form title decides most types
         # with no model call, and constructing one would resolve credentials for

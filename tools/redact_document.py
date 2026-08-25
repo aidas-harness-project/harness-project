@@ -3,7 +3,8 @@
 All case data access goes through tools/dao.py. Redaction itself goes through
 the `redaction.Redactor` abstraction (today: `LlmRedactor` over any configured
 provider), so a future dedicated de-identification model can drop in without
-changing this tool. Dev-phase default provider is `claude-cli`.
+changing this tool. The provider defaults to HARNESS_REDACTION_PROVIDER,
+then to llm_providers.DEFAULT_PROVIDER.
 
 Redaction is span-substitution, not page rewriting: the model only IDENTIFIES
 PII values and `redaction.py` deterministically replaces them in the source, so

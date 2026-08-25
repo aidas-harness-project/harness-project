@@ -65,7 +65,7 @@
     },
     "provider_usage": {
       "type": "object",
-      "description": "Token counts the provider itself reported for this unit's call, copied verbatim -- never estimated. Optional because not every provider returns usage and a missing figure must stay distinguishable from a guessed one. Without it a unit's wall time has no measured explanation and the only available reading is speculation: on 2026-08-19 M1 varied 117s-492s and M2 64s-564s across the CASE_302~321 corpus with no recorded token count to test 'output volume' against.",
+      "description": "Token counts the provider itself reported for this unit's call, copied verbatim -- never estimated. Optional because not every provider returns usage and a missing figure must stay distinguishable from a guessed one. Without it a unit's wall time has no measured explanation and the only available reading is speculation: on 2026-08-19 M1 varied 117s-492s and M2 64s-564s across the CASE_302~321 corpus with no recorded token count to test 'output volume' against. The key names are ONE canonical vocabulary, not any single provider's: an OpenAI-compatible backend (openrouter, openai-api) reports prompt_tokens / completion_tokens / prompt_tokens_details.cached_tokens / completion_tokens_details.reasoning_tokens, and driver_runtime._normalize_usage RENAMES those onto the fields below. A rename is not an estimate -- both vocabularies mean the same billed quantity -- and normalizing here is what keeps two runs on different providers comparable at all.",
       "additionalProperties": false,
       "properties": {
         "input_tokens": {
@@ -91,6 +91,11 @@
         "thinking_tokens": {
           "type": "integer",
           "minimum": 0
+        },
+        "cost_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Total charge for this unit's call, as the provider reported it (OpenRouter's `usage.cost`). Not a token count, and absent for a provider that reports no cost -- never derived from tokens and a price table."
         }
       }
     }

@@ -607,3 +607,22 @@ def test_a_contract_read_span_carries_the_filename(tmp_path, monkeypatch):
     reads = [s for s in spans if s["op"] == "dao.read_contract"]
     assert reads, "the read emitted no span"
     assert reads[0]["attrs"]["contract_name"] == "extracted_claim_fields.json"
+
+
+def test_the_suite_never_configures_tracing_into_the_real_outputs_tree(tmp_path):
+    """conftest redirects trace's DEFAULT root; this is what proves it.
+
+    Observed before the redirect existed: `outputs/CASE_9200/_trace/` held
+    shards whose model_name was `vendor/model-test`, this suite's own fixture
+    value. The tree is gitignored so nothing was committed, but every other
+    filesystem test here runs against tmp_path and tracing had opted out.
+    """
+    import trace as trace_mod
+
+    trace_mod.configure("CASE_TRACE_ISOLATION", "RUN_ISOLATION_1")
+    spans_dir = trace_mod._state["spans_dir"]
+
+    assert spans_dir is not None
+    repo_outputs = Path(trace_mod.__file__).resolve().parent.parent / "outputs"
+    assert repo_outputs not in Path(spans_dir).resolve().parents, (
+        f"tracing configured into the real outputs tree: {spans_dir}")
