@@ -5,6 +5,7 @@
 exercised here against tmp_path fixture trees, never the real repo's
 .claude/.codex/.agents directories.
 """
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -189,8 +190,15 @@ def test_local_harness_is_fail_closed_and_ground_truth_blind():
     assert "ignore-and-proceed" not in guardrails
     assert "abandon-run" in guardrails
     assert "## P11. Medical review is a structural human gate" in guardrails
-    assert "No agent or tool in the local Units 1–7 harness reads" in dev_guardrails
-    assert "deferred to an isolated Unit 11 service" in dev_guardrails
+    # D1 was amended 2026-08-22: the blanket ban became a ban on every stage
+    # that PRODUCES pipeline output, plus one gated exception for the
+    # verification agent. What this test guards is therefore no longer "nobody
+    # reads it" but the shape of the exception -- who is excluded, and the two
+    # conditions that keep the carve-out from spreading.
+    assert "No agent or tool that **produces** pipeline output reads" in dev_guardrails
+    assert "**Only through the DAO.**" in dev_guardrails
+    assert "**Its result is terminal.**" in dev_guardrails
+    assert "isolated Unit 11 service" in dev_guardrails
     assert "Deferred Evaluation placeholder" in evaluation_agent
     assert "Do not inspect case data, ground truth, run state" in evaluation_agent
     assert "BLOCKED: Evaluation is unavailable" in evaluation_agent
@@ -223,8 +231,29 @@ def test_local_harness_is_fail_closed_and_ground_truth_blind():
     assert derive_position < case_type_position < publish_position
     assert "`.lock` present" not in pipeline_skill
     assert "check-lock" in pipeline_skill
-    assert "No local Evaluation stage or read-ground-truth command is authorized" in settings
-    assert '"allow"' not in settings
+    # The deny globs are the part that must never move: a direct Read has no
+    # gate, no attribution and no log, so it stays refused for every agent
+    # including the verification one.
+    for denied in (
+        "Read(./data/ground_truth/**)",
+        "Read(./source-cases/**)",
+        "Read(./data/raw/**)",
+        "Read(./archive/sources/**)",
+    ):
+        assert denied in settings, denied
+
+    # An allow list now exists, and its contents are the whole point: exactly
+    # the gated DAO command, nothing broader. A bare `"allow" not in settings`
+    # can no longer express that, so check the entries themselves -- an added
+    # `Bash(cat:*)` or a second command has to fail here rather than pass as a
+    # config tweak.
+    allow = json.loads(settings)["permissions"].get("allow", [])
+    assert allow, "the sanctioned ground-truth door must be allowed explicitly"
+    assert all(
+        entry.startswith(("Bash(python tools/dao.py read-ground-truth",
+                          "Bash(python3 tools/dao.py read-ground-truth"))
+        for entry in allow
+    ), allow
     assert '"Run CASE_003 evaluation"    -> denied locally' in readme
 
 

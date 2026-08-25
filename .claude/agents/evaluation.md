@@ -10,4 +10,6 @@ Do not inspect case data, ground truth, run state, or Evaluation artifacts. Do n
 
 `BLOCKED: Evaluation is unavailable in the local Units 1-7 harness and requires the deferred authenticated isolated Unit 11 service.`
 
-Human expert review is completed by the Units 1–7 operator workflow without this agent. It does not authorize local ground-truth access.
+Human expert review is completed by the Units 1–7 operator workflow without this agent. It does not authorize local ground-truth access for this agent.
+
+Scope note (2026-08-22): `harness-guardrails-dev` D1 now permits one narrow local comparison — the verification agent `screening-fidelity` scoring a finished screening report against the case's ground truth, through `dao.py read-ground-truth --caller-stage screening_fidelity`. That is a separate agent with a separate stage name. This placeholder is unchanged: the full Evaluation suite over draft reports stays deferred, and your response is still the BLOCKED line above.

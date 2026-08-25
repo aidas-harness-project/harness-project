@@ -1,11 +1,17 @@
 {
-  "//": "Structural D1/P2 boundary (fleet review). These deny rules stop local Units 1–7 agents from reading answer-key or raw-source paths through Read. No local Evaluation stage or read-ground-truth command is authorized: Evaluation v1/v2 is deferred to the isolated Unit 11 service with separate storage and credentials. NOTE: this does not seal arbitrary Bash-based reads; the production boundary still requires Unit 11 OS/storage isolation.",
+  "//": "Structural D1/P2 boundary (fleet review, amended 2026-08-22). The deny rules stop EVERY agent — including the verification agent — from opening answer-key or raw-source paths through Read. They are unchanged and must stay that way: direct reads have no gate, no attribution, and no log.",
+  "//2": "What changed: one verification stage may now reach ground truth, through exactly one door. `dao.py read-ground-truth` is allowed below because it is gated (caller_stage must be in dao.GROUND_TRUTH_ALLOWED_STAGES), conditioned (that version's human review must be marked complete), and logged. Permissions here are project-wide and cannot be scoped per agent, so the per-agent limit lives where it can be enforced — in the DAO's stage gate, not in this file. See harness-guardrails-dev D1 for the four conditions, including that the verification result is terminal and no producing stage may consume it.",
+  "//3": "The full Evaluation suite (draft report vs ground truth, evaluation_result.schema.json) stays deferred to the isolated Unit 11 service with separate storage and credentials. NOTE: this file does not seal arbitrary Bash-based reads; the production boundary still requires Unit 11 OS/storage isolation.",
   "permissions": {
     "deny": [
       "Read(./data/ground_truth/**)",
       "Read(./source-cases/**)",
       "Read(./data/raw/**)",
       "Read(./archive/sources/**)"
+    ],
+    "allow": [
+      "Bash(python tools/dao.py read-ground-truth:*)",
+      "Bash(python3 tools/dao.py read-ground-truth:*)"
     ]
   }
 }
