@@ -60,6 +60,18 @@ material, not a live spec).
   none of the other. `redacted_text_sha256` still covers the FULL document, so a quote from a
   narrowed read verifies identically; `pages_omitted`/`total_page_count` say whether a read was
   narrowed. A requested page the document lacks is refused, never returned empty.
+- `config/providers/stage_models_v0.1.json` + `tools/stage_models.py` -- **the one place that says
+  which model a stage runs on.** Before it the answer was split across eleven `.claude/agents/*.md`
+  frontmatters (a Claude Code tier, not a provider slug, and only for subagent stages) and a scatter
+  of per-role env vars, so nothing could be read to answer the question for the pipeline. Resolution
+  is explicit flag > this file (role, then stage, then `default`) > environment >
+  `llm_providers.DEFAULT_PROVIDER`; the file outranks the environment because it is checked in and
+  reviewed while the environment is ambient. **It ships EMPTY on purpose** -- an undecided model is
+  an ABSENT key, never a plausible slug, and every lookup falls through exactly as it did before the
+  file existed. `python tools/stage_models.py [STAGE --role ROLE]` prints what resolves. Consumers
+  today: the three P8 roles in `ocr_extract.build_ocr_providers`, redaction in
+  `redact_document.py`, and `run_consistency_check.py judge`. A role is only listed once something
+  reads it.
 - `python tools/validate_output.py <file.json>` -- standalone schema validation (also used internally by `dao.py write-contract`).
 - `python tools/intake_case.py <source-cases folder> <CASE_ID>` -- case intake with the D2 per-file review ledger.
 - `python tools/document_assembly.py --sections-file <spec.json> --held-by <agent> --run-id <run>` -- renders narrative reports and auto-generates `[E#]` citation tags + sidecar (P1). DAO-backed like any other write path: locked, atomic, sidecar schema-validated before either file touches disk.

@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import claim_analysis_contracts as contracts
+import stage_models
 import driver_runtime
 from llm_providers import (ProviderConfigError, add_provider_args, build_provider,
                            parse_provider_config)
@@ -849,6 +850,8 @@ def main(argv: list[str] | None = None) -> int:
     runners = {"prepare": run_prepare, "judge": run_judge, "register": run_register}
     runner = runners[args.subcommand]
     if args.subcommand == "judge":
+        args.provider, args.model = stage_models.resolve(
+            STAGE, "judge", provider=args.provider, model=args.model)
         try:
             provider = build_provider(parse_provider_config(args))
         except ProviderConfigError as exc:

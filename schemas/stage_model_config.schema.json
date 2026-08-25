@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage_model_config.schema.json",
+  "title": "Per-stage provider and model selection v0.1",
+  "description": "One place that says which model each pipeline stage runs on. Before this file the answer lived in eleven `.claude/agents/*.md` frontmatters (as a Claude Code model tier, not a provider slug) and in a scatter of per-role environment variables -- HARNESS_OCR_READER_A_MODEL, HARNESS_REDACTION_MODEL, HARNESS_OPENROUTER_MODEL -- so no single artifact answered 'what ran on what'. An entry may be present and EMPTY: that means 'not decided yet', which is different from a value, and resolution falls through to the environment exactly as it did before.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "stages"],
+  "properties": {
+    "schema_version": { "const": "stage_model_config.v0.1" },
+    "config_version": { "type": "string", "minLength": 1 },
+    "note": { "type": "string" },
+    "default": {
+      "$ref": "#/$defs/selection",
+      "description": "Applied to any stage with no entry of its own. Absent means no default, and every stage falls through to the environment."
+    },
+    "stages": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Keyed by the canonical stage name. The vocabulary is the one run_state.schema.json enumerates -- a stage this pipeline cannot open is a typo, not a configuration.",
+      "propertyNames": {
+        "enum": [
+          "intake",
+          "document_segmentation",
+          "document_processing",
+          "indexing",
+          "policy_clause_processing",
+          "claim_analysis",
+          "denial_response",
+          "consistency_check",
+          "screening_report",
+          "draft_report_v1",
+          "draft_report_v2",
+          "critic_v1",
+          "critic_v2",
+          "denial_validation"
+        ]
+      },
+      "patternProperties": { "^.*$": { "$ref": "#/$defs/stage" } }
+    }
+  },
+  "$defs": {
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A name from llm_providers.SUPPORTED_PROVIDERS. Not enumerated here on purpose: the provider set is code, and duplicating it into a schema would let the two drift."
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Provider-specific slug, e.g. an OpenRouter vendor-prefixed id. Never invented -- an undecided model is an ABSENT key, not a placeholder string."
+        },
+        "note": { "type": "string" }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "note": { "type": "string" },
+        "roles": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "A stage that makes several distinct calls. A role inherits the stage's provider/model unless it overrides them. This exists because P8's two readers are only genuinely independent if they can be given DIFFERENT models -- a single stage-level value cannot express that, and harness-guardrails-dev is explicit that selecting different readers is a per-reader decision.",
+          "propertyNames": {
+            "enum": [
+              "reader_a",
+              "reader_b",
+              "comparator",
+              "classifier",
+              "redaction",
+              "segmentation_judge",
+              "judge",
+              "extraction",
+              "synthesis"
+            ]
+          },
+          "patternProperties": { "^.*$": { "$ref": "#/$defs/selection" } }
+        }
+      }
+    }
+  }
+}

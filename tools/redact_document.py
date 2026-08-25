@@ -46,6 +46,7 @@ from llm_providers import (
     SUPPORTED_PROVIDERS,
     build_provider,
 )
+import stage_models
 from redaction import (PROMPT_VERSION, DevNoLlmRedactor, LlmRedactor,
                        NoPiiClassRedactor, RedactionLeakError, RedactionOutcome,
                        RedactionParseError)
@@ -571,9 +572,11 @@ def main() -> None:
     parser.add_argument("doc_id")
     parser.add_argument("--held-by", required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--provider", choices=SUPPORTED_PROVIDERS,
-                        default=os.environ.get("HARNESS_REDACTION_PROVIDER", DEFAULT_REDACTION_PROVIDER))
-    parser.add_argument("--model", default=os.environ.get("HARNESS_REDACTION_MODEL"))
+    # Defaults resolved AFTER parsing, not baked into the argparse default:
+    # reading the environment here made args.provider non-None on every run, so
+    # a recorded selection could never have applied.
+    parser.add_argument("--provider", choices=SUPPORTED_PROVIDERS, default=None)
+    parser.add_argument("--model", default=None)
     parser.add_argument("--workers", type=int, default=None, metavar="N",
                         help="Pages redacted concurrently (default %d, or "
                              "HARNESS_REDACT_WORKERS). 1 = the strictly sequential "
@@ -597,6 +600,13 @@ def main() -> None:
         "--redact", dest="skip_redaction", action="store_false",
         help="Force the redaction model on even under HARNESS_SKIP_REDACTION.")
     args = parser.parse_args()
+    resolved_provider, resolved_model = stage_models.resolve(
+        "document_processing", "redaction",
+        provider=args.provider, model=args.model)
+    args.provider = (resolved_provider
+                     or os.environ.get("HARNESS_REDACTION_PROVIDER")
+                     or DEFAULT_REDACTION_PROVIDER)
+    args.model = resolved_model or os.environ.get("HARNESS_REDACTION_MODEL")
 
     # Without this every span below is a no-op: trace.enabled() stays False
     # until a case/run is configured, so the redact.page and subprocess.dao

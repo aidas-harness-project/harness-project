@@ -44,6 +44,7 @@ from pathlib import Path
 
 # tools/trace.py, not the stdlib `trace` module -- tools/ precedes stdlib on
 # sys.path for every entry point in this repo.
+import stage_models
 import trace as trace_mod
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -381,6 +382,18 @@ def build_ocr_providers(
     source_env = env if env is not None else os.environ
     default_provider = source_env.get("HARNESS_LLM_PROVIDER") or DEFAULT_PROVIDER
     default_model = source_env.get("HARNESS_LLM_MODEL")
+
+    # The recorded per-role selection sits between the explicit argument and the
+    # environment: a checked-in file beats an ambient variable, and an argument
+    # beats both. An undecided role resolves to None here, so the env chain
+    # below runs exactly as it did before the config existed.
+    reader_a_name, reader_a_model = stage_models.resolve(
+        "document_processing", "reader_a", provider=reader_a_name, model=reader_a_model)
+    reader_b_name, reader_b_model = stage_models.resolve(
+        "document_processing", "reader_b", provider=reader_b_name, model=reader_b_model)
+    comparator_name, comparator_model = stage_models.resolve(
+        "document_processing", "comparator", provider=comparator_name,
+        model=comparator_model)
 
     reader_a_provider = reader_a_name or source_env.get("HARNESS_OCR_READER_A_PROVIDER") or default_provider
     reader_b_provider = reader_b_name or source_env.get("HARNESS_OCR_READER_B_PROVIDER") or reader_a_provider

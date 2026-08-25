@@ -1,0 +1,37 @@
+{
+  "schema_version": "stage_model_config.v0.1",
+  "config_version": "stage_models.v0.1",
+  "note": "Which model each stage runs on. Every entry below is deliberately EMPTY: the models have not been chosen yet, and writing a plausible slug here would be indistinguishable from a decision nobody made. An empty entry resolves exactly as the pipeline did before this file existed -- CLI flag, then environment, then llm_providers.DEFAULT_PROVIDER. Fill an entry in and it takes effect for that stage without touching any code. Stages absent from this file (intake, indexing) make no provider call.",
+  "stages": {
+    "document_processing": {
+      "note": "Fans out to several roles. The two P8 readers are only genuinely independent if they are given DIFFERENT models; leaving both empty means one model reads twice, which harness-guardrails-dev records as a weak P8 either way. Only the roles with a consumer are listed -- classification and the segmentation judge resolve their own provider today and get an entry when their code reads this file.",
+      "roles": {
+        "reader_a": {},
+        "reader_b": {},
+        "comparator": {},
+        "redaction": {}
+      }
+    },
+    "policy_clause_processing": {
+      "note": "Deterministic today -- the driver records provider_name 'deterministic' and makes no call. Listed so its absence of a model is a stated fact rather than an omission."
+    },
+    "claim_analysis": {
+      "note": "Its driver resolves its provider from --provider/--model today; it gets an entry with roles when it reads this file."
+    },
+    "denial_response": {},
+    "consistency_check": {
+      "note": "The judgement runs either as the consistency-check subagent or as `run_consistency_check.py judge`. This entry applies to the driver route only -- a subagent's model is the session's, which this file cannot set.",
+      "roles": {
+        "judge": {}
+      }
+    },
+    "screening_report": {
+      "note": "Driver route not built yet (known-gaps 55). The entry exists so the model decision has a home before the code does."
+    },
+    "draft_report_v1": {},
+    "draft_report_v2": {},
+    "critic_v1": {},
+    "critic_v2": {},
+    "denial_validation": {}
+  }
+}
