@@ -91,6 +91,29 @@ def test_single_reader_document_rollup_is_honest(page_image: Path) -> None:
     assert result["pages"][0]["text_path"] is not None
 
 
+def test_single_reader_names_no_provider_for_the_readers_that_never_ran(
+        page_image: Path) -> None:
+    """reader_b and the comparator make no call, so they may not be named.
+
+    The label fallback used to return the literal "claude-cli", so a real
+    single-reader run recorded `vision_model_name: "claude-cli;
+    comparator=claude-cli"` -- a provider named as having read the page in the
+    same contract whose `cross_validation_mode` says nothing was
+    cross-validated. Plausible while claude-cli was the default and false the
+    moment it was not; false under --single-reader either way.
+    """
+    out = _run(page_image, single_reader=True)
+    result = rc._assemble_ocr_result(
+        "CASE_999", "DOC_001", "RUN_20260811_001", out, source_total_pages=1)
+
+    assert result["vision_model_name"] == "not_recorded; comparator=not_recorded"
+    for field in ("ocr_engine", "vision_model_name"):
+        assert "claude-cli" not in result[field], (
+            f"{field} names a provider that never ran")
+    # The reader that DID run is still named in full.
+    assert result["ocr_engine"] == "fixture:stub-1"
+
+
 def test_single_reader_contract_validates(page_image: Path) -> None:
     out = _run(page_image, single_reader=True)
     result = rc._assemble_ocr_result(

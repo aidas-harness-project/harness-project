@@ -8,8 +8,9 @@ extraneous content (a fabricated appendix, meta-commentary, anything one
 reading has that the other lacks entirely) as a disagreement even when the
 core facts otherwise match.
 
-The reader/comparator backends are provider-configurable (claude-cli /
-codex-cli / openai-api / openrouter). All available providers are LLM-vision-backed, so any
+The reader/comparator backends are provider-configurable (openrouter /
+claude-cli / codex-cli / anthropic-api / openai-api). All available providers
+are LLM-vision-backed, so any
 reader pair is a documented weak-P8 (see _classify_cross_validation): the two
 reads share one extraction technology class and cannot catch a correlated
 confident error. A genuinely technology-independent reader (a real OCR engine)
@@ -26,7 +27,7 @@ cleaned up on exit), not system /tmp.
 Usage:
     python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf
     python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf \
-        --reader-a claude-cli --reader-b codex-cli --comparator claude-cli
+        --reader-a PROVIDER --reader-b PROVIDER --comparator PROVIDER
 """
 import argparse
 import contextlib

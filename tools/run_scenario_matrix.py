@@ -86,7 +86,8 @@ def run_matrix(
     # call below -- rather than letting each call re-resolve provider names
     # independently. Without this, resolve_from_raw_ocr()'s classification step
     # (called once per scenario) would fall back to build_classifier_provider()'s
-    # own default (real claude-cli) even when the baseline ran against an
+    # own default (the configured DEFAULT_PROVIDER) even when the baseline
+    # ran against an
     # injected/non-default provider, silently reintroducing the P8/OCR
     # bottleneck this script exists to let callers avoid. Resolving once also
     # keeps the classifier consistent with the actual comparator used, matching

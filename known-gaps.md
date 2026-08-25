@@ -34,6 +34,9 @@ the same pass.
 | 48 | PARTIAL | Merge 3569d50 discarded parent2's dao.py wholesale; halves still inconsistent |
 | 56 | PARTIAL | Mid-document pages classified as documents -- detector built, 25 pairs found; merge step not built |
 | 58 | PARTIAL | Classification width 8 measured SLOWER than 4 on the real path; OCR width untested |
+| 59 | OPEN | The agent-executed stages never reach llm_providers, so the OpenRouter switch cannot cover them |
+| 60 | OPEN | No OpenRouter call has ever been made against the real service -- everything is verified statically |
+| 61 | OPEN | scan_intake_content has no production caller after D2's pre-check was removed |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
@@ -4112,3 +4115,69 @@ Not yet done: no width below 4 was tried, so the knee is unlocated -- 206s at
 width 4 may itself be past it. The fix suggested by the lock breakdown is to
 batch the manifest patches rather than to lower the width, which would change
 what is being measured and is a separate piece of work.
+## 59. The agent-executed stages never reach `llm_providers`, so the OpenRouter switch cannot cover them -- OPEN 2026-08-25
+
+The 2026-08-21 switch moved every LLM call in `tools/` onto `openrouter`, and
+2026-08-25 carried it into the layers that call those tools. Neither touched
+the stages that run as **Claude Code subagents** rather than as code:
+`consistency_check` (the judgement half), `screening_report`, `draft_report`
+(v1 and v2), `critic`, and Phase 2's `denial_validation`. Their specs mention
+no provider tool and no provider flag -- grepping
+`.claude/agents/{screening-report,draft-report,critic,consistency-check,denial-validation}.md`
+for `run_checkpoint1|run_stage2|redact_document|ocr_extract|run_claim_analysis_selective|run_denial_response_driver|segment_case|--provider`
+returns **0 matches each**. They are executed by the session model itself, so
+there is no call site to point at a provider.
+
+Why it matters: "the harness runs on OpenRouter" is true of the mechanical
+stages and false of the judgement stages, and nothing in the repo said so.
+Anyone reading `DEFAULT_PROVIDER` would reasonably conclude the whole pipeline
+moved. A cost, latency or model-choice statement about the pipeline is a
+statement about two different execution paths.
+
+What closes it: converting those stages to drivers -- prompt builder, transport
+schema, parser, receipt, correction gate -- the way `claim_analysis` and
+`denial_response` already are. That is a pipeline-architecture change, not a
+wiring fix: the current split is deliberate (drivers own mechanics, agents own
+judgement), and `critic` in particular is defined by reading a draft the way a
+reviewer would. Scope per stage is roughly what `run_claim_analysis_selective.py`
+carries. **Not started, and it needs an explicit decision before it is** --
+recorded here so the boundary is visible rather than assumed.
+
+## 60. No OpenRouter call has ever been made against the real service -- OPEN 2026-08-25
+
+Everything about the `openrouter` provider is verified statically or against a
+loopback server: 76 provider tests, a real-socket suite, 21 defects reinserted
+one at a time. **No request has ever reached openrouter.ai** -- there is no API
+key in this environment.
+
+Unverified as a result: whether real models honour the forced `emit_result`
+tool call against the harness's actual transport schemas; how far
+`provider: {"data_collection": "deny"}` narrows the routable model set (the
+per-endpoint data policy needs `GET /api/v1/models/:slug/endpoints`, which
+needs a key); whether the real edge accepts the client as configured; and the
+real shape of a 429 under load.
+
+What closes it: `python tools/provider_smoke.py --provider openrouter --model
+<slug>` for the transport, then one real case through Stage 2 with the timing
+records kept. The smoke tool sends no case data.
+
+## 61. `scan_intake_content` has no production caller -- OPEN 2026-08-25
+
+D2's vision content pre-check was removed on 2026-08-20 (item 44 / PoC owner's
+decision), which left `BaseProvider.scan_intake_content` -- and the
+`_require_scan_images` fail-closed guard behind it -- implemented on every
+provider with nothing in `tools/` calling it. Grepping the repo returns only
+test call sites. `tools/intake_case.py`'s provider imports were dead for the
+same reason and were removed on 2026-08-25, along with the module docstring
+that still described the pre-check as a live step.
+
+Not a defect today: the per-file HUMAN review gate that the scan only advised
+is unchanged and still mandatory, so nothing is unguarded. It matters because
+an interface method with no caller drifts unnoticed -- the OpenRouter
+implementation of it was written and tested in 2026-08-21 for a surface the
+pipeline does not use.
+
+What closes it: either re-wire the pre-check (a decision the PoC owner already
+made against once), or retire the method from the provider interface. Left open
+rather than removed unilaterally, because removing it would also delete the
+only fail-closed vision-scan guard if the check ever comes back.
