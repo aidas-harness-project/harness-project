@@ -188,9 +188,20 @@ does not change any gate or state transition. `aggregate-trace` reports
 incomplete stage coverage instead of reconstructing missing timings from
 run-state marker timestamps.
 
+**No stage command in this skill names a provider.** The `--provider
+claude-cli` these carried was removed 2026-08-25, when `openrouter` became
+`DEFAULT_PROVIDER`: an explicit flag outranks the environment, so the pin made
+the harness-wide default unreachable and a transport switch meant editing this
+file. Selection falls to `HARNESS_LLM_PROVIDER`, then `DEFAULT_PROVIDER`.
+Redaction resolves separately — `HARNESS_REDACTION_PROVIDER`, then
+`DEFAULT_REDACTION_PROVIDER` (which follows `DEFAULT_PROVIDER` since the same
+change) — so pinning one transport everywhere means setting **both** env vars.
+Which transport ran is therefore not visible in the command: read it back from
+`reader_a`/`reader_b` in `ocr_result_DOC_*.json`.
+
 **Stage 2 runs as one command, not as a sequence you supervise.** Dispatch
 `document-pipeline` to run `python tools/run_stage2.py CASE_ID --held-by
-document-pipeline --run-id RUN_ID --provider claude-cli`, which performs every
+document-pipeline --run-id RUN_ID`, which performs every
 mechanical step (checkpoint 1 → checkpoint 2 → segmentation → child
 classification → child redaction → chunking → contract write) and stops at the
 four real gates. Stage 2 is driven from code because its checkpoint control is
