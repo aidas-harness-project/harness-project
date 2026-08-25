@@ -17,7 +17,7 @@ review_required. A redaction is never trusted silently.
 Usage:
     python tools/redact_document.py CASE_ID DOC_ID \
         --held-by document-pipeline --run-id RUN_ID \
-        --provider claude-cli --model MODEL
+        --provider PROVIDER --model MODEL
 """
 from __future__ import annotations
 

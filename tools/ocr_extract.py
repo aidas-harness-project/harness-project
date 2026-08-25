@@ -26,7 +26,7 @@ cleaned up on exit), not system /tmp.
 Usage:
     python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf
     python tools/ocr_extract.py CASE_ID DOC_ID /path/to/document.pdf \
-        --reader-a claude-cli --reader-b codex-cli --comparator claude-cli
+        --reader-a PROVIDER --reader-b PROVIDER --comparator PROVIDER
 """
 import argparse
 import contextlib

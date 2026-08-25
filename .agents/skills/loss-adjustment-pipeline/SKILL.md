@@ -190,7 +190,7 @@ run-state marker timestamps.
 
 **Stage 2 runs as one command, not as a sequence you supervise.** Dispatch
 `document-pipeline` to run `python tools/run_stage2.py CASE_ID --held-by
-document-pipeline --run-id RUN_ID --provider claude-cli`, which performs every
+document-pipeline --run-id RUN_ID`, which performs every
 mechanical step (checkpoint 1 → checkpoint 2 → segmentation → child
 classification → child redaction → chunking → contract write) and stops at the
 four real gates. Stage 2 is driven from code because its checkpoint control is

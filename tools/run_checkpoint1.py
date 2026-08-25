@@ -350,9 +350,21 @@ def build_classifier_provider(
     return build_provider(ProviderConfig(provider_name, model_name), env=source_env, root=ROOT)
 
 
+# What a role's label says when the run recorded no provider metadata for it.
+# NOT a provider name. It used to be the literal "claude-cli", which was a
+# plausible guess while claude-cli was the default and a lie the moment it was
+# not -- and it was already a lie under --single-reader, where reader_b and the
+# comparator never run: a real single-reader run recorded
+# `vision_model_name: "claude-cli; comparator=claude-cli"`, naming a provider
+# that made no call, in the same contract whose `cross_validation_mode` says no
+# cross-validation happened. harness-guardrails-dev is explicit that a run must
+# never be made to look like one that did not happen.
+PROVIDER_LABEL_UNRECORDED = "not_recorded"
+
+
 def _provider_label(provider_info: dict | None) -> str:
     if not provider_info:
-        return "claude-cli"
+        return PROVIDER_LABEL_UNRECORDED
     provider_name = provider_info.get("provider_name") or "unknown-provider"
     model_name = provider_info.get("model_name") or "unknown-model"
     return f"{provider_name}:{model_name}"

@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -88,7 +89,10 @@ sys.stdout.reconfigure(encoding="utf-8")
 import dao as _dao
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
-from llm_providers import SUPPORTED_PROVIDERS
+import ocr_extract
+import redact_document
+from llm_providers import (DEFAULT_PROVIDER, ProviderConfig, ProviderConfigError,
+                           SUPPORTED_PROVIDERS, build_provider)
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
@@ -213,7 +217,59 @@ def chunkable_documents(manifest: dict) -> tuple[list[str], list[str]]:
 _CLASSIFY_WORKERS = 4
 
 
-def _classify_children(case_id, children, *, common, provider, workers, report):
+def _preflight_providers(provider: str | None, model: str | None, *,
+                         skip_redaction: bool | None, env=None) -> list[str]:
+    """Build every provider this stage will use, before it does any work.
+
+    Returns a list of human-readable failures; empty means every role resolved.
+
+    This exists because the roles resolve their MODEL from different places --
+    the OCR trio from `HARNESS_OCR_*_MODEL`, redaction from
+    `HARNESS_REDACTION_MODEL`, everything else from the provider's own env
+    names -- so a partially configured environment can satisfy checkpoint 1 and
+    then fail at redaction, after the whole document has already been OCR'd and
+    paid for. Verified rather than assumed: with `OPENROUTER_API_KEY` and only
+    `HARNESS_OCR_READER_A_MODEL` set, the OCR trio builds and redaction raises
+    `openrouter requires a model name`.
+
+    Construction is local -- no network call, no provider round trip -- so
+    checking costs nothing and not checking costs a half-processed case. Each
+    role is resolved the way ITS OWN child resolves it; asking one generic
+    question instead would give false assurance for exactly the split
+    environment this guards against.
+    """
+    source_env = os.environ if env is None else env
+    failures: list[str] = []
+
+    def attempt(role: str, build):
+        try:
+            build()
+        except ProviderConfigError as exc:
+            failures.append(f"{role}: {exc}")
+
+    attempt("checkpoint 1 readers/comparator", lambda: ocr_extract.build_ocr_providers(
+        reader_a_name=provider, reader_b_name=provider, comparator_name=provider,
+        reader_a_model=model, reader_b_model=model, comparator_model=model,
+        env=source_env))
+    # The classifier, the segmentation judge and the split-child classification
+    # all take the forwarded pair and otherwise fall back to the provider's own
+    # env names -- one construction covers the three.
+    attempt("classifier / segmentation judge", lambda: build_provider(
+        ProviderConfig(provider or source_env.get("HARNESS_LLM_PROVIDER") or DEFAULT_PROVIDER,
+                       model or source_env.get("HARNESS_LLM_MODEL")),
+        env=source_env, root=ROOT))
+    if skip_redaction is not True:
+        attempt("checkpoint 2 redaction", lambda: build_provider(
+            ProviderConfig(
+                provider or source_env.get("HARNESS_REDACTION_PROVIDER")
+                or redact_document.DEFAULT_REDACTION_PROVIDER,
+                model or source_env.get("HARNESS_REDACTION_MODEL")),
+            env=source_env, root=ROOT))
+    return failures
+
+
+def _classify_children(case_id, children, *, common, provider, workers, report,
+                       model=None):
     """Classify every split child, several at a time, in manifest order.
 
     Independent by construction: each child writes its own
@@ -237,6 +293,8 @@ def _classify_children(case_id, children, *, common, provider, workers, report):
                        case_id, doc_id])
         if provider:
             argv += ["--classifier-provider", provider]
+        if model:
+            argv += ["--classifier-model", model]
         return _run(argv, phase=f"classify:{doc_id}", progress=report)
 
     limit = max(1, min(workers or _CLASSIFY_WORKERS, len(children)))
@@ -277,6 +335,7 @@ def run_stage2(
     run_id: str,
     *,
     provider: str | None = None,
+    model: str | None = None,
     doc_workers: int | None = None,
     page_workers: int | None = None,
     single_reader: bool | None = None,
@@ -310,6 +369,18 @@ def run_stage2(
         }
 
     with trace_mod.span("stage2.driver", category="compute", case_id=case_id):
+        # ---- phase 0: can every role this stage needs even be built? --------
+        # Cheap, local, and ahead of the first paid call. A provider that needs
+        # a model it was never given used to surface as a child failure partway
+        # through -- after OCR, at redaction -- which is the expensive place to
+        # find out.
+        unresolvable = _preflight_providers(provider, model,
+                                            skip_redaction=skip_redaction)
+        if unresolvable:
+            return stop("preflight",
+                        "the stage cannot construct every provider it needs, so "
+                        "nothing was run: " + "; ".join(unresolvable))
+
         # ---- phase 1: checkpoint 1 over everything that needs it ------------
         report("phase: checkpoint 1 (OCR)")
         argv = common([str(TOOLS / "run_document_stage.py"), case_id])
@@ -317,6 +388,10 @@ def run_stage2(
             for flag in ("--reader-a", "--reader-b", "--comparator",
                          "--classifier-provider"):
                 argv += [flag, provider]
+        if model:
+            for flag in ("--reader-a-model", "--reader-b-model",
+                         "--comparator-model", "--classifier-model"):
+                argv += [flag, model]
         if doc_workers is not None:
             argv += ["--doc-workers", str(doc_workers)]
         if page_workers is not None:
@@ -341,6 +416,8 @@ def run_stage2(
                        "--checkpoint", "2"])
         if provider:
             argv += ["--provider", provider]
+        if model:
+            argv += ["--model", model]
         if doc_workers is not None:
             argv += ["--doc-workers", str(doc_workers)]
         argv = redaction_flags(argv)
@@ -364,6 +441,8 @@ def run_stage2(
                     str(TOOLS / "segment_case.py"), "propose", case_id, doc_id])
                 if provider:
                     propose_argv += ["--provider", provider]
+                if model:
+                    propose_argv += ["--model", model]
                 step = _run(propose_argv,
                             phase=f"segment.propose:{doc_id}", progress=report)
                 steps.append(step)
@@ -418,7 +497,7 @@ def run_stage2(
         if children:
             child_steps = _classify_children(
                 case_id, children, common=common, provider=provider,
-                workers=doc_workers, report=report)
+                model=model, workers=doc_workers, report=report)
             steps.extend(child_steps)
             # Reported in manifest order, so the halt names the same child every
             # time regardless of which provider call returned first.
@@ -433,6 +512,8 @@ def run_stage2(
                            "--checkpoint", "2"])
             if provider:
                 argv += ["--provider", provider]
+            if model:
+                argv += ["--model", model]
             if doc_workers is not None:
                 argv += ["--doc-workers", str(doc_workers)]
             argv = redaction_flags(argv)
@@ -517,6 +598,16 @@ def main(argv=None):
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--provider", choices=SUPPORTED_PROVIDERS,
                     help="Applied to every provider-backed step in the stage")
+    ap.add_argument("--model",
+                    help="Model slug, applied to every provider-backed step "
+                         "alongside --provider. The HTTP providers require one "
+                         "(openrouter has no default slug); the CLI providers "
+                         "run on their own default without it. Omitted, each "
+                         "role falls back to its own env var "
+                         "(HARNESS_OCR_*_MODEL, HARNESS_REDACTION_MODEL, "
+                         "HARNESS_OPENROUTER_MODEL) -- which is how a partial "
+                         "environment used to fail at redaction instead of at "
+                         "the start.")
     ap.add_argument("--doc-workers", type=int, default=None, metavar="N")
     ap.add_argument("--page-workers", type=int, default=None, metavar="N")
     group = ap.add_mutually_exclusive_group()
@@ -550,6 +641,7 @@ def main(argv=None):
     result = run_stage2(
         args.case_id, args.held_by, args.run_id,
         provider=args.provider,
+        model=args.model,
         doc_workers=args.doc_workers,
         page_workers=args.page_workers,
         single_reader=args.single_reader,
