@@ -145,10 +145,15 @@ def test_consistency_check_rejects_an_unknown_subcommand() -> None:
         cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
         env=dict(os.environ, PYTHONIOENCODING="utf-8"))
     assert proc.returncode != 0
-    # The helper offers prepare and register only -- there is no path by which
-    # it reaches a verdict of its own, and argparse names the two it has.
+    # The helper offers prepare, judge and register, and argparse names them.
+    # `judge` was added on 2026-08-26 so the stage can reach its verdict through
+    # a provider call instead of a subagent; what it did NOT change is that
+    # producing verdicts and admitting them to the P6 ledger stay two commands
+    # -- `register` still runs its own binding checks against whatever wrote
+    # the verdicts, and still refuses when none exist (see
+    # test_register_refuses_without_agent_verdicts below).
     assert "decide" in proc.stderr
-    assert "{prepare,register}" in proc.stderr.replace(" ", "")
+    assert "{prepare,judge,register}" in proc.stderr.replace(" ", "")
 
 
 # ------------------------------------------------- stage ordering refusals --

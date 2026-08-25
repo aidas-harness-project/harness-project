@@ -32,7 +32,7 @@ the same pass.
 | 46 | PARTIAL | P8 billing-table disagreements: dpi rejected by measurement; reader stability still open |
 | 47 | OPEN | P8 correlated error observed live: both readers invented the same caption |
 | 48 | PARTIAL | Merge 3569d50 discarded parent2's dao.py wholesale; halves still inconsistent |
-| 55 | OPEN | The agent-executed stages never reach llm_providers, so the OpenRouter switch cannot cover them |
+| 55 | PARTIAL | Agent-executed stages reach no provider call site; consistency_check pilot built, four stages left |
 | 56 | OPEN | No OpenRouter call has ever been made against the real service -- everything is verified statically |
 | 57 | OPEN | scan_intake_content has no production caller after D2's pre-check was removed |
 
@@ -3852,7 +3852,7 @@ Open: whether the field's prompt or its route priority needs work, or whether
 extraction's vocabulary. Needs a targeted A/B on this page before changing
 anything -- a blind prompt edit would be guessing.
 
-## 55. The agent-executed stages never reach `llm_providers`, so the OpenRouter switch cannot cover them -- OPEN 2026-08-25
+## 55. The agent-executed stages never reach `llm_providers`, so the OpenRouter switch cannot cover them -- PARTIAL 2026-08-25
 
 The 2026-08-21 switch moved every LLM call in `tools/` onto `openrouter`, and
 2026-08-25 carried it into the layers that call those tools. Neither touched
@@ -3877,8 +3877,19 @@ schema, parser, receipt, correction gate -- the way `claim_analysis` and
 wiring fix: the current split is deliberate (drivers own mechanics, agents own
 judgement), and `critic` in particular is defined by reading a draft the way a
 reviewer would. Scope per stage is roughly what `run_claim_analysis_selective.py`
-carries. **Not started, and it needs an explicit decision before it is** --
-recorded here so the boundary is visible rather than assumed.
+carries. **2026-08-26 update -- PARTIAL.** The analysis is written
+(`plans/driverization/agent-stage-provider-routing.md`) and the pilot is built:
+`run_consistency_check.py judge` reaches the stage's verdicts through one
+bounded provider call, so `consistency_check` no longer needs a subagent.
+Deliberately additive -- the `consistency-check` agent stays a valid producer of
+the same contract, and `register` still runs its binding checks against whatever
+wrote it, so the two routes can be compared on a real case before either is
+retired. The remaining four (`screening_report`, `critic`, `denial_validation`,
+`draft_report` v1/v2) are unstarted, and the analysis's four open questions --
+agent-spec disposition, whether `draft_report` belongs in the list at all,
+per-stage model selection, and who pays -- are still decisions for the PoC
+owner. The orchestrator's and `document-pipeline`'s own inference are
+explicitly out of that scope and stay agent-side.
 
 ## 56. No OpenRouter call has ever been made against the real service -- OPEN 2026-08-25
 

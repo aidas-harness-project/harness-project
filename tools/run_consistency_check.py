@@ -9,8 +9,12 @@ side of that judgement:
               decision-bearing. No verdict field: a prepared answer would make
               the decision by suggestion.)
 
-    <agent>   confirmed / not_material / withdrawn, plus a neutral
-              professional_summary on every confirmed one.
+    judge     the same decision as a bounded provider call, so the stage can
+              run without a subagent. Optional: `register` still accepts a
+              verdicts contract written any other way, and the
+              `consistency-check` agent remains a valid producer of one.
+              (confirmed / not_material / withdrawn, plus a neutral
+              professional_summary on every confirmed one.)
 
     register  verify the verdicts bind to what was prepared, register the
               confirmed ones in the P6 ledger as `pending`, and write the
@@ -24,8 +28,11 @@ against, that nothing reaches the ledger twice -- lives here.
 
 What this module never does:
 
-* **Decide.** With no verdicts file, `register` registers nothing. It cannot
-  reach a verdict on its own, which is the point.
+* **Decide, in `register`.** With no verdicts file, `register` registers
+  nothing. It cannot reach a verdict on its own, which is the point. `judge`
+  is a SEPARATE step for exactly that reason: producing the verdicts and
+  admitting them to the ledger stay two commands, so the deterministic
+  admission checks still run against whatever wrote them.
 * **Dispose.** Every entry is created `pending`. `resolved`, `false_positive`,
   and `deferred_to_report` are human calls under P6. A confirmed verdict says
   the conflict is real, not what should happen about it.
@@ -36,6 +43,7 @@ What this module never does:
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import re
@@ -47,6 +55,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import claim_analysis_contracts as contracts
+import driver_runtime
+from llm_providers import (ProviderConfigError, add_provider_args, build_provider,
+                           parse_provider_config)
 
 ROOT = Path(__file__).resolve().parent.parent
 DAO = ROOT / "tools" / "dao.py"
@@ -59,6 +70,7 @@ WORKITEMS_CONTRACT = "consistency_check_workitems.json"
 WORKITEMS_SCHEMA = "consistency_check_workitems.schema.json"
 VERDICTS_CONTRACT = "consistency_check_verdicts.json"
 VERSION = "consistency_check_helper.v0.1"
+JUDGE_PROMPT_VERSION = "consistency_check_judge_v0.1"
 
 # Phrases that elect a winner. This is a DELIBERATELY LIMITED denylist, not a
 # semantic neutrality check: it catches the blunt forms of picking a side and
@@ -233,6 +245,176 @@ def build_workitems_contract(
         "work_items": [dict(item) for item in work_items],
     }
     if work_items:
+        contract["reviewer_role"] = "손해사정사"
+    return contract
+
+
+# ------------------------------------------------------------------- judge --
+
+# The model supplies a VERDICT per candidate id and nothing else. It is never
+# asked for `candidate_digest`: the driver copies that from the prepared item,
+# because a digest is a fact about what was prepared, not a judgement, and a
+# model that mistypes one turns a binding check into a mismatch error. Same
+# reason the schema below closes `additionalProperties` -- a verdict about a
+# candidate nobody prepared has nothing to bind to.
+JUDGE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "conflict_candidate_id": {"type": "string"},
+                    "outcome": {"enum": ["confirmed", "not_material", "withdrawn"]},
+                    "reason": {"type": "string"},
+                    "professional_summary": {"type": "string"},
+                },
+                "required": ["conflict_candidate_id", "outcome", "reason"],
+            },
+        },
+    },
+    "required": ["verdicts"],
+}
+
+JUDGE_INSTRUCTIONS = """\
+You are reviewing pairs of readings taken from ONE insurance claim case's own
+documents. For each candidate below, decide whether the readings genuinely
+contradict each other.
+
+Answer for every candidate id, exactly once each, using one outcome:
+
+* confirmed    -- the sources genuinely contradict each other on something that
+                  can change a determination.
+* not_material -- a real difference that changes no decision.
+* withdrawn    -- not a contradiction on inspection: one side is silent, the
+                  difference is formatting, or one reading is merely more
+                  detailed than the other.
+
+Rules:
+
+* Judge ONLY from the readings given. Do not infer a value neither reading
+  states, and do not use knowledge about how such cases usually go.
+* `reason` states what you compared and why the outcome follows. One or two
+  sentences.
+* On a `confirmed` verdict, also write `professional_summary` IN KOREAN for a
+  손해사정사/의사: what each record says and what needs checking. It must NOT
+  elect a side -- not by asserting one reading is correct, and not by
+  presenting one as the default or as the more likely. This sentence is carried
+  verbatim into the screening report, so write it for that reader.
+* Do not write `professional_summary` on a verdict that is not `confirmed`.
+* A field marked decision_bearing changes a determination if it is wrong; that
+  raises the cost of a mistake, it does not make a contradiction more likely.
+"""
+
+
+def build_judge_prompt(work_items: Sequence[Mapping[str, Any]]) -> str:
+    """One prompt covering every prepared candidate.
+
+    Carries the readings the DAO already put in the work items and nothing
+    else: no source documents are re-opened here, exactly as `prepare` does not
+    open them. That keeps the prompt bounded and keeps this step unable to
+    introduce a fact the upstream contract does not contain.
+    """
+    blocks: list[str] = []
+    for item in work_items:
+        lines = [
+            f"### {item['conflict_candidate_id']}",
+            f"field: {item.get('field_label') or item.get('field_id')} "
+            f"(decision_bearing: {str(bool(item.get('decision_bearing'))).lower()})",
+        ]
+        for reading in item.get("readings") or []:
+            value = reading.get("value")
+            lines.append(
+                f"- reading {reading.get('observation_id')}: "
+                f"state={reading.get('value_state')}, "
+                f"value={value if value is not None else '(none stated)'}, "
+                f"source_kind={reading.get('source_document_kind')}"
+            )
+            for reference in reading.get("evidence_references") or []:
+                quote = reference.get("quote")
+                lines.append(
+                    f"    evidence: {reference.get('document_id')} "
+                    f"p.{reference.get('page')}"
+                    + (f" -- \"{quote}\"" if quote else "")
+                )
+        blocks.append("\n".join(lines))
+    return JUDGE_INSTRUCTIONS + "\n\n" + "\n\n".join(blocks)
+
+
+def bind_verdicts(
+    raw: Mapping[str, Any],
+    work_items: Sequence[Mapping[str, Any]],
+) -> list[dict]:
+    """Attach each prepared candidate's digest, then run the admission checks.
+
+    Raises ValueError on anything the register step would refuse anyway, so a
+    bad response is corrected once (P4) rather than written and rejected later.
+    """
+    by_id = {item["conflict_candidate_id"]: item for item in work_items}
+    verdicts: list[dict] = []
+    seen: set[str] = set()
+    problems: list[str] = []
+
+    for entry in raw.get("verdicts") or []:
+        candidate_id = entry.get("conflict_candidate_id")
+        item = by_id.get(candidate_id)
+        if item is None:
+            problems.append(f"{candidate_id}: no such prepared candidate")
+            continue
+        if candidate_id in seen:
+            problems.append(f"{candidate_id}: judged more than once")
+            continue
+        seen.add(candidate_id)
+        verdict = {
+            "conflict_candidate_id": candidate_id,
+            # Copied, never taken from the response -- see JUDGE_OUTPUT_SCHEMA.
+            "candidate_digest": item["candidate_digest"],
+            "outcome": entry.get("outcome"),
+            "reason": entry.get("reason"),
+        }
+        summary = entry.get("professional_summary")
+        if summary:
+            verdict["professional_summary"] = summary
+        verdicts.append(verdict)
+
+    missing = sorted(set(by_id) - seen)
+    if missing:
+        problems.append(
+            "no verdict for: " + ", ".join(missing)
+            + " -- every prepared candidate must be judged")
+    problems.extend(validate_verdicts(verdicts, work_items))
+    if problems:
+        raise ValueError("\n  - ".join(["verdicts refused:", *problems]))
+    return verdicts
+
+
+def build_verdicts_contract(
+    *,
+    case_id: str,
+    run_id: str,
+    verdicts: Sequence[Mapping[str, Any]],
+    claim_analysis_sha256: str,
+    model_name: str,
+) -> dict:
+    contract = {
+        "case_id": case_id,
+        "run_id": run_id,
+        "component": COMPONENT,
+        "status": "success",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "model_info": {"model_name": model_name,
+                       "prompt_version": JUDGE_PROMPT_VERSION},
+        "review_required": any(v["outcome"] == "confirmed" for v in verdicts),
+        "warnings": [],
+        "source_grounded": True,
+        "schema_version": "consistency_check_verdicts.v0.1",
+        "claim_analysis_sha256": claim_analysis_sha256,
+        "verdicts": [dict(v) for v in verdicts],
+    }
+    if contract["review_required"]:
         contract["reviewer_role"] = "손해사정사"
     return contract
 
@@ -568,6 +750,53 @@ def run_prepare(*, case_id: str, run_id: str, held_by: str) -> dict:
             "decision_bearing": sum(1 for i in work_items if i["decision_bearing"])}
 
 
+def run_judge(*, case_id: str, run_id: str, held_by: str,
+              provider=None, usage_out: list | None = None) -> dict:
+    """Produce the verdicts contract with one bounded provider call.
+
+    Does NOT register anything: `register` remains a separate command, so the
+    deterministic admission checks still run against these verdicts exactly as
+    they run against an agent's.
+    """
+    require_open_attempt(case_id, run_id)
+    prepared = _dao_json(["read-contract", case_id, WORKITEMS_CONTRACT,
+                          "--run-id", run_id])
+    work_items = prepared.get("work_items") or []
+    if not work_items:
+        # Nothing was prepared, so there is nothing to judge. Writing an empty
+        # verdicts contract would be a judgement about no candidates.
+        return {"judged": 0, "skipped": "no prepared work items"}
+
+    selected = provider or build_provider(parse_provider_config())
+    verdicts = driver_runtime.structured_with_one_correction(
+        provider=selected,
+        prompt=build_judge_prompt(work_items),
+        prompt_version=JUDGE_PROMPT_VERSION,
+        output_schema=JUDGE_OUTPUT_SCHEMA,
+        validate=lambda raw: bind_verdicts(raw, work_items),
+        usage_out=usage_out,
+    )
+    contract = build_verdicts_contract(
+        case_id=case_id, run_id=run_id, verdicts=verdicts,
+        claim_analysis_sha256=prepared.get("claim_analysis_sha256"),
+        model_name=f"{selected.provider_name}:{selected.model_name}",
+    )
+    data_file = _temp_json(contract)
+    try:
+        _dao_write([
+            "write-contract", case_id, VERDICTS_CONTRACT,
+            "--data-file", str(data_file),
+            "--schema-name", "consistency_check_verdicts.schema.json",
+            "--held-by", held_by, "--run-id", run_id, "--stage", STAGE,
+        ])
+    finally:
+        data_file.unlink(missing_ok=True)
+    counts: dict[str, int] = {}
+    for verdict in verdicts:
+        counts[verdict["outcome"]] = counts.get(verdict["outcome"], 0) + 1
+    return {"judged": len(verdicts), "outcomes": counts}
+
+
 def run_register(*, case_id: str, run_id: str, held_by: str) -> dict:
     require_open_attempt(case_id, run_id)
     prepared = _dao_json(["read-contract", case_id, WORKITEMS_CONTRACT,
@@ -611,12 +840,21 @@ def run_register(*, case_id: str, run_id: str, held_by: str) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("subcommand", choices=["prepare", "register"])
+    parser.add_argument("subcommand", choices=["prepare", "judge", "register"])
     parser.add_argument("case_id")
     parser.add_argument("--held-by", required=True)
     parser.add_argument("--run-id", required=True)
+    add_provider_args(parser)
     args = parser.parse_args(argv)
-    runner = run_prepare if args.subcommand == "prepare" else run_register
+    runners = {"prepare": run_prepare, "judge": run_judge, "register": run_register}
+    runner = runners[args.subcommand]
+    if args.subcommand == "judge":
+        try:
+            provider = build_provider(parse_provider_config(args))
+        except ProviderConfigError as exc:
+            print(f"BLOCKED: {exc}", file=sys.stderr)
+            return 1
+        runner = functools.partial(run_judge, provider=provider)
     try:
         print(json.dumps(runner(case_id=args.case_id, run_id=args.run_id,
                                 held_by=args.held_by),

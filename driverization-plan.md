@@ -19,6 +19,14 @@ should become a full driver. CASE_135 showed a flat agent-cost distribution:
 shared deterministic leaves, race-free inter-stage parallelism, and targeted
 claim fan-out come before semantic-stage wrappers.
 
+**Provider-routing addendum:** `plans/driverization/agent-stage-provider-routing.md`
+(2026-08-26) analyses the same stages from a different objective -- routing every
+agent-executed judgement through OpenRouter rather than reducing choreography --
+and covers `critic`, `draft_report` and `denial_validation`, which this document
+never planned. It does not supersede Workstream B/D; it says what is still
+missing against them. Workstream B's provider call is now built
+(`run_consistency_check.py judge`).
+
 **Scheduling distinction:** driverization reduces fixed, repeated work *inside*
 a stage. DAG scheduling reduces waiting *between* independent stages. They are
 separate levers: a scheduler must use the dependency graph and per-stage DAO
