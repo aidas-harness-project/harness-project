@@ -1,0 +1,301 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "screening_fidelity_result.schema.json",
+  "title": "screening_fidelity_result.json -- screening report vs ground truth v0.1",
+  "description": "Produced by screening-fidelity, the one local stage harness-guardrails-dev D1 admits to ground truth. Records how closely a screening report agrees with the adjuster's real report, per templates/rubric-screening-fidelity.md. Distinct from screening_rubric_result (reference-free writing quality) and from evaluation_result (the deferred Unit 11 suite over draft reports); the three answer different questions and their scores are never combined. LEAK BOUNDARY: this contract has no field anywhere for verbatim ground-truth text. The ground-truth side carries a locator and, where the comparison needs one, a short field value (<=200 chars: a date, a code, an amount, a diagnosis name). Narrative passages from the answer key must not be copied into rationale or description either -- a result file naming what the answer key says, sentence by sentence, is the answer key. Screening-side quotes are required instead, because the report is not privileged material and a score with no quotation cannot be checked.",
+  "allOf": [
+    {"$ref": "common_component_output.schema.json"},
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {"const": "screening_fidelity_result.v0.1"},
+        "rubric_version": {
+          "const": "screening_fidelity.v0.1",
+          "description": "Which revision of templates/rubric-screening-fidelity.md produced this score. Scores from different rubric revisions are not comparable."
+        },
+        "target_report_path": {"type": "string", "minLength": 1},
+        "target_report_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the scored screening report's bytes, binding the score to one exact document version."
+        },
+        "ground_truth_access": {"$ref": "#/$defs/ground_truth_access"},
+        "dimensions": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {"$ref": "#/$defs/dimension"},
+          "description": "F1-F4, each exactly once. A dimension that cannot apply is applicable:false with a reason -- omitting it would drop it from the weighted denominator with nothing on the record to say so."
+        },
+        "fidelity_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Weighted over applicable headline dimensions only (F1 50, F2 30, F3 20). F4 is excluded by design: conclusion direction is discretionary, and a report that correctly declines to assert one would otherwise be penalised for good practice."
+        },
+        "core_field_mismatch": {
+          "type": "boolean",
+          "description": "True when any core field (주진단명, 사고일, 청구 담보, 부지급/감액 사유) compared as 'mismatch'. Forces verdict 'divergent' whatever the score says -- a report with the wrong diagnosis is not 80% aligned. A core field merely missing from the screening report does NOT set this: writing something wrong and failing to write it are different failures."
+        },
+        "verdict": {
+          "enum": ["aligned", "partial", "divergent"],
+          "description": "divergent when core_field_mismatch; else aligned at >=80, partial at >=60, divergent below."
+        },
+        "findings": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/finding"},
+          "description": "What to change, numbered stably so a human disposition can reference one. An empty array means no change was called for, not that findings were skipped."
+        }
+      },
+      "required": [
+        "case_id",
+        "run_id",
+        "component",
+        "status",
+        "schema_version",
+        "rubric_version",
+        "target_report_path",
+        "target_report_sha256",
+        "ground_truth_access",
+        "dimensions",
+        "fidelity_score",
+        "core_field_mismatch",
+        "verdict",
+        "findings"
+      ]
+    },
+    {
+      "$comment": "Each dimension id appears exactly once. uniqueItems cannot express this on objects differing in other fields.",
+      "properties": {
+        "dimensions": {
+          "allOf": [
+            {"contains": {"properties": {"dimension_id": {"const": "F1"}}, "required": ["dimension_id"]}, "minContains": 1, "maxContains": 1},
+            {"contains": {"properties": {"dimension_id": {"const": "F2"}}, "required": ["dimension_id"]}, "minContains": 1, "maxContains": 1},
+            {"contains": {"properties": {"dimension_id": {"const": "F3"}}, "required": ["dimension_id"]}, "minContains": 1, "maxContains": 1},
+            {"contains": {"properties": {"dimension_id": {"const": "F4"}}, "required": ["dimension_id"]}, "minContains": 1, "maxContains": 1}
+          ]
+        }
+      }
+    },
+    {
+      "$comment": "A core-field mismatch pins the verdict. Stated in the schema so a result cannot be written that reports one and calls itself aligned.",
+      "if": {"properties": {"core_field_mismatch": {"const": true}}, "required": ["core_field_mismatch"]},
+      "then": {"properties": {"verdict": {"const": "divergent"}}}
+    }
+  ],
+  "$defs": {
+    "ground_truth_access": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How the answer key was reached. Recorded so a reader can confirm the D1 conditions held at scoring time without taking the agent's word for it.",
+      "properties": {
+        "version": {"enum": ["v1", "v2"], "description": "Which reviewed version's ground truth was read."},
+        "caller_stage": {
+          "const": "screening_fidelity",
+          "description": "The stage name passed to dao.py read-ground-truth. Const because this contract exists for exactly one stage."
+        },
+        "human_review_complete": {
+          "const": true,
+          "description": "The DAO refuses the read without this flag; recording it makes the precondition visible in the artifact."
+        },
+        "ground_truth_files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1, "maxLength": 200},
+          "description": "File NAMES read, never contents."
+        }
+      },
+      "required": ["version", "caller_stage", "human_review_complete", "ground_truth_files"]
+    },
+    "ground_truth_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Where in the answer key the comparison looked. A locator, never a passage.",
+      "properties": {
+        "file": {"type": "string", "minLength": 1, "maxLength": 200},
+        "locator": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Page, section, or field label -- e.g. 'p.3 사정 결과' or '진단명란'. Not a sentence from the document."
+        }
+      },
+      "required": ["file", "locator"]
+    },
+    "dimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dimension_id": {
+          "enum": ["F1", "F2", "F3", "F4"],
+          "description": "F1 factual field agreement / F2 issue-prediction recall / F3 required-document agreement / F4 conclusion direction."
+        },
+        "weight": {
+          "type": "number",
+          "minimum": 0,
+          "description": "F1 50, F2 30, F3 20, F4 0 (excluded from the headline)."
+        },
+        "applicable": {"type": "boolean"},
+        "na_reason": {"type": ["string", "null"], "maxLength": 600},
+        "score": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100,
+          "description": "This dimension's own 0-100. Null for F4, which is not scored, and for an inapplicable dimension."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 800,
+          "description": "How the number was reached. Describe the comparison; do not quote the answer key to explain it."
+        },
+        "screening_quotes": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "description": "Verbatim lines from the screening report. At least one when the dimension applies."
+        },
+        "field_comparisons": {"type": "array", "items": {"$ref": "#/$defs/field_comparison"}},
+        "fact_match_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "discretionary_agreement_rate": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Reported beside the headline, never folded into it. Under P3 a screening report may correctly decline to assert a discretionary value and score 0 here for being right."
+        },
+        "issue_matches": {"type": "array", "items": {"$ref": "#/$defs/issue_match"}},
+        "screening_only_issues": {"type": "array", "items": {"$ref": "#/$defs/screening_only_issue"}},
+        "document_comparisons": {"type": "array", "items": {"$ref": "#/$defs/document_comparison"}},
+        "conclusion_agreement": {
+          "enum": ["aligned", "partial", "opposed", "screening_declined", null],
+          "description": "F4 only. 'screening_declined' is not a failure: declining to assert a discretionary conclusion on thin material is what P3 asks for."
+        }
+      },
+      "required": ["dimension_id", "weight", "applicable", "na_reason", "score", "rationale", "screening_quotes"],
+      "allOf": [
+        {
+          "if": {"properties": {"applicable": {"const": true}}, "required": ["applicable"]},
+          "then": {"properties": {"screening_quotes": {"minItems": 1}}}
+        },
+        {
+          "if": {"properties": {"applicable": {"const": false}}, "required": ["applicable"]},
+          "then": {"properties": {"na_reason": {"type": "string", "minLength": 1}}}
+        },
+        {
+          "$comment": "A scored, applicable headline dimension must carry a number.",
+          "if": {
+            "properties": {
+              "applicable": {"const": true},
+              "dimension_id": {"enum": ["F1", "F2", "F3"]}
+            },
+            "required": ["applicable", "dimension_id"]
+          },
+          "then": {"properties": {"score": {"type": "number"}}}
+        },
+        {
+          "$comment": "F4 is excluded from the headline: it carries no score and must state its agreement instead.",
+          "if": {"properties": {"dimension_id": {"const": "F4"}}, "required": ["dimension_id"]},
+          "then": {
+            "properties": {"score": {"type": "null"}, "weight": {"const": 0}},
+            "required": ["conclusion_agreement"]
+          }
+        }
+      ]
+    },
+    "field_comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "field_name": {"type": "string", "minLength": 1, "maxLength": 120},
+        "field_kind": {
+          "enum": ["fact", "discretionary"],
+          "description": "'fact' when the answer is stated somewhere in the material, 'discretionary' when a professional arrives at it (과실률, 손해액, 소득 기준). Classify by where the answer comes from, not by how hard it was."
+        },
+        "core_field": {
+          "type": "boolean",
+          "description": "One of 주진단명 / 사고일 / 청구 담보 / 부지급·감액 사유. A mismatch on any of these pins the verdict."
+        },
+        "screening_value": {"type": ["string", "null"], "maxLength": 400},
+        "ground_truth_value": {
+          "type": ["string", "null"],
+          "maxLength": 200,
+          "description": "A short field value only -- a date, a code, an amount, a name. Never a sentence, never a passage; the cap is the enforcement."
+        },
+        "match_kind": {
+          "enum": ["exact", "normalized", "mismatch", "missing_in_screening", "missing_in_ground_truth"],
+          "description": "'normalized' counts as agreement and records that normalisation was applied (date formats, laterality spellings, amount separators, KCD code punctuation). 'missing_in_ground_truth' leaves the denominator: the report is not penalised for carrying more than the answer key."
+        },
+        "screening_absence_kind": {
+          "enum": ["declared", "silent", "not_applicable"],
+          "description": "For missing_in_screening: whether the report declared the absence with its scope ('확인 불가') or said nothing. Both count the same in the match rate -- a value the answer key holds was still not carried -- but they call for different fixes, so the distinction is kept."
+        },
+        "screening_quote": {"type": ["string", "null"]},
+        "ground_truth_ref": {"$ref": "#/$defs/ground_truth_ref"}
+      },
+      "required": ["field_name", "field_kind", "core_field", "screening_value", "ground_truth_value", "match_kind", "screening_absence_kind", "ground_truth_ref"]
+    },
+    "issue_match": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gt_issue_id": {"type": "string", "pattern": "^GT-[0-9]+$"},
+        "gt_issue_label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "A topic label for the answer key's issue, in the scorer's words -- '배상책임 성립 여부'. Not the answer key's sentence."
+        },
+        "predicted": {
+          "type": "boolean",
+          "description": "Whether the screening report raised this issue. Different wording still counts: what matters is whether the same question was put on the table."
+        },
+        "screening_quote": {"type": ["string", "null"]},
+        "screening_section": {"type": ["string", "null"], "maxLength": 120},
+        "ground_truth_ref": {"$ref": "#/$defs/ground_truth_ref"}
+      },
+      "required": ["gt_issue_id", "gt_issue_label", "predicted", "ground_truth_ref"],
+      "if": {"properties": {"predicted": {"const": true}}, "required": ["predicted"]},
+      "then": {"properties": {"screening_quote": {"type": "string", "minLength": 1}}}
+    },
+    "screening_only_issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "An issue the report raised that the answer key does not address. Recorded, never scored -- the PoC question is agreement with the adjuster, not improvement on them.",
+      "properties": {
+        "label": {"type": "string", "minLength": 1, "maxLength": 120},
+        "screening_quote": {"type": "string", "minLength": 1},
+        "classification": {
+          "enum": ["손사_미기재", "중복", "오탐"],
+          "description": "손사_미기재: a real question the adjuster's document does not take up. 중복: the same issue already counted under another id. 오탐: not a real issue."
+        }
+      },
+      "required": ["label", "screening_quote", "classification"]
+    },
+    "document_comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "document_kind": {"type": "string", "minLength": 1, "maxLength": 120},
+        "relied_on_by_ground_truth": {"type": "boolean"},
+        "screening_classification": {"enum": ["보유", "미확인", "부족", "미언급"]},
+        "verdict": {
+          "enum": ["correct", "under", "miss", "over"],
+          "description": "'over' (flagged as missing but the answer key never needed it) is recorded and NOT counted against the score: an over-broad document request costs effort, while a document the adjuster relied on and the report never named means the next stage proceeds without it."
+        },
+        "screening_quote": {"type": ["string", "null"]},
+        "ground_truth_ref": {"$ref": "#/$defs/ground_truth_ref"}
+      },
+      "required": ["document_kind", "relied_on_by_ground_truth", "screening_classification", "verdict", "ground_truth_ref"]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "finding_id": {"type": "string", "pattern": "^SF-[0-9]+$"},
+        "severity": {"enum": ["high", "medium", "low"]},
+        "dimension_id": {"enum": ["F1", "F2", "F3", "F4"]},
+        "description": {"type": "string", "minLength": 1, "maxLength": 800},
+        "fix_suggestion": {"type": "string", "minLength": 1, "maxLength": 800}
+      },
+      "required": ["finding_id", "severity", "dimension_id", "description", "fix_suggestion"]
+    }
+  }
+}
