@@ -27,7 +27,11 @@ rubric_version: screening_fidelity.v0.1
   --version {v1|v2} [--list | --file NAME]`으로만 읽는다. 직접 파일 열기는 `.claude/settings.json`의
   deny 글롭이 채점자에게도 그대로 적용된다.
 - 해당 버전의 human review가 완료 표시된 뒤에만 읽힌다. 명령이 강제한다.
-- **채점 결과는 종단이다.** 어떤 생산 스테이지도 이 결과를 입력으로 삼지 않는다.
+- **채점 결과는 종단이다.** 규칙이 아니라 구조로 그렇다 — 결과는
+  `data/ground_truth/CASE_ID/_verification/screening_fidelity_result_v{n}.json`에 놓이고,
+  그 자리는 deny 글롭이 이미 걸린 트리다. 쓰기·읽기 모두 `screening_fidelity` 스테이지로 제한된
+  `dao.py write-verification-result` / `read-verification-result`로만 가능하다.
+  `outputs/`에 두면 `read-contract`가 스테이지를 묻지 않으므로 모든 생산 스테이지가 읽는다.
 
 ## 결과 파일에 정답지 원문을 남기지 않는다
 
@@ -171,6 +175,15 @@ fidelity_score = Σ적용가능(차원점수 × 가중) ÷ Σ적용가능(가중
 - 정답지 쪽은 `ground_truth_ref`(문서명 + 위치)를 단다. 인용 필드는 존재하지 않는다.
 - `target_report_sha256`은 채점한 파일의 실제 해시를 복사한다. 기억으로 적지 않는다.
 - 결과는 `screening_fidelity_result_v{n}.json`, `schemas/screening_fidelity_result.schema.json` 준수.
+
+```bash
+python tools/dao.py write-verification-result CASE_ID screening_fidelity_result_v1.json \
+  --caller-stage screening_fidelity --version v1 \
+  --data-file <경로> --held-by screening-fidelity --run-id RUN_ID
+```
+
+파일명은 `screening_fidelity_result_v<n>.json`만 허용된다. 이 경로는 그 계약 하나를 위한 것이지
+정답지 트리에 임의 파일을 쓰는 통로가 아니다.
 
 # 6. 채점자가 하지 말아야 할 것
 

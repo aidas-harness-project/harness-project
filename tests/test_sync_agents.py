@@ -197,7 +197,8 @@ def test_local_harness_is_fail_closed_and_ground_truth_blind():
     # conditions that keep the carve-out from spreading.
     assert "No agent or tool that **produces** pipeline output reads" in dev_guardrails
     assert "**Only through the DAO.**" in dev_guardrails
-    assert "**Its result is terminal.**" in dev_guardrails
+    assert "**Its result is terminal, structurally.**" in dev_guardrails
+    assert "data/ground_truth/CASE_ID/_verification/" in dev_guardrails
     assert "isolated Unit 11 service" in dev_guardrails
     assert "Deferred Evaluation placeholder" in evaluation_agent
     assert "Do not inspect case data, ground truth, run state" in evaluation_agent

@@ -38,6 +38,10 @@ Subcommands:
     read-page-text CASE_ID DOC_ID PAGE --caller-stage STAGE
     read-ground-truth CASE_ID --caller-stage STAGE --version {v1|v2}
         [--file GT_ID | --list]
+    write-verification-result CASE_ID FILENAME --caller-stage STAGE
+        --version {v1|v2} --data-file PATH --held-by NAME --run-id RUN_ID
+    read-verification-result CASE_ID FILENAME --caller-stage STAGE
+        --version {v1|v2}
     read-contract CASE_ID FILENAME
     check-segmentation-ready CASE_ID [--doc-id DOC_ID]
     declare-no-policy-documents CASE_ID --reviewer NAME --note TEXT
@@ -2293,6 +2297,96 @@ def cmd_read_ground_truth(args):
         print(f"EMPTY: {path.name} decoded to no content")
         return 1
     print(text)
+    return 0
+
+
+VERIFICATION_STAGES = frozenset({"screening_fidelity"})
+
+# The verification result names ground-truth VALUES: the dates, codes, amounts
+# and issue labels the comparison turned on. It is not the answer key's prose,
+# which makes it worse rather than better -- it is the answer key's answers,
+# already extracted.
+#
+# harness-guardrails-dev D1 says that result is terminal: no producing stage may
+# consume it. Written under outputs/ that would be a promise and nothing else --
+# `read-contract` takes no caller stage, and no deny glob covers outputs/. So the
+# file lives inside data/ground_truth/, which every agent is already denied by
+# .claude/settings.json, and is reached only through the two commands below.
+#
+# The failure this closes is concrete: score a report, rerun screening_report,
+# and an agent scanning its case artifacts reads the answer values straight out
+# of the score file and writes them into the report. The next score rises
+# because the report copied the answer -- an evaluation confirming itself.
+_VERIFICATION_FILENAME = re.compile(r"^screening_fidelity_result_v[0-9]+\.json$")
+
+_VERIFICATION_SCHEMA = "screening_fidelity_result.schema.json"
+
+
+def verification_dir(case_id: str) -> Path:
+    """Where a verification result lives: inside the denied zone, beside the
+    ground truth it describes."""
+    _require_safe_id("case_id", case_id)
+    return _require_within(DATA / "ground_truth", case_id, "_verification")
+
+
+def _verification_gate(args, action: str) -> str | None:
+    """Return an error string, or None when the caller may proceed."""
+    if args.caller_stage not in VERIFICATION_STAGES:
+        return (f"DENIED: verification results may only be {action} by "
+                f"{sorted(VERIFICATION_STAGES)} (harness-guardrails-dev D1). "
+                f"caller_stage={args.caller_stage!r} is not permitted. "
+                "This is logged as a potential violation.")
+    if not _VERIFICATION_FILENAME.match(args.filename):
+        return (f"DENIED: {args.filename!r} is not a verification result filename. "
+                "Expected screening_fidelity_result_v<n>.json -- this path exists for "
+                "that one contract, not as a general writable area inside "
+                "data/ground_truth/.")
+    if not human_review_flag_path(args.case_id, args.version).exists():
+        return (f"DENIED: human review is not yet marked complete for {args.version} "
+                "of this case. A verification result cannot exist before the read it "
+                "would have to be based on is permitted (D1) -- see "
+                "dao.py mark-human-review-complete.")
+    return None
+
+
+def cmd_write_verification_result(args):
+    denial = _verification_gate(args, "written")
+    if denial:
+        print(denial)
+        return 1
+    target = _require_within(verification_dir(args.case_id), args.filename)
+    existing_lock = acquire_lock_blocking(
+        target, args.held_by, args.run_id, args.purpose or f"write {args.filename}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        data = json.loads(Path(args.data_file).read_text(encoding="utf-8"))
+        schemas, registry = load_registry()
+        errors = validate_instance(data, _VERIFICATION_SCHEMA, schemas, registry)
+        if errors:
+            print(f"FAIL: schema validation errors for {target}:")
+            for e in errors:
+                print(f"  - {e}")
+            return 1
+        atomic_write_json(target, data)
+    finally:
+        release_lock(target)
+    print(f"OK: wrote {target} (validated against {_VERIFICATION_SCHEMA})")
+    return 0
+
+
+def cmd_read_verification_result(args):
+    denial = _verification_gate(args, "read")
+    if denial:
+        print(denial)
+        return 1
+    target = _require_within(verification_dir(args.case_id), args.filename)
+    if not target.exists():
+        print(f"NOT_FOUND: {target}")
+        return 1
+    print(target.read_text(encoding="utf-8"))
     return 0
 
 
@@ -12353,6 +12447,30 @@ def build_parser():
                         "persisting anything. The pages are deleted on exit, so no answer-key "
                         "artifact is left on disk for a later stage to read.")
     p.set_defaults(fn=cmd_read_ground_truth)
+
+    for name, fn, verb in (
+        ("write-verification-result", cmd_write_verification_result, "Write"),
+        ("read-verification-result", cmd_read_verification_result, "Read"),
+    ):
+        p = sub.add_parser(
+            name,
+            help=f"{verb} a verification result under data/ground_truth/CASE_ID/_verification/.")
+        p.add_argument("case_id")
+        p.add_argument("filename", help="screening_fidelity_result_v<n>.json")
+        p.add_argument("--caller-stage", required=True,
+                       help="Stage making the call. Restricted to "
+                            f"{sorted(VERIFICATION_STAGES)}; anything else is DENIED. "
+                            "The result names ground-truth values, so it lives inside the "
+                            "denied zone and no producing stage may reach it (D1).")
+        p.add_argument("--version", required=True, choices=["v1", "v2"],
+                       help="Which reviewed version this result scores. Its "
+                            "human-review-complete flag must exist.")
+        if name.startswith("write"):
+            p.add_argument("--data-file", required=True)
+            p.add_argument("--held-by", required=True)
+            p.add_argument("--run-id", required=True)
+            p.add_argument("--purpose")
+        p.set_defaults(fn=fn)
 
     p = sub.add_parser("read-contract"); p.add_argument("case_id"); p.add_argument("filename")
     p.add_argument("--run-id", help="Optional. Records this read's cost into the run's trace so it stops landing in unattributed stage time; without it the read still works and simply records nothing.")
