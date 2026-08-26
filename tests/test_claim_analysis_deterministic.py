@@ -251,3 +251,53 @@ def test_ocr_split_label_still_matches():
     found = deterministic.extract(_pages(spaced), DISABILITY_FIELDS)
 
     assert found["documented_disability_rate"]["value"] == 13
+
+
+# ------------------------------------- 수술명: withdrawn, deliberately --------
+# `_surgery_name` was removed from RULES on 2026-08-26. It is the one rule that
+# never settled a field: across every case that published one, all 5 rule
+# readings resolved to `conflict` -- 5 of 5 -- while the other seven rules
+# mostly assert (diagnostic_certainty 5/5 asserted, disability_type 2/2).
+#
+# The cause is that the label does not introduce a single-line value. Measured
+# across the processed corpus: of 44 `수술명`-then-value occurrences, only 4
+# (9%) have one value line; 38 (86%) have two or more. `_SURGERY_NAME_NEXTLINE`
+# captured the first and dropped the rest, so the rule published a partial
+# value that then contradicted a fuller reading from another document:
+#
+#   수술명
+#   Open reduction of fracture with internal fixation      <- rule took this
+#   ㄴ 리스프랑 족근골부위 핀고정수술, 4중족골, ...          <- model read this
+#
+# `ㄴ` is a continuation marker: the second line details the SAME operation.
+# The pipeline reported the two as contradicting when they agree (CASE_7044,
+# reproduced on CASE_7015/7046/9415/9418).
+#
+# Not fixed by widening the capture, which is why this is a withdrawal rather
+# than a repair. The extra lines are not uniformly surgery names -- the same
+# survey found `Fracture of greater tuberosity of humerus, closed` (a
+# diagnosis, 16x) and bare form labels (`입원사유`, `어깨 통증`, `수술 전
+# 진단명`, 8x each) directly below the label. Capturing them all would
+# manufacture a surgery name out of a diagnosis, which is worse than reading
+# one line. Deciding line by line what a line MEANS is not what a label anchor
+# does -- it is the judgement `rule-conversion-criteria` says a rule must back
+# away from.
+
+def test_the_surgery_name_rule_is_withdrawn() -> None:
+    assert "surgery_or_procedure_name" not in deterministic.RULES, (
+        "the 수술명 label does not introduce a single-line value: 86% of "
+        "corpus occurrences carry two or more, and every reading this rule "
+        "published resolved to a conflict against a fuller model reading")
+
+
+def test_a_multi_line_surgery_field_is_left_to_the_model() -> None:
+    """The real CASE_7044 shape: the rules must return nothing for it, so the
+    field reaches the prompt whole instead of arriving pre-settled and wrong."""
+    pages = [{"page": 1, "text": (
+        "수술명\n"
+        "Open reduction of fracture with internal fixation\n"
+        "ㄴ 리스프랑 족근골부위 핀고정수술, 4중족골, 입방골, 주상골 관혈적 정복 및 내고정수술 시행\n"
+        "\n수술 전 진단명\n")}]
+    settled = deterministic.extract(
+        pages, [{"field_id": "surgery_or_procedure_name"}])
+    assert "surgery_or_procedure_name" not in settled

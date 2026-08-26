@@ -265,6 +265,17 @@ def _certainty(pages):
     return _assert(value, page_no, _quote_for(match, text))
 
 
+# WITHDRAWN 2026-08-26 -- kept for the survey in its docstring, no longer
+# in RULES. The 수술명 label does not introduce a single-line value: of 44
+# corpus occurrences only 4 (9%) carry one line, 38 (86%) carry two or more,
+# and this reader took the first and dropped the rest. Every reading it
+# published resolved to `conflict` against a fuller model reading (5 of 5:
+# CASE_7015/7044/7046/9415/9418) -- on CASE_7044 the dropped line began with
+# `ㄴ`, a continuation marker detailing the SAME operation, so the pipeline
+# reported agreement as contradiction. Widening the capture does not fix it:
+# the lines below the label are not uniformly surgery names (a diagnosis 16x,
+# bare form labels 8x each), so capturing them all would invent a surgery out
+# of a diagnosis. Telling those apart is judgement, not a label lookup.
 def _surgery_name(pages):
     """The 수술명 line's value, from either printed shape.
 
@@ -362,7 +373,6 @@ RULES = {
     "documented_disability_duration": _duration,
     "documented_disability_standard": _standard,
     "diagnostic_certainty": _certainty,
-    "surgery_or_procedure_name": _surgery_name,
     "disability_related_diagnosis": _disability_diagnosis,
     "primary_diagnosis": _postop_diagnosis,
     "disability_type": _disability_type,
