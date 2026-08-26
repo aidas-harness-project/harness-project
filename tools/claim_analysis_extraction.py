@@ -31,7 +31,10 @@ from typing import Any, Callable, Mapping, Sequence
 
 import claim_analysis_deterministic as deterministic
 
-PROMPT_VERSION = "claim_analysis_selective_extraction.v0.1"
+# v0.2 (2026-08-26): rule 5 rewritten. `driver_runtime.receipt_matches`
+# keys cached-unit reuse on this string, so a prompt change that did not
+# move it would replay results produced under the OLD wording.
+PROMPT_VERSION = "claim_analysis_selective_extraction.v0.2"
 
 # The accident narrative comes from the record that states it, in this order.
 # Listed in the prompt so a model reading a diagnosis certificate knows the
@@ -224,8 +227,31 @@ Rules, all of which matter more than filling the fields in:
    happened. Accident circumstances come only from a record that states them:
    접수 사고내용, 초진기록, 응급실기록, 사고 경위가 직접 적힌 진단서, 사고 경위가 직접 적힌 기타 기록.
 5. `complete` is false when the document states only part of the value.
-   `unambiguous` is false when the text could support more than one reading.
-   Both default to true; set them false rather than picking one reading.
+   `unambiguous` is false when THIS PAGE could support more than one reading of
+   the value -- two candidate values printed side by side, an abbreviation the
+   page never expands, a figure whose label does not say which quantity it is.
+   Both default to true.
+
+   These are not hedges. A value flagged either way is NOT published: the field
+   reports that no trusted value was established, and your quote reaches a
+   human only as an item to go and check. So set them false when the PAGE
+   really is unsettled, and leave them true when it is not:
+
+   - A printed label with one value under it is unambiguous. "병 명 | 우측
+     견봉돌기의 골절, 폐쇄성" is not made ambiguous by the possibility that
+     another document says something else -- you are reading one document, and
+     comparing across documents is a later stage's job.
+   - A complete sentence stating the value is complete, even when it is not
+     inside the form field you expected. "본 장해는 영구 장해임" written in the
+     소견 block fully states the 영구·한시 distinction; the form having no
+     checkbox for it does not make the reading partial.
+   - Being unsure whether the value belongs to THIS FIELD is not ambiguity
+     about the value. If the page states something else, report
+     `not_mentioned` for the field rather than asserting a value you then flag.
+
+   Flag `unambiguous: false` when the page itself offers a choice you cannot
+   settle -- five codes listed under 질병분류기호 with no 주상병 marked, two
+   different dates on one row. That is the case these flags exist for.
 6. A blank cell is NOT a stated absence. "| 기왕증 | |" -- a printed row whose
    cell is empty -- is `printed_but_blank`, never `explicitly_absent`: nobody
    said there was no prior history, they just did not write anything. And it is
