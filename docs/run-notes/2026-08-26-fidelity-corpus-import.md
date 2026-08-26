@@ -212,3 +212,49 @@ was made to go around the gate.
 
 Nothing was moved. Swapping the two files would make CASE_710 scorable and is one
 copy away, but it is a change to answer-key placement and belongs to the owner.
+
+---
+
+# CASE_710 mapping — contract-level evidence (2026-08-27)
+
+The earlier comparison used the rendered report, which is a weak basis for a
+mapping claim. Repeated against `claim_analysis_result.json`, the extracted
+values themselves:
+
+| Field | CASE_710 | CASE_712 |
+| --- | --- | --- |
+| `primary_diagnosis` | 요골 하단의 상세불명 골절, 폐쇄성 | 천골(薦骨)의 골절, 폐쇄성[LT] |
+| `diagnosis_code` | S52590 | S3210 |
+| `diagnosis_site` | 요골 하단 | 천골 / sacral |
+| `disability_related_diagnosis` | 좌측 손목 원위요골 골절 | unavailable |
+| `accident_mechanism` | 걷는중 턱에 걸려넘어질뻔하여 손으로 집었다가 | **차대 차 TA** |
+| `injury_site_and_laterality` | unavailable | Rt. shoulder pain, Lt. buttock pain |
+| `treatment_period` | unavailable | 2025-01-13 ~ 2025-06-25 |
+
+The answer key placed at `data/ground_truth/CASE_710/GT_001.pdf` is a 자동차보험
+손해사정서 under 자배법 제3조, for 상치골지골절 / 천골골절(천장관절) / 골반환 골절,
+with 과실 10%, 노동능력상실률 27%, 휴업손해 60일.
+
+CASE_710's own contract records a wrist fracture with no vehicle involvement.
+A pelvis-fracture traffic settlement cannot be the answer key for a wrist claim,
+so **CASE_710's answer key does not belong to CASE_710** — this part does not
+depend on where it does belong.
+
+Where it does belong is separately supported: the same three values (the triple
+장해상병명, 27%, 60 days) appear in CASE_712's report, whose contract records
+`accident_mechanism: 차대 차 TA`.
+
+## What is still unproven, and why
+
+Whether `CASE_712_GT_개인보험 15.pdf` is CASE_710's answer key. It is the only
+개인보험 file and CASE_710 is the only 개인보험 case, and its size (229,933 bytes)
+fits a full 손해사정서 — but that is inference, not a read.
+
+The read is blocked by a condition I wrote: `read-ground-truth` refuses a case
+whose `screening_report` stage did not pass, and CASE_712's run failed. That
+condition exists to stop a *score* being produced over an unfinished run. Applied
+to a read it prevents no leak — the stage is already trusted with ground truth on
+other cases — and blocks exactly this kind of provenance check. Moving it to the
+write path alone would keep the guarantee it was written for.
+
+No workaround was used, and the files were not moved.
