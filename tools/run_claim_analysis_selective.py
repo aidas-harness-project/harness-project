@@ -1943,8 +1943,10 @@ def run(
         outcomes.extend(replaced.values())
     # A field this round ASKED FOR but found nothing in was read, not skipped.
     # The common pass had already stamped it `source_document_missing` with
-    # "the field is not routed to any document source", which is true of the
-    # medical routes and false of what actually happened: stage 3-a opened the
+    # 「이 항목을 기재하는 법률의견서·보험사 문서가 이 건에 없습니다」 (until
+    # 2026-08-26 the English "the field is not routed to any document source"),
+    # which is true of the medical routes and false of what actually happened
+    # once the pack DOES hold such a document: stage 3-a opened the
     # 법률의견서 and 보험사 문서 that `additional_fields_by_case_type` names for
     # this case type. On CASE_704 `comparative_negligence_rate` therefore told
     # a 손해사정사 the field was unroutable, while DOC_008 carried a whole

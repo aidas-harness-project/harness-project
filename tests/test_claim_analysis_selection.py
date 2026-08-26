@@ -145,7 +145,10 @@ def test_field_with_no_matching_document_records_why_it_was_skipped() -> None:
     )
     plan = selection.plan_field(field, config, _docs(("DOC_001", "nursing_routine_record")))
     assert plan.steps == []
-    assert "no document" in (plan.skip_reason or "")
+    # Korean since 2026-08-26: `skip_reason` is published prose, not a
+    # diagnostic -- it becomes the section 7 row a 손해사정사 reads, with no
+    # translation layer in between. See test_reader_facing_prose_is_korean.py.
+    assert "문서가 이 건에 없습니다" in (plan.skip_reason or ""), plan.skip_reason
 
 
 # ------------------------------------------------------------- stop rule --

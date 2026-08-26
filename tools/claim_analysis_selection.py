@@ -176,7 +176,24 @@ def plan_field(
         route_id=route_id,
     )
     if route_id is None:
-        plan.skip_reason = "the field is not routed to any document source"
+        # Korean, like every other reason a 손해사정사 reads. These two strings
+        # were the only English left in the report's prose, and they landed in
+        # section 7 beside Korean ones -- 82 rows across the CASE_7* corpus,
+        # all six 배상책임 fields plus 과실비율.
+        #
+        # It names the SOURCES rather than "no route", because a route is an
+        # internal notion and the reader's question is which document would
+        # have held the answer. These fields are read by stage 3-a from the
+        # `legal_opinion`/`insurer_response` documents that
+        # `additional_fields_by_case_type` names, NOT from a medical route --
+        # so "no route" was true of the medical ladder and said nothing about
+        # what actually governs the field. Where that round does open a source
+        # and find nothing, `run_claim_analysis_selective` restamps this to
+        # `not_mentioned` with its own sentence; what survives to a reader is
+        # the case where the pack holds no such document at all.
+        plan.skip_reason = (
+            "이 항목을 기재하는 법률의견서·보험사 문서가 이 건에 없습니다"
+        )
         return plan
     route = routes.get(route_id)
     if route is None:
@@ -235,7 +252,7 @@ def plan_field(
         ))
     if not plan.steps:
         plan.skip_reason = (
-            "the case holds no document of any kind this field routes to"
+            "이 항목이 참조하는 종류의 문서가 이 건에 없습니다"
         )
     return plan
 
