@@ -4431,3 +4431,18 @@ other than those three, contracts outside `schemas/`, and any consumer that
 reads a value without declaring an enum for it (a Python `if` on a string
 literal is still invisible). Extending it means adding to `SHARED_AXES` or
 adding another code-surface test in the same file.
+
+
+## 67. A measurement taken from the wrong contract produced a feature nobody needed -- RESOLVED 2026-08-26
+
+While generalizing the conflict rendering I counted how many conflicts reached no report section, got **62 of 101**, and built `disputed` rows in section 7 to carry them.
+
+The count was wrong. `resolve_withdrawn_conflicts` was handed `consistency_check_workitems.json`, while `run_screening_report.main` reads `evidence_validation_result.json`. Both describe consistency_check; only the second is what the stage consumes. With the wrong one, the 76 conflicts consistency_check had WITHDRAWN still looked live, so fields that publish as ordinary `asserted` values were counted as invisible.
+
+Recounted correctly: 76 withdrawn, 25 surviving, 5 in section 1, 20 in the ledger, **0 shown nowhere**. The rows were withdrawn to fire only for a ledger-less conflict.
+
+**Why it survived review:** every check was run against `build_report` in memory rather than the driver. That path takes `consistency` as a parameter, so passing the wrong file is silent -- the shapes are similar enough that nothing raised. Running the driver, which loads the file itself, would have shown 1 conflict row on CASE_7008 instead of 4 the first time.
+
+**Guarded** by a corpus-level test asserting that a conflict surviving review appears in section 1, the ledger, or a section 7 row -- reading the same contract the driver does.
+
+**The general lesson**, which is the reason this is recorded rather than just fixed: a report assembled from a passed-in contract can be assembled from the WRONG contract without error, and the resulting numbers look exactly like real ones. A measurement that will justify building something has to come from the path that runs in production.
