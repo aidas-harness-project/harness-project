@@ -300,13 +300,21 @@ def _settle_unresolved(outcome: "FieldExtractionOutcome") -> None:
               if o.get("value_state") == "explicitly_absent"]
     blank = [o for o in outcome.observations
              if o.get("value_state") == "printed_but_blank"]
-    if blank and not partial and not absent:
+    if (blank and not partial and not absent
+            and len(blank) == len(outcome.observations)):
         # The form raised the item and left it empty. The field still holds no
         # value; what changes is the stated CAUSE, and with it the action --
         # `not_mentioned` would send a reviewer to request records that cannot
         # fill a blank cell, when what is needed is a look at the original.
         # Ranked below both of the others: a cited value and a stated absence
         # each say more than an empty cell does.
+        #
+        # EVERY observation must be blank, not merely one: the schema
+        # constrains `observations.items` (all of them) under this stop_reason,
+        # so a field mixing a blank cell with an `unavailable` reading would
+        # set a cause the contract then refuses. Falling through to the
+        # constructor default is correct there -- the ladder did find something
+        # else to say.
         outcome.stop_reason = "printed_but_blank_only"
         outcome.unavailable_reason = "printed_but_blank"
         outcome.reason = (
@@ -1343,13 +1351,24 @@ def field_result(
         result["resolution_reason"] = outcome.reason
     if outcome.status == "unavailable":
         result["unavailable_reason"] = outcome.unavailable_reason
-        if outcome.stop_reason == "partial_value_only":
+        if outcome.stop_reason in ("partial_value_only",
+                                   "printed_but_blank_only"):
             # A partial reading is the one `unavailable` case where something
             # WAS cited, so its quote must survive: the whole point of the
             # state is to hand a reviewer the text to check. Rewriting it to a
             # citation-free placeholder here would have undone the fix one
             # layer below the contract -- the driver would record the quote and
             # then publish a field claiming nothing was found.
+            #
+            # `printed_but_blank_only` is exempt for the same reason and was
+            # NOT exempt when the value was added: `_settle_unresolved` set the
+            # field-level cause correctly and this rewrite then destroyed the
+            # observations justifying it, so the schema -- which requires them
+            # to be `printed_but_blank` under that stop_reason -- refused every
+            # write. Measured 2026-08-26 on the first real run: CASE_7015 and
+            # CASE_7023 both failed stage 5 at the contract write, on every
+            # attempt, with 4 such fields each. The extraction layer was
+            # producing the observations; nothing could persist them.
             #
             # It is still not canonical: `selected_observation_ids` is empty
             # and the schema refuses a partial reading appearing in it.

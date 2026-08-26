@@ -403,3 +403,128 @@ def test_a_blank_cell_without_a_quote_is_dropped() -> None:
     assert extraction.parse_result(
         {"patient_reported_prior_same_site_history": {
             "presence": "printed_but_blank", "quote": BLANK_ROW}}, rows) == {}
+
+
+# ------------------------------- the publish layer must not erase the blank --
+# `field_result` rewrites every observation of an `unavailable` field to a
+# citation-free `value_state: "unavailable"`, with ONE exemption for
+# `partial_value_only`. `printed_but_blank_only` needed the same exemption and
+# did not get it, so `_settle_unresolved` set the field-level cause correctly
+# and the publish step then destroyed the observations that justify it -- and
+# the result schema, which requires those observations to be
+# `printed_but_blank` under that stop_reason, refused every write.
+#
+# Measured 2026-08-26 on the first real run after the value was added:
+# CASE_7015 (4 fields: diagnosis_date, surgery_or_procedure_date,
+# admission_period, documented_disability_standard) and CASE_7023 (4 fields:
+# accident_date, diagnosis_date, diagnosis_department, legal_basis_cited) both
+# failed stage 5 at the contract write, on every attempt. The extraction layer
+# WAS producing the observations; nothing could persist them.
+#
+# This is a sixth propagation surface, in a change whose commit message claimed
+# five. The lesson is the one `contract-axis-propagation-gap` already records:
+# adding a value upstream does not carry it to the layers that consume it, and
+# the ones that REWRITE rather than read are the easiest to miss.
+
+def _blank_observation(observation_id: str, rank: int) -> dict:
+    return {
+        "observation_id": observation_id,
+        "value_state": "printed_but_blank",
+        "reason": "서식에 항목은 있으나 칸이 비어 있음",
+        "source_document_kind": "diagnosis_certificate",
+        "source_priority_rank": rank,
+        "extraction_wave": "B",
+        "evidence_references": [{
+            "document_id": "DOC_003", "page": 1,
+            "quote": BLANK_ROW, "start_char": 0, "end_char": len(BLANK_ROW),
+        }],
+    }
+
+
+def _published(observations: list[dict]) -> dict:
+    outcome = driver.FieldExtractionOutcome(
+        field_id="diagnosis_date", domain_code="event_timeline", grade="A")
+    outcome.observations = list(observations)
+    driver._settle_unresolved(outcome)
+    return driver.field_result(
+        outcome, conflict_candidate_ids=[], authority="source_document_extraction",
+        priority_grade="A")
+
+
+def test_the_published_field_keeps_the_blank_observations() -> None:
+    """The quote is the whole justification for the cause; erasing it leaves
+    the contract asserting `printed_but_blank` with nothing behind it."""
+    result = _published([_blank_observation("CAO_0001", 1)])
+    assert result["stop_reason"] == "printed_but_blank_only"
+    assert result["unavailable_reason"] == "printed_but_blank"
+    assert [o["value_state"] for o in result["observations"]] == [
+        "printed_but_blank"]
+    # Still not canonical: nothing was established.
+    assert result["selected_observation_ids"] == []
+
+
+def test_the_published_blank_field_validates_against_the_schema() -> None:
+    """The end-to-end bar, and the one the driver actually failed: the result
+    schema requires every observation to be `printed_but_blank` under this
+    stop_reason, so a rewrite to `unavailable` is refused at the write."""
+    from _validation import load_registry, validate_instance
+
+    schemas, registry = load_registry()
+    result = _published([_blank_observation("CAO_0001", 1),
+                         _blank_observation("CAO_0002", 2)])
+    # A whole result document, because the field_result subschema carries
+    # internal $refs that only resolve against the full schema -- and because
+    # the whole document is what the driver actually writes.
+    document = {
+        "schema_version": "0.1",
+        "case_id": "CASE_900",
+        "run_id": "RUN_20260826_001",
+        "component": "claim-analysis",
+        "status": "success",
+        "created_at": "2026-08-26T00:00:00+09:00",
+        "config_version": "0.1",
+        "claim_facts": [result],
+    }
+    errors = [str(e) for e in validate_instance(
+        document, "claim_analysis_result.schema.json", schemas, registry)
+        if str(e).startswith("claim_facts/")]
+    assert errors == [], errors
+
+
+def test_a_mixed_field_does_not_claim_the_blank_cause() -> None:
+    """The schema constrains EVERY observation under `printed_but_blank_only`,
+    not just one, so the selector must require the same. A field holding a
+    blank cell AND an `unavailable` reading is not a blank-cell field: the
+    ladder found something else to say, and claiming otherwise sets a cause the
+    contract refuses at the write."""
+    from _validation import load_registry, validate_instance
+
+    mixed = [
+        _blank_observation("CAO_0001", 1),
+        {
+            "observation_id": "CAO_0002",
+            "value_state": "unavailable",
+            "reason": "이 출처에는 기재가 없습니다",
+            "source_document_kind": "outpatient_record",
+            "source_priority_rank": 2,
+            "extraction_wave": "B",
+            "evidence_references": [],
+        },
+    ]
+    result = _published(mixed)
+    assert result["stop_reason"] != "printed_but_blank_only"
+    assert result["unavailable_reason"] != "printed_but_blank"
+
+    schemas, registry = load_registry()
+    document = {
+        "schema_version": "0.1", "case_id": "CASE_900",
+        "run_id": "RUN_20260826_001", "component": "claim-analysis",
+        "status": "success", "created_at": "2026-08-26T00:00:00+09:00",
+        "config_version": "0.1", "claim_facts": [result],
+    }
+    # Scoped to this field's own rules: the stub document deliberately omits
+    # unrelated top-level blocks, and those errors are not what this pins.
+    errors = [str(e) for e in validate_instance(
+        document, "claim_analysis_result.schema.json", schemas, registry)
+        if str(e).startswith("claim_facts/")]
+    assert errors == [], errors
