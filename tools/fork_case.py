@@ -804,6 +804,16 @@ def check_no_active_locks(source_root: Path) -> None:
                   f"a write may be in progress or was interrupted: {[str(p) for p in locks]}")
 
 
+def _ignore_lock_files(_directory, names):
+    """copytree `ignore` callback: never carry a lock into a fork.
+
+    A stale lock in a fresh branch names a holder that was never running
+    there, which is exactly the state P5 tells a reader to treat as a live
+    write in progress.
+    """
+    return {name for name in names if name.endswith(".lock")}
+
+
 def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str,
                                      source_case_id: str | None = None) -> list[str]:
     """Returns the list of validation warnings (empty if everything that has
@@ -823,7 +833,15 @@ def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str,
         if item.is_file():
             shutil.copy2(item, dest / item.name)
         elif item.is_dir():
-            shutil.copytree(item, dest / item.name, dirs_exist_ok=True)
+            # `ignore` as well as the top-level filter above: the filter only
+            # sees this directory's own entries, while copytree brings a
+            # subtree across wholesale, so a nested `*.lock` was copied into
+            # the fork despite the module docstring saying locks are never
+            # copied. `check_no_active_locks` normally refuses the fork first,
+            # but it is a separate entry point -- a caller reaching the copier
+            # directly (as the stage-cut path does) had no protection at all.
+            shutil.copytree(item, dest / item.name, dirs_exist_ok=True,
+                            ignore=_ignore_lock_files)
 
     schemas, registry = load_registry()
     warnings = []

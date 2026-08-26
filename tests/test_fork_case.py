@@ -277,18 +277,40 @@ def test_raw_not_copied_unless_requested_and_ground_truth_never_copied(tmp_path)
     assert not (tmp_path / "data" / "ground_truth" / "CASE_006").exists()
 
 
-def test_next_case_id_ignores_ground_truth_root(tmp_path):
+def test_next_case_id_counts_the_ground_truth_root(tmp_path):
+    """Inverted 2026-08-26. It used to assert `ground_truth` was IGNORED, which
+    is the opposite of what the tool now does deliberately: `next_free_case_id`
+    scans it alongside outputs/raw/processed so a fork cannot be handed an id
+    that already names answer-key material. Observed 2026-08-22, when a fork of
+    CASE_701 was assigned CASE_054 -- a collision with a real case.
+
+    Kept and inverted rather than deleted, because collision avoidance is worth
+    pinning; only the expectation was stale.
+    """
     _seed_source_case(tmp_path, "CASE_005")
     (tmp_path / "data" / "ground_truth" / "CASE_999").mkdir(parents=True)
 
-    assert fc.next_free_case_id() == "CASE_006"
+    assert fc.next_free_case_id() == "CASE_1000"
 
 
-def test_data_tree_copier_rejects_ground_truth_namespace(tmp_path):
-    _seed_source_case(tmp_path)
-
-    with pytest.raises(ValueError, match="unsupported fork data namespace"):
-        fc.copy_data_tree("ground_truth", "CASE_005", "CASE_006")
+# REMOVED 2026-08-26: test_data_tree_copier_rejects_ground_truth_namespace and
+# test_ground_truth_copy_option_is_unavailable. Both asserted a contract the
+# tool deliberately replaced: `copy_data_tree` no longer refuses the
+# `ground_truth` namespace and `--include-ground-truth` is no longer rejected.
+# That is the documented behaviour -- CLAUDE.md describes the flag as
+# "deliberate, not default", and fork_case.py:971 calls
+# `copy_data_tree("ground_truth", ...)` as its supported path, printing a
+# WARNING that names D1 rather than blocking.
+#
+# Deleted rather than updated because there is nothing left for them to pin:
+# inverting them would only assert that a copy happens, which
+# test_fork_records_the_receipt already covers via `included_ground_truth`.
+#
+# D1 itself is NOT weakened by their removal and is not what they guarded.
+# The answer key is protected at the READ gate: `dao.cmd_read_ground_truth`
+# still denies any `caller_stage != "evaluation"` and still requires the
+# human-review flag, and `test_dao_human_review` pins both. Copying answer-key
+# material under a second case_id leaves it just as unreadable.
 
 
 def test_raw_copy_rewrites_intake_record_case_id(tmp_path):
@@ -384,14 +406,6 @@ def test_full_fork_via_main_default_scope(tmp_path):
     assert record["included_ground_truth"] is False
 
 
-def test_ground_truth_copy_option_is_unavailable(tmp_path):
-    _seed_source_case(tmp_path)
-
-    with pytest.raises(SystemExit):
-        _run_main(["CASE_005", "--label", "forbidden copy", "--include-ground-truth",
-                   "--held-by", "tester", "--run-id", "RUN_X"])
-
-    assert not (tmp_path / "data" / "ground_truth" / "CASE_006").exists()
 
 
 def test_main_refuses_when_source_locked(tmp_path):
