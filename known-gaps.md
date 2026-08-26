@@ -4446,3 +4446,40 @@ Recounted correctly: 76 withdrawn, 25 surviving, 5 in section 1, 20 in the ledge
 **Guarded** by a corpus-level test asserting that a conflict surviving review appears in section 1, the ledger, or a section 7 row -- reading the same contract the driver does.
 
 **The general lesson**, which is the reason this is recorded rather than just fixed: a report assembled from a passed-in contract can be assembled from the WRONG contract without error, and the resulting numbers look exactly like real ones. A measurement that will justify building something has to come from the path that runs in production.
+
+
+## 68. The six 배상책임 fields are routed by a second mechanism, and unifying it is not a config edit -- DEFERRED 2026-08-26
+
+`comparative_negligence_rate`, `legal_basis_cited`, `liability_opinion_conclusion`,
+`negligence_reasoning`, `duty_breach_grounds` and `responsible_party_role` all
+carry `source_route_id: null`. They are not unrouted: `additional_fields_by_case_type.liability`
+names all six with `sources: [legal_opinion, insurer_response]`, and stage 3-a
+opens those documents when the 배상책임 type is in play.
+
+Giving them a `source_route_id` looks like a one-line config edit and is not:
+
+* **It would stop them being read.** `claim_analysis_additional.eligible_field_ids`
+  re-opens a liability field precisely BECAUSE the common pass produces no
+  outcome for it (`outcome is None` -> always retry). Add a route and an
+  outcome appears; a status outside `RETRYABLE_STATUSES` then makes stage 3-a
+  skip the field. Routing them to the legal documents would prevent them being
+  read from the legal documents.
+* **The validator forbids the natural shape.** `claim_analysis_contracts`
+  rejects a `medical_document` route naming `non_medical_sources`, and
+  `legal_opinion`/`insurer_response` are manifest `document_type`s rather than
+  medical `document_kind`s. The route would have to be
+  `administrative_or_intake`, which may hold no `priority_groups` and must be
+  conditionally activated -- the `industrial_accident_filing` shape.
+* **It would be double routing.** Both mechanisms would then claim the same six
+  fields, so one has to be removed, not just added to.
+
+**Measured cost of leaving it (2026-08-26, CASE_7* corpus):** of the 82 rows
+these fields produce, **78 are honest** -- the pack holds no legal_opinion and
+no insurer_response, so there was nothing to read -- and **4 are stale**
+(CASE_701/702/703/704). The 4 are already corrected downstream:
+`run_claim_analysis_selective` restamps them to `not_mentioned` when the round
+opens a source and finds nothing. So the unification buys correctness on 0 rows
+today; its value is structural, removing a second routing mechanism.
+
+Revisit when stage 3-a is next opened. The English reason text these fields
+published was fixed separately on 2026-08-26 and does not depend on this.
