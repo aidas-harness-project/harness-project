@@ -5,11 +5,21 @@
   "description": "One place that says which model each pipeline stage runs on. Before this file the answer lived in eleven `.claude/agents/*.md` frontmatters (as a Claude Code model tier, not a provider slug) and in a scatter of per-role environment variables -- HARNESS_OCR_READER_A_MODEL, HARNESS_REDACTION_MODEL, HARNESS_OPENROUTER_MODEL -- so no single artifact answered 'what ran on what'. An entry may be present and EMPTY: that means 'not decided yet', which is different from a value, and resolution falls through to the environment exactly as it did before.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "stages"],
+  "required": [
+    "schema_version",
+    "stages"
+  ],
   "properties": {
-    "schema_version": { "const": "stage_model_config.v0.1" },
-    "config_version": { "type": "string", "minLength": 1 },
-    "note": { "type": "string" },
+    "schema_version": {
+      "const": "stage_model_config.v0.1"
+    },
+    "config_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "note": {
+      "type": "string"
+    },
     "default": {
       "$ref": "#/$defs/selection",
       "description": "Applied to any stage with no entry of its own. Absent means no default, and every stage falls through to the environment."
@@ -36,7 +46,11 @@
           "denial_validation"
         ]
       },
-      "patternProperties": { "^.*$": { "$ref": "#/$defs/stage" } }
+      "patternProperties": {
+        "^.*$": {
+          "$ref": "#/$defs/stage"
+        }
+      }
     }
   },
   "$defs": {
@@ -54,16 +68,26 @@
           "minLength": 1,
           "description": "Provider-specific slug, e.g. an OpenRouter vendor-prefixed id. Never invented -- an undecided model is an ABSENT key, not a placeholder string."
         },
-        "note": { "type": "string" }
+        "note": {
+          "type": "string"
+        }
       }
     },
     "stage": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "provider": { "type": "string", "minLength": 1 },
-        "model": { "type": "string", "minLength": 1 },
-        "note": { "type": "string" },
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "note": {
+          "type": "string"
+        },
         "roles": {
           "type": "object",
           "additionalProperties": false,
@@ -78,10 +102,15 @@
               "segmentation_judge",
               "judge",
               "extraction",
-              "synthesis"
+              "synthesis",
+              "review"
             ]
           },
-          "patternProperties": { "^.*$": { "$ref": "#/$defs/selection" } }
+          "patternProperties": {
+            "^.*$": {
+              "$ref": "#/$defs/selection"
+            }
+          }
         }
       }
     }

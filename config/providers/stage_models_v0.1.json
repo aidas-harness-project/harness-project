@@ -33,8 +33,18 @@
     },
     "draft_report_v1": {},
     "draft_report_v2": {},
-    "critic_v1": {},
-    "critic_v2": {},
+    "critic_v1": {
+      "note": "The blind review pass when run with `tools/run_critic.py`. The four deterministic checks make no model call. Worth a DIFFERENT model from the one that authored the draft: a critic reviewing its own author is a weaker review, and this is the line where that choice is made.",
+      "roles": {
+        "review": {}
+      }
+    },
+    "critic_v2": {
+      "note": "The blind review pass when run with `tools/run_critic.py`. The four deterministic checks make no model call. Worth a DIFFERENT model from the one that authored the draft: a critic reviewing its own author is a weaker review, and this is the line where that choice is made.",
+      "roles": {
+        "review": {}
+      }
+    },
     "denial_validation": {}
   }
 }
