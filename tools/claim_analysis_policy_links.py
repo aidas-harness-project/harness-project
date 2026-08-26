@@ -298,21 +298,46 @@ def build_policy_links(
     by_field = dict(conflict_candidate_ids_by_field or {})
     links: list[dict] = []
 
+    # Which coverages rest on a fact the case actually established, as opposed
+    # to a case type the assessment merely did not rule out. `coverage_terms`
+    # merges both and does not say which is which, so recompute the fact side
+    # here rather than inferring it from the merged list.
+    fact_backed = {
+        field_id for field_id, _ in coverage_terms(
+            claim_facts, config=config, case_type_assessment=None)
+    }
+
     for coverage_id, term in coverage_terms(
             claim_facts, config=config,
             case_type_assessment=case_type_assessment):
         conflicts = list(by_field.get(coverage_id) or [])
+        # `supported` is an affirmative claim that the requirement is met, and
+        # P1 does not let one stand uncited. A coverage justified only by a
+        # case type in play establishes nothing about the requirement -- it
+        # says which clauses are worth SEARCHING for, which is a different
+        # question. Measured 2026-08-26 on CASE_7077: `liability_premises_owner`
+        # and `liability_premises_medical_expense` both published `supported`
+        # with zero evidence_references, on a case whose liability-grounding
+        # facts are all `unavailable`, all four case types `uncertain`, and no
+        # policy document present at all. It told a 손해사정사 the requirement
+        # was met.
+        if conflicts:
+            status = "conflict"
+            reason = ("이 요건이 근거하는 사실에 서로 다른 두 기재가 있습니다. 검토자가 "
+                      "양쪽을 조항에 대조할 수 있도록 조항을 연결했습니다.")
+        elif coverage_id in fact_backed:
+            status = "supported"
+            reason = "확인된 사실이 이 요건을 충족한다고 기재하고 있습니다."
+        else:
+            status = "unknown"
+            reason = ("사건유형상 검토 대상이어서 조항을 찾았을 뿐, 이 요건을 "
+                      "충족한다고 확인된 사실은 없습니다. 검토자가 직접 판단해야 합니다.")
         requirement = {
             "requirement_id": "REQ-1",
             "requirement_text": f"{term} 관련 담보 요건",
-            "evidence_status": "conflict" if conflicts else "supported",
+            "evidence_status": status,
             "conflict_candidate_ids": conflicts,
-            "reason": (
-                "이 요건이 근거하는 사실에 서로 다른 두 기재가 있습니다. 검토자가 "
-                "양쪽을 조항에 대조할 수 있도록 조항을 연결했습니다."
-                if conflicts else
-                "확인된 사실이 이 요건을 충족한다고 기재하고 있습니다."
-            ),
+            "reason": reason,
             "evidence_references": [],
         }
 

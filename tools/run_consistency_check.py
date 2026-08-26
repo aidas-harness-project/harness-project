@@ -380,8 +380,23 @@ def operation_id_for(
     returns the entry it already made rather than minting a second one. It
     carries the digest as well as the id because a candidate whose readings
     changed is a different disagreement and deserves its own entry.
+
+    `run_id` is deliberately NOT part of the id, though it stays in the
+    signature so callers are unchanged. Including it made every re-run produce
+    a fresh id, so the DAO saw a new operation and minted a duplicate entry for
+    a disagreement already recorded -- the exact opposite of what the paragraph
+    above promises. Measured 2026-08-26: duplicates on CASE_7015/7034/7061/
+    7071/7077, and CASE_7077 ended holding CONFLICT_1 `deferred_to_report` and
+    CONFLICT_2 `pending` for the same field from the same two sources, the
+    pending one blocking `screening_report`.
+
+    Dropping it is safe because the DAO compares the request envelope as well
+    as the id, and `cmd_add_conflict_entry`'s payload is
+    `{stage, topic, sources}` -- no run id in it. So a genuine re-run over the
+    same evidence matches and returns the original entry, while a candidate
+    whose readings changed still gets a new id through the digest.
     """
-    return f"consistency_check:{case_id}:{run_id}:{candidate_id}:{digest}"
+    return f"consistency_check:{case_id}:{candidate_id}:{digest}"
 
 
 def register_confirmed(

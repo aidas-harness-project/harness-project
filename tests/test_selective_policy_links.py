@@ -238,3 +238,63 @@ def test_referenced_documents_scopes_the_snapshot() -> None:
     links = _build()
     assert linker.referenced_documents(links) == ["DOC_900"]
     assert linker.referenced_documents([]) == []
+
+
+# ------------------------------- `supported` must mean something is supported --
+# `evidence_status` was `"conflict" if conflicts else "supported"`, with
+# `evidence_references` initialised to `[]`. So a requirement whose underlying
+# fact was never established still published `supported` -- an affirmative
+# claim that the requirement is met, carrying no citation at all.
+#
+# Measured 2026-08-26 on CASE_7077: `liability_premises_owner` REQ-1 and
+# `liability_premises_medical_expense` REQ-1 both read `supported` with zero
+# `evidence_references`, on a case where every liability-grounding fact is
+# `unavailable` and all four case types are `uncertain`. Those coverages come
+# from `case_type_terms`, which deliberately includes a type the assessment did
+# not rule OUT -- correct for deciding what to SEARCH, wrong as a basis for
+# saying a requirement is satisfied.
+#
+# Under P1 an uncited affirmative claim is a defect, and this one is worse than
+# an unlinked sentence: it tells a 손해사정사 the requirement is met.
+
+def _real_config() -> dict:
+    """The shipped routing config, because `case_type_terms` reads
+    `policy_linking.coverage_terms_by_case_type` from it and returns nothing
+    without it -- which is why a synthetic config cannot reach this path."""
+    import pathlib
+    return json.loads((pathlib.Path(__file__).resolve().parent.parent
+                       / "config" / "claim_analysis"
+                       / "claim_analysis_routing_v0.1.json"
+                       ).read_text(encoding="utf-8"))
+
+
+def test_a_requirement_with_no_evidence_is_not_reported_as_supported() -> None:
+    """The CASE_7077 shape: a coverage justified only by an unresolved case
+    type, whose facts established nothing."""
+    # No policy documents at all, which is CASE_7077's actual state: its
+    # links read `clause_link_status: not_found`, "사용할 약관 문서가
+    # 없어" -- and the requirement still claimed to be supported.
+    links = _build(
+        claim_facts=[{"field_id": "surgery_or_major_procedure_status",
+                      "resolution_status": "unavailable"}],
+        case_type_assessment=[{"case_type": "liability", "verdict": "uncertain"}],
+        manifest={"documents": []},
+        index=None,
+        config=_real_config(),
+    )
+    for link in links:
+        for requirement in link.get("requirements") or []:
+            if requirement.get("evidence_status") != "supported":
+                continue
+            assert requirement.get("evidence_references"), (
+                f"{link.get('coverage_id')} {requirement.get('requirement_id')} "
+                "claims the requirement is supported and cites nothing")
+
+
+def test_an_established_fact_still_supports_its_requirement() -> None:
+    """The guard must not cost a legitimate `supported`."""
+    links = _build()
+    statuses = {r.get("evidence_status")
+                for link in links for r in link.get("requirements") or []}
+    assert statuses, "no requirement was produced at all"
+    assert "supported" in statuses

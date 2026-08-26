@@ -280,3 +280,45 @@ def test_confirmed_check_points_at_its_ledger_entry() -> None:
     assert contract["checks"][0]["result"] == "inconsistent"
     assert contract["checks"][0]["conflict_id"] == "CONFLICT_1"
     assert contract["review_required"] is True
+
+
+def test_the_operation_id_is_stable_across_runs() -> None:
+    """The docstring's own promise, which the key did not keep.
+
+    `operation_id_for` says it is "deterministic so a retried register is the
+    same operation and the DAO returns the entry it already made rather than
+    minting a second one". It included `run_id`, which guarantees the
+    opposite: every re-run produces a fresh id, so the DAO sees a NEW operation
+    and mints a duplicate ledger entry for a disagreement already recorded.
+
+    Measured 2026-08-26 on the eight-case re-run -- duplicate entries appeared
+    on CASE_7015, 7034, 7061, 7071 and 7077, and CASE_7077 ended with
+    CONFLICT_1 `deferred_to_report` and CONFLICT_2 `pending` for the SAME field
+    from the SAME two sources, the pending one blocking `screening_report`.
+
+    The existing test above only ever passed one run_id, so it could not see
+    this. Dropping `run_id` is safe because the DAO's idempotency compares the
+    request envelope too, and `cmd_add_conflict_entry`'s payload is
+    `{stage, topic, sources}` -- it carries no run id, so a genuine re-run with
+    the same evidence matches cleanly instead of being refused as "committed
+    for a different request".
+    """
+    item = _items()[0]
+    first = helper.operation_id_for(
+        "CASE_9001", "RUN_20260819_1",
+        item["conflict_candidate_id"], item["candidate_digest"])
+    rerun = helper.operation_id_for(
+        "CASE_9001", "RUN_20260826_9",
+        item["conflict_candidate_id"], item["candidate_digest"])
+    assert first == rerun, (
+        "a re-run mints a second ledger entry for the same disagreement")
+
+
+def test_a_different_case_still_gets_its_own_operation_id() -> None:
+    """Stability across runs must not become collision across cases."""
+    item = _items()[0]
+    a = helper.operation_id_for(
+        "CASE_9001", "RUN_1", item["conflict_candidate_id"], item["candidate_digest"])
+    b = helper.operation_id_for(
+        "CASE_9002", "RUN_1", item["conflict_candidate_id"], item["candidate_digest"])
+    assert a != b
