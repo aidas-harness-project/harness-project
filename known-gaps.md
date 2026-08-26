@@ -37,6 +37,7 @@ the same pass.
 | 59 | OPEN | The agent-executed stages never reach llm_providers, so the OpenRouter switch cannot cover them |
 | 60 | OPEN | No OpenRouter call has ever been made against the real service -- everything is verified statically |
 | 61 | OPEN | scan_intake_content has no production caller after D2's pre-check was removed |
+| 62 | OPEN | Half the failing test baseline is Windows-platform (O_NOFOLLOW/symlink), not logic |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
@@ -4181,3 +4182,44 @@ What closes it: either re-wire the pre-check (a decision the PoC owner already
 made against once), or retire the method from the provider interface. Left open
 rather than removed unilaterally, because removing it would also delete the
 only fail-closed vision-scan guard if the check ever comes back.
+
+
+## 62. Half the failing test baseline is Windows-platform, not logic -- OPEN 2026-08-26
+
+**What.** The suite carries 98 failures on this machine. Classified by root
+cause (2026-08-26, before any of that day's fixes):
+
+| cause | count | what it is |
+|---|---|---|
+| `os.O_NOFOLLOW` missing | 24 | POSIX-only constant, absent on Windows |
+| `WinError 1314` + symlink | 12 | symlink creation needs a privilege this account lacks |
+| stale test mocks | 13 | `fake_classify` predating the 2026-08-19 `routing_config` argument |
+| other assertions | ~49 | genuinely unexamined |
+
+**47 of the 98 are the medical-review subsystem** (`test_medical_*`,
+`test_dao_medical_variables`, `test_frontend_medical_endpoints`) failing at
+import or first syscall on `os.O_NOFOLLOW`, which does not exist on win32.
+
+**Why it matters, and why it is not urgent.** `dao.py` already solved exactly
+this, at line 244: `_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)`, with a comment
+recording that the medical modules "were authored on Linux ... so the original
+code could not import, let alone run, on this machine". That fix was never
+carried to `medical_review_ledger.py` (5 sites) or `operator_auth.py` (1 site).
+So this is production code that cannot execute on the development platform --
+but the subsystem is dormant by design: both shipped policies carry
+`operations_enabled: false, approval: null`, and `dao.py`'s
+`_medical_operations_approved` fails closed, so the pipeline routes around it.
+Stage 5 runs `medical not_applicable` and never enters these paths.
+
+The risk is that the gate is unverifiable ON THIS MACHINE, so if the policy is
+ever approved, nothing here has been exercised. It is a portability debt with a
+known shape and a worked precedent, not an unknown.
+
+**What closes it.** Apply `dao.py`'s `getattr` degradation to the two modules,
+then re-measure. Expect the 47 to drop sharply; whatever remains is real and
+newly visible. Separately: the ~49 unclassified assertions have never been
+read, and item 3 of the 2026-08-26 audit is where that starts.
+
+**Do not** treat "98 failures, delta 0" as a clean bill. That was how this was
+managed until 2026-08-26, and it hid 13 dead checkpoint-1 tests -- including
+the one pinning that classification reads REDACTED rather than raw page text.
