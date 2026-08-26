@@ -86,9 +86,10 @@
               "sources_exhausted",
               "conflict_found",
               "not_applicable",
-              "explicitly_absent"
+              "explicitly_absent",
+              "partial_value_only"
             ],
-            "description": "Why this field's read ladder stopped. Mirrors the SAME enum in claim_analysis_result.schema.json: one writer copies `outcome.stop_reason` into both the result's claim_facts and this trace's field_stops, so a value one schema accepts and the other rejects fails the stage on its last write. `explicitly_absent` was added to the result schema on 2026-08-20 and not here, and CASE_712 (2026-08-21) was the first case whose evidence elected it -- a source stating a field is absent (\"PMHx. n/s\") rather than carrying a value. Keep the two enums identical."
+            "description": "Why this field's read ladder stopped. Mirrors the SAME enum in claim_analysis_result.schema.json: one writer copies `outcome.stop_reason` into both the result's claim_facts and this trace's field_stops, so a value one schema accepts and the other rejects fails the stage on its last write. `explicitly_absent` was added to the result schema on 2026-08-20 and not here, and CASE_712 (2026-08-21) was the first case whose evidence elected it -- a source stating a field is absent (\"PMHx. n/s\") rather than carrying a value. The identical drift recurred with `partial_value_only` on 2026-08-26: it was added to the result schema and not here, and the very first case to elect it (CASE_9410, a CASE_7015 fork) failed on this write with 5 rejected field_stops. Keep the two enums identical."
           },
           "documents_read": {
             "type": "integer",

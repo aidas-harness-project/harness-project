@@ -192,6 +192,14 @@ def test_unavailable_reason_enum_matches_spec() -> None:
         # read at all: a conditional route whose trigger never fired, and an
         # opportunistic field that schedules no read of its own.
         "route_not_activated", "not_scheduled",
+        # Added 2026-08-26. The opposite error to the two above: a source WAS
+        # read and DID state a value, but the reading failed the trusted-value
+        # requirements (complete/unambiguous) and used to be discarded at the
+        # gate -- leaving the field reporting `not_mentioned` about text the
+        # model had quoted verbatim. Measured on CASE_7015 as 5 of 40
+        # unavailable fields, among them 사고일 and 수술명. Requesting more
+        # records cannot close it; a person must read the preserved quote.
+        "partial_reading_only",
     }
     assert set(schema["$defs"]["field_result"]["properties"]["unavailable_reason"]["enum"]) == expected
     assert set(schema["$defs"]["observation"]["properties"]["unavailable_reason"]["enum"]) == expected

@@ -250,6 +250,18 @@
         "value": {
           "$ref": "#/$defs/value"
         },
+        "partial_reading": {
+          "type": "boolean",
+          "description": "True when this reading cited a real value that did NOT meet the four trusted-value requirements in extraction_policy.trusted_value_requirements -- it is complete: false, unambiguous: false, or both. Such a reading is recorded but never becomes canonical: it is never placed in selected_observation_ids, and the field it belongs to stays 'unavailable' unless some other source asserts a trusted value. It exists because the alternative was discarding the reading outright, which left the field reporting that no source mentioned it while the model had quoted the value verbatim -- measured on CASE_7015 (2026-08-26) as 5 of 40 unavailable fields, among them 사고일, 수술명 and 장해 영구성. Absent means an ordinary reading, so a producer that does not set it is unchanged."
+        },
+        "complete": {
+          "type": "boolean",
+          "description": "The model's own verdict that this reading captured the WHOLE value. False when the source states more than the reading carries -- a second 수술명 on the next line, a date given only as 3/26. Recorded only alongside partial_reading so a reviewer can tell which of the two requirements failed."
+        },
+        "unambiguous": {
+          "type": "boolean",
+          "description": "The model's own verdict that the text supports exactly one reading. False when the same passage could be read more than one way. Recorded only alongside partial_reading."
+        },
         "reason": {
           "type": "string",
           "minLength": 1
@@ -262,9 +274,10 @@
             "outside_poc_scope",
             "route_not_activated",
             "not_scheduled",
-            "conflict_unresolved"
+            "conflict_unresolved",
+            "partial_reading_only"
           ],
-          "description": "WHY a field has no value. Three of these are distinct records-management situations that a single value used to collapse -- measured on CASE_700 (2026-08-21), where all 25 unavailable fields read `not_mentioned` while the free-text reason held three different causes. `not_mentioned` means sources WERE read and none discussed the field, which is a real records gap a reviewer may close by requesting documents. `route_not_activated` means a conditional route never opened -- its trigger did not fire (산재 filing unconfirmed), so nothing was read and no document is missing; requesting records would be wasted effort. `not_scheduled` means an opportunistic field was never scheduled a read of its own: it answers only from documents another field already opened. `outside_poc_scope` means the pipeline has no producer for this source at all. Collapsing these into `not_mentioned` sends a reviewer looking for records that would not have helped, and hides that a route silently never ran."
+          "description": "WHY a field has no value. Three of these are distinct records-management situations that a single value used to collapse -- measured on CASE_700 (2026-08-21), where all 25 unavailable fields read `not_mentioned` while the free-text reason held three different causes. `not_mentioned` means sources WERE read and none discussed the field, which is a real records gap a reviewer may close by requesting documents. `route_not_activated` means a conditional route never opened -- its trigger did not fire (산재 filing unconfirmed), so nothing was read and no document is missing; requesting records would be wasted effort. `not_scheduled` means an opportunistic field was never scheduled a read of its own: it answers only from documents another field already opened. `outside_poc_scope` means the pipeline has no producer for this source at all. Collapsing these into `not_mentioned` sends a reviewer looking for records that would not have helped, and hides that a route silently never ran. `partial_reading_only` means a priority source DID cite a value but it failed the trusted-value requirements (complete/unambiguous), so nothing became canonical -- the records are NOT silent and the quote is preserved in observations, so a reviewer should read the source rather than request more documents. It pairs with stop_reason partial_value_only (added 2026-08-26 after CASE_7015 showed such readings being discarded and reported as not_mentioned)."
         },
         "source_document_kind": {
           "$ref": "medical_document_classification.schema.json#/$defs/medical_document_kind"
@@ -540,8 +553,10 @@
             "sources_exhausted",
             "conflict_found",
             "not_applicable",
-            "explicitly_absent"
-          ]
+            "explicitly_absent",
+            "partial_value_only"
+          ],
+          "description": "Why this field's read ladder stopped. 'partial_value_only' -- every cited reading failed the trusted-value requirements (complete/unambiguous), so no value became canonical even though the sources were NOT silent. It is distinct from 'sources_exhausted', which means the ladder found nothing at all; conflating the two made a quoted-but-partial value indistinguishable from an absent one."
         },
         "resolution_reason": {
           "type": "string",
@@ -555,9 +570,10 @@
             "outside_poc_scope",
             "route_not_activated",
             "not_scheduled",
-            "conflict_unresolved"
+            "conflict_unresolved",
+            "partial_reading_only"
           ],
-          "description": "WHY a field has no value. Three of these are distinct records-management situations that a single value used to collapse -- measured on CASE_700 (2026-08-21), where all 25 unavailable fields read `not_mentioned` while the free-text reason held three different causes. `not_mentioned` means sources WERE read and none discussed the field, which is a real records gap a reviewer may close by requesting documents. `route_not_activated` means a conditional route never opened -- its trigger did not fire (산재 filing unconfirmed), so nothing was read and no document is missing; requesting records would be wasted effort. `not_scheduled` means an opportunistic field was never scheduled a read of its own: it answers only from documents another field already opened. `outside_poc_scope` means the pipeline has no producer for this source at all. Collapsing these into `not_mentioned` sends a reviewer looking for records that would not have helped, and hides that a route silently never ran."
+          "description": "WHY a field has no value. Three of these are distinct records-management situations that a single value used to collapse -- measured on CASE_700 (2026-08-21), where all 25 unavailable fields read `not_mentioned` while the free-text reason held three different causes. `not_mentioned` means sources WERE read and none discussed the field, which is a real records gap a reviewer may close by requesting documents. `route_not_activated` means a conditional route never opened -- its trigger did not fire (산재 filing unconfirmed), so nothing was read and no document is missing; requesting records would be wasted effort. `not_scheduled` means an opportunistic field was never scheduled a read of its own: it answers only from documents another field already opened. `outside_poc_scope` means the pipeline has no producer for this source at all. Collapsing these into `not_mentioned` sends a reviewer looking for records that would not have helped, and hides that a route silently never ran. `partial_reading_only` means a priority source DID cite a value but it failed the trusted-value requirements (complete/unambiguous), so nothing became canonical -- the records are NOT silent and the quote is preserved in observations, so a reviewer should read the source rather than request more documents. It pairs with stop_reason partial_value_only (added 2026-08-26 after CASE_7015 showed such readings being discarded and reported as not_mentioned)."
         }
       },
       "required": [
@@ -655,7 +671,7 @@
           }
         },
         {
-          "$comment": "unavailable: no evidence anywhere, and the reason why is named.",
+          "$comment": "unavailable: nothing became canonical, and the reason why is named. Two shapes reach it and the difference is what a reviewer is owed. sources_exhausted -- no evidence anywhere, so every observation must itself be 'unavailable'. partial_value_only -- a priority source DID cite a value that failed the trusted-value requirements (complete/unambiguous), so the observations are 'asserted' and flagged partial_reading; the field still selects nothing and still asserts no value. Before partial_value_only existed such a reading was discarded and the field reported that no source mentioned it, contradicting a quote the model had reproduced verbatim (CASE_7015, 2026-08-26).",
           "if": {
             "properties": {
               "resolution_status": {
@@ -671,28 +687,92 @@
               "selected_observation_ids": {
                 "maxItems": 0
               },
-              "observations": {
-                "items": {
-                  "properties": {
-                    "value_state": {
-                      "const": "unavailable"
-                    }
-                  },
-                  "required": [
-                    "value_state"
-                  ]
-                }
-              },
               "conflict_candidate_ids": {
                 "maxItems": 0
               },
               "stop_reason": {
-                "const": "sources_exhausted"
+                "$comment": "Expressed as an exclusion, NOT as an enum of the two allowed values. `test_stop_reason_enums_agree.py` scans every `stop_reason` node carrying an `enum` and requires them all to hold the full shared vocabulary -- a conditional listing a SUBSET reads to that guard as a schema that lost values, and it would also displace the result schema's real declaration from the position the guard samples. Saying which reasons an `unavailable` field may NOT carry keeps the restriction while leaving exactly one place that declares the vocabulary.",
+                "not": {
+                  "enum": [
+                    "trusted_value_found",
+                    "conflict_found",
+                    "not_applicable",
+                    "explicitly_absent"
+                  ]
+                }
               }
             },
             "required": [
               "resolution_reason",
               "unavailable_reason"
+            ],
+            "allOf": [
+              {
+                "$comment": "No evidence at all: every observation must itself be unavailable. Unchanged from before partial_value_only was added.",
+                "if": {
+                  "properties": {
+                    "stop_reason": {
+                      "const": "sources_exhausted"
+                    }
+                  },
+                  "required": [
+                    "stop_reason"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "observations": {
+                      "items": {
+                        "properties": {
+                          "value_state": {
+                            "const": "unavailable"
+                          }
+                        },
+                        "required": [
+                          "value_state"
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "$comment": "A partial reading is real cited evidence, so it must carry the partial_reading flag and at least one of complete/unambiguous must be false -- otherwise it would have met the trusted-value bar and should not be here. At least one such observation must exist, or the field had no partial reading to report.",
+                "if": {
+                  "properties": {
+                    "stop_reason": {
+                      "const": "partial_value_only"
+                    }
+                  },
+                  "required": [
+                    "stop_reason"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "unavailable_reason": {
+                      "const": "partial_reading_only"
+                    },
+                    "observations": {
+                      "minItems": 1,
+                      "contains": {
+                        "properties": {
+                          "partial_reading": {
+                            "const": true
+                          },
+                          "value_state": {
+                            "const": "asserted"
+                          }
+                        },
+                        "required": [
+                          "partial_reading",
+                          "value_state"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
             ]
           }
         },

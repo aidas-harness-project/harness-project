@@ -221,3 +221,40 @@ def test_the_report_schema_requires_the_cause():
     assert "gap_kind" in found["items"]["required"]
     assert set(found["items"]["properties"]["gap_kind"]["enum"]) == set(
         screening.UNAVAILABLE_KIND_LABEL)
+
+
+def test_stop_reason_enum_is_identical_in_result_and_trace_schemas() -> None:
+    """One writer copies `outcome.stop_reason` into BOTH contracts, so a value
+    one schema accepts and the other rejects fails the stage on its last write.
+
+    Both schemas already say "Keep the two enums identical" in prose, and the
+    drift still happened twice: `explicitly_absent` (added to the result schema
+    2026-08-20, elected first by CASE_712) and `partial_value_only` (added
+    2026-08-26, elected first by CASE_9410 -- which failed on the trace write
+    with 5 rejected field_stops AFTER the whole run had been paid for). Prose
+    could not enforce it; this can.
+    """
+    schemas, _ = load_registry()
+    result_enum = schemas["claim_analysis_result.schema.json"]["$defs"][
+        "field_result"]["properties"]["stop_reason"]["enum"]
+    trace_enum = schemas["claim_analysis_trace.schema.json"]["properties"][
+        "field_stops"]["items"]["properties"]["stop_reason"]["enum"]
+    assert set(result_enum) == set(trace_enum), (
+        "stop_reason drifted between the result and trace schemas: "
+        f"result-only={sorted(set(result_enum) - set(trace_enum))}, "
+        f"trace-only={sorted(set(trace_enum) - set(result_enum))}")
+
+
+def test_unavailable_reason_enum_is_identical_in_observation_and_field_result() -> None:
+    """The same drift, one level down: `observation` and `field_result` each
+    declare `unavailable_reason`, and the driver writes the field's value into
+    both. They had already diverged when `partial_reading_only` was added.
+    """
+    schemas, _ = load_registry()
+    defs = schemas["claim_analysis_result.schema.json"]["$defs"]
+    observation = defs["observation"]["properties"]["unavailable_reason"]["enum"]
+    field_result = defs["field_result"]["properties"]["unavailable_reason"]["enum"]
+    assert set(observation) == set(field_result), (
+        "unavailable_reason drifted between observation and field_result: "
+        f"observation-only={sorted(set(observation) - set(field_result))}, "
+        f"field_result-only={sorted(set(field_result) - set(observation))}")

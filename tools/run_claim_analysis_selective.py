@@ -223,6 +223,76 @@ class FieldExtractionOutcome:
         self.comparisons = 0
 
 
+def _partial_observation(found: Mapping[str, Any], *, observation_id: str,
+                         kind: str | None, priority_rank: int, wave: str,
+                         reference: Mapping[str, Any]) -> dict:
+    """A cited reading that failed the trusted-value bar, recorded not discarded.
+
+    See `_consume` for why this exists: dropping such a reading left the field
+    on its `unavailable`/`sources_exhausted` default, so the contract reported
+    that no source mentioned a value the model had quoted verbatim.
+
+    It is never canonical. `_settle_unresolved` keeps the field `unavailable`
+    and `selected_observation_ids` empty; the schema refuses a partial reading
+    that appears in `selected_observation_ids`.
+    """
+    observation = {
+        "observation_id": observation_id,
+        "value_state": "asserted",
+        "value": found["value"],
+        "partial_reading": True,
+        "complete": bool(found.get("complete", True)),
+        "unambiguous": bool(found.get("unambiguous", True)),
+        "source_priority_rank": priority_rank,
+        "extraction_wave": wave,
+        "evidence_references": [reference],
+    }
+    if kind is not None:
+        observation["source_document_kind"] = kind
+    return observation
+
+
+def _settle_unresolved(outcome: "FieldExtractionOutcome") -> None:
+    """Report a field that ended with no trusted value, distinguishing WHY.
+
+    Three endings, and a reviewer is owed a different thing by each:
+
+    * `explicitly_absent` -- a source stated the thing is not present.
+    * `partial_value_only` -- a source cited a value that failed the
+      trusted-value requirements. The records are NOT silent, and the quote is
+      preserved, so the reviewer should read the source rather than request
+      more documents.
+    * otherwise the constructor default stands: nothing was established.
+    """
+    if outcome.status != "unavailable" or not outcome.observations:
+        return
+    absent = [o for o in outcome.observations
+              if o.get("value_state") == "explicitly_absent"]
+    if absent:
+        outcome.status = "explicitly_absent"
+        outcome.stop_reason = "explicitly_absent"
+        outcome.selected_ids = []
+        outcome.reason = "라우팅된 출처가 이 항목이 없다고 기재하고 있습니다"
+        return
+    partial = [o for o in outcome.observations if o.get("partial_reading")]
+    if not partial:
+        return
+    outcome.stop_reason = "partial_value_only"
+    outcome.unavailable_reason = "partial_reading_only"
+    outcome.selected_ids = []
+    incomplete = sum(1 for o in partial if not o.get("complete", True))
+    ambiguous = sum(1 for o in partial if not o.get("unambiguous", True))
+    parts = []
+    if incomplete:
+        parts.append(f"불완전 {incomplete}건")
+    if ambiguous:
+        parts.append(f"다의적 {ambiguous}건")
+    outcome.reason = (
+        f"우선순위 출처에서 값을 확인했으나 신뢰값 요건을 충족하지 못했습니다"
+        f"({', '.join(parts)}). 인용은 보존되어 있으므로 검토자가 원문을 "
+        "확인해야 합니다")
+
+
 def _values_disagree(left: Any, right: Any) -> bool:
     """Whether two extracted values are a real contradiction.
 
@@ -297,6 +367,11 @@ def resolve_field(
                 complete=bool(found.get("complete", True)),
                 unambiguous=bool(found.get("unambiguous", True)),
             ):
+                # Recorded, never canonical -- see `_partial_observation`.
+                outcome.observations.append(_partial_observation(
+                    found, observation_id=next(observation_ids), kind=kind,
+                    priority_rank=step.priority_rank, wave=plan.wave,
+                    reference=reference))
                 continue
             observation = {
                 "observation_id": next(observation_ids),
@@ -345,6 +420,9 @@ def resolve_field(
             f"이 항목의 우선순위 출처 {outcome.documents_read}건을 읽었으나 "
             "어느 자료에도 기재가 없었습니다"
         )
+        # A partial reading overrides that sentence: the sources were not
+        # silent, they were merely not trustworthy enough to be canonical.
+        _settle_unresolved(outcome)
     return outcome
 
 
@@ -475,6 +553,11 @@ def resolve_from_cache(
                 complete=bool(found.get("complete", True)),
                 unambiguous=bool(found.get("unambiguous", True)),
             ):
+                # Recorded, never canonical -- see `_partial_observation`.
+                outcome.observations.append(_partial_observation(
+                    found, observation_id=next(observation_ids), kind=kind,
+                    priority_rank=step.priority_rank, wave=plan.wave,
+                    reference=reference))
                 continue
             observation = {
                 "observation_id": next(observation_ids),
@@ -523,6 +606,9 @@ def resolve_from_cache(
             f"이 항목의 우선순위 출처 {outcome.documents_read}건을 읽었으나 "
             "어느 자료에도 기재가 없었습니다"
         )
+        # A partial reading overrides that sentence: the sources were not
+        # silent, they were merely not trustworthy enough to be canonical.
+        _settle_unresolved(outcome)
     return outcome
 
 
@@ -682,17 +768,10 @@ def _finish(progress: FieldProgress) -> None:
         outcome.selected_ids = [progress.trusted["observation_id"]]
         outcome.reason = (
             "확보 가능한 최상위 우선순위 출처에서 신뢰할 수 있는 값을 확인했습니다")
-    elif outcome.observations and outcome.status == "unavailable":
-        # Only explicitly-absent readings survived: a source stated the thing
-        # is NOT present. That is a finding, not an empty search.
-        absent = [o for o in outcome.observations
-                  if o.get("value_state") == "explicitly_absent"]
-        if absent:
-            outcome.status = "explicitly_absent"
-            outcome.stop_reason = "explicitly_absent"
-            outcome.selected_ids = []
-            outcome.reason = (
-                "라우팅된 출처가 이 항목이 없다고 기재하고 있습니다")
+    else:
+        # Only explicitly-absent or partial readings survived. Which of the two
+        # it was decides what the contract says and what a reviewer should do.
+        _settle_unresolved(outcome)
     progress.done = True
 
 
@@ -747,6 +826,33 @@ def _consume(
         complete=bool(found.get("complete", True)),
         unambiguous=bool(found.get("unambiguous", True)),
     ):
+        # A cited reading that is merely PARTIAL or AMBIGUOUS is recorded, and
+        # deliberately does not become `trusted`: the ladder keeps walking, so
+        # a complete lower-priority source can still win. Recording it changes
+        # only what the contract says when nothing better is ever found.
+        #
+        # Discarding it outright is what this replaces, and the failure was not
+        # cosmetic. `_finish` settles a field from `outcome.observations`, so a
+        # dropped reading left the field on its constructor default --
+        # `unavailable` / `sources_exhausted` / "어떤 출처도 이 항목을 기재하지
+        # 않았습니다". The contract then asserted that no source mentioned the
+        # field, about text the model had quoted verbatim. Measured on
+        # CASE_7015 (2026-08-26): 5 of 40 `unavailable` fields were this case,
+        # including 사고일 ('3/26'), 수술명 ('CRIF with K-wires, distal radius,
+        # Lt'), 장해 영구성 ('본 장해는 영구 장해임') and 맥브라이드식 기준 --
+        # each dropped for `complete: false`, which the model set honestly
+        # because a second procedure or a fuller date sat beside the value it
+        # returned. An evaluation comparing this contract against ground truth
+        # cannot tell such a field from one the records genuinely never state.
+        #
+        # This mirrors `explicitly_absent` above: evidence is preserved, the
+        # search is not satisfied. The four trusted-value requirements in
+        # `extraction_policy.trusted_value_requirements` are untouched -- this
+        # value still fails them, and still never becomes canonical.
+        outcome.observations.append(_partial_observation(
+            found, observation_id=next(observation_ids), kind=kind,
+            priority_rank=progress.current_rank(),
+            wave=progress.plan.wave, reference=reference))
         return
 
     observation = {
@@ -1165,18 +1271,31 @@ def field_result(
     if outcome.status != "asserted":
         result["resolution_reason"] = outcome.reason
     if outcome.status == "unavailable":
-        # Nothing was established, so nothing may be cited. Any reading picked
-        # up along the way is rewritten to carry the same verdict -- an
-        # asserted value cannot survive underneath an "unavailable" field.
         result["unavailable_reason"] = outcome.unavailable_reason
-        result["observations"] = [{
-            "observation_id": observation["observation_id"],
-            "value_state": "unavailable",
-            "reason": outcome.reason,
-            "unavailable_reason": outcome.unavailable_reason,
-            "extraction_wave": observation["extraction_wave"],
-            "evidence_references": [],
-        } for observation in outcome.observations]
+        if outcome.stop_reason == "partial_value_only":
+            # A partial reading is the one `unavailable` case where something
+            # WAS cited, so its quote must survive: the whole point of the
+            # state is to hand a reviewer the text to check. Rewriting it to a
+            # citation-free placeholder here would have undone the fix one
+            # layer below the contract -- the driver would record the quote and
+            # then publish a field claiming nothing was found.
+            #
+            # It is still not canonical: `selected_observation_ids` is empty
+            # and the schema refuses a partial reading appearing in it.
+            pass
+        else:
+            # Nothing was established, so nothing may be cited. Any reading
+            # picked up along the way is rewritten to carry the same verdict --
+            # an asserted value cannot survive underneath an "unavailable"
+            # field that reports its sources as silent.
+            result["observations"] = [{
+                "observation_id": observation["observation_id"],
+                "value_state": "unavailable",
+                "reason": outcome.reason,
+                "unavailable_reason": outcome.unavailable_reason,
+                "extraction_wave": observation["extraction_wave"],
+                "evidence_references": [],
+            } for observation in outcome.observations]
     return result
 
 

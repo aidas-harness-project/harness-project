@@ -451,12 +451,18 @@ UNAVAILABLE_KIND = {
     "not_scheduled": "not_searched",
     "outside_poc_scope": "out_of_scope",
     "conflict_unresolved": "disputed",
+    # Its own kind on purpose. It is NOT a records_gap: the document exists,
+    # was read, and states a value -- requesting more records would find
+    # nothing new. What it needs is a person reading the quote already in the
+    # contract and deciding whether it is the whole answer.
+    "partial_reading_only": "partial_reading",
 }
 UNAVAILABLE_KIND_LABEL = {
     "records_gap": "자료 미비",
     "not_searched": "탐색 미실행",
     "out_of_scope": "PoC 범위 밖",
     "disputed": "자료 간 불일치",
+    "partial_reading": "부분 기재(원문 확인 필요)",
 }
 
 

@@ -658,3 +658,179 @@ def test_parse_result_unwraps_the_fields_envelope():
     flat = {"primary_diagnosis": wrapped["fields"]["primary_diagnosis"]}
     assert _extraction.parse_result(flat, rows)["primary_diagnosis"]["value"] == (
         "우측 요골 골절")
+
+
+# ------------------------------------------- partial (untrusted) readings --
+# A reading that cites a real value but fails the trusted-value requirements
+# (complete/unambiguous) used to be DISCARDED at the gate. `_finish` settles a
+# field from `outcome.observations`, so the field kept its constructor default
+# and the contract reported `sources_exhausted` / "어떤 출처도 이 항목을 기재하지
+# 않았습니다" -- about text the model had quoted verbatim. Measured on CASE_7015
+# (2026-08-26): 5 of 40 unavailable fields, including 사고일 and 수술명.
+#
+# These tests assert the value and the quote SURVIVE, and equally that the
+# reading never becomes canonical. Reintroducing the `continue` fails the first
+# group; relaxing is_trusted_value to admit it fails the second.
+
+def _progress_for(field_id: str, documents, *, config=None):
+    """A FieldProgress on the live path, the way extract_all builds one."""
+    config = config or _config()
+    field_row = next(r for r in config["fields"] if r["field_id"] == field_id)
+    plan = selection.plan_field(field_row, config, documents)
+    outcome = driver.FieldExtractionOutcome(
+        field_id=plan.field_id, domain_code=plan.domain_code,
+        grade=selection.field_grade(field_row))
+    return driver.FieldProgress(
+        plan, field_row, selection.comparison_budget(field_row, config),
+        outcome), outcome
+
+
+def test_incomplete_reading_is_recorded_not_discarded() -> None:
+    quote = "CRIF with K-wires, distal radius, Lt"
+    documents = [selection.DocumentRef("DOC_001", "surgery_procedure_record")]
+    progress, outcome = _progress_for("surgery_or_procedure_name", documents)
+    page_text = {("DOC_001", 1): "수술명\n " + quote + "\n External fixator apply, wrist, Lt"}
+
+    driver._consume(
+        progress, "DOC_001", "surgery_procedure_record",
+        {"presence": "asserted", "value": quote, "page": 1, "quote": quote,
+         "complete": False, "unambiguous": True},
+        page_text, driver._observation_id_sequence())
+    driver._finish(progress)
+
+    # The evidence survives -- this is the whole point.
+    assert len(outcome.observations) == 1
+    observation = outcome.observations[0]
+    assert observation["value"] == quote
+    assert observation["partial_reading"] is True
+    assert observation["complete"] is False
+    assert observation["evidence_references"][0]["quote"] == quote
+
+    # ...and it is reported as a partial reading, not as silence.
+    assert outcome.status == "unavailable"
+    assert outcome.stop_reason == "partial_value_only"
+    assert outcome.unavailable_reason == "partial_reading_only"
+    assert "기재가 없었습니다" not in outcome.reason
+    assert "신뢰값 요건" in outcome.reason
+
+    # ...but it is never canonical.
+    assert outcome.selected_ids == []
+    assert progress.trusted is None
+
+
+def test_ambiguous_reading_is_recorded_and_named_as_ambiguous() -> None:
+    documents = [selection.DocumentRef("DOC_001", "surgery_procedure_record")]
+    progress, outcome = _progress_for("surgery_or_procedure_name", documents)
+    page_text = {("DOC_001", 1): "수술명 관혈적 정복술"}
+
+    driver._consume(
+        progress, "DOC_001", "surgery_procedure_record",
+        {"presence": "asserted", "value": "관혈적 정복술", "page": 1,
+         "quote": "관혈적 정복술", "complete": True, "unambiguous": False},
+        page_text, driver._observation_id_sequence())
+    driver._finish(progress)
+
+    assert outcome.observations[0]["unambiguous"] is False
+    assert outcome.stop_reason == "partial_value_only"
+    assert "다의적" in outcome.reason
+    assert outcome.selected_ids == []
+
+
+def test_a_trusted_source_still_wins_over_an_earlier_partial_reading() -> None:
+    """The ladder must keep walking: a partial reading must not stop the search."""
+    documents = [
+        selection.DocumentRef("DOC_001", "surgery_procedure_record"),
+        selection.DocumentRef("DOC_002", "admission_discharge_summary"),
+    ]
+    progress, outcome = _progress_for("surgery_or_procedure_name", documents)
+    page_text = {("DOC_001", 1): "수술명 부분값", ("DOC_002", 1): "수술명 완전값"}
+    ids = driver._observation_id_sequence()
+
+    driver._consume(progress, "DOC_001", "surgery_procedure_record",
+                    {"presence": "asserted", "value": "부분값", "page": 1,
+                     "quote": "부분값", "complete": False, "unambiguous": True},
+                    page_text, ids)
+    assert progress.trusted is None, "a partial reading must not become trusted"
+    assert not progress.done, "a partial reading must not end the search"
+
+    driver._consume(progress, "DOC_002", "admission_discharge_summary",
+                    {"presence": "asserted", "value": "완전값", "page": 1,
+                     "quote": "완전값", "complete": True, "unambiguous": True},
+                    page_text, ids)
+    driver._finish(progress)
+
+    assert outcome.status == "asserted"
+    assert outcome.stop_reason == "trusted_value_found"
+    assert len(outcome.selected_ids) == 1
+    selected = [o for o in outcome.observations
+                if o["observation_id"] == outcome.selected_ids[0]][0]
+    assert selected["value"] == "완전값"
+    assert not selected.get("partial_reading")
+
+
+def test_explicit_absence_still_outranks_a_partial_reading() -> None:
+    """A stated absence is a finding; it must not be relabelled partial."""
+    documents = [
+        selection.DocumentRef("DOC_001", "surgery_procedure_record"),
+        selection.DocumentRef("DOC_002", "admission_discharge_summary"),
+    ]
+    progress, outcome = _progress_for("surgery_or_procedure_name", documents)
+    page_text = {("DOC_001", 1): "수술명 부분값", ("DOC_002", 1): "수술 시행하지 않음"}
+    ids = driver._observation_id_sequence()
+
+    driver._consume(progress, "DOC_001", "surgery_procedure_record",
+                    {"presence": "asserted", "value": "부분값", "page": 1,
+                     "quote": "부분값", "complete": False, "unambiguous": True},
+                    page_text, ids)
+    driver._consume(progress, "DOC_002", "admission_discharge_summary",
+                    {"presence": "explicitly_absent", "page": 1,
+                     "quote": "수술 시행하지 않음", "reason": "미시행"},
+                    page_text, ids)
+    driver._finish(progress)
+
+    assert outcome.status == "explicitly_absent"
+    assert outcome.stop_reason == "explicitly_absent"
+
+
+def test_partial_reading_survives_into_the_published_contract() -> None:
+    """End-to-end: the driver's own build_result must publish the quote, and
+    the schema must accept the shape -- and refuse it being made canonical."""
+    config = _config()
+    documents = [selection.DocumentRef("DOC_001", "surgery_procedure_record")]
+    progress, outcome = _progress_for("surgery_or_procedure_name", documents)
+    quote = "CRIF with K-wires, distal radius, Lt"
+    driver._consume(
+        progress, "DOC_001", "surgery_procedure_record",
+        {"presence": "asserted", "value": quote, "page": 1, "quote": quote,
+         "complete": False, "unambiguous": True},
+        {("DOC_001", 1): "수술명 " + quote},
+        _OBSERVATION_IDS)
+    driver._finish(progress)
+
+    result = driver.build_result(
+        case_id="CASE_9002", run_id="RUN_20260826_1", outcomes=[outcome],
+        config=config, documents=documents, medical_revision_context=None)
+    assert _errors(result, "claim_analysis_result.schema.json") == []
+
+    published = next(f for f in result["claim_facts"]
+                     if f["field_id"] == "surgery_or_procedure_name")
+    assert published["stop_reason"] == "partial_value_only"
+    assert published["unavailable_reason"] == "partial_reading_only"
+    assert published["selected_observation_ids"] == []
+    # The quote a reviewer needs is actually in the contract.
+    assert published["observations"][0]["value"] == quote
+    assert published["observations"][0]["evidence_references"][0]["quote"] == quote
+
+    # Making that partial reading canonical must be refused by the schema.
+    canonical = deepcopy(result)
+    field = next(f for f in canonical["claim_facts"]
+                 if f["field_id"] == "surgery_or_procedure_name")
+    field["selected_observation_ids"] = [field["observations"][0]["observation_id"]]
+    assert _errors(canonical, "claim_analysis_result.schema.json")
+
+    # ...as must claiming the sources were silent about it.
+    mislabelled = deepcopy(result)
+    field = next(f for f in mislabelled["claim_facts"]
+                 if f["field_id"] == "surgery_or_procedure_name")
+    field["unavailable_reason"] = "not_mentioned"
+    assert _errors(mislabelled, "claim_analysis_result.schema.json")

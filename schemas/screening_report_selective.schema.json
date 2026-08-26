@@ -94,9 +94,10 @@
                   "records_gap",
                   "not_searched",
                   "out_of_scope",
-                  "disputed"
+                  "disputed",
+                  "partial_reading"
                 ],
-                "description": "What a reader can DO about it. Only `records_gap` is closable by requesting documents; `not_searched` says the pipeline never looked and why."
+                "description": "What a reader can DO about it. Only `records_gap` is closable by requesting documents; `not_searched` says the pipeline never looked and why. `partial_reading` is neither: the document exists, was read, and states a value that failed the trusted-value bar (incomplete or ambiguous), so more records would add nothing -- a person must read the quote the contract already carries and decide whether it is the whole answer."
               },
               "reason": {
                 "type": "string",
