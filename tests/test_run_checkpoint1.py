@@ -52,11 +52,47 @@ def _mock_ocr(monkeypatch, pages):
     monkeypatch.setattr(rc1, "run_ocr", fake_run_ocr)
 
 
-def _mock_classify(monkeypatch, doc_type="insurer_response", label="보험사 회신"):
-    def fake_classify(text, classifier=None):
-        return {"predicted_document_type": doc_type, "document_type_label": label,
-                "confidence": 0.9, "quote": text[:20]}
+# Broad medical type -> a fine kind that is valid for it, so the helper below
+# can produce a response of the same shape the real classifier returns.
+_MEDICAL_BROAD_TYPES = {
+    "diagnosis_certificate": "diagnosis_certificate",
+    "medical_record": "outpatient_record",
+    "imaging_report": "imaging_interpretation",
+}
+
+
+def _mock_classify(monkeypatch, doc_type="insurer_response", label="보험사 회신",
+                   medical_kind=None):
+    # `routing_config` has been part of the production signature since
+    # 2026-08-19 (55b20bf), when medical routing began passing it. This helper
+    # was last touched 2026-08-05, so every test using it died on
+    # `unexpected keyword argument 'routing_config'` -- 13 of them, silently,
+    # including the ones pinning that classification reads REDACTED text
+    # rather than the raw page. Accept and ignore it: these tests are about
+    # checkpoint-1 plumbing, not about routing.
+    def fake_classify(text, classifier=None, routing_config=None):
+        parsed = {"predicted_document_type": doc_type, "document_type_label": label,
+                  "confidence": 0.9, "quote": text[:20]}
+        # A REAL classifier response for a medical broad type also carries the
+        # fine-grained kind: `classification_from_model` requires one (or
+        # candidates) whenever `predicted_document_type` is medical, and
+        # `_finish_checkpoint1` turns a missing one into `sys.exit`. Verified
+        # against a live artifact -- CASE_700 DOC_011 publishes
+        # `medical_classification.kind: diagnosis_certificate`. Omitting it
+        # here made the mock unrepresentative of any response the pipeline can
+        # actually receive, so the tests died in setup rather than exercising
+        # the behaviour they name.
+        if doc_type in _MEDICAL_BROAD_TYPES:
+            parsed["medical_document_kind"] = medical_kind or _MEDICAL_BROAD_TYPES[doc_type]
+        return parsed
     monkeypatch.setattr(rc1, "classify_document", fake_classify)
+
+
+def _enable_medical_routing(monkeypatch):
+    config = json.loads(json.dumps(rc1._medical_routing.load_routing_config()))
+    config["behavior_enabled"] = True
+    monkeypatch.setattr(rc1._medical_routing, "load_routing_config", lambda: config)
+    return config
 
 
 class FakeClassifier:
@@ -190,6 +226,7 @@ def test_checkpoint1_provider_backed_classification_without_claude_cli(tmp_path,
     _mock_ocr(monkeypatch, [("provider page text", "provider page text b", "agreed")])
     classifier = FakeClassifier(
         '{"predicted_document_type": "medical_record", "document_type_label": "의무기록", '
+        '"medical_document_kind": "outpatient_record", '
         '"confidence": 0.88, "quote": "provider page text"}'
     )
 
@@ -200,7 +237,14 @@ def test_checkpoint1_provider_backed_classification_without_claude_cli(tmp_path,
 
     assert result["status"] == "passed"
     assert result["document_type"] == "medical_record"
-    assert classifier.prompts[0][1] == rc1.CLASSIFICATION_PROMPT_VERSION
+    # The MEDICAL constant, because medical routing is enabled in the
+    # shipped config and `classify_document` switches version with it.
+    # Verified against a real artifact: CASE_700's classification_result
+    # records prompt_version `classification_v0.3_medical_v0.1`. These
+    # assertions named the pre-routing constant, so they described a
+    # call the pipeline no longer makes.
+    assert (classifier.prompts[0][1]
+            == rc1.MEDICAL_CLASSIFICATION_PROMPT_VERSION)
     classification = json.loads(
         (tmp_path / "outputs" / "CASE_009" / "classification_result_DOC_001.json").read_text(encoding="utf-8")
     )
@@ -217,9 +261,13 @@ def test_classifier_defaults_to_comparator_provider(tmp_path, monkeypatch):
         '"confidence": 0.77, "quote": "page text"}'
     )
 
+    # Dual-read explicitly: the comparator only EXISTS on that path (under
+    # the PoC's single-reader default reader_b and the comparator are never
+    # built), so "the classifier falls back to the comparator's provider" is
+    # a dual-read property and the test has to ask for it.
     result = rc1.run_checkpoint1(
         "CASE_009", "DOC_001", "fake.pdf", "tester", "RUN_20260713_001",
-        comparator=comparator_and_classifier,
+        comparator=comparator_and_classifier, single_reader=False,
     )
 
     assert result["status"] == "passed"
@@ -596,11 +644,12 @@ def test_cli_resolve_disagreement_uses_explicit_classifier_provider(
 
     monkeypatch.setattr(rc1, "build_classifier_provider", fake_build_classifier_provider)
 
-    def fake_classify(text, selected_classifier=None):
+    def fake_classify(text, selected_classifier=None, routing_config=None):
         assert selected_classifier is classifier
         return {
             "predicted_document_type": "medical_record",
             "document_type_label": "의무기록",
+            "medical_document_kind": "outpatient_record",
             "confidence": 0.9,
             "quote": text[:20],
         }
@@ -654,7 +703,14 @@ def test_classify_document_parses_provider_response():
     assert result["predicted_document_type"] == "insurer_response"
     assert result["confidence"] == 0.95
     assert result["_provider_metadata"]["provider_name"] == "openai-api"
-    assert classifier.prompts[0][1] == rc1.CLASSIFICATION_PROMPT_VERSION
+    # The MEDICAL constant, because medical routing is enabled in the
+    # shipped config and `classify_document` switches version with it.
+    # Verified against a real artifact: CASE_700's classification_result
+    # records prompt_version `classification_v0.3_medical_v0.1`. These
+    # assertions named the pre-routing constant, so they described a
+    # call the pipeline no longer makes.
+    assert (classifier.prompts[0][1]
+            == rc1.MEDICAL_CLASSIFICATION_PROMPT_VERSION)
 
 
 def test_classify_document_fails_loud_on_unparseable_response():
@@ -1079,6 +1135,105 @@ def test_a_form_naming_title_classifies_without_calling_the_model(tmp_path, monk
     assert "진 단 서" in written["evidence_references"][0]["quote"]
 
 
+def test_enabled_medical_routing_classifies_a_form_title_without_model(tmp_path, monkeypatch):
+    _child_with_inherited_pages(tmp_path)
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    dao.atomic_write_json(out_dir / "segmentation_proposal_DOC_005.json", {
+        "review_status": "approved", "method": {"mode": "text_anchor"},
+        "segments": [{"page_start": 1, "page_end": 1,
+                      "provisional_type_label": "진 단 서"}],
+    })
+    _enable_medical_routing(monkeypatch)
+    monkeypatch.setattr(
+        rc1, "classify_document",
+        lambda *a, **k: pytest.fail("a fine-grained form title needs no model call"))
+
+    rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline",
+        run_id="RUN_20260805_002")
+
+    written = json.loads(
+        (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
+    medical = written["medical_classification"]
+    assert medical["status"] == "deterministic_title"
+    assert medical["kind"] == "diagnosis_certificate"
+    assert medical["evidence_references"] == [{"page": 1, "quote": "진 단 서"}]
+
+
+def test_enabled_medical_routing_marks_inherited_policy_without_fake_quote(tmp_path, monkeypatch):
+    _child_with_inherited_pages(tmp_path)
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    manifest_path = out_dir / "document_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["documents"].insert(0, {
+        "document_id": "DOC_005", "file_name": "DOC_005.pdf",
+        "file_path": "data/raw/CASE_009/DOC_005.pdf",
+        "file_format": "pdf", "file_size_bytes": 100,
+        "ocr_status": "not_applicable", "segmentation_status": "completed",
+        "segmentation_proposal_path":
+            "outputs/CASE_009/segmentation_proposal_DOC_005.json",
+        "downstream_disposition": "superseded_bundle",
+    })
+    dao.atomic_write_json(manifest_path, manifest)
+    dao.atomic_write_json(out_dir / "segmentation_proposal_DOC_005.json", {
+        "review_status": "approved", "method": {"mode": "text_anchor"},
+        "segments": [{"page_start": 1, "page_end": 1,
+                      "provisional_type_label": "상해보험 특별약관"}],
+    })
+    _enable_medical_routing(monkeypatch)
+    monkeypatch.setattr(
+        rc1, "classify_document",
+        lambda *a, **k: pytest.fail("an inherited policy needs no model call"))
+
+    rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline",
+        run_id="RUN_20260805_002")
+
+    written = json.loads(
+        (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
+    assert written["evidence_references"] == [{"page": 1, "quote": "상해보험 특별약관"}]
+    medical = written["medical_classification"]
+    assert medical["status"] == "not_medical"
+    assert medical["evidence_references"] == [{"page": 1, "quote": "상해보험 특별약관"}]
+    assert "classification response contained no quote" not in json.dumps(written)
+
+
+def test_enabled_medical_routing_calls_model_once_for_ambiguous_title(tmp_path, monkeypatch):
+    _child_with_inherited_pages(tmp_path)
+    out_dir = tmp_path / "outputs" / "CASE_009"
+    dao.atomic_write_json(out_dir / "segmentation_proposal_DOC_005.json", {
+        "review_status": "approved", "method": {"mode": "text_anchor"},
+        "segments": [{"page_start": 1, "page_end": 1,
+                      "provisional_type_label": "REPORT"}],
+    })
+    config = _enable_medical_routing(monkeypatch)
+    calls = []
+
+    def fake_classify(text, classifier=None, routing_config=None):
+        calls.append(text)
+        assert routing_config is config
+        return {
+            "predicted_document_type": "imaging_report",
+            "document_type_label": "영상판독지",
+            "confidence": 0.9,
+            "quote": "진 단 서",
+            "medical_document_kind": "imaging_interpretation",
+            "medical_kind_candidates": [],
+            "medical_ambiguity_reason": None,
+        }
+
+    monkeypatch.setattr(rc1, "classify_document", fake_classify)
+    rc1.classify_existing(
+        "CASE_009", "DOC_006", held_by="document-pipeline",
+        run_id="RUN_20260805_002")
+
+    assert len(calls) == 1
+    written = json.loads(
+        (out_dir / "classification_result_DOC_006.json").read_text(encoding="utf-8"))
+    assert written["medical_classification"]["status"] == "llm_classified"
+    assert written["medical_classification"]["kind"] == "imaging_interpretation"
+
+
 def test_a_genre_naming_title_still_calls_the_model(tmp_path, monkeypatch):
     """"REPORT" names a genre, so the page still has to be read."""
     _child_with_inherited_pages(tmp_path)
@@ -1112,10 +1267,12 @@ def test_classification_reads_the_redacted_text_when_it_exists(tmp_path, monkeyp
         "<<<PAGE page=1>>>\n환자 [REDACTED] 진 단 서\n", encoding="utf-8")
     seen = {}
 
-    def fake_classify(text, classifier=None):
+    def fake_classify(text, classifier=None, routing_config=None):
         seen["text"] = text
         return {"predicted_document_type": "diagnosis_certificate",
-                "document_type_label": "진단서", "confidence": 0.9, "quote": text[:20]}
+                "document_type_label": "진단서", "confidence": 0.9,
+                "medical_document_kind": "diagnosis_certificate",
+                "quote": text[:20]}
 
     monkeypatch.setattr(rc1, "classify_document", fake_classify)
 
@@ -1220,3 +1377,85 @@ def test_page_range_slice_does_not_mutate_the_raw_source(tmp_path):
     assert pdf_path.read_bytes() == before, "the raw source PDF was modified"
     with fitz.open(pdf_path) as doc:
         assert doc.page_count == 5, "the raw source lost pages"
+
+
+# --------------------------------------------------- classify_document's own
+# provider resolution.
+#
+# `build_classifier_provider` (tested above) walks the full ladder --
+# --classifier-provider, HARNESS_CLASSIFIER_PROVIDER, the comparator,
+# HARNESS_OCR_COMPARATOR_PROVIDER, HARNESS_LLM_PROVIDER, then DEFAULT_PROVIDER.
+# `classify_document` did NOT use it: with no `classifier` handed in it built
+# `ProviderConfig(DEFAULT_PROVIDER)` directly, which bypasses even
+# `parse_provider_config`'s env read, so every environment variable in that
+# ladder was unreachable on this path.
+#
+# Measured on CASE_7077 (2026-08-26): a run whose shell exported
+# HARNESS_LLM_PROVIDER=claude-cli still reached openrouter and died
+# `ProviderConfigError: openrouter requires OPENROUTER_API_KEY`, twice, before
+# a third attempt passing --provider explicitly completed. The stage was
+# blocked honestly each time -- the defect is the unreachable env var, not a
+# silent pass.
+
+def test_classify_document_honours_the_llm_provider_env_var(monkeypatch):
+    """The env var the harness documents must reach the classifier."""
+    built = []
+
+    def fake_build_provider(config, **kwargs):
+        built.append(config)
+        return FakeClassifier(
+            '{"predicted_document_type": "receipt", '
+            '"document_type_label": "영수증", "confidence": 0.9, '
+            '"quote": "page text"}'
+        )
+
+    monkeypatch.setattr(rc1, "build_provider", fake_build_provider)
+    monkeypatch.setenv("HARNESS_LLM_PROVIDER", "claude-cli")
+    monkeypatch.delenv("HARNESS_CLASSIFIER_PROVIDER", raising=False)
+    monkeypatch.delenv("HARNESS_OCR_COMPARATOR_PROVIDER", raising=False)
+
+    rc1.classify_document("page text", routing_config={})
+
+    assert built, "classify_document built no provider"
+    assert built[0].provider_name == "claude-cli", (
+        f"env var unreachable: built {built[0].provider_name!r}")
+
+
+def test_classify_document_still_falls_back_to_the_default(monkeypatch):
+    """With nothing set anywhere, the harness default still governs."""
+    built = []
+
+    def fake_build_provider(config, **kwargs):
+        built.append(config)
+        return FakeClassifier(
+            '{"predicted_document_type": "receipt", '
+            '"document_type_label": "영수증", "confidence": 0.9, '
+            '"quote": "page text"}'
+        )
+
+    monkeypatch.setattr(rc1, "build_provider", fake_build_provider)
+    for name in ("HARNESS_LLM_PROVIDER", "HARNESS_CLASSIFIER_PROVIDER",
+                 "HARNESS_OCR_COMPARATOR_PROVIDER"):
+        monkeypatch.delenv(name, raising=False)
+
+    rc1.classify_document("page text", routing_config={})
+
+    assert built[0].provider_name == rc1.DEFAULT_PROVIDER
+
+
+def test_an_explicit_classifier_still_wins(monkeypatch):
+    """A handed-in provider must not be re-resolved -- run_stage2 passes
+    --classifier-provider down this path and that has to keep governing."""
+    def explode(*a, **kw):
+        raise AssertionError("must not build a provider when given one")
+
+    monkeypatch.setattr(rc1, "build_provider", explode)
+    monkeypatch.setenv("HARNESS_LLM_PROVIDER", "claude-cli")
+
+    given = FakeClassifier(
+        '{"predicted_document_type": "receipt", '
+        '"document_type_label": "영수증", "confidence": 0.9, '
+        '"quote": "page text"}'
+    )
+    result = rc1.classify_document("page text", given, routing_config={})
+    assert result["predicted_document_type"] == "receipt"

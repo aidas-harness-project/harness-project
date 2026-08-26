@@ -91,7 +91,7 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
 from dao import (case_dir, atomic_write_json, make_history_boundary, now_iso,
-                 OUTPUTS, DATA)
+                 _canonical_json_bytes, OUTPUTS, DATA)
 from _validation import load_registry, validate_instance, schema_name_for
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
@@ -197,6 +197,57 @@ def _rewrite_reconstructed_value(value, source_case_id: str, new_case_id: str):
     if isinstance(value, str):
         return _rewrite_case_paths(value, source_case_id, new_case_id)
     return value
+
+
+def rebind_ledger_operations(data: dict, source_case_id: str,
+                             new_case_id: str) -> bool:
+    """Re-point a copied ledger's operation requests at the fork, and re-seal.
+
+    A ledger operation is bound three ways: `request.case_id` must equal the
+    ledger's `case_id`, `request.operation_id` must equal the operation's, and
+    `request_sha256` must be the digest of the request's canonical bytes. A
+    copy that rewrites only the top-level `case_id` breaks the first binding,
+    and rewriting the nested id alone breaks the third -- so `check-source-
+    ledger-clear` refused every forked case with "ledger operation request
+    binding is invalid" (CASE_9403, 2026-08-22), which in turn meant no
+    `sla.phase1.start` marker and `active_s: n/a` on any fork.
+
+    Recomputing the digest is the honest move rather than a weakening of it.
+    The digest seals WHAT WAS REQUESTED against later editing; it is not a
+    claim about which case the request was filed under, and the case id is
+    exactly the field a fork is entitled to change. What must survive is the
+    human decision -- reviewer, status, timestamp, and the file it was about --
+    and every one of those lives in `payload`/`result`/`completed_at` and is
+    copied untouched here. A fork that silently dropped the operations would
+    lose the D2 review it is meant to inherit; one that kept them unbound
+    produces a ledger the DAO refuses to read at all.
+
+    Idempotent, and deliberately keyed on the DIGEST rather than on the id:
+    callers may run `_rewrite_reconstructed_value` first, which already sets
+    the nested id, so a request that "still names the source case" is not a
+    reliable signal that resealing is outstanding. Re-sealing a request whose
+    digest already matches is a no-op.
+
+    Returns True when anything changed, so the caller only rewrites files it
+    had a reason to touch.
+    """
+    operations = data.get("operations")
+    if not isinstance(operations, list):
+        return False
+    changed = False
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        request = operation.get("request")
+        if not isinstance(request, dict):
+            continue
+        if request.get("case_id") in (source_case_id, new_case_id):
+            request["case_id"] = new_case_id
+        digest = hashlib.sha256(_canonical_json_bytes(request)).hexdigest()
+        if digest != operation.get("request_sha256"):
+            operation["request_sha256"] = digest
+            changed = True
+    return changed
 
 
 def _source_json(path: Path, failures: list[str]):
@@ -507,6 +558,15 @@ def build_stage_cut_run_state(*, new_case_id: str, run_id: str,
         return {
             "stage_name": stage,
             "status": "passed",
+            # Explicit nulls, not omitted keys. The stage-item schema declares
+            # both as nullable and names no `required` list, so omitting them
+            # validated -- and the DAO's `in_progress` path then read
+            # `entry["started_at"]` directly and raised KeyError on the first
+            # transition of every forked case (CASE_054, 2026-08-22). Null is
+            # the honest value: the fork inherited this stage's OUTPUT, it did
+            # not run it, so there is no start or completion time to claim.
+            "started_at": None,
+            "completed_at": None,
             "attempt_count": 1,
             "backup_path": fork_origin_backup_path(new_case_id, stage),
         }
@@ -621,7 +681,18 @@ def copy_stage_cut_outputs(source_root: Path, new_case_id: str,
         if not isinstance(data, dict):
             continue
         if data.get("case_id") is not None:
+            source_case_id = source_root.name
+            # Nested identity and case-root paths, not just the top-level
+            # field. Rewriting only the latter left every `request.case_id`
+            # and every `outputs/CASE_SOURCE/...` path pointing at the parent
+            # -- which made the ledger unreadable to the DAO and the manifest's
+            # paths misleading to a human (CASE_9403, 2026-08-22). The full
+            # copy path has done this since 2026-08-14; the stage-cut path
+            # never did.
+            data = _rewrite_reconstructed_value(
+                data, source_case_id, new_case_id)
             data["case_id"] = new_case_id
+            rebind_ledger_operations(data, source_case_id, new_case_id)
             atomic_write_json(json_path, data)
         schema_name = schema_name_for(json_path)
         if schema_name:
@@ -659,22 +730,33 @@ def next_free_case_id() -> str:
     CASE_SMOKE) are ignored -- they predate or fall outside the
     ^CASE_[0-9]+$ schema pattern and aren't part of this numbering.
 
-    Normally max+1, so a fork gets a fresh id above everything on disk and
-    numbering stays chronological.
+    Always max+1, so a fork gets a fresh id above everything on disk and
+    numbering stays chronological. Ids below 1000 stay zero-padded to three
+    digits, matching every existing CASE_001/CASE_002 on disk; above that they
+    are their natural four digits.
 
-    The 3-digit ceiling is real and load-bearing:
-    `human_review_ledger.schema.json` pins case_id to ^CASE_[0-9]{3}$ --
-    exactly three digits, unlike the ^CASE_[0-9]+$ every other schema uses.
-    With CASE_999 present, plain max+1 returned CASE_1000; the fork then
-    copied every file, rewrote the case_id into each, and only afterwards
-    reported that the id it had just chosen was invalid -- leaving a case
-    that could never accept a human-review write.
+    **The ceiling was 999 until 2026-08-22**, because
+    `human_review_ledger.schema.json` pinned case_id to ^CASE_[0-9]{3}$ --
+    exactly three digits, the sole outlier among the ^CASE_[0-9]+$ every other
+    schema uses. This function must never mint an id some schema will later
+    refuse: with CASE_999 present, plain max+1 returned CASE_1000, the fork
+    copied every file and rewrote the case_id into each, and only afterwards
+    reported the id was invalid -- leaving a case that could never accept a
+    human-review write.
 
-    So above the ceiling it falls back to the lowest free id rather than
-    emitting an unusable one. That is a deliberate second choice: reusing a
-    gap loses chronological ordering and can resurrect an id with history
-    attached (CASE_002 is free only because its files were rejected in the
-    D1 incident), which is why it is the fallback and not the rule.
+    The old guard against that was to fall back to the LOWEST FREE id above
+    the ceiling, which turned out to be worse than the problem. CASE_9001/9200/
+    9401 exist on disk, so max+1 exceeded 999 permanently and the fallback was
+    not an edge case but the normal path: every fork silently reused a gap,
+    losing chronological order and risking an id with history attached
+    (CASE_002 is free only because its files were rejected in the D1 incident).
+    Observed 2026-08-22, when a fork of CASE_701 was assigned CASE_054.
+
+    The pin is now ^CASE_[0-9]{3,4}$, so four digits are valid everywhere and
+    max+1 needs no fallback. Existing 3-digit ids remain valid and nothing was
+    renamed. Five digits is still out of range, and this raises rather than
+    minting one, because a silently-unusable id is what the fallback was
+    written to prevent.
     """
     used: set[int] = set()
     for root in (OUTPUTS, DATA / "raw", DATA / "processed", DATA / "ground_truth"):
@@ -685,17 +767,16 @@ def next_free_case_id() -> str:
             if m:
                 used.add(int(m.group(1)))
     candidate = (max(used) + 1) if used else 1
-    if candidate <= 999:
-        return f"CASE_{candidate:03d}"
-    for n in range(1, 1000):
-        if n not in used:
-            return f"CASE_{n:03d}"
-    raise RuntimeError(
-        "no free CASE_NNN id remains: CASE_001..CASE_999 are all in use. The "
-        "3-digit ceiling is a schema constraint (human_review_ledger.schema"
-        ".json pins ^CASE_[0-9]{3}$), so going wider needs a schema change, "
-        "not a change here."
-    )
+    if candidate > 9999:
+        raise RuntimeError(
+            f"the next free case id would be CASE_{candidate}, which is five "
+            "digits and outside ^CASE_[0-9]{3,4}$. Widening again means "
+            "changing that pattern in human_review_ledger.schema.json, "
+            "draft_report_metadata.schema.json and document_assembly.py "
+            "together -- minting the id here first would produce a case whose "
+            "human-review writes are refused after every file is copied."
+        )
+    return f"CASE_{candidate:03d}"
 
 
 def resolve_source_root(source_case_id: str, from_step: int | None) -> Path:
@@ -723,6 +804,16 @@ def check_no_active_locks(source_root: Path) -> None:
                   f"a write may be in progress or was interrupted: {[str(p) for p in locks]}")
 
 
+def _ignore_lock_files(_directory, names):
+    """copytree `ignore` callback: never carry a lock into a fork.
+
+    A stale lock in a fresh branch names a holder that was never running
+    there, which is exactly the state P5 tells a reader to treat as a live
+    write in progress.
+    """
+    return {name for name in names if name.endswith(".lock")}
+
+
 def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str,
                                      source_case_id: str | None = None) -> list[str]:
     """Returns the list of validation warnings (empty if everything that has
@@ -742,7 +833,15 @@ def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str,
         if item.is_file():
             shutil.copy2(item, dest / item.name)
         elif item.is_dir():
-            shutil.copytree(item, dest / item.name, dirs_exist_ok=True)
+            # `ignore` as well as the top-level filter above: the filter only
+            # sees this directory's own entries, while copytree brings a
+            # subtree across wholesale, so a nested `*.lock` was copied into
+            # the fork despite the module docstring saying locks are never
+            # copied. `check_no_active_locks` normally refuses the fork first,
+            # but it is a separate entry point -- a caller reaching the copier
+            # directly (as the stage-cut path does) had no protection at all.
+            shutil.copytree(item, dest / item.name, dirs_exist_ok=True,
+                            ignore=_ignore_lock_files)
 
     schemas, registry = load_registry()
     warnings = []
@@ -755,6 +854,10 @@ def copy_outputs_and_rewrite_case_id(source_root: Path, new_case_id: str,
             continue
         if source_case_id and json_path.name != "_fork_record.json":
             data = _rewrite_reconstructed_value(data, source_case_id, new_case_id)
+            # The rewrite above changes `request.case_id`, which changes the
+            # bytes the operation's digest seals -- so the ledger needs
+            # re-sealing in the same pass or it validates as tampered.
+            rebind_ledger_operations(data, source_case_id, new_case_id)
         data["case_id"] = new_case_id
         if json_path.name == "_run_state.json":
             data = _enforce_medical_gate_on_fork(data)

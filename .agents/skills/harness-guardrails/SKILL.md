@@ -9,6 +9,29 @@ These are non-negotiable. Stage-specific skills describe *how* to do a stage's j
 
 During the PoC/evaluation phase, also see `harness-guardrails-dev` — ground-truth isolation and intake rules that only apply while a ground-truth answer key exists in this repo.
 
+## PoC scope: four rules are OFF
+
+Turned off by the PoC owner on 2026-08-20, each with the measurement behind
+it. The register is `dao.POC_INACTIVE_GUARDRAILS`, and removing a code from
+there turns the gate back on. **These are throughput reductions, not
+corrections** — a run made under them has no P8 evidence and is not
+privacy-preserving, and any report of its results has to say so.
+
+| Rule | What is off | What stays on |
+|---|---|---|
+| **P7** | human-input wait tracking (`human_input_status`) | Every synchronous human gate: D2 approval, segmentation boundaries, P8 resolution, P6 dispositions. 0 of 220 cases ever carried a `waiting` entry — the PoC has no asynchronous human step for it to track. |
+| **P9** | the 3-attempt cap and its audit halt | Attempt counts are still recorded in `_run_state.json`. What is off is the automatic halt, not the measurement. |
+| **P10** | the *cumulative snapshot* half | The run-state file — P10's other half — is untouched and is still the single source of truth for where a run stopped. Snapshots still run; they now carry the governed contracts only. `_backups` was 17.8MB of CASE_489's 21.4MB (83%, 594 of 1011 files), almost entirely `ocr_result_*.json`, which is regenerable and already held in `data/processed/`. |
+| **P8** | reader independence (`--single-reader` is now the default) | **Disagreement handling is unchanged.** If a comparison does happen, a material disagreement still hard-halts with no tolerance threshold. Every single-reader document is still stamped `ocr_quality: low`, `cross_validation_status: single_reader_no_cross_validation`, `review_required`. |
+
+`--dual-read`, `--redact`, and `HARNESS_SINGLE_READER=0` / `HARNESS_SKIP_REDACTION=0`
+restore the full paths for a run that needs them.
+
+**P1, P2, P3, P4, P5, P6, P11 are unchanged.** P4 earned its place the day
+this register was written: it caught CASE_048's `denial_response` returning a
+Korean value for an English enum, twice, which would otherwise have reached
+the screening report.
+
 ## P1. No fabricated claims
 
 Every extracted value or assertion must trace to a specific source quote. If it can't be traced, it is marked unconfirmed and routed for review — never stated as fact. This is the harness's highest-probability failure mode; treat any unlinked claim as a bug.
@@ -70,7 +93,11 @@ Holding the lock means owning the entire file for that edit — nothing else may
 
 When two of the case's own sources disagree (dates, diagnoses, amounts, etc.), the finding agent does not halt inline and does not resolve it itself. It writes an entry to `_conflict_ledger.json` (one per case, shared across every stage that can raise a conflict) via the DAO: the field/topic, both values with full source attribution (document_id, page, quote), and `verdict: pending`.
 
-Before starting any stage, the orchestrator checks `check_conflicts_clear(case_id)` — if any entry across the whole case is still `pending` (old or new), it halts and lists all of them, not just the newest. A stage only proceeds once every entry for the case reads `resolved` or `false_positive`. Values are never silently discarded to resolve a conflict — the ledger entry, not a deleted value, is how a conflict gets closed.
+Before starting any stage, the orchestrator checks `check_conflicts_clear(case_id)` — if any entry across the whole case is still `pending` (old or new), it halts and lists all of them, not just the newest. A stage only proceeds once every entry for the case reads `resolved`, `false_positive`, or `deferred_to_report`. Values are never silently discarded to resolve a conflict — the ledger entry, not a deleted value, is how a conflict gets closed.
+
+**Three dispositions, and only two of them are decisions.** `resolved` means somebody worked out which reading holds; `false_positive` means there was never a disagreement. `deferred_to_report` means neither: the disagreement is real, stands un-withdrawn, no value has been preferred, and the decision itself is handed to the loss adjuster or physician by carrying the conflict into the screening report with its sources. Use it when settling the question needs domain judgement or a document the case does not contain — which is most of the interesting ones. It is not a softer `resolved`: `finalize-stage screening_report` refuses unless every deferred entry appears in the report's `inconsistencies` with `conflict_ref` set to that `conflict_id`. Deferring is taking on an obligation, and the obligation is checked.
+
+Added 2026-08-18. Before it, CASE_047's four billing-vs-clinical disagreements (implant identity, injury laterality, treated body part, psychiatric onset) were filed as `resolved` because that was the only value that let the pipeline advance, and every `resolution_note` had to state in prose that the verdict field did not mean what it said. The screening report then opened its inconsistency section with a warning box explaining that the ledger's own verdicts should not be believed. A verdict that must be contradicted by its own note is a missing enum value, not a judgement call.
 
 This is enforced structurally as well as by the orchestrator: `finalize-stage` refuses any stage in `dao.CONFLICT_GATED_STAGES` while an entry is `pending`. `consistency_check` is deliberately NOT gated — it is the stage that raises conflicts, so gating it would stop it finalizing the finding it just recorded — and neither are `intake`/`document_processing`, which run before any cross-document comparison exists. Until 2026-08-05 the gate was prose only: `check-conflicts-clear` existed as a CLI command an agent had to remember to call, and the finalize path never read the ledger, so `screening_report` finalized cleanly on CASE_909 with a conflict still pending.
 
@@ -78,13 +105,18 @@ Note: this rule is for the case's *own* sources contradicting each other. An ins
 
 ## P7. Human-review steps are never fabricated
 
+> **OFF for the PoC (2026-08-20).** The wait-tracking field below is not
+> maintained. The prohibition it serves — never synthesise a stand-in for
+> a human decision — is NOT lifted and never was: it is enforced at each
+> synchronous gate instead.
+
 If a stage depends on human input that hasn't arrived, the pipeline waits — it never synthesizes a stand-in for a human decision. Waiting status is tracked as a field in the run-state file (P10): `human_input_status: waiting`, naming exactly which stage and what input is pending. The moment genuine human input is confirmed present — not merely claimed by an agent — the status flips to `received`. The field is never deleted, only updated in place, so the run's full history of what was waited on and when it cleared stays visible for as long as the run-state file exists.
 
 ## P8. Extraction failure is measured by cross-validation, not self-reported confidence
 
 A single process, however many times it checks itself, can be confidently wrong. This runs at the document-processing stage (document-pipeline), before document type is known — not at claim-field extraction, which trusts this stage's already-validated text and does not re-cross-validate.
 
-Every page is read independently by two configured provider paths (`tools/ocr_extract.py`): `reader_a` and `reader_b` are separate calls with no shared context, reading the raw page blind, neither seeing the other's output. Since document type isn't known yet at this point, the two reads are diffed on raw page-text material-content agreement (same names/dates/numbers/diagnoses present) — not verbatim match, since two independent transcriptions will differ in formatting even when both are correct. The selectable providers (claude-cli / codex-cli / openai-api) are all LLM-vision-backed, so any reader pair is a documented weak P8 (`cross_validation_mode: single_technology_weak_p8_poc`) — two reads sharing one extraction technology class can make a correlated confident error. A genuinely technology-independent reader (a real OCR engine) is deferred; see `open-decisions.md` #4. (A plain-text source skips this entirely: it is decoded deterministically as embedded text, `deferred_poc`.)
+Every page is read independently by two configured provider paths (`tools/ocr_extract.py`): `reader_a` and `reader_b` are separate calls with no shared context, reading the raw page blind, neither seeing the other's output. Since document type isn't known yet at this point, the two reads are diffed on raw page-text material-content agreement (same names/dates/numbers/diagnoses present) — not verbatim match, since two independent transcriptions will differ in formatting even when both are correct. The selectable providers (openrouter / claude-cli / codex-cli / openai-api) are all LLM-vision-backed, so any reader pair is a documented weak P8 (`cross_validation_mode: single_technology_weak_p8_poc`) — two reads sharing one extraction technology class can make a correlated confident error. A genuinely technology-independent reader (a real OCR engine) is deferred; see `open-decisions.md` #4. (A plain-text source skips this entirely: it is decoded deterministically as embedded text, `deferred_poc`.)
 
 A page/document is marked extraction-failed if the two independent reads materially disagree. This blocks that document from downstream use until a human verifies which reading is correct — a hard gate, not a queued-for-later flag, since everything downstream depends on this being right. Any single failure — even one document, even one page — is reported immediately. There is no tolerance threshold here; accuracy at extraction is the foundation everything downstream depends on, so nothing waits for a batch or a percentage to accumulate before surfacing.
 
@@ -96,9 +128,18 @@ A page/document is marked extraction-failed if the two independent reads materia
 
 ## P9. Partial or failed stages retry 3 times, then halt for audit
 
+> **OFF for the PoC (2026-08-20).** Attempts are still counted and
+> recorded; the automatic halt at 3 is not enforced.
+
 A stage that fails or completes with `status: partial` does not proceed to the next stage — it retries, up to 3 attempts total, fixed (no exponential backoff). If, after 3 attempts, the stage still hasn't completed fully, the pipeline halts and requests a user audit — same hard-gate pattern as P4 (schema validation) and P8 (extraction cross-validation). Partial output is never silently forwarded or upgraded to "complete"; either the stage succeeds within 3 tries, or a human looks at it.
 
 ## P10. Run-state tracking and per-step backups
+
+> **Half off for the PoC (2026-08-20).** Run-state tracking is unchanged.
+> The cumulative snapshot is narrowed to the governed contracts — the
+> per-document extraction artifacts (`ocr_result_*`, `redaction_result_*`,
+> `classification_result_*`, `page_chunks*`) are excluded as regenerable
+> bulk. See `dao.snapshot_excludes_name`.
 
 Every run maintains a persistent run-state file (`outputs/CASE_XXX/_run_state.json`, provisional path per D4) recording every stage's status — `pending` / `in_progress` / `passed` / `failed` — with timestamps, plus the `human_input_status` field from P7. This file is the single source of truth for where the pipeline stopped; a crash or resume never has to guess or re-derive it from scattered output files.
 

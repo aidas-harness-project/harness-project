@@ -91,6 +91,29 @@ def test_single_reader_document_rollup_is_honest(page_image: Path) -> None:
     assert result["pages"][0]["text_path"] is not None
 
 
+def test_single_reader_names_no_provider_for_the_readers_that_never_ran(
+        page_image: Path) -> None:
+    """reader_b and the comparator make no call, so they may not be named.
+
+    The label fallback used to return the literal "claude-cli", so a real
+    single-reader run recorded `vision_model_name: "claude-cli;
+    comparator=claude-cli"` -- a provider named as having read the page in the
+    same contract whose `cross_validation_mode` says nothing was
+    cross-validated. Plausible while claude-cli was the default and false the
+    moment it was not; false under --single-reader either way.
+    """
+    out = _run(page_image, single_reader=True)
+    result = rc._assemble_ocr_result(
+        "CASE_999", "DOC_001", "RUN_20260811_001", out, source_total_pages=1)
+
+    assert result["vision_model_name"] == "not_recorded; comparator=not_recorded"
+    for field in ("ocr_engine", "vision_model_name"):
+        assert "claude-cli" not in result[field], (
+            f"{field} names a provider that never ran")
+    # The reader that DID run is still named in full.
+    assert result["ocr_engine"] == "fixture:stub-1"
+
+
 def test_single_reader_contract_validates(page_image: Path) -> None:
     out = _run(page_image, single_reader=True)
     result = rc._assemble_ocr_result(
@@ -131,12 +154,15 @@ class TestSingleReaderDefault:
     @pytest.mark.parametrize(
         "env,arg,expected",
         [
-            (None, None, False),          # nothing set anywhere -> P8 stays on
-            ("1", None, True),            # dev shell default
+            # PoC default since 2026-08-20: nothing set anywhere -> P8 OFF.
+            # It was on until then, which is what the two rows below used to
+            # assert. The env var now works in BOTH directions.
+            (None, None, True),
+            ("1", None, True),
             ("true", None, True),
             ("on", None, True),
-            ("0", None, False),
-            ("maybe", None, False),       # unparseable is not "on"
+            ("0", None, False),           # a negative env value turns it back on
+            ("maybe", None, True),        # unparseable falls back to the default
             ("1", False, False),          # --dual-read overrides the env
             ("0", True, True),            # --single-reader overrides the env
         ],
@@ -162,7 +188,15 @@ class TestSingleReaderDefault:
     def test_explicit_dual_read_beats_env(
             self, page_image: Path, monkeypatch) -> None:
         monkeypatch.setenv(ocr_extract.SINGLE_READER_ENV, "1")
-        out = _run(page_image, single_reader=False)
+        # reader_b is supplied explicitly. Omitting it made run_ocr BUILD the
+        # default provider and perform a real second read -- a live model call
+        # sitting inside the unit suite, invisible for exactly as long as the
+        # default happened to be a locally installed CLI that quietly answered.
+        # Two identical readings take compare()'s byte-identical shortcut, so
+        # the dual-read branch runs here with no comparator call either.
+        out = _run(page_image, single_reader=False,
+                   reader_b=FixtureProvider(model_name="stub-2",
+                                            text="환자 홍길동 진단명 골절"))
         assert out["pages"][0]["agreement"] != "single_reader"
         assert out["pages"][0]["reading_b"] is not None
 

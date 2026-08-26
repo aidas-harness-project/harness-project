@@ -106,6 +106,19 @@ def validate_instance(instance: dict, schema_name: str, schemas: dict, registry)
         out.append(f"{loc}: {e.message}")
     if schema_name == "case_type_result.schema.json":
         out.extend(_report_profile_errors(instance))
+    elif not out and schema_name == "claim_analysis_routing_config.schema.json":
+        from claim_analysis_contracts import validate_routing_config_semantics
+
+        out.extend(validate_routing_config_semantics(instance))
+    elif not out and schema_name == "claim_analysis_result.schema.json":
+        from claim_analysis_contracts import (
+            load_default_routing_config,
+            validate_claim_analysis_result_semantics,
+        )
+
+        out.extend(validate_claim_analysis_result_semantics(
+            instance, load_default_routing_config()
+        ))
     return out
 
 

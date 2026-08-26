@@ -4,16 +4,22 @@
   "title": "evidence_validation_result.json -- internal cross-document consistency log v0.1",
   "description": "Produced by consistency-check. Historical record of what was checked, not something downstream stages read past on their own -- the conflict-ledger gate (_conflict_ledger.json, check_conflicts_clear) is what actually controls progression, see harness-guardrails P6. PoC dev-phase decision: logs every field checked, consistent or not, not just findings -- narrow to findings-only once the harness is past PoC (see known-gaps.md).",
   "allOf": [
-    { "$ref": "common_component_output.schema.json" },
+    {
+      "$ref": "common_component_output.schema.json"
+    },
     {
       "type": "object",
       "properties": {
         "checks": {
           "type": "array",
-          "items": { "$ref": "#/$defs/check" }
+          "items": {
+            "$ref": "#/$defs/check"
+          }
         }
       },
-      "required": ["checks"]
+      "required": [
+        "checks"
+      ]
     }
   ],
   "$defs": {
@@ -28,27 +34,99 @@
           "type": "string",
           "description": "What was compared. e.g. \"accident_date across DOC_001/DOC_002\""
         },
+        "conflict_candidate_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The claim-analysis conflict candidate this check judged, e.g. \"CAC_0001\". Lets a downstream reader match a check back to the claim_facts field that raised it without parsing `topic`. Null when the check did not come from a candidate."
+        },
+        "field_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The claim_facts field the candidate belongs to, e.g. \"primary_diagnosis\". Null when the check is not field-scoped."
+        },
         "values_compared": {
           "type": "array",
           "description": "Each source's stated value for this topic, with attribution.",
           "minItems": 1,
-          "items": { "$ref": "common_component_output.schema.json#/$defs/evidence_reference" }
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/evidence_reference"
+          }
         },
-        "result": { "enum": ["consistent", "inconsistent"] },
+        "result": {
+          "enum": [
+            "consistent",
+            "contested_not_decisive",
+            "inconsistent"
+          ],
+          "description": "How the comparison came out. `consistent` means the two readings state the same fact -- the candidate was WITHDRAWN and a consumer may elect one reading. `contested_not_decisive` means the readings genuinely differ but the difference changes no decision (`not_material`): the disagreement is real and must NOT be promoted to a settled value. `inconsistent` means confirmed, and carries a conflict_id. Until 2026-08-21 `not_material` was written as `consistent`, so a real dispute was indistinguishable from a wording variance and stage 7 elected one side of it as fact -- on CASE_704 section 4 printed DOC_006's 'victim walked normally' as established while DOC_008 p4 said the opposite."
+        },
         "conflict_id": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "The _conflict_ledger.json entry this check raised. Required (non-null) when result is inconsistent; must be null when consistent."
         }
       },
-      "required": ["check_id", "topic", "values_compared", "result", "conflict_id"],
+      "required": [
+        "check_id",
+        "topic",
+        "values_compared",
+        "result",
+        "conflict_id"
+      ],
       "allOf": [
         {
-          "if": { "properties": { "result": { "const": "inconsistent" } } },
-          "then": { "properties": { "conflict_id": { "type": "string" } } }
+          "if": {
+            "properties": {
+              "result": {
+                "const": "inconsistent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "conflict_id": {
+                "type": "string"
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "result": { "const": "consistent" } } },
-          "then": { "properties": { "conflict_id": { "const": null } } }
+          "if": {
+            "properties": {
+              "result": {
+                "const": "consistent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "conflict_id": {
+                "const": null
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "contested_not_decisive"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "conflict_id": {
+                "const": null
+              }
+            }
+          }
         }
       ]
     }

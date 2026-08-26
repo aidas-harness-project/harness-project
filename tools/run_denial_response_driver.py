@@ -30,7 +30,12 @@ ROOT = Path(__file__).resolve().parent.parent
 DAO = ROOT / "tools" / "dao.py"
 STAGE, UNIT = "denial_response", "initial_extraction"
 CONTRACT, SCHEMA = "denial_reason_result.json", "denial_reason_result.schema.json"
-VERSION = "denial_response_initial_driver.v0.3"
+# v0.4 (2026-08-20): the prompt now states the closed vocabularies the
+# transport schema drops. Bumped rather than edited in place because
+# `receipt_matches` reuses a stored candidate only when the prompt
+# version matches -- a candidate produced under v0.3 was answered
+# without ever being told decision_type's allowed values.
+VERSION = "denial_response_initial_driver.v0.4"
 TEXT_DISPOSITIONS = frozenset({"automated_text_pipeline", "text_only_no_normalization"})
 
 
@@ -230,7 +235,14 @@ def _prompt(bundle: list[dict]) -> str:
 Return only the supplied JSON Schema. Separate every denial/reduction and every accepted coverage.
 Use only exact quotes from this bundle. Do not infer missing amounts. Provide ranked Top-3 R-code
 candidates. There is no policy text in this checkpoint: set every policy_matches array to [].
-Use provisional schema-valid IDs; the driver assigns final deterministic IDs.
+IDs are provisional -- the driver reassigns the final deterministic ones -- but they are still
+pattern-checked before that happens, so they must already have the right SHAPE. Number them from 1
+in order of appearance and use exactly these forms:
+  reason_id            "DR_1", "DR_2", ...       (never "REASON_1")
+  basis_id             "BASIS_1", "BASIS_2", ... numbered across ALL grounds arrays, not per array
+  accepted_coverage_id "AC_1", "AC_2", ...
+document_id in every evidence reference is the real DOC_NNN id from the bundle heading above the
+text you quote, never invented.
 
 For each denial_reasons item include: reason_id, decided_coverage, decision_type, payment_status,
 taxonomy_code, candidate_codes, raw_reason_text, insurer_claim_summary, grounds with all three
@@ -238,9 +250,93 @@ basis arrays, amounts, requested_documents, policy_matches, confidence, evidence
 review_required. For each accepted_coverages item include: accepted_coverage_id, coverage_name,
 payment_status, accepted_amount, insurer_stated_basis, policy_matches, confidence,
 evidence_references, and review_required. Every evidence reference needs document_id, page, and an
-exact quote. The complete response is validated against the full local contract before publication.
+exact quote.
+
+candidate_codes is an array of 1 to 3 objects, and each object has EXACTLY these two keys:
+  taxonomy_code -- the R-code string, e.g. "R07"
+  confidence    -- a number from 0 to 1
+No other key is permitted in a candidate_codes entry: rank, code, rationale, label and reason are
+all rejected. Rank is expressed by array ORDER, not by a field. The list is ranked best-first, its
+first entry's taxonomy_code MUST equal this reason's taxonomy_code, the codes must be distinct, and
+confidence must never increase as the list goes on. For example:
+  "taxonomy_code": "R07",
+  "candidate_codes": [
+    {{"taxonomy_code": "R07", "confidence": 0.82}},
+    {{"taxonomy_code": "R12", "confidence": 0.11}}
+  ]
+
+grounds is an object with EXACTLY these three keys, and no others -- policy_basis, legal_basis and
+factual_basis are rejected:
+  contractual_basis        -- grounds drawn from the policy/contract terms
+  medical_or_factual_basis -- grounds drawn from medical findings or the facts of the accident,
+                              INCLUDING statute and case-law reasoning about liability
+  calculation_basis        -- grounds about how an amount was computed
+Each of the three is an array (use [] when the insurer stated nothing in that category). Each array
+ENTRY is an object, never a bare string, with these keys:
+  basis_id          -- see the ID shapes above
+  text              -- the ground itself, as an exact quote from the bundle
+  basis_source      -- exactly one of: insurer_stated, agent_inferred
+  evidence_references -- array of {{document_id, page, quote}}
+  confidence        -- a number from 0 to 1
+  review_required   -- true or false; when true, also give reviewer_role
+For example:
+  "grounds": {{
+    "contractual_basis": [],
+    "medical_or_factual_basis": [
+      {{"basis_id": "BASIS_1", "text": "<exact quote>", "basis_source": "insurer_stated",
+        "evidence_references": [{{"document_id": "DOC_007", "page": 3, "quote": "<exact quote>"}}],
+        "confidence": 0.9, "review_required": false}}
+    ],
+    "calculation_basis": []
+  }}
+
+amounts is an object with EXACTLY these five keys, ALL of them always present. Write null for any
+figure the insurer did not state -- never omit the key, never leave the object empty, and never
+infer or compute a number that is not written in the bundle:
+  claimed_amount, payable_amount, denied_amount, reduction_amount  -- numbers >= 0, or null
+  reduction_rate                                                   -- a number from 0 to 1, or null
+For example, when the insurer denies without naming any figure:
+  "amounts": {{"claimed_amount": null, "payable_amount": null, "denied_amount": null,
+               "reduction_amount": null, "reduction_rate": null}}
+
+requested_documents is an array of document-type codes (use [] when none were requested). Each
+entry is exactly one of these literal codes, not a Korean document name:
+  insurance_certificate, insurance_policy, application_form, diagnosis_certificate,
+  medical_record, imaging_report, receipt, insurer_response, legal_opinion,
+  legal_reference, power_of_attorney, accident_statement,
+  public_benefit_certificate, other
+
+Each accepted_coverages entry needs accepted_coverage_id, coverage_name, payment_status,
+accepted_amount (a number, or null when the insurer accepts without naming a figure),
+confidence, evidence_references and review_required; insurer_stated_basis is a string or null.
+
+policy_matches is [] everywhere in this checkpoint, as stated above, so it needs no inner shape.
+
+The complete response is validated against the full local contract before publication.
 If review_required is true at the response level, reviewer_role is required and must be one of
 손해사정사, 의사, or 법률전문가.
+
+CLOSED VOCABULARIES. These fields take one of a fixed set of codes. Write the code exactly as
+written here -- they are literal identifiers, not labels to translate. The source bundle is
+Korean and these codes are not; that is expected, and a Korean rendering of one is invalid:
+  decision_type must be one of: denial, reduction
+  payment_status must be one of: unpaid, partially_paid, paid, unknown
+  reviewer_role, where required, must be one of: 손해사정사, 의사, 법률전문가
+decision_type applies to denial_reasons items only. payment_status applies to items in both
+denial_reasons and accepted_coverages. taxonomy_code is an R-code (R01-R21, or R99 when none
+applies), also written verbatim.
+
+THE R-CODE DETERMINES decision_type. Each code is intrinsically about reducing a payment or about
+refusing one, so the pair must agree or the response is rejected:
+  reduction codes -- R01 R02 R03 R06 R07 R10 R11 R13 R16 R17 R18 R19 R20 R21
+                     these REQUIRE decision_type "reduction"
+  denial codes    -- R04 R05 R08 R09
+                     these REQUIRE decision_type "denial"
+  R12 and R14     -- either decision_type, but review_required MUST be true and reviewer_role
+                     must be given
+  R99             -- either decision_type; use it only when no R01-R21 code fits
+Choose the code that matches what the insurer actually did. If the insurer refused payment
+outright, pick a denial code (or R99) -- do not pick a reduction code and then label it a denial.
 
 BUNDLE TEXT:
 {rendered}

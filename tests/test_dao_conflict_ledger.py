@@ -306,3 +306,76 @@ def test_schema_invalid_sources_rejected_and_not_written(isolated_dao, make_args
     assert rc == 1
     ledger = dao.load_conflict_ledger("CASE_009")
     assert ledger["conflicts"] == [], "nothing should have been written"
+
+
+# --- professional_summary must survive the replay check --------------------
+# Measured on CASE_488 (2026-08-20). consistency_check writes a
+# `professional_summary` on every confirmed finding, and the DAO stored it on
+# the entry (cmd_add_conflict_entry) while leaving it OUT of the operation
+# payload. The replay check rebuilds each `add` entry from the payload alone,
+# so the rebuilt entry had 7 keys and the stored one 8, and every subsequent
+# ledger operation on that case failed closed:
+#
+#     ledger state does not replay from its history boundary
+#
+# The first write succeeds -- the check runs before the append -- so the damage
+# only shows on the SECOND add, or on the first set-conflict-verdict /
+# check-conflicts-clear. In CASE_488 that blocked screening_report, which is
+# gated on check_conflicts_clear, on a case whose conflicts were correctly
+# raised. The field the screening report must carry verbatim was, by
+# construction, the field that made the ledger unreplayable.
+
+def test_a_stored_professional_summary_still_replays(
+    isolated_dao, make_args, tmp_path
+):
+    sources = [
+        {"document_id": "DOC_006", "value": "책임 있음", "quote": "민법 제758조"},
+        {"document_id": "DOC_008", "value": "책임 없음", "quote": "하자 인정 어려움"},
+    ]
+    first = make_args(
+        stage="consistency_check", topic="liability",
+        sources_file=_sources_file(tmp_path, sources),
+        professional_summary="두 법률의견이 책임 성립 여부에 대해 반대 결론을 제시합니다.",
+        operation_id="conflict:summary-0001",
+    )
+    assert dao.cmd_add_conflict_entry(first) == 0
+
+    second = make_args(
+        stage="consistency_check", topic="fault_ratio",
+        sources_file=_sources_file(tmp_path, sources),
+        professional_summary="과실비율에 대한 판단 근거가 서로 다릅니다.",
+        operation_id="conflict:summary-0002",
+    )
+    assert dao.cmd_add_conflict_entry(second) == 0, (
+        "a second entry must not be refused by the replay check")
+
+    ledger = dao.load_conflict_ledger("CASE_009")
+    assert [c["conflict_id"] for c in ledger["conflicts"]] == [
+        "CONFLICT_1", "CONFLICT_2"]
+    assert all("professional_summary" in c for c in ledger["conflicts"]), (
+        "the summary must still be stored, not dropped to make replay pass")
+
+
+def test_the_gate_stays_usable_after_a_summary_entry(
+    isolated_dao, make_args, tmp_path
+):
+    """check-conflicts-clear and set-conflict-verdict both re-run the replay,
+    so a single summarised entry is enough to wedge the whole case."""
+    sources = [
+        {"document_id": "DOC_006", "value": "a", "quote": "q1"},
+        {"document_id": "DOC_008", "value": "b", "quote": "q2"},
+    ]
+    args = make_args(
+        stage="consistency_check", topic="liability",
+        sources_file=_sources_file(tmp_path, sources),
+        professional_summary="서로 다른 결론입니다.",
+        operation_id="conflict:summary-gate-0001",
+    )
+    assert dao.cmd_add_conflict_entry(args) == 0
+
+    verdict = make_args(
+        conflict_id="CONFLICT_1", verdict="deferred_to_report",
+        note="손해사정사 판단 필요", operation_id="conflict:summary-gate-0002",
+    )
+    assert dao.cmd_set_conflict_verdict(verdict) == 0, (
+        "the verdict path must not be blocked by its own stored summary")

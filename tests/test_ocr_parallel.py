@@ -21,6 +21,19 @@ import ocr_extract as oe
 from llm_providers import ProviderResult
 
 
+@pytest.fixture(autouse=True)
+def dual_read(monkeypatch):
+    """Every test in this file is about the two-reader path.
+
+    They used to get it from the default; the PoC default flipped to
+    single-reader on 2026-08-20, under which reader_b is never called and the
+    parallelism these tests pin does not exist. Asking for dual-read here
+    states what the file is actually testing, in one place, rather than at
+    every run_ocr call site.
+    """
+    monkeypatch.setenv(oe.SINGLE_READER_ENV, "0")
+
+
 def _page_number(image_path: Path) -> int:
     """page_007.png -> 7. The fakes key off this, so a mixed-up image/page
     association is a test failure rather than something that averages out."""

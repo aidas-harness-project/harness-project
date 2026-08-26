@@ -41,21 +41,28 @@ judgement:
 
 WHAT THIS DRIVER DELIBERATELY DOES NOT DECIDE
 
-Four decision points in Stage 2 are real, and every one of them is a HUMAN
+Three decision points in Stage 2 are real, and every one of them is a HUMAN
 gate, not agent reasoning. The driver stops and reports; it never answers them:
 
   * a P8 disagreement            -- a human picks a reading, or supplies a
                                     corrected transcription
-  * segmentation boundary approval -- a reviewer sees the ranges and the title
-                                    line each cut is made on
   * a `raw_page_text` classification -- a human answers whether the evidence
                                     quote survives into the redacted text
   * a possible PII leak          -- a privacy event that must stop everything
 
-Stopping at these is the point, not a limitation: `--auto-approve-segmentation`
-exists for timing/plumbing runs and is refused unless explicitly passed, for
-the same reason `--single-reader` is orchestrator-owned rather than the
-agent's to choose.
+Stopping at these is the point, not a limitation, for the same reason
+`--single-reader` is orchestrator-owned rather than the agent's to choose.
+
+Segmentation boundary approval was a fourth such gate until 2026-08-20, when it
+was removed on the user's instruction: a `pending` proposal is now auto-approved
+and split without stopping. The approval record still exists and still names a
+reviewer -- it reads `<held_by> (auto-approved)` rather than a person, so a
+later reader can tell which boundaries a human actually saw. `propose` still
+flags `undecided_pages`, and a `rejected` proposal is still honoured rather than
+overwritten; what changed is only that nobody is asked about a `pending` one.
+The tradeoff accepted here: over-splitting stays cheap to undo by a later merge,
+while an over-merge now propagates a wrong `document_type` downstream with no
+human in its path.
 
 FAILURE SEMANTICS
 
@@ -70,9 +77,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -80,7 +89,11 @@ sys.stdout.reconfigure(encoding="utf-8")
 import dao as _dao
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
-from llm_providers import SUPPORTED_PROVIDERS
+import llm_providers
+import ocr_extract
+import redact_document
+from llm_providers import (DEFAULT_PROVIDER, ProviderConfig, ProviderConfigError,
+                           SUPPORTED_PROVIDERS, build_provider)
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
@@ -173,17 +186,77 @@ def _proposal(case_id: str, doc_id: str) -> dict | None:
         case_id, f"segmentation_proposal_{doc_id}.json")
 
 
-def unclassified_children(manifest: dict) -> list[dict]:
+def unclassified_children(manifest: dict,
+                          reclassify: str | None = None) -> list[dict]:
     """Split children that still owe a classification.
 
     A child inherits its pages from the bundle, so it must be classified with
     `classify-only`; `run` would re-OCR pages it already owns and overwrite
     their P8 history (this really happened to CASE_909's DOC_006-013).
+
+    `reclassify` re-opens children that ALREADY carry a type, which the default
+    selection skips. It exists because a document's type is a verdict under one
+    taxonomy, and the taxonomy changes: `legal_opinion`/`legal_reference` were
+    added 2026-08-20 and three administrative codes 2026-08-22, but every case
+    processed before those dates keeps its old answer forever, because
+    `not document_type` is false for it. Measured on a CASE_701 fork the day
+    after the second change: Stage 2 completed, made ZERO classification calls,
+    and the manifest came out byte-identical -- a run that looked like a
+    revalidation and revalidated nothing.
+
+    Two values, and the narrow one is the default worth reaching for:
+
+    * `"other"` -- only documents that landed in the catch-all bucket. This is
+      the taxonomy-change case: a code was added, and the question is whether
+      anything previously homeless now has a home. It cannot change a verdict
+      that already succeeded, so it is safe to run broadly.
+    * `"all"` -- every classified child. Re-opens verdicts that are already
+      settled and may CHANGE them, since a classifier call is not deterministic.
+      For a prompt or model change, where the old answers are what is in doubt.
+
+    Neither touches a `superseded_bundle`: its children own its pages, and it
+    carries `document_type: null` by construction rather than by omission.
+
+    **Reclassification is not restricted to split children.** The default
+    selection requires `source_file_name` because a top-level document is
+    classified inside checkpoint 1, at the moment it is OCR'd -- so "not yet
+    classified" really does mean "a split child". Re-classification asks a
+    different question: not "who still owes a verdict" but "whose verdict was
+    reached under the old taxonomy", and that is answered the same way whether
+    a PDF held one document or thirty.
+
+    Restricting it anyway is what the first corpus pass did, and it silently
+    skipped 13 of the 184 `other` documents -- among them ten 법률질의회신서
+    read at 0.95 confidence whose `legal_opinion` bucket had existed since
+    2026-08-20. They were never attempted, so nothing reported a failure; they
+    simply stayed in the catch-all. A document qualifies here by having pages
+    of its own, which is what `file_path` records, not by how it came to exist.
     """
+    if reclassify not in (None, "other", "all"):
+        raise ValueError(f"unknown reclassify mode: {reclassify!r}")
+
+    def wants(document: dict) -> bool:
+        document_type = document.get("document_type")
+        if not document_type:
+            return True
+        if reclassify == "all":
+            return True
+        return reclassify == "other" and document_type == "other"
+
+    def in_scope(document: dict) -> bool:
+        if document.get("downstream_disposition") == "superseded_bundle":
+            return False
+        # `expert_review_only` is a decision about the document, not a missing
+        # verdict: it is excluded from the text pipeline entirely, so
+        # re-typing it would change nothing downstream.
+        if document.get("downstream_disposition") == "expert_review_only":
+            return False
+        if reclassify:
+            return bool(document.get("file_path"))
+        return bool(document.get("source_file_name"))
+
     return [d for d in manifest.get("documents", [])
-            if d.get("source_file_name")
-            and d.get("downstream_disposition") != "superseded_bundle"
-            and not d.get("document_type")]
+            if in_scope(d) and wants(d)]
 
 
 def chunkable_documents(manifest: dict) -> tuple[list[str], list[str]]:
@@ -197,6 +270,142 @@ def chunkable_documents(manifest: dict) -> tuple[list[str], list[str]]:
         elif doc.get("redacted_text_path"):
             text.append(doc["document_id"])
     return text, excluded
+
+
+# Default fan-out for split-child classification. Measured 2026-08-23 on a
+# fixed 24-document workload, each width run twice:
+#
+#     workers   wall (s)               mean per call
+#     4         49.8, 50.0             7.65s
+#     8         28.9                   8.90s
+#     12        22.5, 28.0, 31.0       9.85-13.89s
+#     16        24.1, 29.9             11.49-13.86s
+#
+# 8 is where the reproducible gain stops. Width 4 repeated to 0.4%, so the
+# 4 -> 8 improvement (-42%) is real; 12 and 16 land in the same 27-31s band as
+# 8 while their spread grows to 38%, which is contention, not headroom. A first
+# single run showed 22.5s at width 12 and would have justified 12 on its own --
+# repeating it is what showed that number was one lucky sample.
+#
+# The value this replaced was 4, chosen on the reasoning that "the provider's
+# own in-flight semaphore is the real ceiling anyway". It is not: that
+# semaphore is 24 (`DEFAULT_LLM_MAX_INFLIGHT`, whose comment records it as the
+# measured OCR knee), and nothing in this range ever reaches it. Classification
+# saturates at a third of OCR's width because the calls are shorter -- 7.6s of
+# text against 23s of image -- so per-call latency growth overtakes the
+# parallel gain much sooner.
+_CLASSIFY_WORKERS = 8
+
+
+def _preflight_providers(provider: str | None, model: str | None, *,
+                         skip_redaction: bool | None, env=None) -> list[str]:
+    """Build every provider this stage will use, before it does any work.
+
+    Returns a list of human-readable failures; empty means every role resolved.
+
+    This exists because the roles resolve their MODEL from different places --
+    the OCR trio from `HARNESS_OCR_*_MODEL`, redaction from
+    `HARNESS_REDACTION_MODEL`, everything else from the provider's own env
+    names -- so a partially configured environment can satisfy checkpoint 1 and
+    then fail at redaction, after the whole document has already been OCR'd and
+    paid for. Verified rather than assumed: with `OPENROUTER_API_KEY` and only
+    `HARNESS_OCR_READER_A_MODEL` set, the OCR trio builds and redaction raises
+    `openrouter requires a model name`.
+
+    Construction is local -- no network call, no provider round trip -- so
+    checking costs nothing and not checking costs a half-processed case. Each
+    role is resolved the way ITS OWN child resolves it; asking one generic
+    question instead would give false assurance for exactly the split
+    environment this guards against.
+    """
+    source_env = os.environ if env is None else env
+    failures: list[str] = []
+
+    # The OCR trio keeps its own construction: build_ocr_providers applies the
+    # per-reader env chain (HARNESS_OCR_READER_A_MODEL and friends) that a
+    # generic build would not see.
+    try:
+        ocr_extract.build_ocr_providers(
+            reader_a_name=provider, reader_b_name=provider, comparator_name=provider,
+            reader_a_model=model, reader_b_model=model, comparator_model=model,
+            env=source_env)
+    except ProviderConfigError as exc:
+        failures.append(f"checkpoint 1 readers/comparator: {exc}")
+
+    # The classifier, the segmentation judge and the split-child classification
+    # all take the forwarded pair and otherwise fall back to the provider's own
+    # env names -- one construction covers the three.
+    specs = [("classifier / segmentation judge",
+              provider or source_env.get("HARNESS_LLM_PROVIDER"),
+              model or source_env.get("HARNESS_LLM_MODEL"))]
+    if skip_redaction is not True:
+        # A case whose documents are ALL of a PII-free class would never call
+        # the redaction model, so this can in principle refuse a run that would
+        # have succeeded. Accepted deliberately: classification runs AFTER
+        # redaction precisely so the classifier reads the redacted layer, so at
+        # this point document_type is mostly unknown and the PII-free
+        # short-circuit almost never applies to a whole case.
+        specs.append(("checkpoint 2 redaction",
+                      provider or source_env.get("HARNESS_REDACTION_PROVIDER")
+                      or redact_document.DEFAULT_REDACTION_PROVIDER,
+                      model or source_env.get("HARNESS_REDACTION_MODEL")))
+    failures.extend(llm_providers.preflight(specs, env=source_env, root=ROOT))
+    return failures
+
+
+def _classify_children(case_id, children, *, common, provider, workers, report,
+                       model=None):
+    """Classify every split child, several at a time, in manifest order.
+
+    Independent by construction: each child writes its own
+    `classification_result_DOC_X.json` and folds its fields into the manifest via
+    `dao.patch_manifest_document`, a read-modify-write under a single lock hold --
+    the same primitive `pool.documents` already relies on in run_document_stage.
+
+    Returns one step per child, ordered as `children` was, NOT by completion.
+    The steps list is a receipt a human reads against the manifest; ordering it
+    by whichever provider answered first would make two runs of one case produce
+    receipts that differ for no reason. Failures are returned like any other
+    step -- the caller decides what halts.
+
+    Measured cause, CASE_701: 10 children took 81.4s of wall for 60.4s of
+    provider time, the remaining 21.1s being interpreter starts serialized
+    between calls.
+    """
+    concurrency = trace_mod.ConcurrencyProbe()
+
+    def one(child):
+        doc_id = child["document_id"]
+        argv = common([str(TOOLS / "run_checkpoint1.py"), "classify-only",
+                       case_id, doc_id])
+        if provider:
+            argv += ["--classifier-provider", provider]
+        if model:
+            argv += ["--classifier-model", model]
+        with concurrency.enter():
+            return _run(argv, phase=f"classify:{doc_id}", progress=report)
+
+    limit = max(1, min(workers or _CLASSIFY_WORKERS, len(children)))
+    if limit == 1 or len(children) == 1:
+        return [one(child) for child in children]
+
+    with trace_mod.span("pool.classify_children", category="compute",
+                        case_id=case_id, worker_count=limit,
+                        items=len(children)) as pool_span:
+        # run_in_context: contextvars do not cross into pool workers, so a raw
+        # submit would orphan each child's spans at parent None.
+        submit = trace_mod.run_in_context(one)
+        with ThreadPoolExecutor(max_workers=limit) as pool:
+            futures = [pool.submit(submit, child) for child in children]
+            # Every future is waited on before any result is inspected: a child
+            # that already finished has written its contract, and abandoning the
+            # pool early would discard that work while leaving its output on disk.
+            steps = [future.result() for future in futures]
+        # Bound rather than returned directly: the probe's maximum is only final
+        # once every worker has left, so the attribute has to be set after the
+        # pool exits and before this span closes.
+        pool_span.set(observed_max_concurrency=concurrency.max_observed)
+        return steps
 
 
 def _phase_ok(step: dict) -> bool:
@@ -219,12 +428,14 @@ def run_stage2(
     run_id: str,
     *,
     provider: str | None = None,
+    model: str | None = None,
     doc_workers: int | None = None,
     page_workers: int | None = None,
     single_reader: bool | None = None,
     skip_redaction: bool | None = None,
     auto_approve_segmentation: bool = False,
     segmentation_reviewer: str | None = None,
+    reclassify: str | None = None,
     progress=None,
 ) -> dict:
     report = progress or (lambda msg: print(msg, file=sys.stderr, flush=True))
@@ -252,6 +463,18 @@ def run_stage2(
         }
 
     with trace_mod.span("stage2.driver", category="compute", case_id=case_id):
+        # ---- phase 0: can every role this stage needs even be built? --------
+        # Cheap, local, and ahead of the first paid call. A provider that needs
+        # a model it was never given used to surface as a child failure partway
+        # through -- after OCR, at redaction -- which is the expensive place to
+        # find out.
+        unresolvable = _preflight_providers(provider, model,
+                                            skip_redaction=skip_redaction)
+        if unresolvable:
+            return stop("preflight",
+                        "the stage cannot construct every provider it needs, so "
+                        "nothing was run: " + "; ".join(unresolvable))
+
         # ---- phase 1: checkpoint 1 over everything that needs it ------------
         report("phase: checkpoint 1 (OCR)")
         argv = common([str(TOOLS / "run_document_stage.py"), case_id])
@@ -259,6 +482,10 @@ def run_stage2(
             for flag in ("--reader-a", "--reader-b", "--comparator",
                          "--classifier-provider"):
                 argv += [flag, provider]
+        if model:
+            for flag in ("--reader-a-model", "--reader-b-model",
+                         "--comparator-model", "--classifier-model"):
+                argv += [flag, model]
         if doc_workers is not None:
             argv += ["--doc-workers", str(doc_workers)]
         if page_workers is not None:
@@ -283,6 +510,8 @@ def run_stage2(
                        "--checkpoint", "2"])
         if provider:
             argv += ["--provider", provider]
+        if model:
+            argv += ["--model", model]
         if doc_workers is not None:
             argv += ["--doc-workers", str(doc_workers)]
         argv = redaction_flags(argv)
@@ -292,28 +521,6 @@ def run_stage2(
             return stop("redaction",
                         "redaction did not complete; a possible PII leak halts "
                         "the document and is never worked around", gate=True)
-
-        # ---- phase 2b: classify, now that redacted text exists ---------------
-        # Deliberately AFTER redaction. Classification used to be checkpoint 1's
-        # tail, which meant every top-level document was labelled from the raw
-        # page -- `classification_text_source: raw_page_text`, `review_required`
-        # -- because no redacted layer existed yet. That made the
-        # `classification_review` gate fire on the normal path of every run
-        # (4-5 documents on CASE_909/911/961/962) rather than on an exception,
-        # and a gate taken every time is a gate that gets rubber-stamped. A
-        # bundle awaiting its split is excluded by the selector, not by a flag
-        # here: its children classify individually after the split.
-        report("phase: classification (post-redaction)")
-        argv = common([str(TOOLS / "run_document_stage.py"), case_id,
-                       "--checkpoint", "classify"])
-        if provider:
-            argv += ["--classifier-provider", provider]
-        if doc_workers is not None:
-            argv += ["--doc-workers", str(doc_workers)]
-        step = _run(argv, phase="classification", progress=report)
-        steps.append(step)
-        if not _phase_ok(step):
-            return stop("classification", "classification did not complete")
 
         # ---- phase 3: segmentation, per bundle ------------------------------
         manifest = _manifest(case_id)
@@ -328,6 +535,8 @@ def run_stage2(
                     str(TOOLS / "segment_case.py"), "propose", case_id, doc_id])
                 if provider:
                     propose_argv += ["--provider", provider]
+                if model:
+                    propose_argv += ["--model", model]
                 step = _run(propose_argv,
                             phase=f"segment.propose:{doc_id}", progress=report)
                 steps.append(step)
@@ -350,15 +559,6 @@ def run_stage2(
             if review_status not in {"pending", "approved"}:
                 return stop(f"segment.approve:{doc_id}",
                             f"unknown proposal review_status {review_status!r}")
-
-            if review_status != "approved" and not auto_approve_segmentation:
-                return stop(
-                    f"segment.approve:{doc_id}",
-                    "boundary approval is a human gate: a reviewer must see the "
-                    "proposed ranges and the title line each cut is made on. "
-                    "Approve with `segment_case.py approve` and re-run, or pass "
-                    "--auto-approve-segmentation for a timing/plumbing run.",
-                    gate=True)
 
             if review_status != "approved":
                 reviewer = segmentation_reviewer or f"{held_by} (auto-approved)"
@@ -385,19 +585,19 @@ def run_stage2(
 
         # ---- phase 4: classify split children -------------------------------
         manifest = _manifest(case_id)
-        children = unclassified_children(manifest)
+        children = unclassified_children(manifest, reclassify)
         if children:
             report(f"phase: classify {len(children)} split child(ren)")
-        for child in children:
-            doc_id = child["document_id"]
-            argv = common([str(TOOLS / "run_checkpoint1.py"), "classify-only",
-                           case_id, doc_id])
-            if provider:
-                argv += ["--classifier-provider", provider]
-            step = _run(argv, phase=f"classify:{doc_id}", progress=report)
-            steps.append(step)
-            if not _phase_ok(step):
-                return stop(f"classify:{doc_id}", "child classification failed")
+        if children:
+            child_steps = _classify_children(
+                case_id, children, common=common, provider=provider,
+                model=model, workers=doc_workers, report=report)
+            steps.extend(child_steps)
+            # Reported in manifest order, so the halt names the same child every
+            # time regardless of which provider call returned first.
+            for step in child_steps:
+                if not _phase_ok(step):
+                    return stop(step["phase"], "child classification failed")
 
         # ---- phase 5: redact the children -----------------------------------
         if children:
@@ -406,6 +606,8 @@ def run_stage2(
                            "--checkpoint", "2"])
             if provider:
                 argv += ["--provider", provider]
+            if model:
+                argv += ["--model", model]
             if doc_workers is not None:
                 argv += ["--doc-workers", str(doc_workers)]
             argv = redaction_flags(argv)
@@ -490,6 +692,16 @@ def main(argv=None):
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--provider", choices=SUPPORTED_PROVIDERS,
                     help="Applied to every provider-backed step in the stage")
+    ap.add_argument("--model",
+                    help="Model slug, applied to every provider-backed step "
+                         "alongside --provider. The HTTP providers require one "
+                         "(openrouter has no default slug); the CLI providers "
+                         "run on their own default without it. Omitted, each "
+                         "role falls back to its own env var "
+                         "(HARNESS_OCR_*_MODEL, HARNESS_REDACTION_MODEL, "
+                         "HARNESS_OPENROUTER_MODEL) -- which is how a partial "
+                         "environment used to fail at redaction instead of at "
+                         "the start.")
     ap.add_argument("--doc-workers", type=int, default=None, metavar="N")
     ap.add_argument("--page-workers", type=int, default=None, metavar="N")
     group = ap.add_mutually_exclusive_group()
@@ -511,23 +723,32 @@ def main(argv=None):
         help="Force the redaction model on even under HARNESS_SKIP_REDACTION.")
     ap.add_argument(
         "--auto-approve-segmentation", action="store_true",
-        help="Skip the human boundary-approval gate. For timing and plumbing "
-             "runs only -- the reviewer normally sees the proposed ranges and "
-             "the title line each cut is made on.")
+        help="No-op since 2026-08-20: boundary approval is no longer a gate, so "
+             "a pending proposal is auto-approved either way. Still accepted so "
+             "existing invocations keep working.")
+    ap.add_argument(
+        "--reclassify", choices=("other", "all"), default=None,
+        help="Re-run classification on children that ALREADY carry a type, "
+             "which is otherwise skipped. 'other' re-opens only the catch-all "
+             "bucket -- the taxonomy-change case, and the one to reach for. "
+             "'all' re-opens every settled verdict and may change them.")
     ap.add_argument("--segmentation-reviewer", default=None,
-                    help="Reviewer recorded when --auto-approve-segmentation is used")
+                    help="Reviewer name recorded on an auto-approved proposal "
+                         "(default: '<held_by> (auto-approved)')")
     args = ap.parse_args(argv)
     trace_mod.configure_from_args(args)
 
     result = run_stage2(
         args.case_id, args.held_by, args.run_id,
         provider=args.provider,
+        model=args.model,
         doc_workers=args.doc_workers,
         page_workers=args.page_workers,
         single_reader=args.single_reader,
         skip_redaction=args.skip_redaction,
         auto_approve_segmentation=args.auto_approve_segmentation,
         segmentation_reviewer=args.segmentation_reviewer,
+        reclassify=args.reclassify,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["status"] == "success" else 1

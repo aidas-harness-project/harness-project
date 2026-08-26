@@ -1,0 +1,792 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "screening_report_selective.schema.json",
+  "title": "Screening report v0.1 (selective lane)",
+  "description": "The triage document for the source-grounded selective lane. It differs from screening_report.schema.json in exactly two ways: preliminary_assessment is not required (the lane makes no feasibility/difficulty/payout judgement), and the operational sections the lane produces -- the required-document checklist, whether a disability assessment already exists, and what the records could not establish -- are declared rather than riding along undeclared. The legacy contract is unchanged and still governs the legacy lane.",
+  "allOf": [
+    {
+      "$ref": "common_component_output.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "report_path": {
+          "type": "string",
+          "description": "Path to the rendered .md report. outputs/CASE_XXX/screening_report.md"
+        },
+        "case_summary": {
+          "$ref": "#/$defs/case_summary"
+        },
+        "insurer_position": {
+          "$ref": "#/$defs/insurer_position"
+        },
+        "source_denial_contract_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the denial_reason_result.json this report summarizes -- of the reason ids, decision types, taxonomy codes, and owned policy_match_ids, not the whole file. The DAO recomputes it from the contract on disk at write time and refuses a mismatch, so a screening report describing a superseded reason set cannot be persisted. Rewriting denial_reason_result.json flips this stage back to pending in run-state; no file is deleted."
+        },
+        "key_issues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/key_issue"
+          }
+        },
+        "inconsistencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/inconsistency"
+          }
+        },
+        "missing_documents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/missing_document"
+          }
+        },
+        "review_points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/review_point"
+          }
+        },
+        "preliminary_assessment": {
+          "$ref": "#/$defs/preliminary_assessment"
+        },
+        "draft_writer_input_summary": {
+          "$ref": "#/$defs/draft_writer_input_summary"
+        },
+        "required_document_checklist": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "existing_disability_assessment": {
+          "type": "object"
+        },
+        "unconfirmed_items": {
+          "type": "array",
+          "description": "Fields the run could not establish. Each carries the STRUCTURED cause alongside the sentence: an unconstrained `{type: object}` here is how the cause went unpublished until 2026-08-21 -- nothing failed when it was absent.",
+          "items": {
+            "type": "object",
+            "required": [
+              "field_id",
+              "label",
+              "gap_kind",
+              "reason"
+            ],
+            "properties": {
+              "field_id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "unavailable_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "$comment": "Mirrors claim_analysis_result#/$defs/field_result/unavailable_reason; nullable because a pre-2026-08-21 result may not carry one."
+              },
+              "gap_kind": {
+                "enum": [
+                  "records_gap",
+                  "not_searched",
+                  "out_of_scope",
+                  "disputed",
+                  "partial_reading",
+                  "source_blank"
+                ],
+                "description": "What a reader can DO about it. Only `records_gap` is closable by requesting documents; `not_searched` says the pipeline never looked and why. `partial_reading` is neither: the document exists, was read, and states a value that failed the trusted-value bar (incomplete or ambiguous), so more records would add nothing -- a person must read the quote the contract already carries and decide whether it is the whole answer. `source_blank` is the form printing the field and the writer leaving the cell empty: the item WAS raised by the document, so no records request can fill it and the action is to check the original."
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "partial_readings": {
+                "type": "array",
+                "description": "The readings a row is telling the reviewer to go and check, each with the citation that grounds it. Carried by two kinds of row and the shape is shared deliberately: a `partial_reading` row (a value that failed the trusted-value requirements) and a `disputed` row (two sources that disagree) both send a reader to the same place for the same reason. Without them a row's own sentence names no source, so confirming one field meant opening the JSON contract by hand.",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "value_text"
+                  ],
+                  "properties": {
+                    "value_text": {
+                      "type": "string"
+                    },
+                    "why": {
+                      "type": "string",
+                      "description": "Which trusted-value requirement the reading failed: 불완전 (the source said less than the whole value -- read the rest of the page), 다의적 (the text supports more than one reading -- decide which), or both joined by '·'. Present only on a `partial_reading` row. A `disputed` row's readings each MET the bar on their own -- what is unresolved is which one the field takes -- so there is nothing to name and the key is absent rather than filled with a placeholder."
+                    },
+                    "document_id": {
+                      "type": "string"
+                    },
+                    "page": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "quote": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "medical_projection_status": {
+          "const": "not_configured"
+        },
+        "policy_links": {
+          "type": "array",
+          "description": "Copied from `claim_analysis_result.policy_links`. Present so section 8 of the narrative and the evidence sidecar can name the clauses the case actually links to; previously the report dropped them and the section read '연결된 약관 조항 없음' on every case.",
+          "items": {
+            "$ref": "#/$defs/screening_policy_link"
+          }
+        }
+      },
+      "required": [
+        "report_path",
+        "case_summary",
+        "insurer_position",
+        "key_issues",
+        "inconsistencies",
+        "missing_documents",
+        "review_points"
+      ]
+    }
+  ],
+  "$defs": {
+    "case_summary": {
+      "type": "object",
+      "description": "Case overview section. Source: extracted_claim_fields, coverage_result, case_type_result.",
+      "properties": {
+        "case_type": {
+          "type": "string",
+          "description": "Case type -- e.g. permanent-disability, diagnosis/surgery-cost, out-of-pocket medical, liability, other. See pipeline.md's taxonomy."
+        },
+        "main_diagnosis": {
+          "type": "string"
+        },
+        "kcd_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The KCD code, or the disagreement between the sources that record it (see accident_date). Identical readings that differ only in case are collapsed by the renderer and publish as the single value."
+        },
+        "accident_date": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The accident date, or the disagreement between the sources that record it. `format: date` was dropped 2026-08-26, when conflicted summary facts started rendering as `자료 간 불일치: A / B (CONFLICT_N)` instead of 확인 불가. A disagreement is not a date and cannot be spelled as one, so a validator enforcing the format would push the field back into the vocabulary of absence -- the exact defect the change removes. The machine-readable date is still available upstream: claim_analysis_result.json enforces `format: date` on each observation, and this field is the human-facing rendering of what those observations resolved to."
+        },
+        "onset_date": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "treatment_period": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "start_date": {
+              "type": "string",
+              "format": "date"
+            },
+            "end_date": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date"
+            }
+          },
+          "required": [
+            "start_date"
+          ]
+        },
+        "claim_coverages": {
+          "type": "array",
+          "description": "Standard coverage names -- see pipeline.md's taxonomy.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fact_evidence": {
+          "$ref": "#/$defs/fact_evidence"
+        },
+        "treatment_period_text": {
+          "type": "string",
+          "description": "Present ONLY when the treatment period is in conflict, which has no single start/end to put in `treatment_period`. Carries the rendered disagreement so a disputed period is not silently dropped into 확인 불가. Mutually exclusive with `treatment_period` by construction: a conflicted period produces no block, an asserted one produces no text."
+        }
+      },
+      "required": [
+        "case_type",
+        "main_diagnosis",
+        "claim_coverages"
+      ]
+    },
+    "insurer_position": {
+      "type": "object",
+      "description": "Insurer's determination section. Source: denial_reason_result (from denial-response, consumed as a dependency -- see pipeline.md).",
+      "properties": {
+        "has_denial": {
+          "type": "boolean"
+        },
+        "has_reduction": {
+          "type": "boolean"
+        },
+        "has_denial_or_reduction": {
+          "type": "boolean",
+          "deprecated": true,
+          "description": "Deprecated compatibility field retained for one schema version. Must equal has_denial OR has_reduction; consumers should migrate to the two explicit fields."
+        },
+        "has_acceptance": {
+          "type": "boolean",
+          "description": "Whether the insurer's response ACCEPTED any coverage. Optional and additive: absent means the report predates this field, NOT that nothing was accepted. Without it a split outcome was structurally invisible -- CASE_907's report correctly said in prose that 배상책임 was denied while 구내치료비 ₩2,000,000 was notified, but insurer_position read has_denial:true/has_reduction:false and nothing else, which a structural consumer takes as a total denial. That is the exact misreading denial_reason_result's accepted_coverages exists to prevent, so the report that summarizes it must carry the axis too."
+        },
+        "acceptance": {
+          "type": "object",
+          "description": "Which coverages the insurer accepted, mirroring the denial/reduction summaries. Sourced from denial_reason_result.accepted_coverages; ids must be exactly that contract's accepted_coverage_ids.",
+          "properties": {
+            "accepted_coverage_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^AC_[0-9]+$"
+              }
+            },
+            "total_amount": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Sum of stated accepted amounts, or null when no figure is stated. An amount the insurer merely NOTIFIED is still recorded here -- payment_status on the source contract carries whether it was actually paid, and this field must never be read as proof of payment."
+            },
+            "evidence_references": {
+              "type": "array",
+              "description": "What the insurer itself wrote, copied from the denial contract. Empty when the response stated no locatable grounds -- never a licence to supply one.",
+              "items": {
+                "$ref": "#/$defs/screening_evidence_reference"
+              }
+            }
+          },
+          "required": [
+            "accepted_coverage_ids"
+          ],
+          "additionalProperties": false
+        },
+        "denial": {
+          "$ref": "#/$defs/decision_summary"
+        },
+        "reduction": {
+          "$ref": "#/$defs/decision_summary"
+        },
+        "main_reason_code": {
+          "deprecated": true,
+          "anyOf": [
+            {
+              "$ref": "common_component_output.schema.json#/$defs/taxonomy_code"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "main_reason_label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "deprecated": true
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Summary of the insurer's position -- hedged, non-definitive phrasing."
+        },
+        "reduction_amount": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "deprecated": true,
+          "description": "Deprecated compatibility field. Use reduction.total_amount."
+        }
+      },
+      "required": [
+        "has_denial",
+        "has_reduction",
+        "has_denial_or_reduction",
+        "denial",
+        "reduction"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "has_denial": {
+                "const": false
+              },
+              "has_reduction": {
+                "const": false
+              }
+            },
+            "required": [
+              "has_denial",
+              "has_reduction"
+            ]
+          },
+          "then": {
+            "properties": {
+              "has_denial_or_reduction": {
+                "const": false
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "has_denial_or_reduction": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "has_denial": {
+                "const": true
+              }
+            },
+            "required": [
+              "has_denial"
+            ]
+          },
+          "then": {
+            "properties": {
+              "denial": {
+                "properties": {
+                  "reason_ids": {
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "denial": {
+                "properties": {
+                  "reason_ids": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "has_reduction": {
+                "const": true
+              }
+            },
+            "required": [
+              "has_reduction"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reduction": {
+                "properties": {
+                  "reason_ids": {
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reduction": {
+                "properties": {
+                  "reason_ids": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "decision_summary": {
+      "type": "object",
+      "properties": {
+        "reason_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^DR_[0-9]+$"
+          }
+        },
+        "total_amount": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Total denied or reduced amount when explicitly available; null when the source does not state enough amounts to total safely."
+        },
+        "evidence_references": {
+          "type": "array",
+          "description": "What the insurer itself wrote, copied from the denial contract. Empty when the response stated no locatable grounds -- never a licence to supply one.",
+          "items": {
+            "$ref": "#/$defs/screening_evidence_reference"
+          }
+        }
+      },
+      "required": [
+        "reason_ids",
+        "total_amount"
+      ]
+    },
+    "key_issue": {
+      "type": "object",
+      "description": "A core issue for review.",
+      "properties": {
+        "issue_id": {
+          "type": "string",
+          "pattern": "^ISSUE_[0-9]+$"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "related_documents": {
+          "type": "array",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/document_id"
+          }
+        },
+        "review_required": {
+          "type": "boolean"
+        },
+        "reviewer_role": {
+          "$ref": "common_component_output.schema.json#/$defs/reviewer_role"
+        }
+      },
+      "required": [
+        "issue_id",
+        "title",
+        "description"
+      ]
+    },
+    "inconsistency": {
+      "type": "object",
+      "description": "A cross-document inconsistency. Source: evidence_validation_result / the conflict ledger (see harness-guardrails P6) -- detailed doc_a/doc_b value comparison and resolution live there; this is a summary plus document tracing.",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "conflict_ref": {
+          "type": "string",
+          "pattern": "^CONFLICT_[0-9]+$",
+          "description": "The conflict-ledger entry this inconsistency carries, when it came from there. Required in practice for every entry the ledger marks `deferred_to_report`: finalize-stage screening_report refuses unless each such conflict_id appears here, which is what makes a deferral a carried obligation rather than a second way of saying `resolved`. Optional on an inconsistency the report raises on its own, which has no ledger entry to point at. Bind by id, not by matching prose -- CASE_047's four deferrals were described in the report body in fluent Korean that no string comparison could have tied back to CONFLICT_1..4."
+        },
+        "severity": {
+          "$ref": "common_component_output.schema.json#/$defs/severity"
+        },
+        "related_documents": {
+          "type": "array",
+          "minItems": 2,
+          "description": "The documents being compared where the inconsistency was found.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/document_id"
+          }
+        },
+        "review_required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "field",
+        "description",
+        "severity"
+      ]
+    },
+    "missing_document": {
+      "type": "object",
+      "description": "A document recommended for follow-up request.",
+      "properties": {
+        "document_type": {
+          "type": "string",
+          "description": "Standard code or specific document name. e.g. disability_certificate"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "document_type",
+        "reason"
+      ]
+    },
+    "review_point": {
+      "type": "object",
+      "description": "A point flagged for expert review. This array is P3's aggregation point for Phase 1: P3 says an inference-bearing claim is hedged and flagged, does not halt its stage, and that flagged claims 'surface together at the aggregation/report stage for batch human review' -- screening-report is that stage, and these are those claims. v0.3 adds point_id, source_refs and answerable, all optional so every pre-2026-08-06 report validates untouched.",
+      "properties": {
+        "point_id": {
+          "type": "string",
+          "pattern": "^RP-[0-9]+$",
+          "description": "Stable identifier, RP-N, numbered within this report. Its absence was a real asymmetry: critic findings carry finding_id and expert_review disposes of each by finding_ref, so a human's answer to a critic has somewhere to attach -- while a review point had no id at all, leaving a reviewer's answer with nothing to bind to and no way to tell later which points were ever addressed. Number stably; a point that survives into a later revision keeps its id."
+        },
+        "point": {
+          "type": "string"
+        },
+        "reviewer_role": {
+          "$ref": "common_component_output.schema.json#/$defs/reviewer_role",
+          "description": "Who can actually answer THIS question -- routed per question, not copied from the flagging contract's own reviewer_role. Those differ in practice and the per-question value is the correct one: on CASE_909 every upstream contract-level flag read 손해사정사, while the questions behind them split 법률전문가 4 / 손해사정사 5 / 의사 1. Whether a McBride rating is medically sound is a 의사 question no matter which contract raised it."
+        },
+        "priority": {
+          "$ref": "common_component_output.schema.json#/$defs/severity"
+        },
+        "source_refs": {
+          "type": "array",
+          "description": "Where this point came from: the upstream contract(s) whose review_required flag, uncertainty, or warning it aggregates. Prose naming of a source is not enough -- on CASE_909, 5 of 10 points named no document and none was machine-resolvable, so nothing could check whether a flagged contract had been surfaced at all. Empty is legitimate for a point the agent raised from its own reading rather than from an upstream flag.",
+          "items": {
+            "$ref": "#/$defs/review_point_source"
+          }
+        },
+        "answerable": {
+          "type": "boolean",
+          "description": "Whether a reviewer can change anything by answering. False marks a point raised for the record over material that is simply gone -- a value erased by redaction, a document absent from the pack -- where 'please confirm this is missing' spends expert attention and returns nothing. Default true when omitted. This is what keeps batch review from filling with unanswerable items: prefer raising the DOWNSTREAM CONSEQUENCE as an answerable point instead (CASE_909 routed a redaction-blanked 사고일자 as the premise of 보험기간 내 사고 여부 and 소멸시효, not as 'a field is null')."
+        }
+      },
+      "required": [
+        "point",
+        "reviewer_role",
+        "priority"
+      ]
+    },
+    "review_point_source": {
+      "type": "object",
+      "description": "An upstream contract this review point aggregates, and optionally the element within it.",
+      "properties": {
+        "contract": {
+          "type": "string",
+          "description": "Filename of the upstream contract, e.g. requirement_matching_result.json or denial_reason_result.json."
+        },
+        "element_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The specific element inside that contract when one applies -- REQ-3, DR_1, PM_2, CONFLICT_1. Null when the flag is contract-level."
+        }
+      },
+      "required": [
+        "contract"
+      ]
+    },
+    "preliminary_assessment": {
+      "type": "object",
+      "description": "DEPRECATED in the selective lane. feasibility and difficulty are forecasts the lane does not make -- placed beside evidenced facts in a practitioner's briefing they read with the same weight, and nothing in the records supports them. Present only for compatibility with consumers of the legacy contract; when it appears, the helper writes the not_assessed constants and no agent judgement contributes to it.",
+      "properties": {
+        "feasibility": {
+          "enum": [
+            "high",
+            "medium",
+            "low",
+            "not_assessed"
+          ],
+          "deprecated": true
+        },
+        "difficulty": {
+          "enum": [
+            "high",
+            "medium",
+            "low",
+            "not_assessed"
+          ],
+          "deprecated": true
+        },
+        "priority_review_points": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "rationale_evidence_references": {
+          "type": "array",
+          "description": "Evidence backing this assessment. Empty is treated as source_grounded: false.",
+          "items": {
+            "$ref": "common_component_output.schema.json#/$defs/evidence_reference"
+          }
+        }
+      },
+      "required": [
+        "priority_review_points"
+      ]
+    },
+    "draft_writer_input_summary": {
+      "type": "object",
+      "description": "Summary handed to draft-report. template_id is decided by case-type classification.",
+      "properties": {
+        "recommended_template_id": {
+          "type": "string"
+        },
+        "sections_to_emphasize": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "recommended_template_id"
+      ]
+    },
+    "screening_evidence_reference": {
+      "type": "object",
+      "description": "One exact citation carried forward from an upstream contract. The screening report never mints these: each is copied from the claim analysis result, the denial contract, or the conflict ledger entry that already established it, so a quote here resolves in the processed text exactly as it did there.",
+      "properties": {
+        "document_id": {
+          "type": "string"
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "quote": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "document_id",
+        "page",
+        "quote"
+      ]
+    },
+    "fact_evidence": {
+      "type": "object",
+      "description": "Per-fact evidence for the case summary's scalar values. Keyed by the summary field it grounds (accident_date, main_diagnosis, kcd_code, treatment_period), so a section that prints a value can carry exactly the citation for that value and no other.",
+      "additionalProperties": {
+        "type": "array",
+        "description": "Exact upstream evidence for the value(s) this entry states. An empty array means the records did not establish it -- never that a citation was omitted, and never a licence to invent one.",
+        "items": {
+          "$ref": "#/$defs/screening_evidence_reference"
+        }
+      }
+    },
+    "screening_policy_requirement": {
+      "type": "object",
+      "properties": {
+        "requirement_id": {
+          "type": "string"
+        },
+        "requirement_text": {
+          "type": "string"
+        },
+        "evidence_status": {
+          "enum": [
+            "supported",
+            "contradicted",
+            "unknown",
+            "conflict",
+            "uncertain"
+          ]
+        },
+        "conflict_candidate_ids": {
+          "type": "array",
+          "description": "Conflict candidate ids from the claim analysis result, carried unchanged. They are the link between a requirement and the disagreement a reviewer must judge it against.",
+          "items": {
+            "type": "string",
+            "pattern": "^CAC_[0-9]+$"
+          }
+        },
+        "reason": {
+          "type": "string"
+        },
+        "evidence_references": {
+          "type": "array",
+          "description": "Exact upstream evidence for the value(s) this entry states. An empty array means the records did not establish it -- never that a citation was omitted, and never a licence to invent one.",
+          "items": {
+            "$ref": "#/$defs/screening_evidence_reference"
+          }
+        }
+      },
+      "required": [
+        "requirement_id",
+        "evidence_status"
+      ]
+    },
+    "screening_policy_link": {
+      "type": "object",
+      "description": "One coverage term linked to the policy layer that `policy_clause_processing` already built. A link says which clause the claim would be assessed against; it never states that the claim is covered, and this report adds no coverage or payout verdict of its own.",
+      "properties": {
+        "coverage_id": {
+          "type": "string"
+        },
+        "coverage_name": {
+          "type": "string"
+        },
+        "clause_link_status": {
+          "enum": [
+            "matched",
+            "candidate",
+            "not_found"
+          ]
+        },
+        "clause_ref": {
+          "description": "Present only for `matched`. A candidate or not_found link carries `uncertainty_reason` instead, because naming a clause it could not confirm is the fabricated reference this lane refuses.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/screening_evidence_reference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uncertainty_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requirements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/screening_policy_requirement"
+          }
+        }
+      },
+      "required": [
+        "coverage_id",
+        "clause_link_status"
+      ]
+    }
+  }
+}

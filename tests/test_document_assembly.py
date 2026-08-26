@@ -477,3 +477,80 @@ def test_main_refuses_a_bad_citation_and_writes_nothing(isolated_da):
     assert not out_path.exists()
     assert not out_path.with_suffix(".evidence.json").exists()
     assert not out_path.with_name(out_path.name + ".lock").exists()
+
+
+# ------------------------------------------------- the reference appendix --
+#
+# `[E22]` in the body is unresolvable on its own: the document/page/quote live
+# only in the .evidence.json sidecar, which a reader of the .md never opens.
+# A screening report is read by a 손해사정사 as a document, not as a pair of
+# files, so a citation whose source cannot be looked up from the document is a
+# citation the reader has to take on trust. These tests pin the rendered
+# reference list that closes that gap: tag - 문서종류 - 페이지.
+
+
+def test_render_appends_a_resolvable_reference_list():
+    spec = {"output_path": "outputs/CASE_009/r.md", "sections": [
+        {"heading": "A", "content": "first {{E}}",
+         "evidence_references": [
+             {"document_id": "DOC_001", "page": 3, "quote": "claim filed"}]},
+    ]}
+    text, _ = da.render(spec)
+
+    body, _, references = text.partition(da.REFERENCE_HEADING)
+    assert "[E1]" in body
+    assert "E1" in references and "DOC_001" in references and "p.3" in references
+
+
+def test_reference_list_is_not_a_template_section():
+    """It must not be a `## ` heading: validate_template() reads the spec's
+    headings and refuses any section the registry does not name, so rendering
+    the appendix as a section would break every allow_extra_sections=false
+    template at once."""
+    spec = {"output_path": "outputs/CASE_009/r.md", "sections": [
+        {"heading": "A", "content": "x {{E}}",
+         "evidence_references": [{"document_id": "DOC_001", "quote": "q"}]},
+    ]}
+    text, _ = da.render(spec)
+    headings = [line for line in text.splitlines() if line.startswith("## ")]
+    assert headings == ["## A"]
+
+
+def test_reference_list_names_the_document_kind_not_only_its_id(tmp_path, monkeypatch):
+    """`DOC_011` tells a reader nothing; 진단서 tells them what they are
+    looking at. The kind comes from the manifest, never from a guess here."""
+    monkeypatch.setattr(da, "ROOT", tmp_path)
+    manifest = {"documents": [
+        {"document_id": "DOC_011", "document_type": "diagnosis_certificate",
+         "medical_classification": {"kind": "diagnosis_certificate"}},
+    ]}
+    out = tmp_path / "outputs" / "CASE_009"
+    out.mkdir(parents=True)
+    (out / "document_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8")
+
+    spec = {"output_path": "outputs/CASE_009/r.md", "sections": [
+        {"heading": "A", "content": "x {{E}}",
+         "evidence_references": [
+             {"document_id": "DOC_011", "page": 1, "quote": "q"}]},
+    ]}
+    text, _ = da.render(spec)
+    assert "진단서" in text.partition(da.REFERENCE_HEADING)[2]
+
+
+def test_reference_list_survives_a_case_with_no_manifest():
+    """Rendering must not depend on the manifest being readable -- a missing
+    one degrades to the document id, it does not fail the document."""
+    spec = {"output_path": "outputs/CASE_404/r.md", "sections": [
+        {"heading": "A", "content": "x {{E}}",
+         "evidence_references": [{"document_id": "DOC_001", "quote": "q"}]},
+    ]}
+    text, _ = da.render(spec)
+    assert "DOC_001" in text.partition(da.REFERENCE_HEADING)[2]
+
+
+def test_no_reference_list_when_there_are_no_citations():
+    spec = {"output_path": "outputs/CASE_009/r.md",
+            "sections": [{"heading": "A", "content": "no citations here"}]}
+    text, _ = da.render(spec)
+    assert da.REFERENCE_HEADING not in text

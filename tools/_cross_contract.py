@@ -595,11 +595,87 @@ def locate_quote_hint(quote: str, pages_by_number, claimed_page) -> str:
         return ""
     found = find_quote_pages(quote, pages_by_number, claimed_page)
     if not found:
-        return ""
+        return _assembled_quote_hint(quote, pages_by_number, claimed_page)
     if len(found) == 1:
         return f" -- that text is on page {found[0]}, not {claimed_page}"
     listed = ", ".join(str(number) for number in found[:5])
     return f" -- that text appears on page(s) {listed}, not {claimed_page}"
+
+
+# The shortest leading run worth reporting. Korean is dense -- "공황 장애" is a
+# whole diagnosis in 5 characters, and CASE_047 DOC_003's real failure bottoms
+# out at exactly that length -- so this is deliberately low. A shorter run than
+# this would match a particle or a stray digit and point at half the page.
+_ASSEMBLED_MIN_PREFIX_CHARS = 4
+# How much of the containing line to echo back. Long enough to show the model
+# the delimiters it crossed, short enough not to paste a table row into a prompt.
+_ASSEMBLED_LINE_CHARS = 120
+
+
+def _assembled_quote_hint(quote: str, pages_by_number, claimed_page) -> str:
+    """Hint for a quote the model ASSEMBLED rather than copied.
+
+    A Korean medical form is drawn as a box: the 병명 label sits in one cell,
+    its value in the next, and a second diagnosis on the line below. Reading it
+    as prose ("병명 공황 장애", "공황 장애 상세불명의 불안장애") produces a
+    string that is true about the document and absent from it, so the quote is
+    refused and `find_quote_pages` reports nothing -- the model is told its
+    quote does not exist and given no way to see why.
+
+    Measured on CASE_047 DOC_003 (2026-08-18), a 1-page 진단서 that is entirely
+    one ruled table: three runs of the same input cited it two different ways
+    and failed twice on this, after the prompt's existing "do not join cells"
+    rule. Each individual cell verifies -- "공황 장애", "상세불명의 불안장애"
+    and "F410" all match -- so quoting one cell is always available; the model
+    just cannot tell which part of its string broke.
+
+    This shows the real line the quote STARTS in, which is where the join
+    happened. It reveals nothing new: the line comes from the same served
+    redacted page the model already read.
+    """
+    prefix = _longest_matching_prefix(quote, pages_by_number)
+    if prefix is None:
+        return ""
+    fragment, page_number, line = prefix
+    shown = line.strip()[:_ASSEMBLED_LINE_CHARS]
+    return (f" -- only the leading {len(fragment)} character(s) of that quote "
+            f"exist, on page {page_number} in the line: {shown!r}. The rest was "
+            "joined from another cell, column or line. Quote ONE cell exactly "
+            "as printed, or a run of text that appears unbroken on one line.")
+
+
+def _longest_matching_prefix(quote: str, pages_by_number):
+    """(fragment, page, containing_line) for the longest prefix that exists.
+
+    Searched on the normalized form so incidental whitespace does not decide
+    the cut, then the ORIGINAL line is returned so the hint shows the model the
+    real printed layout, delimiters included.
+    """
+    pages = [(number, [(line, _normalize_ws(line)) for line in text.splitlines()])
+             for number, text in _iter_pages(pages_by_number) if text]
+    # Longest prefix first: the first hit is the answer, and stopping there
+    # keeps this linear in the quote length rather than quadratic.
+    for cut in range(len(quote), _ASSEMBLED_MIN_PREFIX_CHARS - 1, -1):
+        fragment = _normalize_ws(quote[:cut])
+        # Normalization shortens the fragment (a run of spaces collapses), so a
+        # cut above the floor can still yield a fragment below it. Skip that
+        # cut rather than stopping: a shorter cut may normalize to the same
+        # length and still be the match. Breaking here is what made this
+        # return nothing for "공황 장애 상세불명의 불안장애", whose real answer
+        # sits at cut=6 / len 5.
+        if len(fragment) < _ASSEMBLED_MIN_PREFIX_CHARS:
+            continue
+        for page_number, normalized_lines in pages:
+            for line, normalized in normalized_lines:
+                if fragment in normalized:
+                    return fragment, page_number, line
+    return None
+
+
+def _iter_pages(pages_by_number):
+    if hasattr(pages_by_number, "items"):
+        return sorted(pages_by_number.items(), key=lambda item: item[0])
+    return list(enumerate(pages_by_number, start=1))
 
 
 def _spans_normalized_pair(quote: str, normalized_pages, page) -> bool:
@@ -2235,6 +2311,14 @@ def check(filename: str, data: dict, case_dir: Path,
             data, case_dir, redacted_text_for)
     if base == DENIAL_VALIDATION:
         return check_denial_validation_result(data, case_dir)
-    if base.startswith("screening_report"):
+    # The REPORT and its sidecar restate the insurer's decisions, so both must
+    # record which denial_reason_result they were derived from. The agent's
+    # `screening_report_judgement.json` does not: it carries key_issues,
+    # review_points and per-conflict severity, derives from no upstream
+    # contract, and has no hash to record. A `startswith` match swept it into
+    # the report's check and refused the write for a missing
+    # `source_denial_contract_hash` -- unsatisfiable, so the selective lane's
+    # agent half could not be published at all (CASE_489, 2026-08-20).
+    if base in ("screening_report.json", "screening_report.evidence.json"):
         return check_screening_report(data, case_dir)
     return []

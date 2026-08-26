@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "consistency_check_verdicts.schema.json",
+  "title": "Consistency Check agent verdicts v0.1",
+  "description": "The consistency-check agent's judgement on each prepared work item. `confirmed` means the agent established that the sources genuinely contradict each other -- it is NOT a P6 disposition: every entry the helper creates from a confirmed verdict is `pending`, and resolved/false_positive/deferred_to_report stay human calls. Each verdict carries the candidate_digest it was written against, so registering it against changed content fails rather than silently applying an old judgement to a new disagreement.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "component": { "const": "consistency-check" },
+        "schema_version": { "const": "consistency_check_verdicts.v0.1" },
+        "claim_analysis_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "verdicts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/verdict" }
+        }
+      },
+      "required": ["schema_version", "claim_analysis_sha256", "verdicts"]
+    }
+  ],
+  "$defs": {
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "conflict_candidate_id": { "type": "string", "pattern": "^CAC_[0-9]{4,}$" },
+        "candidate_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "outcome": {
+          "enum": ["confirmed", "not_material", "withdrawn"],
+          "description": "`confirmed` -- the sources genuinely contradict each other on something that can change a determination. `not_material` -- a real difference that changes no decision. `withdrawn` -- not a contradiction on inspection (one side silent, a formatting variance, a difference in detail rather than in fact)."
+        },
+        "reason": { "type": "string", "minLength": 1 },
+        "professional_summary": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required on a confirmed verdict. A neutral statement of the disagreement for the 손해사정사/의사: what each record says and what needs checking. It must not elect a side -- not by asserting one reading is correct, and not by presenting one as the default. This sentence is carried verbatim into the screening report if the entry is deferred, so it is written for that reader."
+        }
+      },
+      "required": ["conflict_candidate_id", "candidate_digest", "outcome", "reason"],
+      "allOf": [
+        {
+          "$comment": "A confirmed conflict reaches a professional; it must arrive with the sentence they will read.",
+          "if": { "properties": { "outcome": { "const": "confirmed" } }, "required": ["outcome"] },
+          "then": { "required": ["professional_summary"] }
+        },
+        {
+          "$comment": "A set-aside candidate never reaches the report, so a summary written for that reader would describe a finding nobody receives.",
+          "if": { "properties": { "outcome": { "enum": ["not_material", "withdrawn"] } }, "required": ["outcome"] },
+          "then": { "not": { "required": ["professional_summary"] } }
+        }
+      ]
+    }
+  }
+}

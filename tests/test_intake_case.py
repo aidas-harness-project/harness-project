@@ -284,59 +284,25 @@ def test_dry_run_does_not_write_anything(isolated_intake, monkeypatch, capsys):
     assert "dry run" in capsys.readouterr().out
 
 
-def test_init_ledger_uses_scan_provider_and_leaves_files_pending(isolated_intake, monkeypatch):
-    src = _make_source_case(isolated_intake)
-    scan_calls = []
+def test_init_ledger_writes_every_raw_entry_pending_with_no_scan(
+    isolated_intake, monkeypatch
+):
+    """D2's gate, after the vision pre-check was removed (2026-08-20).
 
-    class ScanProvider:
-        provider_name = "fixture"
-        model_name = "scan-model"
-
-    def fake_build_scan_provider(scan_provider_name=None, scan_model=None, env=None):
-        scan_calls.append((scan_provider_name, scan_model))
-        return ScanProvider()
-
-    def fake_scan(pdf_path, case_id, index, n_pages=intake_case.CONTENT_SCAN_PAGES, provider=None):
-        return {
-            "flagged": True,
-            "evidence": f"FLAGGED: scan-provider={provider.provider_name}",
-            "pages_checked": 1,
-            "provider_metadata": {"provider_name": provider.provider_name, "model_name": provider.model_name},
-        }
-
-    monkeypatch.setattr(intake_case, "build_scan_provider", fake_build_scan_provider)
-    monkeypatch.setattr(intake_case, "scan_for_answer_key_content", fake_scan)
-
-    _run_main(
-        monkeypatch,
-        [str(src), "CASE_009", "--init-ledger", "--scan-provider", "fixture", "--scan-model", "scan-model"],
-    )
-
-    ledger = json.loads((isolated_intake / "outputs" / "CASE_009" / "_source_ledger.json").read_text(encoding="utf-8"))
-    raw_entries = [entry for entry in ledger["files"] if entry["classification"] == "raw"]
-    assert scan_calls == [("fixture", "scan-model")]
-    assert raw_entries, "test setup should include raw-proposed PDFs"
-    assert all(entry["review_status"] == "pending" for entry in raw_entries)
-    assert all("content_warning" in entry for entry in raw_entries)
-
-
-def test_init_ledger_no_content_scan_skips_provider_but_keeps_gate(isolated_intake, monkeypatch):
-    """--no-content-scan (user-directed opt-out, 2026-08-14) must skip the
-    vision pre-check entirely -- no provider is even built -- while the D2
-    review gate is untouched: every raw entry is still written 'pending' with
-    no content_warning. Reintroducing the defect (running the scan despite the
-    flag) fails on the boom provider; weakening the gate fails on 'pending'."""
+    This replaces two tests that drove the scan itself. What they were really
+    protecting is asserted here and is unchanged: every raw entry lands
+    `pending` for a human, and no `content_warning` is invented now that
+    nothing scans. The removal is asserted separately, in
+    test_poc_guardrail_scope.py.
+    """
     src = _make_source_case(isolated_intake)
 
-    def boom_build_scan_provider(scan_provider_name=None, scan_model=None, env=None):
-        raise AssertionError("--no-content-scan must not build a scan provider")
+    _run_main(monkeypatch, [str(src), "CASE_009", "--init-ledger"])
 
-    monkeypatch.setattr(intake_case, "build_scan_provider", boom_build_scan_provider)
-
-    _run_main(monkeypatch, [str(src), "CASE_009", "--init-ledger", "--no-content-scan"])
-
-    ledger = json.loads((isolated_intake / "outputs" / "CASE_009" / "_source_ledger.json").read_text(encoding="utf-8"))
-    raw_entries = [entry for entry in ledger["files"] if entry["classification"] == "raw"]
+    ledger = json.loads((isolated_intake / "outputs" / "CASE_009" /
+                         "_source_ledger.json").read_text(encoding="utf-8"))
+    raw_entries = [entry for entry in ledger["files"]
+                   if entry["classification"] == "raw"]
     assert raw_entries, "test setup should include raw-proposed PDFs"
     assert all(entry["review_status"] == "pending" for entry in raw_entries)
     assert all("content_warning" not in entry for entry in raw_entries)

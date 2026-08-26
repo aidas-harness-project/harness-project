@@ -45,11 +45,22 @@ def make_receipt(*, case_id: str, run_id: str, stage: str, unit_id: str,
                  input_digests: Mapping[str, str], prompt_version: str,
                  response_schema_version: str, provider_name: str,
                  model_name: str, completed_contracts: list[str],
-                 status: str = "complete") -> dict:
-    """Build a receipt payload for DAO `write-driver-receipt` validation."""
+                 status: str = "complete",
+                 provider_usage: Mapping[str, Any] | None = None) -> dict:
+    """Build a receipt payload for DAO `write-driver-receipt` validation.
+
+    `provider_usage` is the provider's OWN token counts for this unit's call,
+    copied verbatim. It is optional because not every provider reports usage,
+    and an absent figure must stay distinguishable from an invented one -- the
+    same rule T13 applies to `record-dispatch`. Omitting it costs the ability to
+    explain a unit's wall time at all: across CASE_302~321 M1 ranged 117s-492s
+    and M2 64s-564s with nothing recorded to test an output-volume hypothesis
+    against, which left the question answerable only by speculation.
+    """
     if status not in {"complete", "in_progress"}:
         raise ValueError("status must be complete or in_progress")
     digests = dict(sorted(input_digests.items()))
+    receipt_usage = _normalize_usage(provider_usage)
     return {
         "case_id": case_id,
         "run_id": run_id,
@@ -64,7 +75,88 @@ def make_receipt(*, case_id: str, run_id: str, stage: str, unit_id: str,
         "completed_contracts": sorted(completed_contracts),
         "status": status,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
+        **({"provider_usage": receipt_usage} if receipt_usage else {}),
     }
+
+
+_USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens",
+               "cache_creation_input_tokens", "total_tokens")
+
+# The OpenAI-compatible vocabulary, renamed onto the canonical one above.
+# Anthropic-shaped backends (claude-cli, anthropic-api) already speak the
+# canonical names; openrouter and openai-api do not, and until this mapping
+# existed a receipt from the DEFAULT provider kept `total_tokens` and dropped
+# everything else -- verified by feeding a real OpenRouter usage block through
+# the old code, which returned `{'total_tokens': 1540}` from a block carrying
+# prompt, completion, cached and reasoning counts.
+#
+# A rename is not an estimate: `prompt_tokens` and `input_tokens` name the same
+# billed quantity. What would be an estimate is deriving one from the other, or
+# filling a missing figure with a zero -- neither happens here. Normalizing is
+# also the only thing that keeps two runs on different providers comparable,
+# which is the whole point of recording usage.
+_USAGE_ALIASES = (
+    ("prompt_tokens", "input_tokens"),
+    ("completion_tokens", "output_tokens"),
+)
+# Nested one level down, per provider family.
+_USAGE_NESTED_ALIASES = (
+    # (container key, source key, canonical key)
+    ("output_tokens_details", "thinking_tokens", "thinking_tokens"),
+    ("completion_tokens_details", "reasoning_tokens", "thinking_tokens"),
+    ("prompt_tokens_details", "cached_tokens", "cache_read_input_tokens"),
+    ("prompt_tokens_details", "cache_write_tokens", "cache_creation_input_tokens"),
+)
+_USAGE_COST_KEY = "cost"
+
+
+def _usage_int(value: Any) -> int | None:
+    """A real non-boolean, non-negative integer, or nothing.
+
+    Anything else yields no field at all rather than a fabricated zero -- a
+    provider that reports a partial or oddly shaped usage block must leave the
+    figure MISSING, which is distinguishable from a measured value.
+    """
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _normalize_usage(usage: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Pull the token counts out of a provider usage mapping, one vocabulary.
+
+    Copies only keys the receipt schema declares. The canonical names are taken
+    verbatim where the provider already uses them; the OpenAI-compatible names
+    are renamed onto them (see _USAGE_ALIASES). A canonical key already present
+    is never overwritten by an alias, so a provider that reports both keeps the
+    one it named directly.
+    """
+    if not isinstance(usage, Mapping):
+        return {}
+    out: dict[str, Any] = {}
+    for key in _USAGE_KEYS:
+        value = _usage_int(usage.get(key))
+        if value is not None:
+            out[key] = value
+    for source, canonical in _USAGE_ALIASES:
+        if canonical in out:
+            continue
+        value = _usage_int(usage.get(source))
+        if value is not None:
+            out[canonical] = value
+    for container, source, canonical in _USAGE_NESTED_ALIASES:
+        if canonical in out:
+            continue
+        details = usage.get(container)
+        if not isinstance(details, Mapping):
+            continue
+        value = _usage_int(details.get(source))
+        if value is not None:
+            out[canonical] = value
+    cost = usage.get(_USAGE_COST_KEY)
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
+        out["cost_usd"] = float(cost)
+    return out
 
 
 def receipt_matches(receipt: Mapping[str, object], *, input_digests: Mapping[str, str],
@@ -85,15 +177,22 @@ def make_candidate(*, case_id: str, run_id: str, stage: str, unit_id: str,
                    candidate_id: str, input_digests: Mapping[str, str],
                    prompt_version: str, response_schema_version: str,
                    provider_name: str, model_name: str,
-                   result: Mapping[str, Any]) -> dict:
+                   result: Mapping[str, Any],
+                   call_usage: list | None = None) -> dict:
     """Build one completed sub-unit payload for DAO `write-driver-candidate`.
 
     `input_digests` must name only what THIS unit consumed. A stage-wide digest
     set would make every unit's fingerprint change when any one document's
     redacted text changes, which would defeat the point of per-unit resume.
+
+    `call_usage` is the provider's own per-call token counts (see `call_usage`).
+    It is diagnostic only and deliberately outside `input_fingerprint`, so a
+    recorded count never changes whether a candidate can be reused.
     """
     digests = dict(sorted(input_digests.items()))
+    usage = [dict(entry) for entry in (call_usage or []) if entry]
     return {
+        **({"call_usage": usage} if usage else {}),
         "case_id": case_id,
         "run_id": run_id,
         "stage": stage,
@@ -179,17 +278,63 @@ def interrupt_at(stage: str, candidate_ids: Iterable[str]) -> Iterator[list[str]
         globals()["interruption_hook"] = previous
 
 
+def call_usage(result: Any) -> dict | None:
+    """The provider's own token counts for one call, or None if it reported none.
+
+    Copied verbatim from `raw_metadata['usage']`, never derived: a count this
+    driver computed would be indistinguishable from one the provider measured.
+    Only scalar counters are kept -- the nested per-model and per-iteration
+    breakdowns are the CLI's internals, and a prompt or document text can never
+    reach a usage field, so this stays safe to persist beside a candidate.
+
+    Why it is worth persisting: CASE_047's M1 ran the SAME input six times at
+    159.6 / 179.5 / 271.4 / 397.5 / 502.1 / 666.1s (2026-08-18). Input size,
+    document count and output size were each ruled out by measurement -- the
+    three cases compared had near-identical outputs (46-56 fields, 62-65
+    evidence references) and 5.6x different wall times. Cache hits and thinking
+    tokens are the remaining candidates and were simply not being recorded.
+    """
+    metadata = getattr(result, "raw_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return None
+    usage = metadata.get("usage")
+    if not isinstance(usage, Mapping):
+        return None
+    kept = {key: value for key, value in usage.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)}
+    details = usage.get("output_tokens_details")
+    if isinstance(details, Mapping):
+        thinking = details.get("thinking_tokens")
+        if isinstance(thinking, int):
+            kept["thinking_tokens"] = thinking
+    return kept or None
+
+
 def structured_with_one_correction(*, provider: Any, prompt: str, prompt_version: str,
                                   output_schema: Mapping[str, Any],
-                                  validate: Callable[[Mapping[str, Any]], T]) -> T:
+                                  validate: Callable[[Mapping[str, Any]], T],
+                                  usage_out: list | None = None) -> T:
     """Validate one structured response, then make exactly one correction call.
 
     Native provider schemas constrain JSON shape, but a stage's tighter
     candidate rules still require driver-owned validation.  This helper makes
     P4's single correction explicit without logging a prompt, source text, or
     model output.  A second failure is re-raised for the orchestrator to halt.
+
+    `usage_out`, when given, collects one `call_usage` mapping per provider
+    call -- so a run that needed the correction records BOTH calls rather than
+    reporting the pair as one. Caller-owned list, following the same
+    out-parameter idiom `undecided`/`judged` use in segmentation.
     """
+    def record(call_result):
+        if usage_out is None:
+            return
+        usage = call_usage(call_result)
+        if usage is not None:
+            usage_out.append(usage)
+
     result = provider.analyze_text_structured(prompt, prompt_version, output_schema)
+    record(result)
     if not isinstance(result.structured_output, dict):
         raise ValueError("provider returned no structured object")
     try:
@@ -200,6 +345,7 @@ def structured_with_one_correction(*, provider: Any, prompt: str, prompt_version
             "Return a corrected JSON object that satisfies the same schema."
         )
         retry = provider.analyze_text_structured(correction, prompt_version, output_schema)
+        record(retry)
         if not isinstance(retry.structured_output, dict):
             raise ValueError("provider correction returned no structured object") from first_error
         return validate(retry.structured_output)

@@ -7,7 +7,8 @@
   "properties": {
     "case_id": {
       "type": "string",
-      "pattern": "^CASE_[0-9]{3}$"
+      "pattern": "^CASE_[0-9]{3,4}$",
+      "description": "Widened from exactly 3 digits to 3-or-4 on 2026-08-22. This was the ONLY schema pinning an exact width -- every other case_id in the repo is `^CASE_[0-9]+$` -- and that single outlier set a hard 999 ceiling on the whole id space, because `fork_case.next_free_case_id` must not mint an id this ledger would later refuse. With CASE_9001/9200/9401 already on disk the ceiling was permanently exceeded, so every fork silently fell back to reusing the lowest free gap (CASE_054 on 2026-08-22), losing chronological order. Existing 3-digit ids stay valid; nothing needs renaming."
     },
     "records": {
       "type": "array",

@@ -38,9 +38,11 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `document-pipeline`, checkpoint 1 (P8's dual-path cross-validation, `tools/ocr_extract.py`).
 
-**Current:** unresolved. Every available provider (claude-cli / codex-cli / openai-api) sends the page image or extracted text to an external service. The offline local path that would have closed the on-machine transmission gap was removed (never produced usable transcriptions on real Korean pages; single-machine Windows/E: only -- `known-gaps.md` item 16). So this risk is back to open, exactly as it was before that path was attempted.
+**Current:** unresolved. Every available provider (openrouter / claude-cli / codex-cli / openai-api) sends the page image or extracted text to an external service. The offline local path that would have closed the on-machine transmission gap was removed (never produced usable transcriptions on real Korean pages; single-machine Windows/E: only -- `known-gaps.md` item 16). So this risk is back to open, exactly as it was before that path was attempted.
 
 **Problem:** P8's two readers must see the raw, unredacted page image (that's the point -- they have to see what's actually on the page before redaction). The comparator and classifier may also see unredacted extracted text. If any configured provider path is not under a no-data-retention arrangement, every checkpoint-1 run may send PII to that destination.
+
+**What the OpenRouter default changed (2026-08-22), in both directions.** It made this *worse* in one way: an aggregator routes to whichever upstream provider serves the slug, so the set of destinations is no longer one named vendor under one contract, and OpenRouter's own default (`data_collection: "allow"`) permits providers that RETAIN prompts, including for training. It made it *better* in another: that fan-out is controllable per request, which no CLI path offered. `OpenRouterProvider` therefore sends `provider: {"data_collection": "deny"}` on every call -- not only the image ones, since a redaction prompt carries the same material the page did -- and `HARNESS_OPENROUTER_ZDR=1` additionally pins routing to zero-data-retention endpoints. The posture in force is recorded in each result's `raw_metadata` (`data_collection`, `zdr`) rather than being inferable only from whatever the environment holds later. **This does not resolve the item.** `deny` is a claim about the provider's retention policy, not about non-transmission: the page still leaves the machine and still reaches a third party. It also narrows the eligible provider pool, and how far has NOT been measured -- the per-endpoint data policy needs `GET /api/v1/models/:slug/endpoints`, which needs a key this repo does not have. `HARNESS_OPENROUTER_DATA_COLLECTION=allow` is the deliberate, recorded opt-out for a deployment that accepts retention.
 
 **Options on the table (see conversation history for the full discussion):**
 - Establish a no-retention trust arrangement for the deployment running these reads (procurement/vendor question, not an architecture change).
@@ -52,7 +54,7 @@ Deferred decisions from the 2026-07-10 restructure, tracked explicitly so they d
 
 **Where:** `tools/ocr_extract.py`, used by `document-pipeline` checkpoint 1.
 
-**Current:** no dedicated OCR engine exists. Every P8 reader is LLM-vision-backed (claude-cli / codex-cli / openai-api), so both reads share one extraction technology class and `ocr_result.json` records `cross_validation_mode: single_technology_weak_p8_poc` honestly. `dual_technology` remains a defined-but-unreachable schema value, reserved for the day a real OCR engine is added as one of the two reading paths. `ocr_result.json` records the actual provider/model labels.
+**Current:** no dedicated OCR engine exists. Every P8 reader is LLM-vision-backed (openrouter / claude-cli / codex-cli / openai-api), so both reads share one extraction technology class and `ocr_result.json` records `cross_validation_mode: single_technology_weak_p8_poc` honestly. `dual_technology` remains a defined-but-unreachable schema value, reserved for the day a real OCR engine is added as one of the two reading paths. `ocr_result.json` records the actual provider/model labels.
 
 **Problem:** two LLM-vision reads (even from different vendors) can produce a correlated confident error that P8 cannot catch -- the protection is real but weaker than the original design intended, which assumed two genuinely different extraction technologies.
 
@@ -351,3 +353,99 @@ always was.
 7. **Not every pair is meaningful.** 자동차보험×실손 or 개인보험×실손 may not
    correspond to real practice. Decide whether to constrain valid combinations
    (a matrix) or accept any pair and let the template lookup fail.
+
+## 9. Industrial-accident filing has no producer (selective lane, deferred 2026-08-20)
+
+Three fields in the selective Claim Analysis routing config ask an
+administrative question rather than a clinical one:
+
+- `industrial_accident_filing_basis` -- was a 산재 claim filed, and on what basis
+- `industrial_accident_approval_status` -- was it approved
+- `industrial_accident_approved_diagnosis` -- for which 상병
+
+**Nothing in this repository produces that information.** There is no schema for
+a filing declaration, no DAO subcommand that writes one, no intake step that
+records one, and `medical_document_kind` has no administrative form kind (adding
+one would put an administrative document into Stage 2's *medical* classification
+contract, which is the wrong axis).
+
+An earlier implementation read `_intake_declaration.json` and
+`_industrial_accident_filing.json`. Neither is written anywhere; the tests
+passed because their fixtures created the file contents and handed them straight
+to the reader. That reader has been removed. A phantom contract is worse than a
+gap: it reports `unavailable` on every real case while the code and its tests
+suggest a working integration, so nobody goes looking for the missing half.
+
+**Current behaviour, and the correct one until a producer exists:** filing
+status is `unknown` for every case type, and the three fields resolve
+`unavailable` / `outside_poc_scope` -- naming the missing producer, not a
+missing document. The case is not missing a file; the pipeline is missing a
+stage.
+
+**The rule that must survive whoever builds this.** Filing is never inferred
+from the accident. "Injured at work" makes the industrial case *type*
+applicable and says nothing about whether a claim was filed or approved; those
+are separate facts with separate sources. `not_filed` is reachable only from a
+source that states it -- silence is `unknown`, permanently.
+
+**What building it properly requires**, all in one change: a schema, DAO
+validation, a named writer, a real path from intake or from a classified
+administrative document, exact-quote verification like every other citation, a
+consumer, and an end-to-end test. Partial versions of this list are how the
+phantom appeared in the first place.
+
+Open question for whoever picks it up: does the filing record belong at intake
+(a person records what the claimant supplied) or at Stage 2 (an administrative
+document is classified and read)? That choice decides who owns the writer, and
+it is a workflow question rather than a technical one.
+
+## `clause_ref` holds one article, but a coverage is a whole 약관
+
+**Status:** open. Behaviour chosen provisionally on 2026-08-20 so CASE_053's
+liability clauses could be cited at all; the choice is recorded here rather
+than settled.
+
+`policy_link.clause_ref` is a single `exact_evidence_reference` -- one
+document, one page, one quote. That shape carries an assumption from the legacy
+personal-insurance lane, where a coverage usually IS one article
+(`수술보험금의 지급사유`), so one reference said everything. The field carries
+no description and no rationale is recorded anywhere; it appears to have been
+mirrored from `coverage_result.matched_clause_ref` rather than decided.
+
+A Korean liability coverage does not have that shape. 「시설소유(관리)자
+특별약관」 is 제1조 사고 / 제2조 보상하지 않는 손해 / 제3조 준용규정, and the
+same 약관 is reprinted in more than one policy document of a bundle -- on
+CASE_053 that made 6 index entries for one coverage, and 14 for 구내치료비.
+Until 2026-08-20 `find_clause` matched only on exactly one hit, so a
+coverage-level term was unmatchable by construction and both stayed
+`candidate`: the exclusion clause the insurer's denial rests on was never
+cited. `find_clause` now collapses hits that share the 약관's name (and only
+when the search term matched that NAME -- two different benefits inside one
+약관 still stay candidates), which forces the question this entry records.
+
+**Provisional rule, and why it may be wrong.** The elected article is the one
+whose heading states what is NOT covered (`보상하지 않는 손해`), else the
+약관's lowest-numbered non-`준용규정` article. That suits a denial dispute --
+CASE_053's insurer refused on 시설물 하자 부존재, so 제2조 is exactly what a
+손해사정사 must compare the refusal against. It is probably wrong for a
+first-instance payment claim, where `보상하는 손해` is what decides whether the
+event is covered at all. The remaining articles are returned as `candidates`,
+so nothing is hidden; what the choice decides is which article a reviewer sees
+first.
+
+**The three options, for whoever settles it:**
+1. Keep the exclusion-first rule (assumes the lane's cases are disputes).
+2. Always elect the lowest-numbered article -- simple and predictable, but puts
+   `제1조 사고` in front of a reviewer whose actual question is the exclusion.
+3. Branch on the case: exclusion-first when `denial_reason_result.json` exists,
+   coverage-first otherwise. Most accurate, and the only one that needs a new
+   input to the linker.
+
+**The deeper question, which options 1-3 all dodge:** should `clause_ref`
+become plural? A coverage genuinely spans several articles, and every consumer
+currently receives one of them plus a candidate list that mixes "other articles
+of the same 약관" with "other 약관 entirely". Widening the field touches
+`_cross_contract`'s reference verification, `dao._downstream_policy_ref_errors`,
+and the legacy `matched_clause_ref` it was mirrored from, so it is a contract
+change rather than a linker change -- which is why it was not taken while
+fixing the matching.

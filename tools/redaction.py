@@ -38,6 +38,7 @@ caught here -- only a real NER redactor closes that fully (open-decisions.md #1)
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -301,6 +302,68 @@ def _is_institutional_contact(kind: str, sample: str, context: str) -> bool:
     return any(marker in context for marker in _INSTITUTIONAL_LINE_MARKERS)
 
 
+# A 진료비 세부산정내역 prints one row per line as
+# "<date>\t<code>\t<name>\t<amount>...", and the 의약품 표준코드 in the code
+# column is a 9-10 digit run that begins 0 whenever the manufacturer prefix does
+# -- the same shape as a contiguous landline. Measured on CASE_488/DOC_005 p14:
+# 0647801081 (타우롤린주사2%250ml) blocked the document on BOTH paths, because
+# --skip-redaction reported it as present and the LLM redactor correctly judged
+# it non-PII and left it in place, whereupon this scan flagged it as residual.
+# No configuration let the document through.
+#
+# Anchored on the TABLE CELL, never on the number's shape: the run must fill a
+# whole tab-delimited cell whose preceding cell is a bare date. A real phone is
+# not typeset that way -- it carries a 연락처/전화 label or separators -- and a
+# mobile prefix is disqualified outright, so a claimant's number still blocks.
+_BILLING_DATE_CELL = re.compile(r"(?:^|\t)\s*\d{4}-\d{2}-\d{2}\s*$")
+
+
+def _is_billing_table_code(
+    kind: str, value: str, text: str, start: int, end: int
+) -> bool:
+    """True when the hit fills a code cell that directly follows a date cell."""
+    if kind != "phone_number_contiguous":
+        return False
+    if value.startswith(_PERSONAL_NUMBER_PREFIXES):
+        return False
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    before, after = text[line_start:start], text[end:line_end]
+    # the value must occupy a whole cell: tab-delimited on both sides
+    if not before.endswith("\t") or not (after.startswith("\t") or after == ""):
+        return False
+    return bool(_BILLING_DATE_CELL.search(before[:-1]))
+
+
+RESIDUAL_SCAN_ENV = "HARNESS_SKIP_PII_SCAN"
+
+
+def residual_scan_disabled(env=None) -> bool:
+    """Whether the deterministic residual-PII scan is switched OFF entirely.
+
+    A DEV switch for a corpus that is ALREADY pseudonymised at source, where
+    every hit this scan produces is a false positive and the block is pure
+    cost. Measured on CASE_7077 (2026-08-26): the 보험증권's 계약자/피보험자/
+    주소 cells are blank in the source, and the only things `long_digit_run`
+    caught were the 증권번호 `20236147840` and a print serial
+    `20251222143900290378511` -- neither a person. The named
+    `영업담당자` beside them is the INSURER's agent, printed in the issuing
+    branch's boilerplate, not the claimant.
+
+    Off by default and env-only on purpose. There is no CLI flag, because a
+    flag invites reaching for it to get a blocked document through, which is
+    exactly the situation the scan exists for. A run with this set is NOT
+    privacy-preserving and every page it touches records
+    `pii_scan_skipped` in its review warnings, so a later reader cannot
+    mistake it for a scanned run.
+    """
+    source = os.environ if env is None else env
+    raw = str(source.get(RESIDUAL_SCAN_ENV, "")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def scan_residual_pii(
     redacted_text: str,
     *,
@@ -328,7 +391,12 @@ def scan_residual_pii(
 
     Everything else -- RRNs, account numbers, vehicle plates, personal
     numbers, unlabelled long runs -- still blocks, so this narrows the scan
-    rather than turning it off. Pass either flag False to scan strictly."""
+    rather than turning it off. Pass either flag False to scan strictly.
+
+    `HARNESS_SKIP_PII_SCAN` turns the whole scan off for an already-pseudonymised
+    corpus -- see `residual_scan_disabled`."""
+    if residual_scan_disabled():
+        return []
     scanned = _normalize_widths(redacted_text)
     hits: list[dict[str, str]] = []
     for kind, pattern in _RESIDUAL_PII_PATTERNS.items():
@@ -338,6 +406,9 @@ def scan_residual_pii(
                 continue
             if allow_document_identifiers and _is_labelled_document_identifier(
                     kind, scanned, m.start()):
+                continue
+            if _is_billing_table_code(
+                    kind, m.group(0), scanned, m.start(), m.end()):
                 continue
             hits.append({"kind": kind, "sample": m.group(0)})
     return hits
@@ -656,16 +727,25 @@ class DevNoLlmRedactor:
                 "PII is present, so the page cannot pass through unmodified: "
                 + ", ".join(f"{h['kind']}={h['sample']!r}" for h in residual)
             )
+        if residual_scan_disabled():
+            warning = (
+                "redaction model skipped (HARNESS_SKIP_REDACTION) AND the "
+                "deterministic structured-PII scan was switched off "
+                "(HARNESS_SKIP_PII_SCAN): NOTHING checked this page for PII. "
+                "Valid only for a corpus already pseudonymised at source."
+            )
+        else:
+            warning = (
+                "redaction model skipped (HARNESS_SKIP_REDACTION): structured-PII "
+                "scan passed, but unstructured PII (e.g. a bare personal name) "
+                "was not checked by any model on this page"
+            )
         return RedactionOutcome(
             redacted_text=text,
             items_redacted=0,
             categories=[],
             provider_metadata=None,
-            review_warnings=[
-                "redaction model skipped (HARNESS_SKIP_REDACTION): structured-PII "
-                "scan passed, but unstructured PII (e.g. a bare personal name) "
-                "was not checked by any model on this page"
-            ],
+            review_warnings=[warning],
         )
 
 

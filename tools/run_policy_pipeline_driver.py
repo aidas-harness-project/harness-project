@@ -25,6 +25,9 @@ ROOT = Path(__file__).resolve().parent.parent
 DAO = ROOT / "tools" / "dao.py"
 STAGE, UNIT = "policy_clause_processing", "zero_normalization"
 VERSION = "policy_zero_normalization_driver.v0.1"
+# Mirrors dao.py's _NO_POLICY_DECLARATION; read through the DAO like any
+# other contract rather than opened from the case directory (P2).
+NO_POLICY_DECLARATION = "_no_policy_documents.json"
 TEXT_DISPOSITIONS = frozenset({"automated_text_pipeline", "text_only_no_normalization"})
 
 
@@ -111,7 +114,23 @@ def run(*, case_id: str, held_by: str, run_id: str, prompt_version: str = VERSIO
         manifest = _dao_json(["read-contract", case_id, "document_manifest.json", "--run-id", run_id])
         text_only, normalized = policy_documents(manifest)
     if not text_only and not normalized:
-        raise RuntimeError("BLOCKED: no active text-processed insurance policy is available")
+        # A recorded D5 declaration is the same evidence the DAO's own
+        # finalization gate accepts for this case (dao.py `_no_policy_waiver`),
+        # so refusing here would block a case the gate is willing to pass --
+        # the driver would be stricter than the contract it serves. The
+        # declaration is refused the moment the manifest types anything as
+        # insurance_policy, so it cannot mask skipped policy work.
+        #
+        # Read inside this branch, not beside the manifest: a case that HAS
+        # policy text never consults the declaration, so hoisting the read
+        # would spend a DAO call on every ordinary run to answer a question
+        # only the empty case asks.
+        declared_none = _dao_json(["read-contract", case_id, NO_POLICY_DECLARATION,
+                                   "--run-id", run_id], allow_missing=True) is not None
+        if not declared_none:
+            raise RuntimeError("BLOCKED: no active text-processed insurance policy is available")
+        return {"status": "noop_no_policy_documents", "text_only_policy_count": 0,
+                "document_index": _build_document_index(case_id, held_by, run_id)}
     if normalized:
         # Retired 2026-08-15, so this is now unreachable for any case intaken
         # after 2026-08-04 (`default_disposition` classifies every policy

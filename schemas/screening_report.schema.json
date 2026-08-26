@@ -224,6 +224,11 @@
       "properties": {
         "field": { "type": "string" },
         "description": { "type": "string" },
+        "conflict_ref": {
+          "type": "string",
+          "pattern": "^CONFLICT_[0-9]+$",
+          "description": "The conflict-ledger entry this inconsistency carries, when it came from there. Required in practice for every entry the ledger marks `deferred_to_report`: finalize-stage screening_report refuses unless each such conflict_id appears here, which is what makes a deferral a carried obligation rather than a second way of saying `resolved`. Optional on an inconsistency the report raises on its own, which has no ledger entry to point at. Bind by id, not by matching prose -- CASE_047's four deferrals were described in the report body in fluent Korean that no string comparison could have tied back to CONFLICT_1..4."
+        },
         "severity": { "$ref": "common_component_output.schema.json#/$defs/severity" },
         "related_documents": {
           "type": "array",

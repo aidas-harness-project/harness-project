@@ -54,9 +54,17 @@ def _case(tmp_path, monkeypatch):
 def _write_ledger(outputs, statuses):
     case = outputs / "CASE_999"
     case.mkdir(parents=True, exist_ok=True)
+    # `source_dir` and per-file `classification` are REQUIRED by
+    # source_ledger.schema.json, and every real ledger carries them
+    # (checked against CASE_700). Omitting them made
+    # `cmd_check_source_ledger_clear` return 1 on a schema error before
+    # it could emit any marker, so all six tests in this file were
+    # asserting against a ledger the DAO refuses to read.
     (case / "_source_ledger.json").write_text(json.dumps({
         "case_id": "CASE_999",
-        "files": [{"file_name": f"f{i}.pdf", "review_status": s}
+        "source_dir": "source-cases/CASE_999",
+        "files": [{"file_name": f"f{i}.pdf", "classification": "raw",
+                   "review_status": s}
                   for i, s in enumerate(statuses)],
     }), encoding="utf-8")
     return case

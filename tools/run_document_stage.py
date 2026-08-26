@@ -45,7 +45,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 import dao as _dao
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
-from llm_providers import SUPPORTED_PROVIDERS
+import llm_providers
+import ocr_extract
+from llm_providers import ProviderConfigError, SUPPORTED_PROVIDERS
 import redact_document as redact_document_mod
 from run_checkpoint1 import (
     build_classifier_provider,
@@ -55,8 +57,61 @@ from run_checkpoint1 import (
 
 ROOT = Path(__file__).resolve().parent.parent
 
-DEFAULT_DOC_WORKERS = 3
+# Document-level fan-out for OCR and redaction. Measured 2026-08-24 on a fixed
+# 12-document workload of SINGLE-PAGE scans -- the shape that dominates this
+# corpus (1,170 of 1,797 scanned documents are one page) and the case where
+# page-level parallelism provably cannot help, since `min(workers, pages)`
+# collapses the 24-wide page pool to width 1 for each of them:
+#
+#     doc_workers   wall (s)                     mean per call
+#     3            78.8, 79.4                    18.9s
+#     6            45.4                          19.2s
+#     8            39.1, 43.7, 41.6, 39.8        20.6-21.2s
+#     12           30.5, 31.5, 34.2              21.1-23.6s   <- knee
+#     16           34.0                          23.8s
+#
+# 12 is 59% below the old default of 3 and 22% below 8, and it replicated three
+# times with the same spread as 8. Per-call latency rises only 12% from width 3
+# to 12, unlike classification (+50% by width 16) -- an OCR call waits ~20s on
+# the model, so added contention is a small share of it.
+#
+# The reason this mattered: 100 of 118 cases hold more than 3 scanned
+# documents, so nearly every case was clamped at 3 while the page pool it was
+# multiplied against sat idle on one-page documents.
+#
+# Interaction with the provider semaphore is already handled: in-flight is
+# doc_workers x min(page_workers, pages), and `DEFAULT_LLM_MAX_INFLIGHT` caps
+# the product at 24. A 19-page document at width 12 would demand 228; the
+# semaphore holds it to 24, which is the width its own curve measured as the
+# knee. Raising this value therefore lifts the one-page case without changing
+# what a multi-page document actually runs at.
+DEFAULT_DOC_WORKERS = 12
 DOC_WORKERS_ENV = "HARNESS_DOC_WORKERS"
+
+# Classification's own width. Measured 2026-08-23 on a fixed 24-document
+# workload, each width run twice: 4 -> 49.9s, 8 -> 28.9s, 12 -> 27.2s mean,
+# 16 -> 27.0s mean. The 4 -> 8 gain (-42%) reproduced; beyond 8 the wall lands
+# in the same band while the spread grows to 38%, which is contention rather
+# than headroom. Kept apart from DOC_WORKERS because that value also drives
+# OCR and redaction, and redaction multiplies it by page workers -- 8 there
+# would put 32 redaction calls in flight against a provider semaphore of 24.
+#
+# CONTRADICTED ON THE REAL PATH, 2026-08-24 (known-gaps #58). Two forks of
+# CASE_133, 193 documents each, classification only (OCR already complete):
+# width 4 ran 206s, width 8 ran 218s -- 8 was 6% SLOWER, not 42% faster. Both
+# arms reached their configured width, so the pool is saturated, not
+# serialised. The cost moved into `lock.acquire`: 482s of self-time at width 4
+# (63% of total) against 1024s at width 8 (78%), for the same ~773 acquires --
+# one manifest lock hold per document, which the bench does not take because it
+# discards its results. Only 35 of 193 documents reach the model at all, so
+# provider latency is not the constraint at this width.
+#
+# The value is LEFT AT 8 deliberately: lowering it is a guess at the knee, and
+# no width below 4 has been measured. The lock breakdown says the fix is to
+# batch the manifest patches rather than to narrow the pool. Do not cite the
+# bench's -42% as a real-path figure.
+DEFAULT_CLASSIFY_WORKERS = 8
+CLASSIFY_WORKERS_ENV = "HARNESS_CLASSIFY_WORKERS"
 
 # Statuses that do NOT represent a failure of this step. Kept as an explicit
 # allowlist rather than "not blocked_*" so a status added upstream shows up as
@@ -72,6 +127,21 @@ DOC_WORKERS_ENV = "HARNESS_DOC_WORKERS"
 # manifest disagrees with the filter and it is left OUT of this set on
 # purpose: that is worth surfacing.
 _OK_STATUSES = {"success", "passed", "bundle_ocr_complete", "already_extracted"}
+
+
+def _resolve_classify_workers() -> int:
+    """Classification's own fan-out: HARNESS_CLASSIFY_WORKERS, else the default.
+
+    Separate from `doc_workers` because the two phases saturate at different
+    widths and because doc_workers is multiplied by page workers in redaction.
+    See `DEFAULT_CLASSIFY_WORKERS` for the measurement.
+    """
+    raw = os.environ.get(CLASSIFY_WORKERS_ENV, "")
+    try:
+        value = int(raw) if raw.strip() else None
+    except ValueError:
+        value = None
+    return max(1, value) if value is not None else DEFAULT_CLASSIFY_WORKERS
 
 
 def _resolve_doc_workers(explicit: int | None) -> int:
@@ -239,16 +309,25 @@ def run_classification_stage(
         return {"status": "success", "case_id": case_id, "documents": [],
                 "note": "no documents required classification"}
 
-    workers = _resolve_doc_workers(doc_workers)
+    # Classification gets its own width, not `doc_workers`. That value is
+    # shared with OCR and redaction, and redaction multiplies it by its page
+    # workers (doc_workers x page_workers in flight), so raising it here to the
+    # measured classification optimum would push redaction to 8 x 4 = 32
+    # concurrent calls -- past the provider semaphore of 24 and into a regime
+    # this was never measured in. An explicit `--doc-workers` still wins, so a
+    # caller who wants one number for the whole stage keeps getting it.
+    workers = (_resolve_doc_workers(doc_workers) if doc_workers is not None
+               else _resolve_classify_workers())
     report(f"classification: {len(targets)} document(s), {workers} document worker(s)")
 
     slots: list[dict | None] = [None] * len(targets)
     lock = threading.Lock()
+    concurrency = trace_mod.ConcurrencyProbe()
 
     def process(index: int, doc: dict) -> None:
         doc_id = doc["document_id"]
         with trace_mod.span("stage.classification", category="compute",
-                            case_id=case_id, doc_id=doc_id):
+                            case_id=case_id, doc_id=doc_id), concurrency.enter():
             try:
                 result = classify_existing(case_id, doc_id, held_by=held_by,
                                             run_id=run_id, classifier=classifier)
@@ -273,12 +352,16 @@ def run_classification_stage(
             process(index, doc)
     else:
         with trace_mod.span("pool.classification", category="compute",
-                            case_id=case_id, worker_count=workers):
+                            case_id=case_id, worker_count=workers,
+                            items=len(targets)) as pool_span:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [pool.submit(trace_mod.run_in_context(process), i, d)
                            for i, d in enumerate(targets)]
                 for future in concurrent.futures.as_completed(futures):
                     future.result()
+            # Set after the pool drains, matching pool.ocr_pages/pool.redact_pages:
+            # the probe's maximum is only final once every worker has left.
+            pool_span.set(observed_max_concurrency=concurrency.max_observed)
 
     results = [r for r in slots if r is not None]
     blocked = [r for r in results if r.get("status") not in _OK_STATUSES]
@@ -464,6 +547,47 @@ def run_document_stage(
     }
 
 
+def _preflight_for(args) -> list[str]:
+    """Every provider this invocation will actually use, built before any work.
+
+    Roles differ per checkpoint, and each resolves its model from its own env
+    chain, so a partial environment could satisfy one checkpoint and fail the
+    next -- after the first had already been paid for. Only the roles this
+    invocation genuinely reaches are checked: `classify` never opens a reader,
+    and checkpoint 1 never opens the redaction model.
+
+    `classify` is checked ONLY when a classifier was named explicitly. Without
+    one the provider is built lazily on purpose -- a printed form title settles
+    most document types with no model call at all -- and demanding credentials
+    up front would break a path that legitimately never calls a model.
+    """
+    if args.checkpoint == "1":
+        try:
+            ocr_extract.build_ocr_providers(
+                reader_a_name=args.reader_a, reader_b_name=args.reader_b,
+                comparator_name=args.comparator,
+                reader_a_model=args.reader_a_model,
+                reader_b_model=args.reader_b_model,
+                comparator_model=args.comparator_model,
+                env=os.environ)
+        except ProviderConfigError as exc:
+            return [f"checkpoint 1 readers/comparator: {exc}"]
+        return []
+    if args.checkpoint == "2":
+        if args.skip_redaction is True:
+            return []
+        return llm_providers.preflight([(
+            "checkpoint 2 redaction",
+            args.provider or os.environ.get("HARNESS_REDACTION_PROVIDER")
+            or redact_document_mod.DEFAULT_REDACTION_PROVIDER,
+            args.model or os.environ.get("HARNESS_REDACTION_MODEL"),
+        )])
+    if args.classifier_provider or args.classifier_model:
+        return llm_providers.preflight([(
+            "classification", args.classifier_provider, args.classifier_model)])
+    return []
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -496,7 +620,7 @@ def main(argv=None):
              "document (default 4, or HARNESS_REDACT_WORKERS).")
     ap.add_argument(
         "--provider", choices=SUPPORTED_PROVIDERS, default=None,
-        help="Checkpoint 2 only: redaction provider (default claude-cli).")
+        help="Checkpoint 2 only: redaction provider. Defaults to HARNESS_REDACTION_PROVIDER, then to llm_providers.DEFAULT_PROVIDER -- not to any one named CLI.")
     ap.add_argument(
         "--model", default=None,
         help="Checkpoint 2 only: redaction model.")
@@ -555,6 +679,18 @@ def main(argv=None):
             "arise for --on-disagreement to resolve.")
 
     trace_mod.configure(args.case_id, args.run_id)
+
+    unresolvable = _preflight_for(args)
+    if unresolvable:
+        print(json.dumps({
+            "status": "failed",
+            "case_id": args.case_id,
+            "run_id": args.run_id,
+            "stopped_at": "preflight",
+            "reason": "the checkpoint cannot construct every provider it needs, "
+                      "so nothing was run: " + "; ".join(unresolvable),
+        }, ensure_ascii=False, indent=2))
+        return 1
 
     if args.checkpoint == "classify":
         classifier = None

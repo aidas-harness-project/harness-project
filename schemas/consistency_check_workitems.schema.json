@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "consistency_check_workitems.schema.json",
+  "title": "Consistency Check work items v0.1",
+  "description": "What the deterministic helper hands the consistency-check agent: one item per conflict candidate, carrying both readings and their exact evidence, plus the facts the helper can establish without judgement (whether the field is decision-bearing, whether each side is evidenced). It deliberately holds NO verdict field -- deciding whether two readings are a real contradiction is the agent's work, and a prepared answer would make that decision by suggestion. The candidate_digest binds each item to the exact candidate content it was built from, so a verdict written against one version of a candidate cannot be registered against another.",
+  "allOf": [
+    { "$ref": "common_component_output.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "component": { "const": "consistency-check" },
+        "schema_version": { "const": "consistency_check_workitems.v0.1" },
+        "claim_analysis_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "Digest of the claim_analysis_result.json these items were prepared from."
+        },
+        "work_items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/work_item" }
+        }
+      },
+      "required": ["schema_version", "claim_analysis_sha256", "work_items"]
+    }
+  ],
+  "$defs": {
+    "work_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "conflict_candidate_id": { "type": "string", "pattern": "^CAC_[0-9]{4,}$" },
+        "candidate_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "Digest over the candidate and the observations it cites. Changes whenever any cited reading changes, which is what makes a stale verdict detectable rather than silently applied to different content."
+        },
+        "field_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "field_label": { "type": "string" },
+        "decision_bearing": {
+          "type": "boolean",
+          "description": "Whether the routing config marks this field critical_conflict_field. A fact about the configuration, not a verdict: the agent still decides whether THIS disagreement matters."
+        },
+        "readings": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/reading" }
+        }
+      },
+      "required": ["conflict_candidate_id", "candidate_digest", "field_id", "decision_bearing", "readings"]
+    },
+    "reading": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "observation_id": { "type": "string", "pattern": "^CAO_[0-9]{4,}$" },
+        "value_state": {
+          "enum": ["asserted", "explicitly_absent", "printed_but_blank", "unavailable", "not_applicable"],
+          "$comment": "Mirrors claim_analysis_result#/$defs/observation/value_state, because run_consistency_check.py copies the value verbatim out of that contract. `printed_but_blank` was added there 2026-08-26 and not here, and stage 6 then refused every write on the five cases stage 5 had just published (25 such fields) -- the CASE_712 shape, one contract further downstream. test_stop_reason_enums_agree.py now guards this pair. A blank reading is carried but never compared: every consistency rule gates on value_state == 'asserted', so a printed-and-empty cell contributes no value to contradict."
+        },
+        "value": { "type": ["string", "null"] },
+        "source_document_kind": { "type": ["string", "null"] },
+        "evidence_references": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "document_id": { "type": "string" },
+              "page": { "type": "integer", "minimum": 1 },
+              "quote": { "type": "string" },
+              "start_char": { "type": "integer", "minimum": 0 },
+              "end_char": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["document_id", "page", "quote", "start_char", "end_char"]
+          }
+        }
+      },
+      "required": ["observation_id", "value_state", "evidence_references"]
+    }
+  }
+}

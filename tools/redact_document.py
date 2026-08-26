@@ -3,7 +3,8 @@
 All case data access goes through tools/dao.py. Redaction itself goes through
 the `redaction.Redactor` abstraction (today: `LlmRedactor` over any configured
 provider), so a future dedicated de-identification model can drop in without
-changing this tool. Dev-phase default provider is `claude-cli`.
+changing this tool. The provider defaults to HARNESS_REDACTION_PROVIDER,
+then to llm_providers.DEFAULT_PROVIDER.
 
 Redaction is span-substitution, not page rewriting: the model only IDENTIFIES
 PII values and `redaction.py` deterministically replaces them in the source, so
@@ -17,7 +18,7 @@ review_required. A redaction is never trusted silently.
 Usage:
     python tools/redact_document.py CASE_ID DOC_ID \
         --held-by document-pipeline --run-id RUN_ID \
-        --provider claude-cli --model MODEL
+        --provider PROVIDER --model MODEL
 """
 from __future__ import annotations
 
@@ -38,6 +39,7 @@ import dao
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
 from llm_providers import (
+    DEFAULT_PROVIDER,
     ProviderConfig,
     ProviderConfigError,
     ProviderExecutionError,
@@ -51,13 +53,15 @@ from redaction import (PROMPT_VERSION, DevNoLlmRedactor, LlmRedactor,
 
 ROOT = Path(__file__).resolve().parent.parent
 DAO = ROOT / "tools" / "dao.py"
-# claude-cli, not codex-cli: on Windows the codex npm shim installs as
-# `codex.CMD`, which `shutil.which` resolves but `subprocess.run(["codex"])`
-# cannot launch (WinError 2) -- a batch file needs a shell, not execve. The
-# default has to be a provider that actually starts, so an operator who passes
-# no --provider gets a working redaction rather than a FileNotFoundError.
-# codex-cli remains selectable via --provider / HARNESS_REDACTION_PROVIDER.
-DEFAULT_REDACTION_PROVIDER = "claude-cli"
+# Follows the harness-wide default rather than pinning its own. The pin it
+# replaces existed for a CLI-only reason: on Windows the codex npm shim
+# installs as `codex.CMD`, which `shutil.which` resolves but
+# `subprocess.run(["codex"])` cannot launch (WinError 2), so the default had to
+# be a CLI that actually starts. An HTTP provider has no shim to launch, so
+# that constraint no longer selects the default -- and keeping a second copy of
+# "the default provider" here would silently diverge from llm_providers.py.
+# Any provider remains selectable via --provider / HARNESS_REDACTION_PROVIDER.
+DEFAULT_REDACTION_PROVIDER = DEFAULT_PROVIDER
 
 
 # Bumped when the CACHE ENTRY's own shape changes (not when redaction changes
@@ -452,12 +456,7 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
         # to 손해사정사, same role run_checkpoint1.py uses for its own
         # review_required case (a P8 disagreement).
         contract["reviewer_role"] = "손해사정사"
-        contract["review_reason"] = (
-            "Over-redaction risk: a span was left un-redacted because a safe "
-            "replacement could not be made without risking corruption of "
-            "surrounding kept text (privacy-safe direction, but needs a human "
-            "check). See warnings for the specific page(s)/span(s)."
-        )
+        contract["review_reason"] = review_reason_for(review_warnings)
 
     scratch_root = ROOT / "_redaction_scratch"
     scratch_root.mkdir(parents=True, exist_ok=True)
@@ -505,18 +504,73 @@ NO_PII_DOCUMENT_TYPES = frozenset({"insurance_policy"})
 SKIP_REDACTION_ENV = "HARNESS_SKIP_REDACTION"
 
 
+# PoC default (2026-08-20, set by the PoC owner): unspecified means the
+# redaction MODEL is skipped. It was the reverse until then. What still runs
+# is the deterministic residual-PII sweep, which hard-fails a page carrying
+# structured PII, and every page produced this way is stamped
+# `dev_no_llm_redaction` and carries a warning that unstructured PII (a bare
+# personal name) was checked by no model. A run under this default is
+# therefore NOT privacy-preserving; set HARNESS_SKIP_REDACTION=0, or pass
+# --redact, for anything that leaves the PoC.
+SKIP_REDACTION_DEFAULT = True
+
+
 def resolve_skip_redaction(skip: bool | None = None) -> bool:
     """Whether to skip the redaction MODEL. Explicit argument wins, then the env.
 
     Same precedence as every other knob here (and as
     ocr_extract.resolve_single_reader): `None` means "not specified", so an
-    evaluation run can force real redaction back on inside a shell that exports
-    the dev default.
+    evaluation run can force real redaction back on without changing this file
+    or the shell.
     """
     if skip is not None:
         return bool(skip)
     raw = str(os.environ.get(SKIP_REDACTION_ENV, "")).strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return SKIP_REDACTION_DEFAULT
+
+
+def review_reason_for(review_warnings) -> str:
+    """Why this document needs a human look, from what actually happened.
+
+    This used to be ONE hardcoded sentence naming over-redaction risk. That is
+    true on the LLM path, where a span really was examined and deliberately
+    kept. It is false on the dev path, where nothing examines the page at all:
+    the artifact then told a reviewer a masking judgement had been made and
+    come out cautious, while `items_redacted: 0` and `categories: []` on the
+    same record said nothing was inspected.
+
+    Reported independently from CASE_7005 and CASE_7002 (2026-08-26), on a run
+    where the redaction model is skipped by default and the deterministic scan
+    was switched off -- so every document carried a reason describing a
+    decision that never happened.
+    """
+    warnings = [w for w in (review_warnings or []) if isinstance(w, str)]
+    gave_up = [w for w in warnings
+               if "unstructured" in w or "NOTHING checked" in w]
+    if gave_up and len(gave_up) == len(warnings):
+        return (
+            "Redaction model skipped: unstructured PII (a bare personal name "
+            "or address, which has no detectable format) was not checked for "
+            "on this document. Nothing was masked and nothing claims to have "
+            "been. See warnings for what each page did and did not verify."
+        )
+    if gave_up:
+        return (
+            "Mixed: some pages had a span left un-redacted because a safe "
+            "replacement could not be made (privacy-safe, needs a look), and "
+            "others were not checked for unstructured PII at all. See warnings "
+            "for which page is which."
+        )
+    return (
+        "Over-redaction risk: a span was left un-redacted because a safe "
+        "replacement could not be made without risking corruption of "
+        "surrounding kept text (privacy-safe direction, but needs a human "
+        "check). See warnings for the specific page(s)/span(s)."
+    )
 
 
 def _redactor_for(case_id: str, doc_id: str, provider_name: str, model: str | None,

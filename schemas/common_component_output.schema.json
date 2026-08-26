@@ -99,7 +99,7 @@
       "enum": ["손해사정사", "의사", "법률전문가"]
     },
     "document_type": {
-      "description": "Standard document-type code. See pipeline.md's taxonomy section.",
+      "description": "Standard document-type code. See pipeline.md's taxonomy section. The three non-medical codes added 2026-08-21 are a liability case's evidence, and were added because the classifier was already reading their titles correctly (confidence 0.90-0.95) and had no bucket but `other` to put them in -- which dropped them out of claim analysis entirely (`no medical classification, so no route reaches it`). `legal_opinion` is the legal ANSWER itself; `insurer_response` stays the insurer's covering letter, which may cite one. `legal_reference` is published reference material a party attached rather than authored -- a court's 위자료 산정기준표, a 노동능력상실률 table -- which disability-rate and 위자료 calculation need to cite. `legal_opinion` does not say which side commissioned the opinion: a masked 수신/발신 block often makes that undecidable from the page, and both sides' opinions are evidence. The three codes added 2026-08-22 come from counting what `other` actually held across the corpus (182 records): 위임장 6, 사고경위서 4, 보험급여 지급확인원 2. They are separate codes rather than one `public_agency_record` because they differ in author and in standing -- `power_of_attorney` is the 보험업법 제188조 mandate authorising the adjuster to act, written by the claimant; `accident_statement` is a party's own account of how the accident happened, which is evidence about the event and never an authority on it; `public_benefit_certificate` is a state body's record of benefits actually paid (근로복지공단's 보험급여 지급확인원, a 지급결의확인서), which is the document a 산재 finding rests on and the reason `industrial_accident`'s three fields sat `unavailable` in 14 of 14 runs. Folding them together would have made that last one unfindable behind the other two. Note what the same count showed about the codes added on 2026-08-21: 150 of those 182 records were 위자료 산정기준표 (63), 법률질의회신서 (60) and 판결문 (27) -- documents `legal_reference`/`legal_opinion` already cover, classified before those codes existed on 2026-08-20. A code is only missing if re-running the classifier still leaves the document in `other`.",
       "enum": [
         "insurance_certificate",
         "insurance_policy",
@@ -109,6 +109,11 @@
         "imaging_report",
         "receipt",
         "insurer_response",
+        "legal_opinion",
+        "legal_reference",
+        "power_of_attorney",
+        "accident_statement",
+        "public_benefit_certificate",
         "other"
       ]
     },

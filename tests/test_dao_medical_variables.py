@@ -1036,3 +1036,64 @@ def test_legacy_projection_rejects_partial_medical_authority(isolated_dao):
 
     assert projection is None
     assert "post-adoption" in error
+
+
+# --- the legacy projection lane retired with its only producer -------------
+# Measured on CASE_488 (2026-08-20). `load_projection` refuses a projection
+# that does not declare `projection_mode`, and treats a missing mode as an
+# error rather than as legacy -- correctly, since silence must not be read as a
+# claim. At that time nothing in tools/ WROTE "legacy_pre_medical", so the
+# loader's branch was unreachable and screening_report blocked on every
+# legacy-lane case; `run_claim_analysis.py` was given the producer to fix it.
+#
+# **That driver was deleted 2026-08-20** when the selective lane became the
+# only claim-analysis spine, which took the producer with it. The original
+# assertion ("some tool other than medical_repository writes this") therefore
+# flipped from passing to failing -- correctly reporting a real consequence of
+# the deletion, which is why it is inverted here rather than removed.
+#
+# The branch is now dead on BOTH sides, and that is the honest state: nothing
+# writes the mode, and `load_projection` itself has no caller in tools/ (the
+# selective lane publishes `claim_analysis_result.json` and declares
+# `medical_projection_status: not_configured` instead of going through a
+# compatibility projection at all). The loader and its schema value stay so a
+# case processed before the deletion still loads; this test pins that the lane
+# is retired rather than silently half-wired, so re-adding a producer without
+# re-adding a caller -- or vice versa -- fails here.
+
+def test_the_legacy_projection_lane_has_neither_producer_nor_caller():
+    """Retired lane: no tool writes the mode, and nothing calls the loader.
+
+    Inverted 2026-08-20 (see the note above). Asserting a producer exists would
+    now demand code whose only consumer was also deleted.
+    """
+    sources = [p for p in (ROOT / "tools").glob("*.py")
+               if "legacy_pre_medical" in p.read_text(encoding="utf-8")]
+    names = sorted(p.name for p in sources)
+    assert names == ["medical_repository.py"], (
+        "legacy_pre_medical is a retired lane: only the loader that still "
+        "accepts pre-deletion cases may mention it. A new producer needs a "
+        f"consumer too, and this test updated. hits={names}")
+
+    callers = sorted(
+        p.name for p in (ROOT / "tools").glob("*.py")
+        if p.name != "medical_repository.py"
+        and "load_projection" in p.read_text(encoding="utf-8"))
+    assert callers == [], (
+        "load_projection had no caller in tools/ once the legacy driver was "
+        f"deleted; a new one means the lane is being revived. hits={callers}")
+
+
+def test_a_legacy_declaration_loads_when_the_case_has_no_medical_artifacts(
+    isolated_dao, tmp_path
+):
+    """The declaration the driver must write is accepted by the loader for an
+    artifact-free case -- which is the shape every PoC legacy run has."""
+    case_dir = dao.case_dir("CASE_9001")
+    case_dir.mkdir(parents=True, exist_ok=True)
+    dao.atomic_write_json(
+        case_dir / "extracted_claim_fields.json",
+        _legacy_projection("CASE_9001", "legacy_pre_medical"))
+    data, error = medical_repository.load_projection(dao, "CASE_9001")
+    assert error is None, error
+    assert data["projection_mode"] == "legacy_pre_medical"

@@ -51,6 +51,12 @@ Subcommands:
         [--run-id RUN_ID] [--stage STAGE]
     patch-manifest-document CASE_ID DOC_ID --fields-file PATH --held-by NAME --run-id RUN_ID
         [--stage STAGE]
+    unsplit-bundle CASE_ID BUNDLE_ID --held-by NAME --run-id RUN_ID
+        --confirm-case-id CASE_ID
+        (removes a bundle's split children and restores it as splittable, so a
+         re-segmentation can propose different boundaries. Keeps the bundle's
+         OCR. Refused unless BUNDLE_ID is a superseded_bundle, and refused if a
+         child is itself a bundle or is referenced by another document.)
     promote-policy-document CASE_ID DOC_ID --policy-processing-role ROLE
         --disputed-by TEXT --held-by NAME --run-id RUN_ID
     write-page-text CASE_ID DOC_ID PAGE --text-file PATH --held-by NAME --run-id RUN_ID
@@ -96,7 +102,13 @@ Subcommands:
     add-conflict-entry CASE_ID --stage STAGE --topic TOPIC --sources-file PATH
         --held-by NAME --run-id RUN_ID
     set-conflict-verdict CASE_ID CONFLICT_ID VERDICT --note TEXT --held-by NAME --run-id RUN_ID
+        VERDICT is resolved | false_positive | deferred_to_report. The first two
+        are adjudications. deferred_to_report is not: the disagreement stands,
+        and the decision goes to the screening report's human reader -- which
+        finalize-stage screening_report then verifies was actually carried.
     check-conflicts-clear CASE_ID
+        Reports {clear, pending, deferred_to_report}. `clear` reflects pending
+        only; deferrals do not block, they oblige the screening report.
     read-human-review-ledger CASE_ID
     record-human-review CASE_ID --artifact-kind {policy_audit_finding|unpaged_physical_exclusion}
         --artifact-id DOC_ID --target-key KEY --decision {accepted_risk|verified|rejected}
@@ -1263,6 +1275,15 @@ def traced_read(op: str):
                 rc = fn(args)
                 try:
                     sp.set(exit_code=int(rc or 0), startup_s=_startup_seconds())
+                    # Which contract, when the command names one. `filename` is
+                    # a fixed name from this repo's contract set, and
+                    # `_ENUM_ATTRS` caps and strips it -- the same treatment
+                    # `schema_name` gets. Without it a read span says a stage
+                    # read SOMETHING, which cannot be checked against the
+                    # inputs the stage's spec declares.
+                    filename = getattr(args, "filename", None)
+                    if isinstance(filename, str) and filename:
+                        sp.set(contract_name=filename)
                 except Exception:  # noqa: BLE001 -- never break a read
                     pass
                 return rc
@@ -2261,6 +2282,16 @@ def cmd_read_ground_truth(args):
 
 @traced_read("dao.read_contract")
 def cmd_read_contract(args):
+    """Read one governed contract.
+
+    The span carries the contract's own filename as of 2026-08-18. The read was
+    already timed; what it could not say was WHICH contract, so a stage's
+    declared inputs could not be checked against what it actually opened.
+    Measured on CASE_047's consistency_check -- its output names claim_analysis
+    field slots (`accident_date`, `surgery_date`, `admission_period`) while
+    every `values_compared` entry quotes a source document, and the trace could
+    neither confirm nor refute that it read `extracted_claim_fields.json`.
+    """
     # The medical contracts are owned by purpose-built commands: the ledger and
     # the immutable revisions are never readable through the generic path, and
     # a target that is a symlink or carries extra hardlinks is refused rather
@@ -2758,6 +2789,18 @@ def _policy_layer_scheme_blockers(case_id: str, action: str) -> list[str]:
                 "verification state cannot be established"]
     doc_ids = _policy_layer_document_ids(case_id)
     if not doc_ids:
+        # An empty scope normally means "nothing to verify, therefore
+        # verified", which is the defect this gate closes. A recorded D5
+        # declaration is the one case where empty is a HUMAN statement about
+        # the case rather than an absence of work: it names a reviewer and a
+        # reason, and `declare_no_policy_documents` refuses it the moment the
+        # manifest types any document insurance_policy. `_policy_completion_
+        # blockers` already accepts it for the policy stage itself, so without
+        # the same allowance here a declared case passes
+        # policy_clause_processing and can then never finalize claim_analysis
+        # -- measured on CASE_047 (2026-08-18), 52 documents, no 약관.
+        if _no_policy_waiver(case_id) is not None:
+            return []
         return ["no automated insurance_policy document is registered -- "
                 f"{action} cannot rest on a policy layer that does not exist"]
     return _canonical_state_blockers(case_id, doc_ids, action)
@@ -3430,6 +3473,26 @@ def _downstream_policy_ref_errors(
              coverage.get("matched_clause_ref"))
             for index, coverage in enumerate(data.get("coverages") or [])
             if coverage.get("matched_clause_ref") is not None
+        ]
+    elif schema_name == "claim_analysis_result.schema.json":
+        # The selective lane cites clauses through policy_links, and a citation
+        # is a citation: it owes the same canonical-UID state, the same
+        # policy-stage-passed check, and the same upstream snapshot as the
+        # legacy contracts below. Registering it HERE rather than building a
+        # second verifier is the whole point -- a lane with its own weaker
+        # checking would be a second way to reference the policy layer, which
+        # is how a stale or fabricated clause reference gets in.
+        refs = [
+            (f"policy_links[{link_index}].clause_ref", link.get("clause_ref"))
+            for link_index, link in enumerate(data.get("policy_links") or [])
+            if link.get("clause_ref") is not None
+        ]
+        refs += [
+            (f"policy_links[{link_index}].requirements[{req_index}].clause_ref",
+             requirement.get("clause_ref"))
+            for link_index, link in enumerate(data.get("policy_links") or [])
+            for req_index, requirement in enumerate(link.get("requirements") or [])
+            if requirement.get("clause_ref") is not None
         ]
     elif schema_name == "requirement_matching_result.schema.json":
         refs = [
@@ -4472,6 +4535,118 @@ def cmd_write_contract(args):
             for e in errors:
                 print(f"  - {e}")
             return 1
+        # Identity, not shape. Schema validation asks "is this a well-formed
+        # judgement?", never "is this THIS case's judgement?", so a payload
+        # belonging to another case passed every check and was written under
+        # the wrong case_id.
+        #
+        # Measured 2026-08-26 on the eight-case re-run: concurrent
+        # screening-report agents generated to a shared scratchpad filename and
+        # overwrote each other between generation and this write, leaving
+        # CASE_7023's judgement (case_id CASE_7023, run RUN_20260826_602, its
+        # own conflicts) in outputs/CASE_7044/. This returned PASS. Serialising
+        # the agents removes that collision and is the right operational fix,
+        # but a write that names one case and lands in another is wrong however
+        # it arose -- a race, a mistyped --case-id, a resumed run reusing a
+        # stale path -- and refusing it belongs to the layer that owns "no
+        # ungoverned write".
+        #
+        # Only when the payload actually carries `case_id`: not every contract
+        # does, and this must not become a back-door requirement for the field.
+        payload_case_id = data.get("case_id") if isinstance(data, dict) else None
+        if payload_case_id is not None and payload_case_id != args.case_id:
+            print(f"FAIL: {args.filename} names case_id {payload_case_id!r} but is "
+                  f"being written into {args.case_id!r}. A contract is refused "
+                  "rather than relabelled -- the payload was built for another "
+                  "case, and rewriting its id would publish that case's findings "
+                  "under this one.")
+            return 1
+        if schema_name == "claim_analysis_result.schema.json":
+            # The selective lane validates on its OWN terms and never reaches
+            # the canonical medical-revision path below. That separation is the
+            # point: this contract's authority is source-grounded extraction,
+            # so requiring it to resolve a canonical revision would enforce a
+            # binding it deliberately does not claim -- and would block the
+            # lane entirely on cases that have no canonical revision at all.
+            # Falling through on a violation would be worse than either: it
+            # would answer "this result mislabelled its authority" with a
+            # complaint about a missing revision.
+            from claim_analysis_contracts import (
+                exact_evidence_document_ids,
+                verify_exact_evidence_references,
+            )
+
+            authority_violations = sorted({
+                field.get("authority")
+                for field in data.get("claim_facts") or []
+                if field.get("authority") not in {
+                    "source_document_extraction", "claim_analysis_native"
+                }
+            } - {None})
+            if authority_violations:
+                print(f"FAIL: claim-analysis authority is not source-grounded for {target}:")
+                for value in authority_violations:
+                    print(
+                        f"  - {value!r} is not a selective-lane authority. This lane "
+                        "publishes source_document_extraction or claim_analysis_native; "
+                        "it does not project canonical medical variables."
+                    )
+                return 1
+            if data.get("medical_projection_status") != "not_configured":
+                print(f"FAIL: claim-analysis medical projection status is not 'not_configured' for {target}:")
+                print(
+                    f"  - recorded {data.get('medical_projection_status')!r}. v0.1 has no "
+                    "field-to-variable mapping to project through, so no other value is true."
+                )
+                return 1
+
+            # Context, not authority -- and only verified when the result chose
+            # to record it. An omitted context is not a defect; a recorded one
+            # that does not match the case's revision is.
+            revision_ref = data.get("medical_revision_context")
+            if revision_ref is not None:
+                medical_variables, medical_error = _load_medical_revision(
+                    args.case_id, revision_ref["sha256"]
+                )
+                if medical_error or medical_variables is None:
+                    print(f"FAIL: claim-analysis recorded a medical revision context that could not be resolved for {target}:")
+                    print(f"  - {medical_error or 'medical revision is unavailable'}")
+                    return 1
+                revision_mismatches = [
+                    key for key in ("run_id", "schema_version", "config_version")
+                    if medical_variables.get(key) != revision_ref.get(key)
+                ]
+                if revision_mismatches:
+                    print(f"FAIL: claim-analysis medical revision context is stale for {target}:")
+                    for key in revision_mismatches:
+                        print(
+                            f"  - {key}: result records {revision_ref.get(key)!r}, "
+                            f"revision contains {medical_variables.get(key)!r}"
+                        )
+                    return 1
+
+            cited_doc_ids = exact_evidence_document_ids(data)
+            page_text_by_key = {}
+            if cited_doc_ids:
+                try:
+                    bundle = read_redacted_text_bundle_data(args.case_id, cited_doc_ids)
+                except ValueError as exc:
+                    print(f"FAIL: claim-analysis evidence could not be verified for {target}:")
+                    print(f"  - {exc}")
+                    return 1
+                page_text_by_key = {
+                    (document["document_id"], page["page"]): page["text"]
+                    for document in bundle["documents"]
+                    for page in document["pages"]
+                }
+            evidence_errors = verify_exact_evidence_references(
+                data, lambda doc_id, page: page_text_by_key.get((doc_id, page))
+            )
+            if evidence_errors:
+                print(f"FAIL: claim-analysis exact evidence errors for {target}:")
+                for error in evidence_errors:
+                    print(f"  - {error}")
+                return 1
         if schema_name in _POLICY_LAYER_SCHEMAS:
             # P0-3, and deliberately BEFORE the binding/UID checks: those two
             # are scoped to canonical_v1 documents and return [] for anything
@@ -4937,6 +5112,127 @@ def replace_manifest_documents(case_id: str, bundle_id: str, bundle_fields: dict
             result = (True, result[1] + "\nWARNING: split succeeded, but run-state "
                       "could not be updated -- retry the progress update.")
     return result
+
+
+def unsplit_bundle(case_id: str, bundle_id: str, held_by: str, run_id: str,
+                   confirm_case_id: str, purpose: str | None = None):
+    """Remove a bundle's split children and restore it as a splittable document.
+
+    The inverse of `replace_manifest_documents`, for ONE case: re-segmenting a
+    bundle whose boundaries turned out wrong. Neither existing path reaches it
+    -- `replace_manifest_documents` only appends, and
+    `reset_document_processing` refuses outright ("a segmented child cannot be
+    reconstructed from intake-owned fields alone"), which is correct for a COLD
+    reset of the whole stage but leaves no way to redo just the split.
+
+    Encountered on CASE_047 (2026-08-18): a fork inherited CASE_050's 55
+    children, a better rule proposed 30 different boundaries, and `split`
+    refused with `inconsistent_existing_split` because the two boundary sets do
+    not line up. Without this the only routes were re-running 97 OCR calls on a
+    fresh case, or accepting boundaries already known to be wrong.
+
+    Deliberately narrow, because this DELETES manifest entries:
+
+    * Only children of `bundle_id` go -- an entry whose `source_file_name` is
+      the bundle's file AND whose id is not the bundle's. Anything else in the
+      manifest is untouched, so a case with two bundles keeps the other one.
+    * Refused unless the bundle is actually a `superseded_bundle`. A document
+      that was never split has no children to remove, and asking to unsplit it
+      means the caller is confused about which document they are holding.
+    * Refused if any child carries work that removal would silently orphan --
+      a child that is itself a superseded bundle (nested split), or one whose
+      id is referenced by another document's `source_document_id`.
+    * `confirm_case_id` must equal `case_id`, the same destructive-scope
+      confirmation `reset_document_processing` takes.
+
+    The children's processed text under data/processed/ is NOT deleted: it is
+    keyed by document_id, the re-split assigns fresh ids, and leaving it costs
+    disk rather than correctness. The bundle's own pages -- the expensive part,
+    and the whole reason to unsplit rather than re-intake -- are untouched.
+    """
+    if confirm_case_id != case_id:
+        return False, f"REFUSED: --confirm-case-id must exactly equal {case_id}"
+    target = case_dir(case_id) / "document_manifest.json"
+    existing_lock = acquire_lock_blocking(
+        target, held_by, run_id, purpose or f"unsplit bundle {bundle_id}")
+    if existing_lock is not None:
+        return False, (f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+                       f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+    try:
+        if not target.exists():
+            return False, f"FAIL: no document_manifest.json for {case_id}"
+        manifest = json.loads(target.read_text(encoding="utf-8"))
+        documents = manifest["documents"]
+        bundle = next((d for d in documents if d["document_id"] == bundle_id), None)
+        if bundle is None:
+            return False, f"FAIL: bundle document_id {bundle_id} not found in document_manifest.json"
+        if bundle.get("downstream_disposition") != "superseded_bundle":
+            return False, (f"REFUSED: {bundle_id} is not a superseded_bundle "
+                           f"(downstream_disposition={bundle.get('downstream_disposition')!r}) "
+                           "-- it has no split children to remove")
+
+        bundle_file = bundle.get("file_name") or f"{bundle_id}.pdf"
+        children = [d for d in documents
+                    if d.get("source_file_name") == bundle_file
+                    and d["document_id"] != bundle_id]
+        if not children:
+            return False, f"REFUSED: no children of {bundle_id} found in the manifest"
+
+        child_ids = {d["document_id"] for d in children}
+        nested = sorted(d["document_id"] for d in children
+                        if d.get("downstream_disposition") == "superseded_bundle")
+        if nested:
+            return False, (f"REFUSED: {nested} are themselves superseded bundles; "
+                           "unsplit those first so their own children are not orphaned")
+        referenced = sorted(
+            d["document_id"] for d in documents
+            if d["document_id"] not in child_ids
+            and d.get("source_document_id") in child_ids)
+        if referenced:
+            return False, (f"REFUSED: {referenced} derive from children of {bundle_id} "
+                           "-- removing them would orphan those entries")
+
+        kept = [d for d in documents if d["document_id"] not in child_ids]
+        # The bundle becomes an ordinary un-split PDF again. Its OCR is kept
+        # (that is the point), so segmentation can propose from real page text
+        # exactly as it did before -- only the split verdict is withdrawn.
+        bundle["downstream_disposition"] = "automated_text_pipeline"
+        bundle["segmentation_status"] = "required"
+        # `segmentation_status: required` is a human bundle/non-bundle decision
+        # and the schema demands it be attributable (document_entry allOf[5]).
+        # Withdrawing a split IS that decision made again, so it is recorded
+        # against whoever ran this command rather than blanked -- clearing the
+        # attribution would fail validation, and back-dating it to the original
+        # reviewer would credit them with a call they did not make.
+        bundle["segmentation_reviewed_by"] = held_by
+        bundle["segmentation_reviewed_at"] = now_iso()
+        bundle["segmentation_review_note"] = (
+            f"split withdrawn by unsplit-bundle (run {run_id}); "
+            f"{len(child_ids)} child document(s) removed for re-segmentation")
+        # The approved proposal described the boundaries just removed, so it no
+        # longer describes this document; `propose` writes a fresh one.
+        bundle["segmentation_proposal_path"] = None
+        manifest["documents"] = kept
+        manifest["updated_at"] = now_iso()
+
+        errors = _schema_check(manifest, "document_manifest.schema.json")
+        if errors:
+            return False, "FAIL: schema validation errors for " + str(target) + " -- not written:\n" + \
+                "\n".join(f"  - {e}" for e in errors)
+        atomic_write_json(target, manifest)
+        return True, (f"PASS: removed {len(child_ids)} child document(s) of {bundle_id} "
+                      f"and restored it as splittable in {target}\n"
+                      f"  removed: {sorted(child_ids)}")
+    finally:
+        release_lock(target)
+
+
+def cmd_unsplit_bundle(args):
+    ok, message = unsplit_bundle(
+        args.case_id, args.bundle_id, args.held_by, args.run_id,
+        args.confirm_case_id, purpose=args.purpose)
+    print(message)
+    return 0 if ok else 1
 
 
 def cmd_replace_manifest_documents(args):
@@ -5698,7 +5994,7 @@ def _replay_generic_ledger_history(ledger: dict, schema_name: str) -> None:
             entry["rejection_reason"] = (
                 payload["reason"] if payload["status"] == "rejected" else None)
         elif request["action"] == "add":
-            replayed.append({
+            rebuilt = {
                 "conflict_id": result["target_id"],
                 "raised_by_stage": payload["stage"],
                 "field_or_topic": payload["topic"],
@@ -5706,7 +6002,13 @@ def _replay_generic_ledger_history(ledger: dict, schema_name: str) -> None:
                 "verdict": "pending",
                 "resolution_note": None,
                 "resolved_at": None,
-            })
+            }
+            # Optional, and reconstructed only when the operation recorded one,
+            # so an entry written before the payload carried it still replays
+            # as the 7-key shape it was actually stored in.
+            if payload.get("professional_summary"):
+                rebuilt["professional_summary"] = payload["professional_summary"]
+            replayed.append(rebuilt)
         else:
             entry = next((i for i in replayed
                           if i["conflict_id"] == payload["conflict_id"]), None)
@@ -6124,6 +6426,95 @@ def cmd_set_ledger_status(args):
             return 1
         atomic_write_json(p, ledger)
         print(f"OK: {args.file_name} -> {args.status}")
+        return 0
+    finally:
+        release_lock(p)
+
+
+def cmd_repair_source_ledger_binding(args):
+    """Repair exactly one stale source-ledger request digest, under human audit.
+
+    This is intentionally narrower than a ledger editor: it changes no review
+    decision, request, result, timestamp, or baseline state. It repairs the
+    request digest and its matching copied baseline digest only when the named
+    operation's already-recorded request makes the entire ledger validate.
+    """
+    p = source_ledger_path(args.case_id)
+    existing_lock = acquire_lock_blocking(
+        p, args.held_by, args.run_id,
+        f"repair-source-ledger-binding {args.operation_id}")
+    if existing_lock is not None:
+        print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+              f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+        return 1
+    try:
+        ledger = load_json(p)
+        if ledger is None:
+            print(f"NOT_FOUND: {p}")
+            return 1
+        if ledger.get("case_id") != args.case_id:
+            print("ERROR: source ledger belongs to a different case")
+            return 1
+        operation = next((op for op in ledger.get("operations", [])
+                          if op.get("operation_id") == args.operation_id), None)
+        if operation is None:
+            print(f"NOT_FOUND: operation_id {args.operation_id!r}")
+            return 1
+        request = operation.get("request")
+        if not isinstance(request, dict) or request.get("case_id") != args.case_id \
+                or request.get("operation_id") != args.operation_id:
+            print("ERROR: repair refuses an operation whose request is not bound to this case and operation_id")
+            return 1
+        expected = hashlib.sha256(_canonical_json_bytes(request)).hexdigest()
+        old = operation.get("request_sha256")
+        if old == expected:
+            print("ERROR: operation request binding is already valid; no repair written")
+            return 1
+        if any(item.get("operation_id") == args.operation_id
+               for item in ledger.get("binding_repairs", [])):
+            print("ERROR: operation already has a binding-repair audit record")
+            return 1
+
+        boundary = ledger.get("history_boundary")
+        if not isinstance(boundary, dict) or not isinstance(boundary.get("baseline_state"), list):
+            print("ERROR: repair refuses a ledger without a valid history boundary shape")
+            return 1
+        old_baseline = boundary.get("baseline_sha256")
+        expected_baseline = hashlib.sha256(
+            _canonical_json_bytes(boundary["baseline_state"])).hexdigest()
+        # This command repairs one known transplant shape only: the same stale
+        # digest was copied into both independently-bound fields. A different
+        # boundary defect needs a separate audit path.
+        if old_baseline != old:
+            print("ERROR: repair refuses an independently-corrupt history boundary")
+            return 1
+        operation["request_sha256"] = expected
+        boundary["baseline_sha256"] = expected_baseline
+        try:
+            _validate_generic_ledger(ledger, args.case_id, "source_ledger.schema.json")
+        except ValueError as exc:
+            print(f"ERROR: repair refused because the ledger remains invalid: {exc}")
+            return 1
+        ledger.setdefault("binding_repairs", []).append({
+            "operation_id": args.operation_id,
+            "old_request_sha256": old,
+            "new_request_sha256": expected,
+            "old_baseline_sha256": old_baseline,
+            "new_baseline_sha256": expected_baseline,
+            "reviewer": args.reviewer,
+            "note": args.note,
+            "run_id": args.run_id,
+            "repaired_at": now_iso(),
+        })
+        ledger["updated_at"] = now_iso()
+        errors = _schema_check(ledger, "source_ledger.schema.json")
+        if errors:
+            print(f"FAIL: schema validation errors for {p} -- not written:")
+            for error in errors:
+                print(f"  - {error}")
+            return 1
+        atomic_write_json(p, ledger)
+        print(f"OK: repaired request binding for {args.operation_id}")
         return 0
     finally:
         release_lock(p)
@@ -6640,7 +7031,14 @@ def _update_run_state(case_id, run_id, stage, status, held_by, backup_path=None,
                 # started_at keeps the stage's first explicit origin;
                 # current_attempt_started_at tracks this dispatch only.
                 now = now_iso()
-                entry["started_at"] = entry["started_at"] or now
+                # `.get` because `started_at` is declared nullable and the item
+                # schema names no `required` list, so an entry that OMITS the
+                # key is schema-valid -- which `fork_case.py` produced, and a
+                # bare `entry["started_at"]` then raised KeyError on the first
+                # `in_progress` transition of every forked case (CASE_054,
+                # 2026-08-22). Absent and null mean the same thing here: no
+                # explicit attempt has begun yet.
+                entry["started_at"] = entry.get("started_at") or now
                 entry["current_attempt_started_at"] = now
                 entry["attempt_count"] += 1
                 marker_attempt = entry["attempt_count"]
@@ -6945,6 +7343,82 @@ def cmd_get_last_passed_stage(args):
     return 0
 
 
+# Guardrails the PoC owner turned off, with the measurement behind each.
+# Written down rather than left as a verbal waiver: an undocumented exception
+# gets re-litigated at every run, and the 2026-08-19 corpus run showed what
+# that costs. Removing a code from here turns the gate back on.
+POC_INACTIVE_GUARDRAILS: dict[str, dict[str, str]] = {
+    "P7": {
+        "rule": "human-input wait tracking",
+        "reason": (
+            "0 of 220 cases ever carried a `waiting` entry. The PoC has no "
+            "asynchronous human-input step for it to track; the human gates "
+            "that DO exist (D2 approval, segmentation, P8 resolution) stop "
+            "the tool synchronously and do not use this field."
+        ),
+        "decided_on": "2026-08-20",
+    },
+    "P9": {
+        "rule": "3-attempt cap then audit halt",
+        "reason": (
+            "Waived verbally during development and never written down, so "
+            "every run re-decided it. Attempt counts are still recorded in "
+            "_run_state.json -- what is off is the automatic halt, not the "
+            "measurement."
+        ),
+        "decided_on": "2026-08-20",
+    },
+    "P10-snapshots": {
+        "rule": "full cumulative per-stage snapshot",
+        "reason": (
+            "_backups was 17.8MB of CASE_489's 21.4MB (83%; 594 of 1011 "
+            "files), dominated by ocr_result_*.json -- regenerable, and "
+            "already held in data/processed/. Snapshots now carry the "
+            "governed contracts only; run-state tracking (the rest of P10) "
+            "is untouched."
+        ),
+        "decided_on": "2026-08-20",
+    },
+    "D2-content-scan": {
+        "rule": "vision answer-key pre-check at intake",
+        "reason": (
+            "Removed at the PoC owner's direction. The per-file human "
+            "approval gate it fed is NOT removed: every entry still starts "
+            "`pending` and intake still refuses to execute until a human "
+            "approves each one."
+        ),
+        "decided_on": "2026-08-20",
+    },
+}
+
+# Snapshot contents (P10, narrowed 2026-08-20 -- see POC_INACTIVE_GUARDRAILS).
+# Excluded by prefix: the per-document extraction artifacts. They are the bulk
+# of a case, they are regenerable from data/processed/, and no restore reads
+# them -- a resume re-derives them or reuses the processed layer directly.
+SNAPSHOT_EXCLUDED_PREFIXES = (
+    "ocr_result_",
+    "redaction_result_",
+    "classification_result_",
+    "page_chunks",
+)
+
+# Excluded outright: not contract data. `_backups` would make each snapshot
+# quadratic in the number of stages; `_trace` is diagnostic scratch that grows
+# through the run (its permanent derivative, _timing_summary.json, is kept).
+SNAPSHOT_EXCLUDED_NAMES = ("_backups", "_trace")
+
+
+def snapshot_excludes_name(name: str) -> bool:
+    """Whether a case-directory entry is left out of a P10 snapshot.
+
+    One predicate so "what does a backup contain" has a single answer that a
+    test can assert against, rather than a condition inlined in the copy loop.
+    """
+    if name in SNAPSHOT_EXCLUDED_NAMES or name.endswith(".lock"):
+        return True
+    return name.startswith(SNAPSHOT_EXCLUDED_PREFIXES)
+
+
 @trace_mod.traced("dao.snapshot", category="io")
 def _build_snapshot_atomic(case_id: str, stage: str, prospective_state: dict) -> Path:
     """Build a full cumulative snapshot of a case's outputs (P10) and place it
@@ -6971,13 +7445,11 @@ def _build_snapshot_atomic(case_id: str, stage: str, prospective_state: dict) ->
     tmp.mkdir(parents=True)
     try:
         for item in src.iterdir():
-            # _trace/ is diagnostic scratch, not contract data: nothing
-            # downstream reads it and there is nothing in it to restore. It
-            # also GROWS through the run, so copying it into every cumulative
-            # snapshot is precisely the O(stages x tree) cost that makes
-            # finalize a serial tail. The permanent artifact derived from it
-            # (_timing_summary.json) is a normal file and is still snapshotted.
-            if item.name in ("_backups", "_trace") or item.name.endswith(".lock"):
+            # See snapshot_excludes_name: _trace/ and _backups/ are not
+            # contract data, and the per-document extraction artifacts are
+            # the regenerable bulk (83% of a case, measured on CASE_489).
+            # What remains is the governed contracts -- what a restore needs.
+            if snapshot_excludes_name(item.name):
                 continue
             if item.is_file():
                 shutil.copy2(item, tmp / item.name)
@@ -7076,11 +7548,32 @@ def _finalize_stage(case_id, run_id, stage, held_by):
             if pending:
                 print(f"REFUSED: cannot finalize {stage!r} -- P6: the case has "
                       f"unresolved conflict ledger entries: {', '.join(pending)}")
-                print("  Every entry must read 'resolved' or 'false_positive' "
-                      "before a stage that reasons from the case's facts may "
-                      "finalize. Adjudicate with `dao.py set-conflict-verdict "
-                      "CASE_ID CONFLICT_ID {resolved|false_positive} --note ...` "
+                print("  Every entry must read 'resolved', 'false_positive' or "
+                      "'deferred_to_report' before a stage that reasons from the "
+                      "case's facts may finalize. Adjudicate with `dao.py "
+                      "set-conflict-verdict CASE_ID CONFLICT_ID "
+                      "{resolved|false_positive|deferred_to_report} --note ...` "
                       "-- a value is never silently discarded to close one.")
+                return None
+
+        # A deferral is a promise that the screening report will carry the
+        # disagreement to its human reader. Verified here, at the only stage
+        # that can keep it. Without this check `deferred_to_report` would just
+        # be `resolved` under a more honest name -- which is exactly the failure
+        # it exists to fix: on CASE_047 four real disagreements were filed as
+        # `resolved` and each note had to say in prose that the verdict did not
+        # mean what it said.
+        if stage == "screening_report":
+            missing = _uncarried_deferred_conflicts(case_id)
+            if missing:
+                print(f"REFUSED: cannot finalize 'screening_report' -- P6: "
+                      f"conflicts deferred to this report are not in it: "
+                      f"{', '.join(missing)}")
+                print("  Each deferred entry must appear in the report's "
+                      "`inconsistencies` with its `conflict_ref` set to that "
+                      "conflict_id, together with the disagreeing sources. "
+                      "Describing it in the report prose is not enough -- the "
+                      "binding is by id so it can be checked.")
                 return None
 
         if stage == "document_processing":
@@ -7386,6 +7879,16 @@ def cmd_add_conflict_entry(args):
         n = len(ledger["conflicts"]) + 1
         conflict_id = f"CONFLICT_{n}"
         payload = {"stage": args.stage, "topic": args.topic, "sources": sources}
+        # Carried in the OPERATION, not only on the entry. The replay check
+        # rebuilds each `add` from its payload and compares against the stored
+        # conflicts, so a field written to the entry but absent here makes the
+        # ledger permanently unreplayable -- measured on CASE_488, where the
+        # first summarised entry wrote fine and every later operation on the
+        # case (a second add, any set-conflict-verdict, check-conflicts-clear)
+        # failed closed and blocked screening_report.
+        summary = getattr(args, "professional_summary", None)
+        if summary:
+            payload["professional_summary"] = summary
         try:
             request, request_sha256, committed = _prepare_ledger_operation(
                 ledger, args, "add", payload)
@@ -7397,7 +7900,7 @@ def cmd_add_conflict_entry(args):
                   f" operation_id {args.operation_id})")
             return 0
         completed_at = now_iso()
-        ledger["conflicts"].append({
+        entry = {
             "conflict_id": conflict_id,
             "raised_by_stage": args.stage,
             "field_or_topic": args.topic,
@@ -7405,7 +7908,13 @@ def cmd_add_conflict_entry(args):
             "verdict": "pending",
             "resolution_note": None,
             "resolved_at": None,
-        })
+        }
+        if summary:
+            # Stored only when supplied. An entry created without one is a
+            # legacy-shaped entry, and downstream reports it from its sources
+            # rather than inventing a summary after the fact.
+            entry["professional_summary"] = summary
+        ledger["conflicts"].append(entry)
         _commit_ledger_operation(
             ledger, args, request, request_sha256,
             {"action": "add", "target_id": conflict_id, "status": "pending"},
@@ -7487,11 +7996,53 @@ def pending_conflict_ids(case_id: str) -> list[str]:
     Validated, not merely read: "no pending verdicts" is only meaningful if the
     verdicts are the ones the ledger's own history records. A ledger that fails
     its chain raises rather than reporting clear, so P6 fails closed.
+
+    `deferred_to_report` is not pending: a human has disposed of it, by ruling
+    that the disagreement is real and belongs to the reader of the screening
+    report. It is still an OPEN factual question -- see `deferred_conflict_ids`,
+    which is what the screening_report finalize gate checks.
     """
     ledger = load_conflict_ledger(case_id)
     _validate_generic_ledger(ledger, case_id, "conflict_ledger.schema.json")
     return [c["conflict_id"] for c in ledger["conflicts"]
             if c.get("verdict") == "pending"]
+
+
+def _uncarried_deferred_conflicts(case_id: str) -> list[str]:
+    """Deferred conflicts the screening report does not carry by `conflict_ref`.
+
+    A missing report is not a pass. If nothing was deferred this returns empty
+    without reading the contract at all, so a case with no conflicts never
+    depends on the report's shape; but once a deferral exists, an absent or
+    unreadable screening_report.json means the promise demonstrably was not
+    kept, and every deferred id is reported as uncarried.
+    """
+    deferred = deferred_conflict_ids(case_id)
+    if not deferred:
+        return []
+    report = read_contract_data(case_id, "screening_report.json")
+    carried: set[str] = set()
+    if isinstance(report, dict):
+        for item in report.get("inconsistencies") or []:
+            if isinstance(item, dict):
+                ref = item.get("conflict_ref")
+                if isinstance(ref, str):
+                    carried.add(ref)
+    return [cid for cid in deferred if cid not in carried]
+
+
+def deferred_conflict_ids(case_id: str) -> list[str]:
+    """Conflicts a human deferred into the screening report, still un-adjudicated.
+
+    Separate from `pending_conflict_ids` because the two answer different
+    questions. Pending asks "may a stage run at all"; deferred asks "did the
+    report actually carry what it promised to carry". A deferral clears the
+    first and creates the second obligation.
+    """
+    ledger = load_conflict_ledger(case_id)
+    _validate_generic_ledger(ledger, case_id, "conflict_ledger.schema.json")
+    return [c["conflict_id"] for c in ledger["conflicts"]
+            if c.get("verdict") == "deferred_to_report"]
 
 
 # Stages a pending conflict blocks. consistency_check is deliberately absent:
@@ -7516,11 +8067,18 @@ CONFLICT_GATED_STAGES = frozenset({
 def cmd_check_conflicts_clear(args):
     try:
         pending = pending_conflict_ids(args.case_id)
+        deferred = deferred_conflict_ids(args.case_id)
     except ValueError as exc:
         print(json.dumps({"clear": False, "error": str(exc)}, ensure_ascii=False))
         return 1
     clear = not pending
-    print(json.dumps({"clear": clear, "pending": pending}))
+    # `deferred` rides alongside `clear` rather than changing it. The caller
+    # asking this question wants to know whether it may run; a deferral says
+    # yes. It is reported so the screening-report stage knows what it has
+    # inherited an obligation to carry -- and so a reader of this output is
+    # never left thinking a clear case had no disagreements.
+    print(json.dumps({"clear": clear, "pending": pending,
+                      "deferred_to_report": deferred}))
     return 0 if clear else 1
 
 
@@ -7546,12 +8104,49 @@ POST_MEDICAL_STAGES = {
 }
 
 
+def source_grounded_lane_only(case_id: str) -> bool:
+    """Whether this case ran the selective lane and has NO canonical revision.
+
+    The precedence question the medical gate has to answer for `claim_analysis`
+    is which lane produced the case's medical facts, and the order matters:
+
+    1. A canonical medical revision exists -> clearance is required, whether or
+       not a selective result also sits on disk. A published revision carries a
+       review obligation that a second, source-grounded reading of the same
+       documents does not discharge.
+    2. No canonical revision, but a validated selective v0.1 result -> the
+       obligation never attached. That result claims no canonical authority
+       (`medical_projection_status: not_configured`), so there is no canonical
+       conclusion for a reviewer to clear.
+    3. Neither -> unchanged, and still fail-closed. Absence of evidence about
+       which lane ran is not evidence that no review is owed.
+
+    Only case 2 returns True. This is NOT a clearance, an approval, or a
+    waiver, and must never be recorded as one -- it is the finding that this
+    case has no canonical medical conclusion for the gate to be about.
+    """
+    revision, error = _load_medical_revision(case_id, None)
+    if revision is not None and not error:
+        return False
+    try:
+        result = read_contract_data(case_id, "claim_analysis_result.json")
+    except Exception:
+        return False
+    if not isinstance(result, dict):
+        return False
+    return (
+        result.get("schema_version") == "claim_analysis_result.v0.1"
+        and result.get("medical_projection_status") == "not_configured"
+    )
+
+
 def _medical_clearance_required(
     state: dict,
     stage: str,
     status: str | None = None,
     *,
     snapshot: bool = False,
+    case_id: str | None = None,
 ) -> bool:
     """Whether this transition must prove medical clearance first.
 
@@ -7560,11 +8155,21 @@ def _medical_clearance_required(
     review yet" is exactly the condition the gate exists to catch, not an
     exemption from it. Every later stage is gated only once the case has
     adopted the flow.
+
+    The one carve-out is the source-grounded selective lane, and it is narrow
+    by construction: see `source_grounded_lane_only`, which requires the
+    absence of a canonical revision, not merely the presence of a selective
+    result. Without `case_id` the probe cannot run and the gate stays closed --
+    the safe direction.
     """
     if not _medical_gate_applies(state):
         return False
     if stage == "claim_analysis":
-        return snapshot or status == "passed"
+        if not (snapshot or status == "passed"):
+            return False
+        if case_id is not None and source_grounded_lane_only(case_id):
+            return False
+        return True
     if not state.get("medical_review_adopted", False):
         return False
     return stage in POST_MEDICAL_STAGES and (
@@ -7581,7 +8186,9 @@ def _require_transition_medical_clearance(
     *,
     snapshot: bool = False,
 ) -> None:
-    if not _medical_clearance_required(state, stage, status, snapshot=snapshot):
+    if not _medical_clearance_required(
+        state, stage, status, snapshot=snapshot, case_id=case_id
+    ):
         return
     from medical_review_ledger import require_clearance
 
@@ -7636,6 +8243,18 @@ def cmd_check_medical_reviews_clear(args):
             and not _medical_artifacts_present(args.case_id)):
         print(json.dumps({"clear": True, "gate": "not_applicable"},
                          sort_keys=True))
+        return 0
+
+    # Same alignment obligation, for the source-grounded lane. The transition
+    # gate skips `claim_analysis` when the case has a selective v0.1 result and
+    # NO canonical revision, so a check left blind to that would fail closed on
+    # a ledger the case was never required to have -- CASE_028's stall in a new
+    # costume. Reported as `not_required_source_grounded_lane`, never as
+    # cleared/approved/passed: nothing was reviewed and nothing was waived.
+    if source_grounded_lane_only(args.case_id):
+        print(json.dumps(
+            {"clear": True, "gate": "not_required_source_grounded_lane"},
+            sort_keys=True))
         return 0
 
     return cmd_check_clear(sys.modules[__name__], args)
@@ -11216,6 +11835,56 @@ def trace_spans_dir(case_id: str, run_id: str) -> Path:
     return _require_within(case_dir(case_id), "_trace", run_id, "spans")
 
 
+_DISPATCH_USAGE_FIELDS = {
+    "duration_ms": ("duration_s", lambda v: v / 1000.0),
+    "subagent_tokens": ("total_tokens", int),
+    "tool_uses": ("tool_uses", int),
+}
+
+
+def parse_dispatch_usage(text: str) -> dict:
+    """Read a subagent completion's usage block into record-dispatch values.
+
+    `record-dispatch` stays caller-declared -- the dispatch crosses a session
+    boundary this process cannot observe, and that has not changed. What this
+    removes is the TRANSCRIPTION: the completion notification already carries
+    `duration_ms`, `subagent_tokens` and `tool_uses`, and copying them by hand
+    into eight flags is a step that gets skipped (CASE_489: skipped outright,
+    with nothing on disk showing it) or mistyped. A machine copy cannot be
+    either.
+
+    The figures stay harness-reported. The only transformation is ms -> s,
+    because `--duration-s` is in seconds and 377420 recorded as seconds is
+    4.4 days. Anything the notification does not carry -- input/output token
+    split, the agent's own reported duration, human wait -- is simply absent
+    from the result, so `record-dispatch` records it as "not measured" rather
+    than as a zero that would read as a measurement.
+
+    Raises ValueError when the block carries no figures at all: returning an
+    empty mapping would let a caller record a dispatch with no measurement in
+    it while believing it had recorded one.
+    """
+    parsed: dict = {}
+    for tag, (key, convert) in _DISPATCH_USAGE_FIELDS.items():
+        match = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.S)
+        if match is None:
+            continue
+        raw = match.group(1).strip()
+        try:
+            number = int(raw)
+        except ValueError:
+            raise ValueError(
+                f"dispatch usage field {tag} is not an integer: {raw!r}")
+        if number < 0:
+            raise ValueError(f"dispatch usage field {tag} is negative: {number}")
+        parsed[key] = convert(number)
+    if not parsed:
+        raise ValueError(
+            "no dispatch figures found in the usage block -- expected at least "
+            "one of " + ", ".join(_DISPATCH_USAGE_FIELDS))
+    return parsed
+
+
 def cmd_record_dispatch(args):
     """Record one closed subagent-dispatch interval into the run's trace.
 
@@ -11255,6 +11924,24 @@ def cmd_record_dispatch(args):
     never sees the model's context, so it records what it is told and does not
     derive tokens from anything.
     """
+    # getattr, not attribute access: this command is also driven directly
+    # with lightweight arg stubs, which carry only the fields a given
+    # test exercises. A new optional flag must not break those callers.
+    if getattr(args, "from_usage", None):
+        try:
+            parsed = parse_dispatch_usage(args.from_usage)
+        except ValueError as exc:
+            print(f"REFUSED: {exc}")
+            return 1
+        # Explicit flags win: a caller who knows something the block does not
+        # -- a dispatch that stopped for a person, a corrected duration -- must
+        # still be able to say so.
+        for key, value in parsed.items():
+            if getattr(args, key, None) is None:
+                setattr(args, key, value)
+    if getattr(args, "duration_s", None) is None:
+        print("REFUSED: --duration-s is required unless --from-usage supplies it")
+        return 1
     if args.duration_s < 0:
         print("REFUSED: --duration-s cannot be negative")
         return 1
@@ -11706,6 +12393,14 @@ def build_parser():
     p.add_argument("--purpose"); p.add_argument("--stage")
     p.set_defaults(fn=cmd_replace_manifest_documents)
 
+    p = sub.add_parser("unsplit-bundle")
+    p.add_argument("case_id"); p.add_argument("bundle_id")
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.add_argument("--confirm-case-id", required=True,
+                   help="Destructive-scope confirmation; must exactly equal case_id")
+    p.add_argument("--purpose")
+    p.set_defaults(fn=cmd_unsplit_bundle)
+
     p = sub.add_parser("write-page-text")
     p.add_argument("case_id"); p.add_argument("doc_id"); p.add_argument("page", type=int)
     p.add_argument("--text-file", required=True)
@@ -11750,6 +12445,12 @@ def build_parser():
                         "and the same request is an idempotent no-op.")
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_set_ledger_status)
+
+    p = sub.add_parser("repair-source-ledger-binding")
+    p.add_argument("case_id"); p.add_argument("operation_id")
+    p.add_argument("--reviewer", required=True); p.add_argument("--note", required=True)
+    p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
+    p.set_defaults(fn=cmd_repair_source_ledger_binding)
 
     p = sub.add_parser("check-source-ledger-clear"); p.add_argument("case_id")
     # Optional on purpose: this is a read-only query with existing callers, and
@@ -11838,12 +12539,19 @@ def build_parser():
     p.add_argument("--operation-id", default=None,
                    help="Unique id binding this entry into the ledger history. "
                         "Re-running with the same id is an idempotent no-op.")
+    p.add_argument("--professional-summary", default=None,
+                   help="Neutral statement of the disagreement for the "
+                        "손해사정사/의사 who will act on it. Stored with the entry "
+                        "and carried verbatim into the screening report if the "
+                        "entry is later deferred.")
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_add_conflict_entry)
 
     p = sub.add_parser("set-conflict-verdict")
     p.add_argument("case_id"); p.add_argument("conflict_id")
-    p.add_argument("verdict", choices=["resolved", "false_positive"]); p.add_argument("--note", required=True)
+    p.add_argument("verdict", choices=["resolved", "false_positive",
+                                       "deferred_to_report"])
+    p.add_argument("--note", required=True)
     p.add_argument("--operation-id", default=None,
                    help="Unique id binding this verdict into the ledger history. "
                         "Re-running with the same id is an idempotent no-op.")
@@ -12133,9 +12841,15 @@ def build_parser():
                    help="the stage this dispatch belongs to")
     p.add_argument("--started-at", required=True,
                    help="ISO-8601 wall time the dispatch was issued")
-    p.add_argument("--duration-s", type=float, required=True,
+    p.add_argument("--duration-s", type=float, default=None,
                    help="whole dispatch, from asking for the work to holding "
-                        "its result")
+                        "its result. Required unless --from-usage supplies it.")
+    p.add_argument("--from-usage", dest="from_usage", default=None,
+                   help="the subagent completion's <usage> block, verbatim. "
+                        "Fills --duration-s/--total-tokens/--tool-uses from "
+                        "what the harness reported, so those figures are "
+                        "copied by machine rather than retyped. An explicit "
+                        "flag still wins over the parsed value.")
     p.add_argument("--agent-reported-s", type=float, default=None,
                    help="what the harness says the subagent itself took; the "
                         "difference from --duration-s is the round trip")

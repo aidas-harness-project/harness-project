@@ -1,0 +1,451 @@
+"""The provider half of selective Claim Analysis: one document, many fields.
+
+A single call per document asks for every field that document is on the ladder
+for. That is the shape the read budget requires -- one provider call per
+document per run -- and it is also the shape that matches how a document reads:
+a 진단서 states the diagnosis, its date, its site, and the department in one
+place, so asking for them separately pays four times for one page.
+
+Two things this module refuses to do:
+
+* **Infer.** The prompt forbids deriving the accident narrative from the
+  diagnosis, the injured part, or the operation name. A fracture of the right
+  radius does not say how it happened, and a model asked to fill an empty field
+  will supply the most probable story rather than the recorded one.
+* **Repair.** A quote that does not appear verbatim on the page it names is
+  dropped by the caller, never corrected. The exact range is what makes the
+  value checkable, so a quote that cannot be located has no standing.
+
+Silence is a first-class answer here, and so is a stated absence -- they are
+different answers. `not_mentioned` means the document said nothing and produces
+no observation at all; `explicitly_absent` means the document said the thing is
+NOT there, which is a finding and carries the sentence that states it. Folding
+the second into the first (as an earlier revision did, by returning
+`found: false` for both) makes a recorded negative finding indistinguishable
+from a gap in the records.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any, Callable, Mapping, Sequence
+
+import claim_analysis_deterministic as deterministic
+
+# v0.2 (2026-08-26): rule 5 rewritten. `driver_runtime.receipt_matches`
+# keys cached-unit reuse on this string, so a prompt change that did not
+# move it would replay results produced under the OLD wording.
+PROMPT_VERSION = "claim_analysis_selective_extraction.v0.2"
+
+# The accident narrative comes from the record that states it, in this order.
+# Listed in the prompt so a model reading a diagnosis certificate knows the
+# 사고 경위 line there is a source, while the diagnosis name is not.
+ACCIDENT_SOURCE_ORDER = (
+    "접수 사고내용",
+    "초진기록",
+    "응급실기록",
+    "사고 경위가 직접 적힌 진단서",
+    "사고 경위가 직접 적힌 기타 기록",
+)
+
+_VALUE_SHAPE_HINT = {
+    "date": "an ISO date (YYYY-MM-DD) exactly as the document states it",
+    "text": "a short verbatim phrase from the document",
+    "text_list": "a JSON array of short verbatim phrases",
+    "boolean": "true or false",
+    "enum": "one short token",
+    "code": "the code exactly as printed",
+    "number": "a number",
+    # `start` is REQUIRED and must be a real date -- the contract's `value`
+    # schema types it `string`/`format: date` and does not accept null (only
+    # `end` may be null, for a period still open). Korean medical forms very
+    # often state a DURATION with no start date at all -- 진단서 writes
+    # `수술 후 약 8(팔)주 간의 안정가료` and `기브스 및 목발 6주, 재활6 주 총12
+    # 주간의 안정가료`. Told only the object shape, a model fills
+    # `{"start": null, "end": null}`, which `parse_result` used to pass through
+    # and which then failed the stage at contract write (CASE_9412,
+    # 2026-08-26, claim_facts/27 and /29). Naming the fallback here is what
+    # keeps a duration-only statement reportable instead of fatal.
+    "period": ('an object {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD or null"}. '
+               'Use this ONLY when the document states an actual start date. If '
+               'it states a duration with no start date (e.g. "수술 후 약 8주간"), '
+               'return the duration as a plain string instead'),
+}
+
+
+def output_schema(field_rows: Sequence[Mapping[str, Any]]) -> dict:
+    """The structured shape one document read must return.
+
+    A TRANSPORT schema, deliberately compact. The two constraints below are
+    claude-cli's, and they do NOT bind the default HTTP transport -- an
+    OpenRouter request carries its schema in the JSON body, with no argv cap,
+    and its function-parameters validator is permissive where ajv strict is
+    not. They are kept because the shape they force is legal everywhere and
+    the schema must stay sendable on every selectable provider; being tighter
+    than one transport requires is the safe direction. Concretely: claude-cli
+    accepts --json-schema
+    only as an inline argv value under a conservative cap, and enumerating all
+    eight member keys per field grew this ~400 chars per field. CASE_489's
+    first real selective run built one of 16,868 chars against the 8,000 limit
+    and died before any document was read. One shared member spec under
+    `additionalProperties` makes the size constant in the field count instead.
+
+    Two constraints, both learned on the legacy driver and repeated here
+    because breaking either fails only at generation time, after the call is
+    paid for:
+
+    * **No union types.** claude-cli validates with ajv in STRICT mode, which
+      refuses `{"type": ["integer", "null"]}` outright. Nullable members
+      therefore declare no type at all rather than a union.
+    * **Every member key stays DECLARED.** With a bare `{"type": "object"}`
+      member the legacy run measured sonnet-5 omitting keys on most fields.
+      The keys are named here even though the shape is permissive.
+
+    The authoritative check remains local: `parse_result` below drops any
+    member that is not a dict, names a field this read did not ask for, or
+    lacks what its own `presence` requires -- so a permissive transport shape
+    cannot put an uncitable claim into a contract whose basis is citation.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            # One DECLARED property holding the open map, mirroring the legacy
+            # driver's `fields`. A top-level object whose only content is
+            # `additionalProperties` does not survive claude-cli's tool-input
+            # encoding: with no declared property the argument arrives as a
+            # string rather than an object and the schema rejects it, which the
+            # model itself reported -- "the argument keeps arriving as a string
+            # rather than an object, so the schema rejects it every time" --
+            # while the envelope still came back subtype='success',
+            # is_error=False with structured_output null. Reproduced directly
+            # against claude-cli on 2026-08-20 before this wrapper was added.
+            "fields": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "presence": {
+                            "enum": ["asserted", "explicitly_absent",
+                                     "not_mentioned", "printed_but_blank"],
+                        },
+                        # `value`, `page`, `quote` and `reason` are legitimately
+                        # nullable, so they carry no `type` here -- see the ajv
+                        # note above. The local gate enforces their real shapes.
+                        "value": {},
+                        "page": {},
+                        "quote": {},
+                        "reason": {},
+                        "complete": {"type": "boolean"},
+                        "unambiguous": {"type": "boolean"},
+                    },
+                    "required": ["presence"],
+                },
+            },
+        },
+        "required": ["fields"],
+    }
+
+
+def _document_label(document_kind: str | None, document_type: str | None) -> str:
+    """How the prompt names the document it is asking the model to read."""
+    if document_kind:
+        return f"form kind: {document_kind}"
+    if document_type:
+        return f"document type: {document_type}"
+    return "form kind: unknown"
+
+
+def build_prompt(
+    *,
+    document_id: str,
+    document_kind: str | None,
+    pages: Sequence[Mapping[str, Any]],
+    field_rows: Sequence[Mapping[str, Any]],
+    document_type: str | None = None,
+) -> str:
+    """One prompt covering every field this document is responsible for.
+
+    `document_kind` is the fine MEDICAL form kind; `document_type` is the
+    coarse manifest type. Stage 3-a reads documents that have only the latter
+    -- a 법률의견서 has no medical kind at all -- and naming such a document
+    "form kind: unknown" would tell the model nothing about what it is reading.
+    """
+    field_lines = []
+    for row in field_rows:
+        hint = _VALUE_SHAPE_HINT.get(row.get("value_shape"), "a short phrase")
+        # The document is Korean; the field's Korean name is what its heading
+        # actually prints. Naming only the English label made the model bridge
+        # "Disability rate stated by an existing assessment" to a form line
+        # reading `노동능력상실율(%)` on its own -- on CASE_049/DOC_012 it did
+        # not, and returned not_mentioned for the rate, the McBride standard
+        # and the 영구/한시 line while correctly extracting four other fields
+        # from the same 773 characters. `label_ko` was in the config all along
+        # and simply never reached the prompt.
+        names = row.get("label", row["field_id"])
+        if row.get("label_ko"):
+            names = f'{names} / {row["label_ko"]}'
+        line = f'- "{row["field_id"]}" ({names}): {hint}'
+        if row.get("notes"):
+            line += f"\n    NOTE: {row['notes']}"
+        field_lines.append(line)
+
+    body = "\n\n".join(
+        f"<<<PAGE page={page['page']}>>>\n{page['text']}" for page in pages
+    )
+
+    return f"""You are reading ONE document from a Korean insurance claim file and
+extracting only the fields listed below.
+
+Document: {document_id} ({_document_label(document_kind, document_type)})
+
+Extract exactly these fields:
+{chr(10).join(field_lines)}
+
+Rules, all of which matter more than filling the fields in:
+
+1. Every field gets a `presence` verdict, and the three are different facts:
+   - "asserted"          this document states a value for the field.
+   - "explicitly_absent" this document states the thing is NOT present --
+                         "골절 소견 없음", "특이소견 없음", "수술 시행하지 않음".
+                         This is a FINDING, not a blank.
+   - "printed_but_blank" this document PRINTS the field -- a form label, a
+                         table row, a checkbox line -- and the cell is empty.
+                         The item was raised and nobody filled it in.
+   - "not_mentioned"     this document simply does not discuss the field.
+   Do not guess, and do not carry a value over from general knowledge.
+2. "asserted" needs `value`, `page`, and `quote`. "explicitly_absent" needs
+   `page` and `quote` too -- the quote is the sentence stating the absence --
+   plus a short `reason`; it carries NO `value`. "printed_but_blank" is the
+   same shape: quote the PRINTED LABEL or the empty row itself, and carry no
+   `value`. "not_mentioned" carries none of them: there is nothing to cite
+   when a document says nothing.
+3. Every quote must appear on the page you name CHARACTER FOR CHARACTER. Do not
+   normalise spacing, fix a typo, expand an abbreviation, or translate. If you
+   cannot reproduce it exactly, downgrade to "not_mentioned" rather than
+   supplying an approximate quote.
+4. Never infer the accident narrative from clinical content. A diagnosis, an
+   injured body part, or an operation name does NOT establish how the injury
+   happened. Accident circumstances come only from a record that states them:
+   접수 사고내용, 초진기록, 응급실기록, 사고 경위가 직접 적힌 진단서, 사고 경위가 직접 적힌 기타 기록.
+5. `complete` is false when the document states only part of the value.
+   `unambiguous` is false when THIS PAGE could support more than one reading of
+   the value -- two candidate values printed side by side, an abbreviation the
+   page never expands, a figure whose label does not say which quantity it is.
+   Both default to true.
+
+   These are not hedges. A value flagged either way is NOT published: the field
+   reports that no trusted value was established, and your quote reaches a
+   human only as an item to go and check. So set them false when the PAGE
+   really is unsettled, and leave them true when it is not:
+
+   - A printed label with one value under it is unambiguous. "병 명 | 우측
+     견봉돌기의 골절, 폐쇄성" is not made ambiguous by the possibility that
+     another document says something else -- you are reading one document, and
+     comparing across documents is a later stage's job.
+   - A complete sentence stating the value is complete, even when it is not
+     inside the form field you expected. "본 장해는 영구 장해임" written in the
+     소견 block fully states the 영구·한시 distinction; the form having no
+     checkbox for it does not make the reading partial.
+   - Being unsure whether the value belongs to THIS FIELD is not ambiguity
+     about the value. If the page states something else, report
+     `not_mentioned` for the field rather than asserting a value you then flag.
+
+   Flag `unambiguous: false` when the page itself offers a choice you cannot
+   settle -- five codes listed under 질병분류기호 with no 주상병 marked, two
+   different dates on one row. That is the case these flags exist for.
+6. A blank cell is NOT a stated absence. "| 기왕증 | |" -- a printed row whose
+   cell is empty -- is `printed_but_blank`, never `explicitly_absent`: nobody
+   said there was no prior history, they just did not write anything. And it is
+   not `not_mentioned` either, because the form did raise the item. Report it
+   as blank rather than reading anything into the silence.
+7. A stated absence is NOT the boolean false. For a yes/no field, "수술을
+   시행하지 않았다" is `explicitly_absent` with that sentence quoted -- not
+   `asserted` with `value: false`. The distinction is what lets a reader tell a
+   recorded negative finding from a value someone computed.
+
+Return one JSON object keyed by field id, and nothing else.
+
+Document text:
+{body}
+"""
+
+
+def _value_is_publishable(value: Any) -> bool:
+    """Whether this value can survive the contract's `value` schema.
+
+    Mirrors `claim_analysis_result.schema.json#/$defs/value`, which accepts a
+    non-empty string, a number, a boolean, a non-empty array of non-empty
+    strings, or a period object whose `start` is a real date (`end` may be
+    null). Checking here rather than only at write time is what keeps ONE bad
+    field from failing a stage whose provider work is already paid for.
+
+    Deliberately STRICTER than the schema in exactly one place: the schema
+    enforces `minLength: 1`, so a whitespace-only string passes it, while this
+    rejects it. A value of "   " carries no fact and would print as an empty
+    cell in the report, so dropping it leaves the field honestly unresolved
+    rather than publishing a blank as an answer. Any other divergence is a
+    defect -- the two are compared case-by-case in
+    `test_value_guard_matches_the_contract_schema`.
+    """
+    if isinstance(value, bool) or isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return bool(value) and all(
+            isinstance(item, str) and item.strip() for item in value)
+    if isinstance(value, dict):
+        if set(value) - {"start", "end"}:
+            return False
+        start, end = value.get("start"), value.get("end")
+        if not isinstance(start, str) or not start.strip():
+            return False
+        return end is None or (isinstance(end, str) and bool(end.strip()))
+    return False
+
+
+def parse_result(
+    structured: Mapping[str, Any] | None,
+    field_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, dict]:
+    """Normalise one document read into {field_id: {presence, ...}}.
+
+    Three outcomes survive, and they are not interchangeable:
+
+    * `asserted` -- a value with a citable page and quote.
+    * `explicitly_absent` -- no value, but the sentence stating the absence is
+      cited. The caller records it as a real observation; it does not satisfy
+      the field's search, because a later source may still assert a value.
+    * dropped -- `not_mentioned`, or a verdict missing what its own presence
+      requires. Silence produces nothing at all, and the caller turns the
+      absence of any reading into `unavailable`/`not_mentioned`.
+
+    Dropping the malformed cases is safe -- the field stays unresolved -- while
+    keeping them would put an uncitable claim into a contract whose entire
+    basis is citation.
+    """
+    if not structured:
+        return {}
+    # The transport schema wraps the field map in a declared `fields` property
+    # (see output_schema: a bare top-level open map does not survive claude-cli's
+    # tool-input encoding). Unwrap it, while still accepting a flat map so a
+    # result produced by the older shape is read rather than discarded.
+    if isinstance(structured.get("fields"), dict):
+        structured = structured["fields"]
+    known = {row["field_id"] for row in field_rows}
+    parsed: dict[str, dict] = {}
+    for field_id, payload in structured.items():
+        if field_id not in known or not isinstance(payload, dict):
+            continue
+        presence = payload.get("presence")
+        # Back-compatible with the older boolean shape, so an in-flight
+        # provider result is read rather than silently discarded.
+        if presence is None and "found" in payload:
+            presence = "asserted" if payload.get("found") else "not_mentioned"
+        if presence not in {"asserted", "explicitly_absent",
+                            "printed_but_blank"}:
+            continue
+
+        page, quote = payload.get("page"), payload.get("quote")
+        if not isinstance(page, int) or not isinstance(quote, str) or not quote.strip():
+            continue
+
+        if presence in {"explicitly_absent", "printed_but_blank"}:
+            # Both carry a quote and no value, and both are graded by the same
+            # bar above: an ungrounded claim is dropped rather than repaired.
+            # They stay separate because they say different things about the
+            # SOURCE -- one is the form asserting the thing is not present, the
+            # other is the form raising the item and nobody filling it in.
+            default_reason = (
+                "the source states this is not present"
+                if presence == "explicitly_absent"
+                else "the form prints this field and the cell is empty")
+            parsed[field_id] = {
+                "presence": presence,
+                "page": page,
+                "quote": quote,
+                "reason": payload.get("reason") or default_reason,
+            }
+            continue
+
+        value = payload.get("value")
+        if value is None or not _value_is_publishable(value):
+            # A structurally invalid value is dropped here, exactly like an
+            # unverifiable quote. It must not reach the contract: the schema
+            # rejects it at write time, which fails the whole stage AFTER every
+            # provider call is paid for (CASE_9412, 2026-08-26 -- a 진단서
+            # stating `수술 후 약 8(팔)주 간의 안정가료` produced
+            # {"start": null, "end": null} for treatment_period, and two such
+            # fields killed the write). Dropping leaves the field unresolved,
+            # which is honest and recoverable; publishing kills the run.
+            continue
+        parsed[field_id] = {
+            "presence": "asserted",
+            "value": value,
+            "page": page,
+            "quote": quote,
+            "complete": bool(payload.get("complete", True)),
+            "unambiguous": bool(payload.get("unambiguous", True)),
+        }
+    return parsed
+
+
+def make_reader(
+    provider,
+    pages_by_document: (
+        Mapping[str, Sequence[Mapping[str, Any]]]
+        | Callable[[str], Sequence[Mapping[str, Any]]]
+    ),
+):
+    """An `extract(document_id, kind, field_rows)` bound to a real provider.
+
+    Returned as a closure so the driver's ordering logic stays testable with a
+    plain function in place of a provider.
+
+    `document_type` is optional and used only to name a document the prompt
+    would otherwise call "unknown" -- stage 3-a's sources (법률의견서, insurer
+    letter) carry no medical form kind.
+    """
+
+    def extract(document_id: str, kind: str | None,
+                field_rows: Sequence[Mapping[str, Any]],
+                document_type: str | None = None) -> dict[str, dict]:
+        pages = (
+            pages_by_document(document_id)
+            if callable(pages_by_document)
+            else pages_by_document.get(document_id)
+        ) or []
+        if not pages or not field_rows:
+            return {}
+
+        # Rule-first: a field whose Korean form prints a fixed label is a
+        # lookup, and asking a model to perform it costs a call and is not
+        # repeatable (see claim_analysis_deterministic for the measurement).
+        # Whatever the rules settle is subtracted from the prompt; anything
+        # they leave -- including every field with no rule at all -- is asked
+        # exactly as before. A document the rules settle ENTIRELY skips the
+        # provider call, which is why `settled` is checked before the request
+        # is built rather than merged into its result afterwards.
+        settled = deterministic.extract(pages, field_rows)
+        remaining = [row for row in field_rows
+                     if row.get("field_id") not in settled]
+        if not remaining:
+            return dict(settled)
+        field_rows = remaining
+
+        prompt = build_prompt(document_id=document_id, document_kind=kind,
+                              pages=pages, field_rows=field_rows,
+                              document_type=document_type)
+        result = provider.analyze_text_structured(
+            prompt, PROMPT_VERSION, output_schema(field_rows))
+        structured = result.structured_output
+        if structured is None and result.text:
+            try:
+                structured = json.loads(result.text)
+            except json.JSONDecodeError:
+                structured = None
+        # Deterministic readings win on collision, but there is none to win:
+        # a settled field was removed from `field_rows`, so `parse_result`
+        # drops any reading the model volunteered for it as an unknown field.
+        return {**parse_result(structured, field_rows), **settled}
+
+    return extract

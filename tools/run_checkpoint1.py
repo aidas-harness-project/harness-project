@@ -76,15 +76,24 @@ from llm_providers import (
 )
 from ocr_extract import build_ocr_providers, resolve_single_reader, run_ocr
 import segment_case as _segment_case
+import medical_document_routing as _medical_routing
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Mirrors common_component_output.schema.json#/$defs/document_type. This list is
+# shown to the classifier, so a code missing here is a bucket the model cannot
+# choose however clearly the page names it --  which is exactly how CASE_053's
+# 법률질의회신서 landed in `other` at confidence 0.95.
+# test_document_type_enum_copies_match_the_schema fails if they drift.
 DOCUMENT_TYPES = ["insurance_certificate", "insurance_policy", "application_form",
                    "diagnosis_certificate", "medical_record", "imaging_report",
-                   "receipt", "insurer_response", "other"]
+                   "receipt", "insurer_response", "legal_opinion",
+                   "legal_reference", "power_of_attorney", "accident_statement",
+                   "public_benefit_certificate", "other"]
 CLASSIFICATION_PROMPT_VERSION = "classification_v0.2"
+MEDICAL_CLASSIFICATION_PROMPT_VERSION = "classification_v0.3_medical_v0.1"
 
 # The three easily-confused Korean insurance forms all carry policy-like
 # language, so a bare type list collapses them into insurance_policy (CASE_030:
@@ -98,6 +107,16 @@ These three Korean forms look similar -- distinguish them by their defining mark
 - insurance_policy (보험약관): the full contract terms/clauses -- articles like 제N조, 지급사유, 면책, a table of contents of 특별약관. It is the rulebook, not a record of one contract.
 - insurance_certificate (증권서류): a "보험증권" issued as proof of ONE concluded contract -- a 계약번호/증권번호, 보험기간, 보장내용 with 가입금액 per coverage, 총보험료. It references the 약관 but is not the 약관 itself.
 - application_form (청약서류): a "청약서"/가입 신청서 the applicant fills in and signs to APPLY -- 청약일, applicant/피보험자 자필서명, 계약전 알릴의무 질문서, 상품설명서 cover pages. It precedes the contract; it is not the contract terms and not the issued certificate.
+
+Three non-medical types a liability case turns on -- distinguish them by WHO WROTE IT and WHAT IT DECIDES:
+- insurer_response (보험사 회신 공문): a letter the insurer sends -- 손해사정 업무 협조요청, 부지급/지급 통보, 조사 진행 안내. It may SUMMARIZE or attach a legal opinion ("법률자문 결과 ..."), but the letter itself is correspondence, not the legal analysis.
+- legal_opinion (법률의견서): the legal ANSWER itself -- 법률질의회신서, 법률자문 회신, a 제목 like "[시설소유자배상책임] ...". It cites 민법 조문 (제750조, 제758조) and 대법원 판례, works through 질의사항 in order, and ends in a reasoned verdict ("... 배상책임이 있다고 판단됩니다" / "... 부담하지 않는다고 판단됩니다"). Classify it here whichever side commissioned it -- both parties' opinions are evidence, and the 수신/발신 block is often masked.
+- legal_reference (법률참고자료): published reference material a party ATTACHED rather than authored -- a court's 위자료 산정기준표, a 노동능력상실률/맥브라이드 표, a 판례 모음. It states general standards with no 질의 and no verdict about THIS accident. Disability-rate and 위자료 calculation cite it.
+
+Three administrative types, distinguished by WHO ISSUED IT:
+- power_of_attorney (위임장): the claimant's mandate authorising someone to act -- 위 임 장 as a heading, 위임인/수임인 blocks, a 보험업법 제188조 reference, the scope of delegated 손해사정 업무. It grants authority; it states no fact about the accident or the injury.
+- accident_statement (사고경위서): a PARTY's own written account of how the accident happened -- 사 고 경 위 서 as a heading, a first-person narrative, a signature. It is evidence ABOUT the event, never an authority on it: it is what someone says happened, which is why it is not a medical_record and not a legal_opinion.
+- public_benefit_certificate (공적급여 지급확인원): a STATE body's record of benefits actually paid -- 근로복지공단's 보험급여 지급확인원, a 교통사고사항 및 지급결의확인서, 국민건강보험공단 급여내역. It certifies what a public scheme already paid, which is what a 산재 or a 공제 finding rests on. Not an insurer's letter (that is insurer_response) and not a hospital's bill (that is receipt).
 
 Reply with ONLY a JSON object, no other text, in exactly this shape:
 {{"predicted_document_type": "<one of the types above>", "document_type_label": "<Korean display label>",
@@ -137,16 +156,36 @@ def _write_contract(case_id, filename, data, schema_name, held_by, run_id):
     return target
 
 
-def classify_document(text: str, classifier=None) -> dict:
+def classify_document(text: str, classifier=None, routing_config: dict | None = None) -> dict:
     """Classify already-transcribed text through the configured provider.
 
     Fails loud on an unparseable response -- same fail-safe discipline as
     ocr_extract.compare(), not a silent guess.
+
+    Provider resolution goes through `build_classifier_provider`, the same
+    ladder every other classifier call site uses. It used to build
+    `ProviderConfig(DEFAULT_PROVIDER)` here directly, which skipped not only
+    that ladder but `parse_provider_config`'s own env read -- so no environment
+    variable could reach this path at all and the harness default always won.
+    Measured on CASE_7077 (2026-08-26): a shell exporting
+    HARNESS_LLM_PROVIDER=claude-cli still reached openrouter and failed
+    `openrouter requires OPENROUTER_API_KEY` on two attempts, until a third
+    passed --provider explicitly. A handed-in `classifier` still wins, which is
+    how run_stage2.py's --classifier-provider keeps governing.
     """
-    selected_classifier = classifier or build_provider(ProviderConfig(DEFAULT_PROVIDER), root=ROOT)
+    selected_classifier = classifier or build_classifier_provider()
+    selected_routing = (
+        routing_config if routing_config is not None
+        else _medical_routing.load_routing_config()
+    )
+    medical_enabled = _medical_routing.routing_enabled(selected_routing)
     prompt = CLASSIFY_PROMPT_TEMPLATE.format(types=", ".join(DOCUMENT_TYPES), text=text[:3000])
+    prompt_version = CLASSIFICATION_PROMPT_VERSION
+    if medical_enabled:
+        prompt += _medical_routing.medical_prompt_contract(selected_routing)
+        prompt_version = MEDICAL_CLASSIFICATION_PROMPT_VERSION
     try:
-        provider_result = selected_classifier.classify_document(prompt, CLASSIFICATION_PROMPT_VERSION)
+        provider_result = selected_classifier.classify_document(prompt, prompt_version)
     except ProviderExecutionError as exc:
         sys.exit(f"error: classification provider failed: {exc}")
     raw = provider_result.text.strip()
@@ -328,9 +367,21 @@ def build_classifier_provider(
     return build_provider(ProviderConfig(provider_name, model_name), env=source_env, root=ROOT)
 
 
+# What a role's label says when the run recorded no provider metadata for it.
+# NOT a provider name. It used to be the literal "claude-cli", which was a
+# plausible guess while claude-cli was the default and a lie the moment it was
+# not -- and it was already a lie under --single-reader, where reader_b and the
+# comparator never run: a real single-reader run recorded
+# `vision_model_name: "claude-cli; comparator=claude-cli"`, naming a provider
+# that made no call, in the same contract whose `cross_validation_mode` says no
+# cross-validation happened. harness-guardrails-dev is explicit that a run must
+# never be made to look like one that did not happen.
+PROVIDER_LABEL_UNRECORDED = "not_recorded"
+
+
 def _provider_label(provider_info: dict | None) -> str:
     if not provider_info:
-        return "claude-cli"
+        return PROVIDER_LABEL_UNRECORDED
     provider_name = provider_info.get("provider_name") or "unknown-provider"
     model_name = provider_info.get("model_name") or "unknown-model"
     return f"{provider_name}:{model_name}"
@@ -1006,12 +1057,29 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
     classification_result_{doc_id}.json, update document_manifest.json.
     Called both by run_checkpoint1() (no disagreement) and
     apply_disagreement_resolution() (once every page is resolved)."""
+    routing_config = _medical_routing.load_routing_config()
+    medical_enabled = _medical_routing.routing_enabled(routing_config)
     classification = inherited_classification(case_id, doc_id)
     if classification is None:
-        classification = printed_title_classification(case_id, doc_id)
+        title_candidate = printed_title_classification(case_id, doc_id)
+        if title_candidate is not None and medical_enabled:
+            title = title_candidate.get("_title_classified")
+            fine_title = _medical_routing.classification_from_title(title, routing_config)
+            if fine_title is None:
+                # The title settles only the broad legacy type. Fine-grained
+                # routing remains ambiguous, so use the one normal classifier
+                # call instead of inventing a medical kind from a genre label.
+                title_candidate = None
+        classification = title_candidate
     if classification is None:
-        classification = (classify_document(first_page_text, classifier) if classifier is not None
-                          else classify_document(first_page_text))
+        if medical_enabled:
+            classification = classify_document(
+                first_page_text, classifier, routing_config=routing_config
+            )
+        else:
+            # Preserve the pre-v0.1 call contract exactly while the gated
+            # feature is disabled, including existing test/provider adapters.
+            classification = classify_document(first_page_text, classifier)
     ocr_result = json.loads((case_dir(case_id) / f"ocr_result_{doc_id}.json").read_text(encoding="utf-8"))
     provider_metadata = classification.get("_provider_metadata", {})
 
@@ -1026,6 +1094,29 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         "evidence_references": [{"page": 1, "quote": classification.get("quote", "")}],
         "review_required": False,
     }
+    if medical_enabled:
+        title = classification.get("_title_classified")
+        inherited_label = classification.get("_inherited_label")
+        try:
+            if title:
+                medical_classification = _medical_routing.classification_from_title(
+                    title, routing_config
+                )
+                if medical_classification is None:
+                    raise ValueError(
+                        "printed-title path reached publication without a fine medical kind"
+                    )
+            elif classification.get("_inherited_from"):
+                medical_classification = _medical_routing.not_medical_classification(
+                    quote=inherited_label
+                )
+            else:
+                medical_classification = _medical_routing.classification_from_model(
+                    classification, routing_config
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            sys.exit(f"error: invalid fine-grained medical classification: {exc}")
+        classification_result["medical_classification"] = medical_classification
     classification_result["classification_text_source"] = text_source
     if text_source == "raw_page_text":
         # Not an error -- a document not yet redacted still has to be
@@ -1046,8 +1137,7 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         classification_result["classification_source"] = "printed_form_title"
         classification_result["evidence_references"] = [{
             "page": 1,
-            "quote": (f"printed form title {title_classified!r}: the approved "
-                      "text-anchor split cut this document's boundary on it"),
+            "quote": title_classified,
         }]
     inherited_from = classification.get("_inherited_from")
     if inherited_from:
@@ -1057,8 +1147,7 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
         classification_result["inherited_from_document_id"] = inherited_from
         classification_result["evidence_references"] = [{
             "page": 1,
-            "quote": (f"inherited from {inherited_from}: deterministic text-anchor slice of an "
-                      "already-classified insurance_policy bundle; no classifier call made"),
+            "quote": inherited_label,
         }]
     _write_contract(case_id, f"classification_result_{doc_id}.json", classification_result,
                      "classification_result.schema.json", held_by, run_id)
@@ -1077,6 +1166,8 @@ def _finish_checkpoint1(case_id, doc_id, run_id, held_by, first_page_text, class
             classification["predicted_document_type"]),
         "non_text_verification": None,
     }
+    if medical_enabled:
+        fields["medical_classification"] = classification_result["medical_classification"]
     ok, message = _dao.patch_manifest_document(case_id, doc_id, fields, held_by, run_id)
     if not ok:
         sys.exit(f"error: {message}")
@@ -1597,6 +1688,24 @@ def main(argv=None):
             "throughput run with P8 off, or --on-disagreement for a dual-read run "
             "that defers the human adjudication."
         )
+    if args.command == "run":
+        # Preflight the readers, which this command certainly calls. Deliberately
+        # NOT applied to classify-only below: that path builds its provider
+        # lazily because a printed form title settles most document types with
+        # no model call, and demanding credentials up front would break a run
+        # that legitimately never calls a model.
+        try:
+            build_ocr_providers(
+                reader_a_name=args.reader_a, reader_b_name=args.reader_b,
+                comparator_name=args.comparator,
+                reader_a_model=args.reader_a_model,
+                reader_b_model=args.reader_b_model,
+                comparator_model=args.comparator_model,
+                env=os.environ)
+        except ProviderConfigError as exc:
+            sys.exit(f"error: checkpoint 1 readers/comparator cannot be built, "
+                     f"so nothing was run: {exc}")
+
     if args.command == "classify-only":
         # The provider is built lazily: a printed form title decides most types
         # with no model call, and constructing one would resolve credentials for

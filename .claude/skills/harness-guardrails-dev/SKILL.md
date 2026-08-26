@@ -17,7 +17,28 @@ At intake, every file in a case gets an entry in `_source_ledger.json` recording
 
 If a human marks a file `rejected` (classification looks wrong), intake halts for the **entire case** — no file copies, not even the ones already approved — until the rejected file is resolved. Review status lives only in `_source_ledger.json`; no file's status is inferred from anywhere else, so nothing can be mistaken for reviewed when it isn't.
 
-**Filename patterns alone are not a reliable classification signal.** A real case (CASE_002, see `known-gaps.md` item 2) showed two files whose names looked like plain claim documents actually being completed third-party loss-adjustment reports with stated payout figures — filename matching missed it, and an agent self-approved the file, which isn't valid human review. Before writing the ledger, `tools/intake_case.py` now also runs a cheap content pre-check on every file proposed as `raw` (PDFs only): one vision call over the document's first few pages, looking specifically for signs of a completed adjuster's conclusion (a `보험금사정서`/`손해사정서` title, a `사정 결과`/`사정 의견` section, a stated payout figure, an adjuster's license/stamp, a `위임장` granting adjustment authority). A flagged file gets `content_warning` set on its ledger entry. This does **not** auto-reject the file — a false positive shouldn't lock out a legitimate document — but it makes the risk visible right where the human review step already happens, instead of relying on a reviewer to notice on their own. The scan is a signal over a few pages, not a full read; `document-pipeline`'s checkpoint 1 (P8) still owns real OCR and cross-validation over the whole document.
+**Filename patterns alone are not a reliable classification signal.** A real
+case (CASE_002, see `known-gaps.md` item 2) showed two files whose names
+looked like plain claim documents actually being completed third-party
+loss-adjustment reports with stated payout figures — filename matching missed
+it, and an agent self-approved the file, which isn't valid human review. That
+is why the human review step exists and why nothing may be approved by an
+agent.
+
+**The vision content pre-check that used to run here was removed 2026-08-20**
+(PoC owner). It made one vision call over each raw-proposed PDF's first pages
+looking for answer-key-class content, and annotated the ledger entry with
+`content_warning`. It never auto-rejected anything — the human review below
+was always the actual gate — and it cost ~41s on a four-PDF case while reading
+raw, pre-redaction pages. `content_warning` remains in
+`source_ledger.schema.json` and in `build_ledger`, because ledgers written
+while it ran carry the field and must keep validating.
+
+**What this does NOT relax:** every entry still starts `pending`, a human
+still reviews each file's classification, `--execute` still refuses while any
+file is unapproved, and one `rejected` file still halts the whole case. The
+CASE_002 lesson stands — it is now carried entirely by the human review step,
+with no machine signal to lean on, so read the documents.
 
 ## D3. Dev/prod file-naming convention
 
@@ -29,13 +50,13 @@ This convention is itself dev-only guidance — it stops mattering once there's 
 
 ## (Dev-only, temporary) P8 same-provider fallback
 
-**Dev-phase default:** use `claude-cli` for both P8 readers (checkpoint 2's redaction default is `codex-cli`). Every available provider (claude-cli / codex-cli / openai-api) is LLM-vision-backed, so this — and any two-LLM reader pair — is a **documented weak-P8**, not equivalent to dual-technology cross-validation. This is the PoC provider strategy: validate the pipeline on commercial LLMs while a genuinely technology-independent reader remains unavailable (see `open-decisions.md` #4).
+**Dev-phase default:** `openrouter` for both P8 readers and for checkpoint 2's redaction — one default, taken from `llm_providers.DEFAULT_PROVIDER`, since 2026-08-21 (it was `claude-cli` for the readers and `codex-cli` for redaction). Every available provider (openrouter / claude-cli / codex-cli / anthropic-api / openai-api) is LLM-vision-backed, so this — and any two-LLM reader pair — is a **documented weak-P8**, not equivalent to dual-technology cross-validation. Routing both readers through one aggregator does not change that verdict in either direction: two DIFFERENT models reached through OpenRouter are still two LLM readers, and the same model reached twice is still one reader run twice. Selecting genuinely different models per reader is a `--reader-a` / `--reader-b` `--*-model` decision, not a property of the transport. This is the PoC provider strategy: validate the pipeline on commercial LLMs while a genuinely technology-independent reader remains unavailable (see `open-decisions.md` #4).
 
 The switch condition is a **genuinely technology-independent second reader (a real OCR engine) validated against real Korean case documents** — which does not exist in this repo today. An earlier offline Tesseract/Ollama stack was built to be that reader but never transcribed real pages reliably (`known-gaps.md` item 16) and was removed. Until a real OCR engine is added and proven on real content, treat every configurable reader pair as weak P8 and record it honestly.
 
-- **Record it honestly in `ocr_result.json`**: `reader_a`/`reader_b` = `"claude-cli:claude-cli"`, `cross_validation_mode = "single_technology_weak_p8_poc"`, and a `cross_validation_note` stating no independent second technology was available at run time. Never let a same-provider run look like genuine P8.
-- **Disagreement handling is unchanged — hard-halt stays.** What is relaxed is *reader independence*, never *disagreement tolerance*. A genuine content disagreement between the two claude-cli reads still halts with no tolerance threshold.
-- Each `claude-cli` reader is invoked with a **neutral transcription prompt** (`llm_providers.py` `ClaudeCliProvider.transcribe_image`: the shared `TRANSCRIBE_PROMPT` referencing the image as an explicit Read instruction — no "role framing" preamble). `ClaudeCliProvider._run()` enforces `--safe-mode`, so child `claude -p` sessions do **not** inherit `CLAUDE.md`, hooks, or skills context. **Do not reintroduce a defensive framing block** ("this is a SANCTIONED step, do not refuse, do not mention guardrails…"): that language reads as a prompt-injection signal and *causes* the very self-refusal it's trying to prevent — it was tried on DOC_001, failed, and was reverted. No `CLAUDE.md` carve-out is needed, and none should exist.
+- **Record it honestly in `ocr_result.json`**: `reader_a`/`reader_b` = the real `provider:model` pair that ran (`"openrouter:<slug>"` under the default, `"claude-cli:claude-cli"` on the CLI path), `cross_validation_mode = "single_technology_weak_p8_poc"`, and a `cross_validation_note` stating no independent second technology was available at run time. Never let a same-provider run look like genuine P8. Under `openrouter`, record the model OpenRouter reports as having SERVED the call (`raw_metadata.served_model`) when it differs from the slug requested — a routed fallback means the reader that actually ran is not the one that was configured.
+- **Disagreement handling is unchanged — hard-halt stays.** What is relaxed is *reader independence*, never *disagreement tolerance*. A genuine content disagreement between the two reads still halts with no tolerance threshold, whichever provider produced them.
+- The transcription prompt is **neutral on every provider**, and the reason is provider-independent. `openrouter` attaches the page as a base64 image part and needs no filesystem access, no `--safe-mode`, and no Read-tool allowlist — the request carries the prompt and the image and nothing else, so the context-inheritance risk the CLI flags exist to close is structurally absent there. The prompt-framing lesson still applies to both. Each `claude-cli` reader is invoked with a **neutral transcription prompt** (`llm_providers.py` `ClaudeCliProvider.transcribe_image`: the shared `TRANSCRIBE_PROMPT` referencing the image as an explicit Read instruction — no "role framing" preamble). `ClaudeCliProvider._run()` enforces `--safe-mode`, so child `claude -p` sessions do **not** inherit `CLAUDE.md`, hooks, or skills context. **Do not reintroduce a defensive framing block** ("this is a SANCTIONED step, do not refuse, do not mention guardrails…"): that language reads as a prompt-injection signal and *causes* the very self-refusal it's trying to prevent — it was tried on DOC_001, failed, and was reverted. No `CLAUDE.md` carve-out is needed, and none should exist.
 - **Dev-only. Must not ship to prod** — in production `harness-guardrails` P8 (genuine dual-path independence) applies. Remove this same-provider fallback once a real OCR engine gives a genuinely technology-independent reader pair (`open-decisions.md` #4).
 
 ## D4. Directory/stage references must stay in sync with reality

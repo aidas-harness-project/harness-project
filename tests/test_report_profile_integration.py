@@ -194,8 +194,14 @@ def test_provisional_self_injury_profile_requires_review():
 
 def test_every_draft_template_declares_its_report_profile_contract():
     templates = json.loads(TEMPLATE_REGISTRY.read_text(encoding="utf-8"))["templates"]
+    # Screening templates are excluded by CATEGORY, not by name. They are not
+    # draft reports and carry no report-family/claim-mechanism contract; keying
+    # the exclusion to the single string "screening_report" meant the next
+    # screening template added (the selective lane's) was silently treated as a
+    # draft template and failed on a field it should never have.
     draft_templates = {
-        key: value for key, value in templates.items() if key != "screening_report"
+        key: value for key, value in templates.items()
+        if not key.startswith("screening_report")
     }
 
     assert draft_templates

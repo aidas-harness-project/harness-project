@@ -253,7 +253,7 @@ def test_no_resume_ignores_an_existing_cache(monkeypatch, tmp_path):
 
 # ------------------------------------------------- default provider is usable --
 
-def test_default_redaction_provider_resolves_to_a_launchable_command():
+def test_default_redaction_provider_is_actually_reachable():
     """The default must be a provider that can actually start.
 
     codex-cli was the default until 2026-08-11, and on Windows it cannot be
@@ -262,9 +262,14 @@ def test_default_redaction_provider_resolves_to_a_launchable_command():
     a batch file needs a shell, not execve. An operator who passed no
     --provider got a FileNotFoundError instead of a redaction.
 
-    Asserting the constant's spelling would only restate the code. This builds
-    the provider the default actually selects and checks the command it would
-    launch is a real executable file, which is the property that broke.
+    Asserting the constant's spelling would only restate the code, so this
+    builds the provider the default actually selects and checks it is reachable.
+    What "reachable" means depends on the transport, and the default moved to
+    an HTTP one (openrouter) on 2026-08-21: a CLI provider must resolve to a
+    real executable rather than a shim, while an HTTP provider has no command
+    to launch and is reachable when it built at all -- build_provider raises
+    ProviderConfigError at SELECTION for a missing key or model, which is the
+    same failure the executable check was guarding against, just earlier.
     """
     import shutil
     from pathlib import Path as _Path
@@ -274,7 +279,11 @@ def test_default_redaction_provider_resolves_to_a_launchable_command():
     provider = build_provider(
         ProviderConfig(provider_name=rd.DEFAULT_REDACTION_PROVIDER))
     command = getattr(provider, "command", None)
-    assert command, "the default provider must expose the command it launches"
+    if command is None:
+        assert getattr(provider, "base_url", None), (
+            f"default provider {rd.DEFAULT_REDACTION_PROVIDER!r} launches no "
+            "command and exposes no base_url -- it is unreachable either way")
+        return
 
     resolved = shutil.which(command) or (command if _Path(command).exists() else None)
     assert resolved, (

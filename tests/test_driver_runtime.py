@@ -113,3 +113,88 @@ def test_structured_output_gets_exactly_one_driver_owned_correction():
 
     assert value == {"ok": True}
     assert provider.calls == 2
+
+
+# --- provider token counts are recorded, never derived -----------------------
+
+class _UsageResult:
+    def __init__(self, output, usage=None):
+        self.structured_output = output
+        self.raw_metadata = {"usage": usage} if usage is not None else {}
+
+
+class _UsageProvider:
+    provider_name, model_name = "claude-cli", "claude-sonnet-5"
+
+    def __init__(self, *results):
+        self._results = list(results)
+        self.calls = 0
+
+    def analyze_text_structured(self, prompt, prompt_version, output_schema):
+        self.calls += 1
+        return self._results.pop(0)
+
+
+def test_call_usage_copies_scalar_counters_and_lifts_thinking_tokens():
+    """Copied verbatim from the provider's own report. The nested per-model and
+    per-iteration breakdowns are CLI internals and are dropped; thinking tokens
+    are lifted out of `output_tokens_details` because they are a load-bearing
+    counter for explaining a slow call."""
+    result = _UsageResult({}, {
+        "input_tokens": 2, "output_tokens": 52,
+        "cache_creation_input_tokens": 26796, "cache_read_input_tokens": 0,
+        "output_tokens_details": {"thinking_tokens": 1234},
+        "service_tier": "standard",
+        "model_usage": {"claude-sonnet-5": {"inputTokens": 2}},
+    })
+    usage = driver_runtime.call_usage(result)
+    assert usage["input_tokens"] == 2
+    assert usage["cache_creation_input_tokens"] == 26796
+    assert usage["thinking_tokens"] == 1234
+    assert "model_usage" not in usage, "nested CLI internals must not be persisted"
+    assert "service_tier" not in usage, "non-numeric fields are not counters"
+
+
+def test_call_usage_returns_none_when_the_provider_reported_nothing():
+    """No usage is 'not measured', which must stay distinguishable from zero."""
+    assert driver_runtime.call_usage(_UsageResult({})) is None
+    assert driver_runtime.call_usage(object()) is None
+
+
+def test_both_calls_are_recorded_when_p4_correction_runs():
+    """A run that needed the correction paid for TWO calls; reporting them as
+    one would understate the cost of a stage that had to be corrected."""
+    usage_out = []
+    provider = _UsageProvider(
+        _UsageResult({"bad": True}, {"output_tokens": 10}),
+        _UsageResult({"ok": True}, {"output_tokens": 20}),
+    )
+
+    def validate(value):
+        if value.get("bad"):
+            raise ValueError("nope")
+        return value
+
+    out = driver_runtime.structured_with_one_correction(
+        provider=provider, prompt="p", prompt_version="v", output_schema={},
+        validate=validate, usage_out=usage_out)
+
+    assert out == {"ok": True}
+    assert provider.calls == 2
+    assert [entry["output_tokens"] for entry in usage_out] == [10, 20]
+
+
+def test_usage_is_outside_the_reuse_fingerprint():
+    """Recording a token count must never change whether a candidate can be
+    reused -- otherwise measuring a run would invalidate it."""
+    common = dict(case_id="CASE_9001", run_id="RUN_1", stage="claim_analysis",
+                  unit_id="m1", candidate_id="c1", input_digests={"a": "0" * 64},
+                  prompt_version="v", response_schema_version="s",
+                  provider_name="claude-cli", model_name="claude-sonnet-5",
+                  result={"x": 1})
+    without = driver_runtime.make_candidate(**common)
+    with_usage = driver_runtime.make_candidate(**common,
+                                               call_usage=[{"output_tokens": 99}])
+    assert with_usage["call_usage"] == [{"output_tokens": 99}]
+    assert with_usage["input_fingerprint"] == without["input_fingerprint"]
+    assert "call_usage" not in without, "an unmeasured run records no empty field"

@@ -32,6 +32,15 @@ the same pass.
 | 46 | PARTIAL | P8 billing-table disagreements: dpi rejected by measurement; reader stability still open |
 | 47 | OPEN | P8 correlated error observed live: both readers invented the same caption |
 | 48 | PARTIAL | Merge 3569d50 discarded parent2's dao.py wholesale; halves still inconsistent |
+| 56 | PARTIAL | Mid-document pages classified as documents -- detector built, 25 pairs found; merge step not built |
+| 58 | PARTIAL | Classification width 8 measured SLOWER than 4 on the real path; OCR width untested |
+| 59 | OPEN | The agent-executed stages never reach llm_providers, so the OpenRouter switch cannot cover them |
+| 60 | OPEN | No OpenRouter call has ever been made against the real service -- everything is verified statically |
+| 61 | OPEN | scan_intake_content has no production caller after D2's pre-check was removed |
+| 62 | OPEN | Half the failing test baseline is Windows-platform (O_NOFOLLOW/symlink), not logic |
+| 63 | RISK ACCEPTED | Ambiguous-kind medical documents stay unrouted (user decision 2026-08-26) |
+| 64 | OPEN | Two separately-issued 진단서 intaken as one document (CASE_7044 DOC_002) |
+| 65 | RESOLVED | CASE_7044 CONFLICT_1 note corrected by reviewer pyun 2026-08-26 |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
@@ -45,7 +54,13 @@ policies remain disabled with no approved clinical thresholds, real-case scope, 
 actors, or operator tokens. The capability is therefore not operationally activated.
 The authoritative closure conditions are tracked in
 `docs/medical-appropriateness-screening-deferrals.md`; passing software tests does not
-close those clinical, privacy, identity, or deployment approvals.
+close those clinical, privacy, identity, or deployment approvals. That document's
+"How the medical path is actually switched off, and how it would be switched on"
+section (added 2026-08-18) records the mechanical side: which config file and which
+three independent checks reject a publication, why a configuration refusal leaves the
+stage `complete` rather than failed, and the order enabling would have to follow.
+Observed end to end on CASE_047, whose whole Phase 1 chain ran with medical
+publication refused and every downstream gate reporting `not_applicable`.
 
 ## 43. Policy reference-table reading order -- OPEN 2026-07-24
 
@@ -3676,3 +3691,795 @@ tests show the code runs, not that the medical judgments are right.
 *(Numbering note: two pre-existing items both claim 47 -- the P8 correlated-error
 item and the lock-poll item. Not renumbered here to avoid breaking citations to
 either; this item takes 48.)*
+
+## 50. Reduced P8 grades a liability case's two opposing opinions unequally
+
+Measured on CASE_701 (2026-08-21), a facility-liability case whose central
+dispute is two 법률의견서 reaching opposite conclusions.
+
+| document | side | ocr_quality | cross_validation_status |
+|---|---|---|---|
+| DOC_006 | claimant, 성립 | **high** | agreed |
+| DOC_008 | insurer, 불성립 | **low** | single_reader_no_cross_validation |
+| DOC_007 | insurer letter | **low** | single_reader_no_cross_validation |
+
+The grades are an artifact of HOW each document reached the pipeline, not of
+how reliable its text is: DOC_006 carried an embedded text layer and got a
+real dual read, while the insurer bundle was a scan run under
+`HARNESS_SINGLE_READER=1`. Case-wide the split is 6 high/agreed against 18
+low/single_reader.
+
+**Why it matters beyond one case.** A reviewer comparing two opinions sees one
+graded high and the other low, and the low one is the insurer's. Nothing in the
+report says the grades reflect scan-versus-embedded plus a throughput setting
+rather than transcription confidence, so the reduction quietly discounts one
+side of the exact question the case turns on. A screening report is meant to
+present a dispute neutrally.
+
+**Not a blocker for a plumbing run, and not a reason to distrust CASE_701's
+extraction** -- the quotes were verified verbatim against the served text like
+any other. It is a reason not to use a P8-reduced liability case as evaluation
+input, which `harness-guardrails` already says for other reasons, and a reason
+to consider surfacing the *cause* of an ocr_quality grade wherever the report
+shows two sources of one disputed fact.
+
+Open: whether the screening report should annotate a quality grade with its
+cause, or whether liability cases should force `--dual-read` regardless of the
+environment default.
+
+## 51. Section 3's citation path has no producer, so real cases cannot test it
+
+Found while confirming the section-3 fix on CASE_702 (2026-08-21).
+
+Section 3 of the screening report ("유형별 추가정보와 접수 상태") cites the
+evidence behind a filing status through `_mark`, matching every other section.
+The fix is correct and unit-tested, but **no case can exercise it**:
+
+* `run_screening_report.py` reads `filing_evidence_references` off each
+  `case_type_assessment` row (lines 305-309, consumed at 1129).
+* Nothing writes that key. `claim_analysis_case_types.py` builds the row with
+  `"filing_status": filing.get(case_type, "unknown")` from
+  `filing_status_by_type`, and never attaches references.
+* `filing_evidence_references` does not appear in
+  `claim_analysis_result.schema.json` at all.
+* The pipeline skill states outright that no stage produces a filing
+  declaration, so `filing_status` is `unknown` on every case -- CASE_700,
+  CASE_701 and CASE_702 all rendered four rows of 접수 확인 불가.
+
+So on CASE_702 section 3 published zero references and emitted zero markers.
+That is a pass, but it cannot distinguish "the fix works" from "the branch never
+ran". Only `test_screening_all_sections_cited.py` covers it, by supplying
+filed/not_filed rows with references synthetically.
+
+**Why this is a gap and not a nit.** This is the same shape the project has hit
+before (`raw_page_text`, `medical_review_adopted`): a field written by one side
+and read by none, or read by one side and written by none. The consumer looks
+correct in isolation and the defect stays invisible until something finally
+populates the key. When a filing producer is built, section 3's marking path
+executes for the first time on real data -- and that is the moment to re-check
+it, not to assume CASE_702 already proved it.
+
+Open: either wire a producer (intake records a 산재/자동차 접수 fact with its
+source), or drop `filing_evidence_references` from the consumer so the contract
+stops advertising evidence nothing supplies.
+
+## 52. The screening agent's judgement renders nowhere
+
+Measured on CASE_704 (2026-08-21), and true of every selective-lane run before it.
+
+`screening_report.json` carries the agent's whole contribution -- on CASE_704
+that is **7 warnings, 7 key_issues, and 9 review_points**. The rendered
+`screening_report.md` contains none of them. Verified by string search: no
+warning text and no "검토 포인트" heading appears in the markdown.
+
+This is structural, not a bug in the renderer. `templates/registry.json`
+defines `screening_report_selective` with exactly nine `heading_patterns` and
+`allow_extra_sections: false`, and none of the nine is an issues, review-points
+or warnings section. The template's own 「섹션별 생성 주체」 table nevertheless
+assigns 「중요도·배치·검토 포인트」 to the screening agent. So the stage
+dispatches an agent, pays for it (CASE_704: **391.4s and 117,993 tokens**), and
+the deliverable discards the result.
+
+What was lost on this case specifically: the warning that reduced P8 graded the
+두 법률의견서 unequally and a reader must not prefer the more legible side; the
+notice that `negligence_reasoning` was judged `not_material` on this run while
+CASE_702/703 confirmed it; and the framing that no line item means a payout
+decision until 성립 여부 is settled.
+
+A reviewer who reads only the .md -- which is the deliverable -- sees the facts
+and none of the cautions about how to read them.
+
+Open: either add a section to the template for the agent's judgement, or stop
+dispatching the agent for a stage whose output has no home. Doing neither means
+continuing to pay for judgement the deliverable throws away.
+
+## 53. `other` documents are never routed, and the pack's own numbers go unread
+
+Measured on CASE_712 (2026-08-21), a 16-page TA 손해사정서 segmented into 11
+children.
+
+DOC_012 is 「교통사고사항 및 지급결의확인서」 -- the insurer's own
+payment-decision confirmation. It states 진료비합계 19,730,710원 already paid,
+입원 만60일 / 통원 77일, plus 사고형태, 상해등급 and 장해등급. Stage 2 typed it
+`other` at 0.82 confidence, and the trace's disposition reads verbatim:
+
+    "disposition": "skipped", "wave": "not_read",
+    "reason": "no medical classification, so no route reaches it",
+    "field_ids": []
+
+Not read-and-empty: **never routed**. Zero of 56 fields cite it. Meanwhile §5
+of the screening report lists `medical_expense_itemization`,
+`medical_expense_receipt` and `pharmacy_payment_confirmation` as 미확인. The
+case holds the numbers; the type label hid them.
+
+The irony sharpens it: `traffic_accident` came back `applicable` on a medical
+record's narrative sentence ("비보호 좌회전 하다가 직진하는 차량과 부딪혀"),
+while the document literally titled 교통사고사항확인서 contributed nothing.
+
+**Why this is not just a classifier miss.** `other` is a real bucket -- some
+documents genuinely are miscellaneous -- but nothing downstream ever opens one,
+so a misclassification into `other` is silently terminal. CLAUDE.md already
+records this shape starving claim analysis on CASE_053. The routing config
+gives `other_medical` a read mode of `content`, but plain `other` is not a
+medical kind at all and reaches no route.
+
+Open, and genuinely a design question rather than a bug fix:
+* give `insurer_response`-adjacent administrative forms (지급결의확인서,
+  지급내역서) a type of their own, since they carry paid amounts and treatment
+  spans that several fields want; or
+* let a case-type-conditional round open `other` documents the way stage 3-a
+  opens `legal_opinion` for liability cases; or
+* accept it, and make the checklist say "the case holds an untyped document
+  that may be this kind" rather than 미확인 -- the reader can then ask for it.
+
+The third is the cheapest and is already half-built: the checklist's
+`ambiguous` reason string does point at an untyped document. It just does not
+name WHICH one, so a reviewer cannot act on it.
+
+## 54. `accident_date` was reported absent on a case that states it
+
+CASE_712 (2026-08-21). The screening report's §7 lists 사고일 as 미확인
+(`unavailable` / `not_mentioned`), and §1 prints 「사고일: 확인 불가」.
+
+DOC_002 p.1 states it: 「부상 (발병)일 | 2024년 11월 13일」, verified with
+`dao.py search-document-text CASE_712 DOC_002 "발병"`.
+
+This is **not** a routing gap, which is what makes it worth recording. The
+trace shows DOC_002 `disposition: read`, opened once for 11 routed fields, and
+`accident_date` itself stopped `sources_exhausted` after `documents_read: 4`.
+The document was read for this field and the extraction did not return the
+value on the page.
+
+Consequence: the report tells a 손해사정사 to go find a date the pack already
+contains, and 보험기간 / 소멸시효 / treatment-gap questions all hang off it.
+
+Open: whether the field's prompt or its route priority needs work, or whether
+「부상 (발병)일」 as a form-label variant of 사고일 is simply not in the
+extraction's vocabulary. Needs a targeted A/B on this page before changing
+anything -- a blind prompt edit would be guessing.
+
+## 55. Dates on a 진료비 내역 are billing columns, not stated dates
+
+Tested and reverted on 2026-08-22 (fix 1f5fc54, revert in the next commit).
+
+CASE_705 published `surgery_or_procedure_date` and `treatment_period` as
+unavailable while CASE_907, on identical source material, had 2023-12-05 and
+2024-06-28. The values exist only on the 진료비 세부산정내역 pages, which the
+selective lane blocks as cost documents. That much is confirmed: searching the
+whole case for "2024-06-28" returns one hit, on a receipt, and the surgical
+note records `Plan> admission, 내일 Op.` -- "surgery tomorrow", no date.
+
+**So the block was narrowed to let five date fields read a cost document on the
+last priority rung, and it recovered nothing.** Measured on CASE_713, same
+source as CASE_705/907:
+
+* `surgery_or_procedure_date`: `documents_read` 3 -> 9. The six receipts were
+  planned, opened, and asked. Still `sources_exhausted` / `not_mentioned`,
+  zero observations.
+* `provider_calls`: 7 -> 13. **+86% on the stage for zero fields recovered.**
+* `treatment_period` did become `asserted`, but from DOC_017 (입퇴원요약) at
+  rank 2, and the value is the admission span 2023-12-04~12-07 -- it stopped on
+  a trusted value before any receipt was consulted. The fix is not what
+  produced it.
+
+**Why it failed.** The receipt states dates as line-item columns
+(`2023-12-05 | KK052 | 정격주사(100ml~500ml) | 3,400 …`), attached to
+injections and drugs. Nothing on the page labels 2023-12-05 as the date of
+surgery. The extraction prompt asks for 수술·처치일 and the model correctly
+answers `not_mentioned`: inferring that a titanium-screw billing line dated
+2023-12-05 *is* the surgery date is precisely the inference the prompt forbids.
+CASE_907 got the value because a human-shaped legacy pass read all 19 pages
+together and made that cross-reference itself.
+
+Recovering these dates therefore needs a **reading strategy**, not a routing
+permission -- something that correlates a procedure code or drug name against
+the clinical narrative. That is a design decision with its own error modes
+(a billing date is the date of CHARGE, which is not always the date of care),
+so it is recorded here rather than attempted.
+
+Two further findings from the same experiment, worth keeping:
+
+* `imaging_date` **does not exist** in the routing config's 62 fields, and
+  `first_visit_date` is `activation: deferred`. The reverted fix named both.
+  Check a field id against the config before building routing around it.
+* `run_claim_analysis_selective.py`'s trace-labelling loop marks a document
+  `presence_only` / `not_read` from its KIND alone, without consulting whether
+  it was actually read. Under the reverted fix the trace reported 7 documents
+  read while `field_stops` recorded 9. Latent while cost documents are blocked
+  outright; it would misreport immediately if the block is ever narrowed again.
+
+## 56. PARTIAL -- Mid-document pages are classified as if they were documents
+
+**What.** About 40 of the documents the title-anchor rule declines are not
+first pages at all. Their processed text opens with a page number or a body
+heading:
+
+```
+- 7 - | (3) 서울중앙지방법원 2022나1137 판결 | [기초사실]
+Ⅲ. 구체적 검토 | 1. 피보험자의 법률상 배상책임 성립 여부
+3. 결론
+```
+
+These carry a `document_type` from the classifier -- `legal_reference` 22,
+`legal_opinion` 19 -- reached by reading body content, because no title is
+present to read.
+
+**Why it is not a classification defect.** The classifier is answering
+correctly about the text it was given. The error is upstream: a single
+법률의견서 was cut into several documents, so its later pages became documents
+in their own right. Nothing downstream can tell that from a manifest, and the
+per-document reads that claim analysis performs will open the same opinion
+several times as if they were independent sources -- which is also how a single
+author's argument could be double-counted as agreement between two.
+
+**How to fix.** Two candidate signals, both cheap and neither yet tested:
+
+* A page whose first non-empty line is a bare page marker (`- 7 -`, `Page 7`)
+  or a mid-outline heading (`3. 결론`, `Ⅲ.`) is a CONTINUATION, and
+  `text_anchor_boundaries` should merge it into the preceding segment rather
+  than opening a new one.
+* The judge tier already exists for pages the deterministic rule cannot settle.
+  These pages reach it and it answers "new document" -- so the prompt, not the
+  routing, is what needs the continuation case named.
+
+Measure against `tools/score_title_anchors.py`'s decline list before and after:
+the 40 should move out of `legal_*` and into their parent documents, and the
+manifest's document count for those cases should drop.
+
+**Investigated 2026-08-24. The diagnosis above is wrong on its central point,
+and both proposed fixes would have been applied in the wrong place.**
+
+*It is not a segmentation defect.* All 25 affected pairs arrived as SEPARATE
+RAW PDFs. None carries a `segmentation_proposal_*.json` or a parent document
+id, so `text_anchor_boundaries` and the judge tier never ran on them -- neither
+could have merged what it never saw. CASE_002 DOC_006 is `data/raw/.../DOC_006.pdf`
+and DOC_007 is a second file. The split is in the source material: a 10-page
+legal opinion was scanned into two files before intake. A fix belongs at intake
+or in a merge step, not in `segment_case.py`.
+
+*The proposed signal is both too broad and too narrow.* "First line is a bare
+page marker or a mid-outline heading", measured against the 47 declining
+`legal_*` documents:
+
+  * too broad -- 11 open `번    호 :`, the first field of a legal-opinion
+    letterhead, and 2 open `Ⅰ. 사안의 요지 및 질의내용`. Those are document
+    STARTS; merging them would destroy real boundaries.
+  * too narrow -- 6 open mid-sentence (`의 피고 H의 주의의무 ...`) with no
+    marker and no heading at all.
+
+**The signal that works: continuity of the printed page number.** A document
+whose page 1 prints `- 7 -` after a predecessor ending `- 6 -` is that
+document's second half. Measured over all 127 cases:
+
+    133  documents printing `- 1 -` on page 1   -> untouched (real starts)
+     25  documents continuing a predecessor      -> reported
+      0  documents printing > 1 that do NOT continue
+
+The zero is what makes it usable -- no ambiguous middle on this corpus, so a
+hit is a hit. 23 of the 25 are typed DIFFERENTLY on each side
+(`legal_opinion` | `legal_reference`), which is the double-counting this item
+was filed about: one author's single argument reaching claim analysis as two
+independent sources. CASE_046 holds a four-way split (DOC_006/007/008/009 =
+pages 1-2/3-4/5-6/7-10).
+
+Affected: 21 real cases (CASE_002, 010, 012-020, 046, 133, 140, 141, 200, 201,
+300, 301, 600, 601) plus two forks. **None in the 700-series** -- CASE_713's
+DOC_006 is a whole 10-page opinion, so the newer intake produced intact
+documents and this may be historical rather than live.
+
+**Built:** `tools/score_document_continuity.py` (read-only, zero provider
+calls) and `tests/test_score_document_continuity.py` (13 tests, verified by
+reintroducing four defect classes: unanchored marker, gap tolerance, hardcoded
+type comparison, scanning past the first line -- each caught by its own test).
+
+**Still OPEN, which is why this is PARTIAL:** nothing merges them. The detector
+reports and exits 0 deliberately -- merging documents is a decision about
+source material, and a stage should not fail over it. What a merge needs and
+does not yet have: a DAO path to combine two manifest entries and their page
+directories, renumbering the child's pages onto the parent, plus a decision on
+which of the two `document_type` values survives. Whether it is worth building
+depends on the 700-series answer above -- if new intake no longer produces
+these, the 21 cases are better repaired individually than automated.
+
+## 57. FIXED -- Classification concurrency is not instrumented
+
+**What.** `_timing_summary.json` records `worker_config` and
+`observed_max_concurrency` for `ocr_pages`, `redact_pages`, `documents` and
+`redaction` -- and nothing for classification. Both classification pools
+(`pool.classification` in run_document_stage, `pool.classify_children` in
+run_stage2) emit a span, so the phase is visible, but the width it actually
+reached is not.
+
+**Why it matters now.** `DEFAULT_CLASSIFY_WORKERS` was raised 4 -> 8 on
+2026-08-24 from a bench measurement. Whether a real run ever reaches 8 cannot
+be answered from retained records -- only from the bench, which is exactly the
+gap that let the old value's justification ("the semaphore is the real ceiling
+anyway") stand unchallenged for as long as it did.
+
+**How to fix.** The aggregator already derives both fields for the other pools;
+classification needs the same treatment, keyed on the two span names above. The
+check afterwards is a single real run: configured 8 and observed 8 means the
+pool is saturated, observed < 8 means something upstream is serialising it and
+the raise bought less than the bench implies.
+
+**Fixed 2026-08-24.** Both pools now carry a `ConcurrencyProbe`, entered around
+the per-item region and reported on the pool span after the pool drains -- the
+same shape `pool.ocr_pages` and `pool.redact_pages` already used. The
+aggregator needed no change: it derives `worker_config` and
+`observed_max_concurrency` from any `pool.*` span generically, and the schema's
+two maps are open and keyed by pool name, so `classification` and
+`classify_children` land in `_timing_summary.json` on their own.
+
+One thing the fix had to add beyond the probe: `pool.classification` was not
+recording `items`. Every one of these pools is capped by `min(workers, items)`,
+so an observed 3 against a configured 8 is only a finding when the workload
+held more than 3 documents -- without `items`, "serialised" and "only had three
+documents" are the same record.
+
+`tests/test_classification_concurrency_instrumented.py` (12 tests). Note that
+the first 8 drive a synthetic pool and passed against the UNFIXED tools -- they
+pin the probe and the aggregator, not the call sites. The last 4 assert on the
+real source and fail without the fix, which is what verified it.
+
+**Still not answered, and this gap was half about it:** whether a real run ever
+reaches 8. That needs one real case run and its `_timing_summary.json` read
+back; the instrumentation now makes the question answerable, it does not answer
+it. Carried by #58, which needs the same run.
+
+## 58. PARTIAL -- The width measurements were bench-only; the real path disagrees
+
+**What.** Both worker raises this session (classification 4 -> 8, OCR documents
+3 -> 12) were measured with `tools/bench_classify_workers.py` and
+`tools/bench_ocr_doc_workers.py`, which call the provider directly and discard
+the result. They deliberately write nothing -- running the real tools repeatedly
+would rewrite the corpus and make it a function of a benchmark.
+
+**What that leaves unmeasured.** The real path adds a manifest patch under a
+lock per document, plus contract validation and writes. Those serialise where
+the bench does not, so the measured curves are an upper bound on the gain. The
+knee could also sit lower in the real path: lock contention grows with width in
+a way provider latency does not.
+
+**How to fix.** One case, run twice at the old and new widths, comparing
+`_timing_summary.json` stage attempt wall time rather than bench numbers. It
+needs a fork so the second arm starts cold (`fork_case.py --through-stage
+document_processing`), and both arms must use the same case to hold document
+count and page mix fixed. Report the delta as the real figure and treat the
+bench numbers as what they are -- the reason to try the width, not evidence of
+what it achieves.
+
+**Measured 2026-08-24 -- classification only. The bench number does not hold.**
+
+Two forks of CASE_133 (CASE_9406, CASE_9407), 193 classifiable documents each,
+`document_type` cleared through `dao.patch_manifest_document` so classification
+was genuinely pending in both. OCR was NOT re-run: every document already had
+`ocr_status: completed` and `redacted_text.md` on disk, which isolates
+classification from extraction cost. Same corpus, same provider, run
+back to back.
+
+| arm | `--doc-workers` | observed | wall | lock acquires | total lock wait | max wait |
+|---|---|---|---|---|---|---|
+| CASE_9406 | 4 | 4 | **206s** | 774 | 482.2s | 90s |
+| CASE_9407 | 8 | 8 | **218s** | 772 | 1023.7s | 210s |
+
+Width 8 was **6% SLOWER**, against a bench that predicted -42%. Both arms
+reached their configured width, so this is not a serialised pool -- #57's
+instrumentation is what establishes that, and it is the reading that makes the
+result interpretable rather than ambiguous.
+
+**Where it goes instead of into throughput:** `lock.acquire` is 482s of
+self-time at width 4 (63% of total) and 1024s at width 8 (78%), for the same
+~773 acquires. Doubling the width did not change how much locking there is; it
+doubled how long each acquire waits. `provider_calls` was 35 in both arms --
+only 35 of 193 documents reach the model at all, the rest being settled by the
+printed-form-title rule -- so the model is not the constraint at this width.
+The manifest patch is: one lock hold per document, on one file, which every
+worker needs.
+
+This is precisely the divergence the gap predicted: "the real path adds a
+manifest patch under a lock per document ... those serialise where the bench
+does not". The bench discards its results and takes no lock, so it measured
+provider latency alone.
+
+A lock-contention failure also surfaced at width 4 -- DOC_152 died with
+`PermissionError` on `document_manifest.json.lock` and had to be classified
+separately. One occurrence, not characterised; noted because it is the same
+contention the timings show, appearing as a hard failure rather than a delay.
+
+**What this does and does not settle.** It settles classification: 8 is not
+supported by the real path on this workload, and `DEFAULT_CLASSIFY_WORKERS = 8`
+now rests on a bench figure the real path contradicts. It does NOT settle the
+OCR raise (documents 3 -> 12), which was not measured here and whose calls are
+~20s of model time against classification's much shorter ones -- the balance
+between provider latency and lock wait is different there, so this result does
+not transfer. That, and the choice of what classification width should actually
+be, are what keep this PARTIAL rather than RESOLVED.
+
+Not yet done: no width below 4 was tried, so the knee is unlocated -- 206s at
+width 4 may itself be past it. The fix suggested by the lock breakdown is to
+batch the manifest patches rather than to lower the width, which would change
+what is being measured and is a separate piece of work.
+## 59. The agent-executed stages never reach `llm_providers`, so the OpenRouter switch cannot cover them -- OPEN 2026-08-25
+
+The 2026-08-21 switch moved every LLM call in `tools/` onto `openrouter`, and
+2026-08-25 carried it into the layers that call those tools. Neither touched
+the stages that run as **Claude Code subagents** rather than as code:
+`consistency_check` (the judgement half), `screening_report`, `draft_report`
+(v1 and v2), `critic`, and Phase 2's `denial_validation`. Their specs mention
+no provider tool and no provider flag -- grepping
+`.claude/agents/{screening-report,draft-report,critic,consistency-check,denial-validation}.md`
+for `run_checkpoint1|run_stage2|redact_document|ocr_extract|run_claim_analysis_selective|run_denial_response_driver|segment_case|--provider`
+returns **0 matches each**. They are executed by the session model itself, so
+there is no call site to point at a provider.
+
+Why it matters: "the harness runs on OpenRouter" is true of the mechanical
+stages and false of the judgement stages, and nothing in the repo said so.
+Anyone reading `DEFAULT_PROVIDER` would reasonably conclude the whole pipeline
+moved. A cost, latency or model-choice statement about the pipeline is a
+statement about two different execution paths.
+
+What closes it: converting those stages to drivers -- prompt builder, transport
+schema, parser, receipt, correction gate -- the way `claim_analysis` and
+`denial_response` already are. That is a pipeline-architecture change, not a
+wiring fix: the current split is deliberate (drivers own mechanics, agents own
+judgement), and `critic` in particular is defined by reading a draft the way a
+reviewer would. Scope per stage is roughly what `run_claim_analysis_selective.py`
+carries. **Not started, and it needs an explicit decision before it is** --
+recorded here so the boundary is visible rather than assumed.
+
+## 60. No OpenRouter call has ever been made against the real service -- OPEN 2026-08-25
+
+Everything about the `openrouter` provider is verified statically or against a
+loopback server: 76 provider tests, a real-socket suite, 21 defects reinserted
+one at a time. **No request has ever reached openrouter.ai** -- there is no API
+key in this environment.
+
+Unverified as a result: whether real models honour the forced `emit_result`
+tool call against the harness's actual transport schemas; how far
+`provider: {"data_collection": "deny"}` narrows the routable model set (the
+per-endpoint data policy needs `GET /api/v1/models/:slug/endpoints`, which
+needs a key); whether the real edge accepts the client as configured; and the
+real shape of a 429 under load.
+
+What closes it: `python tools/provider_smoke.py --provider openrouter --model
+<slug>` for the transport, then one real case through Stage 2 with the timing
+records kept. The smoke tool sends no case data.
+
+## 61. `scan_intake_content` has no production caller -- OPEN 2026-08-25
+
+D2's vision content pre-check was removed on 2026-08-20 (item 44 / PoC owner's
+decision), which left `BaseProvider.scan_intake_content` -- and the
+`_require_scan_images` fail-closed guard behind it -- implemented on every
+provider with nothing in `tools/` calling it. Grepping the repo returns only
+test call sites. `tools/intake_case.py`'s provider imports were dead for the
+same reason and were removed on 2026-08-25, along with the module docstring
+that still described the pre-check as a live step.
+
+Not a defect today: the per-file HUMAN review gate that the scan only advised
+is unchanged and still mandatory, so nothing is unguarded. It matters because
+an interface method with no caller drifts unnoticed -- the OpenRouter
+implementation of it was written and tested in 2026-08-21 for a surface the
+pipeline does not use.
+
+What closes it: either re-wire the pre-check (a decision the PoC owner already
+made against once), or retire the method from the provider interface. Left open
+rather than removed unilaterally, because removing it would also delete the
+only fail-closed vision-scan guard if the check ever comes back.
+
+
+## 62. Half the failing test baseline is Windows-platform, not logic -- OPEN 2026-08-26
+
+**What.** The suite carries 98 failures on this machine. Classified by root
+cause (2026-08-26, before any of that day's fixes):
+
+| cause | count | what it is |
+|---|---|---|
+| `os.O_NOFOLLOW` missing | 24 | POSIX-only constant, absent on Windows |
+| `WinError 1314` + symlink | 12 | symlink creation needs a privilege this account lacks |
+| stale test mocks | 13 | `fake_classify` predating the 2026-08-19 `routing_config` argument |
+| other assertions | ~49 | genuinely unexamined |
+
+**47 of the 98 are the medical-review subsystem** (`test_medical_*`,
+`test_dao_medical_variables`, `test_frontend_medical_endpoints`) failing at
+import or first syscall on `os.O_NOFOLLOW`, which does not exist on win32.
+
+**Why it matters, and why it is not urgent.** `dao.py` already solved exactly
+this, at line 244: `_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)`, with a comment
+recording that the medical modules "were authored on Linux ... so the original
+code could not import, let alone run, on this machine". That fix was never
+carried to `medical_review_ledger.py` (5 sites) or `operator_auth.py` (1 site).
+So this is production code that cannot execute on the development platform --
+but the subsystem is dormant by design: both shipped policies carry
+`operations_enabled: false, approval: null`, and `dao.py`'s
+`_medical_operations_approved` fails closed, so the pipeline routes around it.
+Stage 5 runs `medical not_applicable` and never enters these paths.
+
+The risk is that the gate is unverifiable ON THIS MACHINE, so if the policy is
+ever approved, nothing here has been exercised. It is a portability debt with a
+known shape and a worked precedent, not an unknown.
+
+**What closes it.** Apply `dao.py`'s `getattr` degradation to the two modules,
+then re-measure. Expect the 47 to drop sharply; whatever remains is real and
+newly visible.
+
+**The non-medical half, classified the same day.** 48 failures outside the
+medical files, and they are not one thing:
+
+| file | n | cause |
+|---|---|---|
+| `test_run_checkpoint1` | 12 | fixtures returned only legacy classification fields -- FIXED 2026-08-26, all 12 revived, file now 61/61 |
+| `test_run_scenario_matrix` | 5 | same stale `routing_config` mock -- FIXED 2026-08-26, all 5 revived |
+| `test_dao_run_state` | 5 | 4 are medical-clearance gates; 1 is a v0.3 `receipt_sha256` binding |
+| `test_dao_human_review` | 4 | setup writes stage_name `evaluation`, which run_state v0.3's enum does not carry (evaluation is a deferred EXTERNAL service, so the schema is right and the test is stale) |
+| `test_sla_markers` | 6 | markers not emitted in the fixture's shape |
+| `test_fork_case` | 6 | ledger operation request binding |
+| `test_dao_locking` | 2 | `medical_repository` key |
+| remainder | 8 | one each, unexamined |
+
+**D1 is not among them.** `cmd_read_ground_truth` still hard-denies any
+`caller_stage != "evaluation"` and still requires the human-review flag, and
+both tests pinning that -- `test_read_ground_truth_denied_without_flag` and
+`test_read_ground_truth_denied_for_wrong_caller_stage` -- PASS. The four
+failures in that file are in fixture setup, not in the guard.
+
+**Do not** treat "98 failures, delta 0" as a clean bill. That was how this was
+managed until 2026-08-26, and it hid 13 dead checkpoint-1 tests -- including
+the one pinning that classification reads REDACTED rather than raw page text.
+
+
+## 63. A medical document the classifier could not pin to one form kind is never read -- RISK ACCEPTED 2026-08-26
+
+**What.** `claim_analysis` routes by fine-grained `medical_document_kind`, and
+`claim_analysis_selection.py:190` skips any document whose kind is `None` or
+whose classification is `ambiguous`. Stage 2 publishes `status: ambiguous` with
+a ranked candidate list when it cannot settle on one kind, and that list is
+discarded -- the document is not read at all, for any field.
+
+**Measured 2026-08-26** across the CASE_70xx corpus: 238 documents, 91 not
+routed. Most of those are correct -- `insurance_policy`, `legal_opinion`,
+`insurance_certificate` and the like have no medical route by design. **Five
+are real losses**, all typed medical and all carrying narrowed candidates:
+
+| case | doc | manifest type | candidates |
+|---|---|---|---|
+| CASE_7044 | DOC_004 | medical_record | admission_discharge_summary 0.5 / other_medical 0.3 / diagnosis_certificate 0.15 |
+| CASE_7034 | DOC_005 | medical_record | 3 candidates |
+| CASE_703 | DOC_015 | medical_record | 3 candidates |
+| CASE_704 | DOC_015 | medical_record | 3 candidates |
+| CASE_7061 | DOC_013 | imaging_report | 2 candidates |
+
+CASE_7044's DOC_004 is an `입원·통원 확인서` whose top candidate reads 0.5. It
+grounds none of the 58 `claim_facts`. The stage-7 agent raised it as ISSUE_3,
+alongside DOC_009 (`공제처리확인서`, 치료비 14,061,670원, 입원 26/27일) -- that one
+is typed `public_benefit_certificate` and has no medical route at all, so it is
+a different question: whether a benefit certificate should reach the pipeline
+as duplicate-payment material.
+
+**Why it is not simply a bug.** Routing by form kind is what makes the ladder
+mean anything -- a document read as the wrong kind answers the wrong fields
+with real citations, which is worse than not reading it. Taking the top
+candidate at 0.5 confidence would do exactly that. The honest options are a
+confidence floor above which a single candidate is accepted, reading such a
+document under a `route_not_activated`-style disposition that a reviewer can
+see, or surfacing it as an explicit human gate. All three are design decisions,
+not repairs.
+
+**Decided 2026-08-26 (user):** exclude it. If the classification settled on
+nothing, the document is not routed. No code change -- that is what
+`claim_analysis_selection.py:190` already does; this item records the decision
+rather than a pending repair.
+
+The rationale is the one above, taken as the answer rather than as one option:
+a document read as the wrong form kind answers the wrong fields with real,
+verifiable citations, and a reviewer has no way to tell that from a correct
+reading. An unread document is visible in the trace as `ambiguous` or
+`skipped`; a misrouted one is invisible. At 0.5 top confidence on CASE_7044's
+`입원·통원 확인서`, accepting the candidate would be a coin flip carried into
+the contract as evidence.
+
+What this costs, stated plainly so it is not rediscovered as a surprise: five
+corpus documents contribute nothing, and CASE_7044's DOC_009 (`공제처리확인서`,
+치료비 14,061,670원, 입원 26/27일) is not among them only because it is
+`not_medical` with zero candidates -- a different exclusion with the same
+effect. If duplicate-payment material needs to reach the pipeline, that is a
+routing question about `public_benefit_certificate`, not about ambiguity.
+
+**Reopen if** the corpus run shows ambiguous documents concentrating on one
+form the classifier consistently cannot settle. That would be a classifier
+gap wearing this item's clothes, and the fix would belong in Stage 2.
+
+## 64. Two separately-issued 진단서 were intaken as ONE document -- OPEN 2026-08-26
+
+**Corrected 2026-08-26, same day.** This item was first written as "a
+contradiction inside one document never becomes a conflict candidate", from
+CASE_7044 DOC_002 stating `3주` on p1 and `총12주` on p2. Reading both pages in
+full shows that is the wrong diagnosis. **The two pages are two separate
+진단서, printed at different times, intaken as one document.**
+
+The evidence is structural, not interpretive. Each page carries the full form
+from `진 단 서` / 등록번호 / 연번호 through 병명 to 의료기관명칭 -- a complete
+certificate, twice. Page 2 additionally carries `출력자` and 면허번호. The
+checkbox glyphs differ between the pages (`☑`/`☐` vs `✔`/`○`), which is a
+different print session. Page 1 has the surgery date filled in (`2025-02-25`);
+on page 2 that same slot is blank. The five 상병명 are identical.
+
+So `3주` and `총12주` are not a self-contradiction: they are two opinions from
+different points in the course -- plausibly remaining vs total 안정가료 -- and
+publishing one of them without the other is a document-boundary problem, not an
+extraction one. `treatment_period` citing only p1 is the correct behaviour for
+the document it was given.
+
+Same family as the 법률의견서 finding already recorded: the split belongs at
+INTAKE, and page-number continuity is the detectable signal.
+
+**What closes it.** Detect a repeated full-form header inside one intaken PDF
+and split it, the same way the 25 법률의견서 pairs are detected. Until then a
+multi-certificate PDF silently publishes whichever page the ladder reaches
+first.
+
+**Still open and NOT explained by this** -- CASE_7046 DOC_003 carries a
+laterality contradiction WITHIN one page (`좌측 손목통증`/`Lt. wrist` vs
+`rt. distal radius fx`), which resolved `asserted` with
+`conflict_candidate_ids: []`. That one is a genuine within-document
+disagreement and is not addressed here.
+
+## 65. A P6 resolution note stated the opposite of the source -- RESOLVED 2026-08-26
+
+**What.** CASE_7044 `CONFLICT_1`'s `resolution_note` says DOC_002 and DOC_003
+record the 주상병 as ligament rupture and **"골절을 기재하지 않음"** (do not record
+fracture). DOC_002 p1 records two fracture codes as 부상병:
+
+```
+(주) Rupture of ligaments at ankle and foot level [S93.2]
+(부) Fracture of other part of tarsal bone, closed [S92.280]
+(부) Fracture of metatarsal bone, closed [S92.30]
+```
+
+So the live question is whether fracture belongs in the **주상병**, not whether
+it appears at all. The note overstates the disagreement on a record a
+손해사정사 reads verbatim.
+
+**Not corrected here, deliberately.** A P6 note is a human-owned record; the
+stage-7 agent flagged it and did not rewrite it, and neither did I. Correcting
+it means writing a new verdict through `set-conflict-verdict` under a named
+reviewer, which is the user's call. Recorded so the note is not carried forward
+as fact.
+
+**RESOLVED 2026-08-26.** Reviewer `pyun` directed the correction, and it was
+recorded through `set-conflict-verdict CASE_7044 CONFLICT_1 deferred_to_report`
+under that name (operation id
+`conflict-note-correction:CASE_7044:CONFLICT_1:20260826`). The verdict is
+unchanged -- only the note was rewritten.
+
+The corrected note states what the sources actually say: DOC_002 and DOC_003
+record the 주상병 as ligament rupture AND record fracture as 부상병 (S92.280,
+S92.30 named explicitly), while DOC_005/006/007 all presuppose fracture, so the
+live question is whether fracture belongs in the 주상병 -- which bears on
+담보 and 산정. It carries a `정정 사유` paragraph naming the previous wording,
+so a later reader sees that the record was corrected and why, rather than
+finding a silently different note. The old phrase therefore still appears in
+the ledger, but only inside that explanation.
+
+
+## 66. Nothing stated which files share a vocabulary, so an added value kept failing to propagate -- GUARDED 2026-08-26
+
+The single most repeated defect in this project, and always the same shape: a
+value is added to `claim_analysis_result`, the writing stage starts emitting
+it, and a downstream contract that never learned it rejects the write.
+`printed_but_blank` did it **seven times** between 2026-08-25 and 2026-08-26 --
+the result schema, the trace schema, `consistency_check_workitems`, the
+extraction prompt's `presence` enum, the publish path, and the screening
+renderer's `UNAVAILABLE_KIND` map.
+
+**Why it kept happening is not carelessness.** There was no artifact anywhere
+naming the set of files that share `unavailable_reason` / `stop_reason` /
+`value_state`. Each surface had to be remembered, and a missed one was
+invisible in exactly the same way as a surface that legitimately did not need
+the value: absence looked identical either way. Three of the seven were found
+only when a real case failed mid-run.
+
+**Guarded by `tests/test_shared_axis_propagation.py`** (2026-08-26). It
+declares `claim_analysis_result.schema.json` the PRODUCER OF RECORD for the
+three axes and checks every consumer carries the same set -- across schemas and
+the two code surfaces no schema check can see:
+
+* `run_screening_report.UNAVAILABLE_KIND`, a TOTAL map. An unmapped reason
+  renders with no kind, so a reviewer sees an empty field with no indication
+  why -- the same silence the reason exists to break.
+* `claim_analysis_extraction.output_schema`'s `presence` enum, which binds what
+  the model may return. A presence the publisher handles but the prompt never
+  offers is a state that cannot occur however well it is plumbed downstream.
+
+Both mirror checks are included: a consumer accepting a value the producer
+never emits is dead vocabulary that validates forever while describing an
+impossible state.
+
+**The mechanism is `NARROWER_CONSUMERS`.** A contract that legitimately handles
+a subset registers it there WITH a reason, which is what makes a value missing
+by design distinguishable from one missing because someone forgot. That
+distinction is the entire fix -- the seven misses were invisible precisely
+because the two looked the same. The registry is empty today: every consumer
+currently carries the full set.
+
+Verified by reintroducing three of the real defects (the consistency-check
+enum that blocked 3 cases, the `UNAVAILABLE_KIND` entry, the presence enum).
+Each fails naming the file, the JSON path, the missing value, and both
+remedies.
+
+**What this does NOT cover**, and is worth knowing before trusting it: axes
+other than those three, contracts outside `schemas/`, and any consumer that
+reads a value without declaring an enum for it (a Python `if` on a string
+literal is still invisible). Extending it means adding to `SHARED_AXES` or
+adding another code-surface test in the same file.
+
+
+## 67. A measurement taken from the wrong contract produced a feature nobody needed -- RESOLVED 2026-08-26
+
+While generalizing the conflict rendering I counted how many conflicts reached no report section, got **62 of 101**, and built `disputed` rows in section 7 to carry them.
+
+The count was wrong. `resolve_withdrawn_conflicts` was handed `consistency_check_workitems.json`, while `run_screening_report.main` reads `evidence_validation_result.json`. Both describe consistency_check; only the second is what the stage consumes. With the wrong one, the 76 conflicts consistency_check had WITHDRAWN still looked live, so fields that publish as ordinary `asserted` values were counted as invisible.
+
+Recounted correctly: 76 withdrawn, 25 surviving, 5 in section 1, 20 in the ledger, **0 shown nowhere**. The rows were withdrawn to fire only for a ledger-less conflict.
+
+**Why it survived review:** every check was run against `build_report` in memory rather than the driver. That path takes `consistency` as a parameter, so passing the wrong file is silent -- the shapes are similar enough that nothing raised. Running the driver, which loads the file itself, would have shown 1 conflict row on CASE_7008 instead of 4 the first time.
+
+**Guarded** by a corpus-level test asserting that a conflict surviving review appears in section 1, the ledger, or a section 7 row -- reading the same contract the driver does.
+
+**The general lesson**, which is the reason this is recorded rather than just fixed: a report assembled from a passed-in contract can be assembled from the WRONG contract without error, and the resulting numbers look exactly like real ones. A measurement that will justify building something has to come from the path that runs in production.
+
+
+## 68. The six 배상책임 fields are routed by a second mechanism, and unifying it is not a config edit -- DEFERRED 2026-08-26
+
+`comparative_negligence_rate`, `legal_basis_cited`, `liability_opinion_conclusion`,
+`negligence_reasoning`, `duty_breach_grounds` and `responsible_party_role` all
+carry `source_route_id: null`. They are not unrouted: `additional_fields_by_case_type.liability`
+names all six with `sources: [legal_opinion, insurer_response]`, and stage 3-a
+opens those documents when the 배상책임 type is in play.
+
+Giving them a `source_route_id` looks like a one-line config edit and is not:
+
+* **It would stop them being read.** `claim_analysis_additional.eligible_field_ids`
+  re-opens a liability field precisely BECAUSE the common pass produces no
+  outcome for it (`outcome is None` -> always retry). Add a route and an
+  outcome appears; a status outside `RETRYABLE_STATUSES` then makes stage 3-a
+  skip the field. Routing them to the legal documents would prevent them being
+  read from the legal documents.
+* **The validator forbids the natural shape.** `claim_analysis_contracts`
+  rejects a `medical_document` route naming `non_medical_sources`, and
+  `legal_opinion`/`insurer_response` are manifest `document_type`s rather than
+  medical `document_kind`s. The route would have to be
+  `administrative_or_intake`, which may hold no `priority_groups` and must be
+  conditionally activated -- the `industrial_accident_filing` shape.
+* **It would be double routing.** Both mechanisms would then claim the same six
+  fields, so one has to be removed, not just added to.
+
+**Measured cost of leaving it (2026-08-26, CASE_7* corpus):** of the 82 rows
+these fields produce, **78 are honest** -- the pack holds no legal_opinion and
+no insurer_response, so there was nothing to read -- and **4 are stale**
+(CASE_701/702/703/704). The 4 are already corrected downstream:
+`run_claim_analysis_selective` restamps them to `not_mentioned` when the round
+opens a source and finds nothing. So the unification buys correctness on 0 rows
+today; its value is structural, removing a second routing mechanism.
+
+Revisit when stage 3-a is next opened. The English reason text these fields
+published was fixed separately on 2026-08-26 and does not depend on this.

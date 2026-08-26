@@ -102,6 +102,15 @@ _ALLOWED_ATTRS: dict[str, frozenset[str]] = {
         "argv0", "subcommand", "exit_code",
     }),
     "io": frozenset({
+        # Which governed contract a read touched. Same character as
+        # `schema_name`: a fixed filename from this repo's own contract set,
+        # ASCII by construction, capped and stripped by `_ENUM_ATTRS`. Added
+        # 2026-08-18 because `read-contract` was the one DAO read with no span
+        # at all, so a stage's declared inputs could not be checked against
+        # what it actually opened -- consistency_check names claim_analysis
+        # field slots in its output while comparing only source documents, and
+        # the trace could neither confirm nor refute that it read the contract.
+        "contract_name",
         "bytes_in", "bytes_out", "page_count", "exit_code", "startup_s",
         "hit_count", "documents_searched", "unit_hash",
     }),
@@ -153,7 +162,7 @@ _ENUM_ATTRS = frozenset({
     "provider_name", "model_name", "prompt_version", "retry_reason_code",
     "lock_kind", "schema_name", "argv0", "subcommand", "gate_kind",
     "marker_kind", "stage_name", "attempt_outcome",
-    "unit_hash", "agent_kind",
+    "unit_hash", "agent_kind", "contract_name",
 })
 _ENUM_MAX_LEN = 64
 _ENUM_EXTRA_CHARS = frozenset("._-:/")

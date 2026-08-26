@@ -7,6 +7,7 @@ would see a finished contract, which makes a cold comparison impossible.
 
 These tests use isolated tmp_path roots only. No real case is forked.
 """
+import hashlib
 import json
 
 import pytest
@@ -237,7 +238,19 @@ def test_fork_keeps_manifest_and_processed_input_digests(tmp_path, monkeypatch, 
         (tmp_path / "outputs" / "CASE_140" / "document_manifest.json").read_text(encoding="utf-8"))
     forked_manifest = json.loads((dest / "document_manifest.json").read_text(encoding="utf-8"))
     assert forked_manifest["case_id"] == "CASE_301"
-    assert forked_manifest["documents"] == source_manifest["documents"]
+    # Everything EXCEPT the case-root paths, which must follow the fork. A
+    # plain equality here asserted the opposite until 2026-08-22 -- it passed
+    # precisely because `file_path` still read `data/raw/CASE_140/...`, i.e.
+    # the fork's manifest pointing at its parent's raw files. The digests this
+    # test is named for are the content fields; the paths are identity.
+    def _without_paths(documents):
+        return [{k: v for k, v in doc.items() if not k.endswith("_path")}
+                for doc in documents]
+
+    assert _without_paths(forked_manifest["documents"]) == _without_paths(
+        source_manifest["documents"])
+    assert all(doc["file_path"].startswith("data/raw/CASE_301/")
+               for doc in forked_manifest["documents"])
 
     for doc in DOCS:
         original = (tmp_path / "data" / "processed" / "CASE_140" / doc / "redacted_text.md").read_bytes()
@@ -296,7 +309,15 @@ def test_fork_run_state_resumes_after_document_processing(tmp_path, monkeypatch,
     # No inherited attempt history, and no fabricated human review.
     assert "human_input_status" not in state
     assert all("current_attempt_started_at" not in s for s in state["stages"])
-    assert all("started_at" not in s and "completed_at" not in s
+    # PRESENT and null, not absent. The intent here is unchanged -- the fork
+    # inherited this stage's output and did not run it, so it claims no start
+    # or completion time -- but absence was the wrong way to say it: the stage
+    # item declares both nullable and names no `required` list, so an entry
+    # missing them validated, and `_update_run_state` then read
+    # `entry["started_at"]` directly and raised KeyError on the first
+    # `in_progress` transition of every forked case (CASE_054, 2026-08-22).
+    # Null says the same thing and survives the round trip.
+    assert all(s["started_at"] is None and s["completed_at"] is None
                for s in state["stages"])
     # The source recorded 2 attempts for document_processing; the fork has
     # made none of them, so P9's budget is not pre-spent.
@@ -310,6 +331,170 @@ def test_fork_run_state_resumes_after_document_processing(tmp_path, monkeypatch,
         "policy_clause_processing", "in_progress", state)
     # claim_analysis stays blocked on its real prerequisite -- documented, not a bug.
     assert stage_dependencies.check_dependencies("claim_analysis", "in_progress", state)
+
+
+def test_the_fork_survives_its_first_real_stage_transition(
+        tmp_path, monkeypatch, capsys):
+    """The gap every other test in this file left open.
+
+    They all read the written file and assert its shape. None of them fed that
+    file back to the DAO, so nothing noticed that `_update_run_state` reads
+    `entry["started_at"]` unguarded: the fork reported success, every artifact
+    validated, and the failure surfaced later in an unrelated command --
+
+        File "tools/dao.py", line 7008, in _update_run_state
+          entry["started_at"] = entry["started_at"] or now
+        KeyError: 'started_at'
+
+    -- which blocked EVERY forked case at its first `in_progress` transition
+    (CASE_054, 2026-08-22). A shape assertion cannot catch a shape the writer
+    and the reader disagree about; only the round trip can.
+
+    The stage re-opened here is an INHERITED one. A fresh stage gets a
+    default-constructed entry that carries the key either way, so opening one
+    of those passes with the defect in place and proves nothing; only a
+    rebuilt entry exercises the disagreement.
+    """
+    _seed_completed_case(tmp_path)
+    dest = _run_cut(tmp_path, monkeypatch)
+    case_id = dest.name
+
+    dao._update_run_state(
+        case_id, "RUN_20260813_200", "document_processing",
+        "in_progress", "orchestrator")
+
+    state = json.loads((dest / "_run_state.json").read_text(encoding="utf-8"))
+    reopened = next(s for s in state["stages"]
+                    if s["stage_name"] == "document_processing")
+    assert reopened["status"] == "in_progress"
+    assert reopened["started_at"], "an opened attempt must carry a start time"
+
+
+def _seed_reviewed_operation(src, case_id="CASE_140"):
+    """Give the source ledger one real D2 review operation.
+
+    The fixture ships `operations: []`, so nothing here ever exercised the
+    operation binding -- which is why forks shipped for months with a ledger
+    the DAO refuses to read.
+    """
+    path = src / "_source_ledger.json"
+    ledger = json.loads(path.read_text(encoding="utf-8"))
+    # A real boundary digest, not the fixture's "b"*64 placeholder: the DAO
+    # replays operations against `baseline_state` and checks this hash first,
+    # so a placeholder makes the ledger unreadable before the operation
+    # binding is ever reached. The baseline is the PRE-approval state, since
+    # the operation below is what moves it to `approved`.
+    baseline = [{**entry, "review_status": "pending", "reviewed_by": None,
+                 "reviewed_at": None}
+                for entry in ledger["files"]]
+    ledger["history_boundary"] = {
+        "mode": "legacy_snapshot",
+        "established_at": "2026-07-01T00:00:00+09:00",
+        "baseline_sha256": hashlib.sha256(
+            dao._canonical_json_bytes(baseline)).hexdigest(),
+        "baseline_state": baseline,
+    }
+    request = {
+        "case_id": case_id,
+        "operation_id": "OP_SEED_1",
+        "action": "set_status",
+        "payload": {"file_name": "a.pdf", "status": "approved",
+                    "reviewer": "human", "reason": None},
+    }
+    ledger["operations"] = [{
+        "operation_id": "OP_SEED_1",
+        "request": request,
+        "request_sha256": hashlib.sha256(
+            dao._canonical_json_bytes(request)).hexdigest(),
+        "result": {"action": "set_status", "target_id": "a.pdf",
+                   "status": "approved"},
+        "completed_at": "2026-07-01T00:00:00+09:00",
+    }]
+    path.write_text(json.dumps(ledger), encoding="utf-8")
+    return ledger
+
+
+def test_a_forked_ledger_is_readable_by_the_dao(tmp_path, monkeypatch, capsys):
+    """The fork's ledger must satisfy the same binding a real one does.
+
+    Copying rewrote only the top-level `case_id`, leaving every
+    `request.case_id` pointing at the source. The DAO checks the two agree AND
+    re-derives `request_sha256` over the request bytes, so every forked case
+    failed `check-source-ledger-clear` with "ledger operation request binding
+    is invalid" (CASE_9403, 2026-08-22) -- which emitted no `sla.phase1.start`
+    and left `active_s: n/a` on every fork.
+
+    Asserted through the DAO's own validator rather than by re-checking the
+    fields here: a test that reimplements the rule can agree with itself while
+    disagreeing with the code that matters.
+    """
+    _seed_completed_case(tmp_path)
+    _seed_reviewed_operation(tmp_path / "outputs" / "CASE_140")
+    dest = _run_cut(tmp_path, monkeypatch)
+
+    ledger = json.loads((dest / "_source_ledger.json").read_text(encoding="utf-8"))
+
+    dao._validate_generic_ledger(
+        ledger, dest.name, "source_ledger.schema.json")
+
+
+def test_rebinding_preserves_the_human_decision(tmp_path, monkeypatch, capsys):
+    """Re-sealing must not become a way to rewrite what a human approved.
+
+    The digest is recomputed, so it can no longer prove the request bytes are
+    unchanged from the source. What must still be carried verbatim is the
+    decision itself -- who approved what, when, and with which status.
+    """
+    _seed_completed_case(tmp_path)
+    source = _seed_reviewed_operation(tmp_path / "outputs" / "CASE_140")
+    dest = _run_cut(tmp_path, monkeypatch)
+
+    forked = json.loads((dest / "_source_ledger.json").read_text(encoding="utf-8"))
+    src_op, fork_op = source["operations"][0], forked["operations"][0]
+
+    assert fork_op["request"]["payload"] == src_op["request"]["payload"]
+    assert fork_op["result"] == src_op["result"]
+    assert fork_op["completed_at"] == src_op["completed_at"]
+    assert fork_op["operation_id"] == src_op["operation_id"]
+    # Only the case id moved, and the seal moved with it.
+    assert fork_op["request"]["case_id"] == dest.name
+    assert fork_op["request_sha256"] != src_op["request_sha256"]
+
+
+def test_rebinding_is_idempotent():
+    """A second pass must not churn a ledger that is already correctly sealed."""
+    request = {"case_id": "CASE_140", "operation_id": "OP_1",
+               "action": "set_status",
+               "payload": {"file_name": "a.pdf", "status": "approved"}}
+    data = {"case_id": "CASE_140", "operations": [{
+        "operation_id": "OP_1", "request": request,
+        "request_sha256": hashlib.sha256(
+            dao._canonical_json_bytes(request)).hexdigest()}]}
+
+    assert fc.rebind_ledger_operations(data, "CASE_140", "CASE_900") is True
+    assert fc.rebind_ledger_operations(data, "CASE_140", "CASE_900") is False
+
+
+def test_stage_cut_rewrites_nested_case_paths(tmp_path, monkeypatch, capsys):
+    """Not just the id field -- the paths under a case root too.
+
+    The full-copy path has rewritten these since 2026-08-14; the stage-cut path
+    never did, so a fork's manifest kept naming `outputs/CASE_140/...`. Nothing
+    failed, because the DAO derives paths from `case_id`, but every such string
+    was misleading to a human reading the fork.
+    """
+    src = _seed_completed_case(tmp_path)
+    manifest = json.loads(
+        (src / "document_manifest.json").read_text(encoding="utf-8"))
+    manifest["documents"][0]["redacted_text_path"] = (
+        "data/processed/CASE_140/DOC_001/redacted_text.md")
+    (src / "document_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8")
+
+    dest = _run_cut(tmp_path, monkeypatch)
+
+    assert "CASE_140" not in (dest / "document_manifest.json").read_text(
+        encoding="utf-8")
 
 
 def test_backup_path_points_inside_the_fork_and_the_snapshot_exists(

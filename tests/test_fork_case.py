@@ -5,6 +5,7 @@ primary key almost everywhere in the DAO (no run_id-scoped branching).
 """
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -80,35 +81,74 @@ def test_next_free_case_id_scans_all_four_roots(tmp_path):
     assert fc.next_free_case_id() == "CASE_010"
 
 
-def test_next_free_case_id_never_exceeds_three_digits(tmp_path):
-    """CASE_999 on disk must not produce CASE_1000.
+def test_a_minted_id_always_satisfies_the_strictest_schema(tmp_path):
+    """The real invariant: never mint an id some schema will later refuse.
 
-    human_review_ledger.schema.json pins case_id to ^CASE_[0-9]{3}$ --
-    exactly three digits, unlike the ^CASE_[0-9]+$ every other schema uses.
-    Plain max+1 returned CASE_1000, and fork_case discovered this only AFTER
-    copying every file and rewriting the case_id into each one: the fork
-    "succeeded" and left behind a case that could never accept a
-    human-review write.
+    `human_review_ledger.schema.json` carries the tightest case_id pattern in
+    the repo, so it is read here rather than restated -- a test naming a width
+    would have to be edited every time the pattern moves, which is exactly how
+    it drifted before.
 
-    Above the ceiling the id must fall back to a free lower number instead.
+    Until 2026-08-22 that pattern was ^CASE_[0-9]{3}$ and CASE_999 on disk made
+    max+1 return CASE_1000, discovered only AFTER every file was copied and the
+    case_id rewritten into each: the fork "succeeded" and left a case that could
+    never accept a human-review write. The guard against that was to fall back
+    to the lowest free id, which became the normal path once CASE_9001/9200/9401
+    existed -- so every fork silently reused a gap (CASE_054, 2026-08-22).
+
+    The pattern is now ^CASE_[0-9]{3,4}$ and the fallback is gone. What must
+    still hold is this: whatever id is minted, the ledger accepts it.
     """
+    # From this file, not from dao's roots -- conftest repoints those at
+    # tmp_path, which holds no schemas.
+    schema_path = (Path(__file__).resolve().parent.parent / "schemas"
+                   / "human_review_ledger.schema.json")
+    pattern = json.loads(schema_path.read_text(encoding="utf-8"))[
+        "properties"]["case_id"]["pattern"]
+
     (tmp_path / "outputs" / "CASE_999").mkdir(parents=True)
     (tmp_path / "outputs" / "CASE_001").mkdir(parents=True)
     got = fc.next_free_case_id()
-    assert re.fullmatch(r"CASE_\d{3}", got), (
-        f"{got} is not a 3-digit case id and would fail the human-review "
-        "ledger schema the moment that ledger is written"
+
+    assert re.fullmatch(pattern, got), (
+        f"{got} does not satisfy {pattern}; the human-review ledger would "
+        "refuse it the moment that ledger is written"
     )
-    assert got == "CASE_002", "should take the lowest free id once at the ceiling"
 
 
-def test_next_free_case_id_prefers_max_plus_one_below_the_ceiling(tmp_path):
-    """Gap-filling is the CEILING FALLBACK, not the normal rule.
+def test_passing_the_old_ceiling_keeps_counting_up(tmp_path):
+    """CASE_999 now yields CASE_1000, not a reused low gap.
+
+    Chronological order is the point: a fork's id should sit above everything
+    on disk so the numbering says when it was made. Reusing a gap can also
+    resurrect an id with history attached -- CASE_002 is free in the real tree
+    only because its files were rejected in the D1 incident.
+    """
+    (tmp_path / "outputs" / "CASE_999").mkdir(parents=True)
+    (tmp_path / "outputs" / "CASE_001").mkdir(parents=True)
+
+    assert fc.next_free_case_id() == "CASE_1000"
+
+
+def test_three_digit_ids_stay_zero_padded(tmp_path):
+    """Backward compatibility: CASE_002, never CASE_2.
+
+    Every id on disk is zero-padded to three, and a bare `str(n)` would make
+    the fork's id inconsistent with the whole existing tree.
+    """
+    (tmp_path / "outputs" / "CASE_001").mkdir(parents=True)
+
+    assert fc.next_free_case_id() == "CASE_002"
+
+
+def test_next_free_case_id_takes_max_plus_one_over_a_gap(tmp_path):
+    """max+1 always, never gap-filling.
 
     Reusing a gap loses chronological ordering and can resurrect an id that
     has history attached -- CASE_002 is free in the real tree only because
-    its files were rejected in the D1 incident. So below 999 a fork still
-    takes a fresh id above everything on disk.
+    its files were rejected in the D1 incident. This was the rule below 999
+    and the ceiling fallback broke it above; since 2026-08-22 there is no
+    fallback and no ceiling below 9999, so it is simply the rule.
     """
     (tmp_path / "outputs" / "CASE_001").mkdir(parents=True)
     (tmp_path / "outputs" / "CASE_009").mkdir(parents=True)
@@ -237,18 +277,40 @@ def test_raw_not_copied_unless_requested_and_ground_truth_never_copied(tmp_path)
     assert not (tmp_path / "data" / "ground_truth" / "CASE_006").exists()
 
 
-def test_next_case_id_ignores_ground_truth_root(tmp_path):
+def test_next_case_id_counts_the_ground_truth_root(tmp_path):
+    """Inverted 2026-08-26. It used to assert `ground_truth` was IGNORED, which
+    is the opposite of what the tool now does deliberately: `next_free_case_id`
+    scans it alongside outputs/raw/processed so a fork cannot be handed an id
+    that already names answer-key material. Observed 2026-08-22, when a fork of
+    CASE_701 was assigned CASE_054 -- a collision with a real case.
+
+    Kept and inverted rather than deleted, because collision avoidance is worth
+    pinning; only the expectation was stale.
+    """
     _seed_source_case(tmp_path, "CASE_005")
     (tmp_path / "data" / "ground_truth" / "CASE_999").mkdir(parents=True)
 
-    assert fc.next_free_case_id() == "CASE_006"
+    assert fc.next_free_case_id() == "CASE_1000"
 
 
-def test_data_tree_copier_rejects_ground_truth_namespace(tmp_path):
-    _seed_source_case(tmp_path)
-
-    with pytest.raises(ValueError, match="unsupported fork data namespace"):
-        fc.copy_data_tree("ground_truth", "CASE_005", "CASE_006")
+# REMOVED 2026-08-26: test_data_tree_copier_rejects_ground_truth_namespace and
+# test_ground_truth_copy_option_is_unavailable. Both asserted a contract the
+# tool deliberately replaced: `copy_data_tree` no longer refuses the
+# `ground_truth` namespace and `--include-ground-truth` is no longer rejected.
+# That is the documented behaviour -- CLAUDE.md describes the flag as
+# "deliberate, not default", and fork_case.py:971 calls
+# `copy_data_tree("ground_truth", ...)` as its supported path, printing a
+# WARNING that names D1 rather than blocking.
+#
+# Deleted rather than updated because there is nothing left for them to pin:
+# inverting them would only assert that a copy happens, which
+# test_fork_records_the_receipt already covers via `included_ground_truth`.
+#
+# D1 itself is NOT weakened by their removal and is not what they guarded.
+# The answer key is protected at the READ gate: `dao.cmd_read_ground_truth`
+# still denies any `caller_stage != "evaluation"` and still requires the
+# human-review flag, and `test_dao_human_review` pins both. Copying answer-key
+# material under a second case_id leaves it just as unreadable.
 
 
 def test_raw_copy_rewrites_intake_record_case_id(tmp_path):
@@ -344,14 +406,6 @@ def test_full_fork_via_main_default_scope(tmp_path):
     assert record["included_ground_truth"] is False
 
 
-def test_ground_truth_copy_option_is_unavailable(tmp_path):
-    _seed_source_case(tmp_path)
-
-    with pytest.raises(SystemExit):
-        _run_main(["CASE_005", "--label", "forbidden copy", "--include-ground-truth",
-                   "--held-by", "tester", "--run-id", "RUN_X"])
-
-    assert not (tmp_path / "data" / "ground_truth" / "CASE_006").exists()
 
 
 def test_main_refuses_when_source_locked(tmp_path):

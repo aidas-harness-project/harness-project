@@ -17,6 +17,51 @@ import dao
 import medical_review_ledger
 import llm_providers
 import policy_uid_resolver
+# tools/trace.py, not the stdlib `trace` -- tools/ precedes stdlib on sys.path.
+import trace as trace_mod
+
+
+# Dummy credentials for the DEFAULT provider (openrouter), which -- unlike the
+# CLI default it replaced -- refuses to build without an API key and a model
+# slug. Tests that exercise a code path which constructs the default provider
+# were relying on "a CLI needs no credentials"; that property went away with
+# the transport, not with the test's intent. Nothing here reaches the network:
+# every provider call in the suite is stubbed, and a test that means to check
+# the missing-credential behaviour passes an explicit `env=` and so is
+# unaffected by these.
+@pytest.fixture(autouse=True)
+def _trace_writes_under_tmp_path(tmp_path, monkeypatch):
+    """No test may leave a trace shard in the repository's real outputs/ tree.
+
+    `trace.configure(case_id, run_id)` defaults its root to `<repo>/outputs`,
+    and every instrumented CLI entry point calls it -- so a test that exercises
+    one wrote real shards under `outputs/<case_id>/_trace/<run_id>/spans/`.
+    Observed, not theorised: `outputs/CASE_9200/_trace/RUN_20260817_9/spans/`
+    held shards whose `model_name` was `vendor/model-test`, this suite's own
+    fixture value, with mtimes matching a test run. The tree is gitignored, so
+    nothing was ever committed -- but every other filesystem test in this repo
+    runs against `tmp_path`, and tracing had quietly opted out.
+
+    Redirecting the DEFAULT root (rather than forcing `HARNESS_TRACE=0`) keeps
+    the tracing tests exercising real tracing; a test that passes an explicit
+    root still gets exactly what it asked for.
+    """
+    real_configure = trace_mod.configure
+
+    def configure(case_id, run_id, root=None):
+        return real_configure(
+            case_id, run_id,
+            root=root if root is not None else tmp_path / "outputs")
+
+    monkeypatch.setattr(trace_mod, "configure", configure)
+    yield
+    trace_mod.reset()
+
+
+@pytest.fixture(autouse=True)
+def _default_provider_credentials(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-a-real-credential")
+    monkeypatch.setenv("OPENROUTER_MODEL", "vendor/test-model")
 
 
 @pytest.fixture

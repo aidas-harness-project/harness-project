@@ -97,3 +97,121 @@ def test_declaration_requires_a_named_reviewer_and_a_reason(tmp_path, monkeypatc
     ok, message = dao.declare_no_policy_documents(
         CASE, reviewer="pyun", note="", held_by="o", run_id=RUN)
     assert not ok and "--note" in message
+
+
+# --- the driver that runs the stage, not just the gate that closes it -------
+#
+# The gate above and the driver below must agree on one case. They did not:
+# `_policy_completion_blockers` accepted a declaration while the driver
+# refused the same case outright, so a declared case could never reach the
+# gate willing to pass it (found on CASE_050, 2026-08-18 -- 56 documents, no
+# 약관). Testing the DAO alone is what let that through, so these assert the
+# driver's own verdict.
+
+def _driver_reads(*, run_state_stage="policy_clause_processing", documents,
+                  declaration):
+    """A `_dao_json` stub returning one case's reads, declaration included."""
+    def fake_read(args, *, allow_missing=False):
+        if args[0] == "read-contract" and args[2] == "_run_state.json":
+            return {"stages": [{"stage_name": run_state_stage,
+                                "status": "in_progress"}]}
+        if args[0] == "read-contract" and args[2] == "document_manifest.json":
+            return {"case_id": CASE, "documents": documents}
+        if args[0] == "read-contract" and args[2] == "_no_policy_documents.json":
+            return declaration
+        raise AssertionError(args)
+    return fake_read
+
+
+def test_driver_passes_a_declared_case_the_dao_gate_would_also_pass(monkeypatch):
+    """Reintroducing the defect -- dropping the declaration read, so the
+    driver sees only the manifest -- turns this into the RuntimeError below."""
+    import run_policy_pipeline_driver as driver
+
+    documents = [{"document_id": "DOC_055",
+                  "document_type": "insurance_certificate",
+                  "downstream_disposition": "text_only_no_normalization"}]
+    monkeypatch.setattr(driver, "_dao_json", _driver_reads(
+        documents=documents, declaration={"reviewer": "pyun", "note": "no 약관"}))
+    monkeypatch.setattr(driver, "_build_document_index",
+                        lambda case_id, held_by, run_id: {"status": "built"})
+
+    result = driver.run(case_id=CASE, held_by="orchestrator", run_id=RUN)
+    assert result["status"] == "noop_no_policy_documents"
+    assert result["text_only_policy_count"] == 0
+
+
+def test_driver_still_blocks_an_undeclared_case_with_no_policy(monkeypatch):
+    """The declaration is the whole difference: without one, 'no policy text'
+    remains indistinguishable from skipped policy work and must block."""
+    import run_policy_pipeline_driver as driver
+
+    documents = [{"document_id": "DOC_055",
+                  "document_type": "insurance_certificate",
+                  "downstream_disposition": "text_only_no_normalization"}]
+    monkeypatch.setattr(driver, "_dao_json", _driver_reads(
+        documents=documents, declaration=None))
+
+    with pytest.raises(RuntimeError, match="no active text-processed insurance policy"):
+        driver.run(case_id=CASE, held_by="orchestrator", run_id=RUN)
+
+
+def test_driver_processes_policy_documents_rather_than_taking_the_waiver(monkeypatch):
+    """A declaration must never short-circuit a case that HAS policy text --
+    the waiver branch is reachable only when the manifest has none."""
+    import run_policy_pipeline_driver as driver
+
+    documents = [{"document_id": "DOC_014", "document_type": "insurance_policy",
+                  "downstream_disposition": "text_only_no_normalization"}]
+    reads = _driver_reads(documents=documents,
+                          declaration={"reviewer": "pyun", "note": "stale"})
+
+    def fake_read(args, *, allow_missing=False):
+        if args[0] == "read-driver-receipt":
+            return None
+        return reads(args, allow_missing=allow_missing)
+
+    monkeypatch.setattr(driver, "_dao_json", fake_read)
+    monkeypatch.setattr(driver, "_dao_write", lambda args: None)
+    monkeypatch.setattr(driver, "_build_document_index",
+                        lambda case_id, held_by, run_id: {"status": "built"})
+
+    result = driver.run(case_id=CASE, held_by="orchestrator", run_id=RUN)
+    assert result["status"] == "noop"
+    assert result["text_only_policy_count"] == 1
+
+
+def test_the_declaration_also_clears_the_downstream_canonical_policy_gate(tmp_path, monkeypatch):
+    """The waiver has to reach every gate that asks about the policy layer, not
+    just the policy stage's own completion check.
+
+    `_policy_layer_scheme_blockers` guards claim_analysis and everything below
+    it, and it refuses an empty policy scope on purpose -- "nothing to verify,
+    therefore verified" is the defect it closes. A declared case is the one
+    empty scope a person vouched for. Without this, CASE_047 (2026-08-18, 52
+    documents, no 약관) passed policy_clause_processing and could then never
+    finalize claim_analysis: cleared by one gate, refused by the next.
+    """
+    _case(tmp_path, monkeypatch, [
+        {"document_id": "DOC_002", "document_type": "diagnosis_certificate",
+         "downstream_disposition": "automated_text_pipeline"},
+    ])
+    blockers = dao._policy_layer_scheme_blockers(CASE, "finalizing 'claim_analysis'")
+    assert blockers and "policy layer that does not exist" in blockers[0]
+
+    assert dao.declare_no_policy_documents(
+        CASE, reviewer="pyun", note="corpus case ships without 약관",
+        held_by="orchestrator", run_id=RUN)[0]
+    assert dao._policy_layer_scheme_blockers(
+        CASE, "finalizing 'claim_analysis'") == []
+
+
+def test_an_undeclared_empty_policy_layer_still_blocks_downstream(tmp_path, monkeypatch):
+    """Silence is not a declaration: an empty scope with no recorded human
+    statement must still refuse, or skipped policy work passes as done."""
+    _case(tmp_path, monkeypatch, [
+        {"document_id": "DOC_002", "document_type": "diagnosis_certificate",
+         "downstream_disposition": "automated_text_pipeline"},
+    ])
+    blockers = dao._policy_layer_scheme_blockers(CASE, "finalizing 'claim_analysis'")
+    assert blockers, "an undeclared empty policy layer must not pass"

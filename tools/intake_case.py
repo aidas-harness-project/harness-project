@@ -4,19 +4,21 @@ truth via a per-file, human-approved ledger (harness-guardrails-dev D2).
 Workflow:
     1. Dry run (default): propose a raw/ground_truth classification per file,
        by filename pattern. Nothing is written yet.
-    2. --init-ledger: for every file proposed as 'raw' (PDFs only -- see
-       below), run a cheap content pre-check (one vision call over the
-       document's first few pages) before writing the ledger -- filename
-       patterns alone missed a real case (see known-gaps.md item 2:
-       CASE_002's DOC_002/DOC_003, filenames looked like plain claim docs
-       but were actually completed third-party loss-adjustment reports with
-       stated payout figures). A flagged file gets `content_warning` set in
-       its ledger entry -- this does NOT auto-reject it, it makes the risk
-       visible for the human review step below, which is still mandatory
-       either way. Writes outputs/CASE_XXX/_source_ledger.json with every
+    2. --init-ledger: writes outputs/CASE_XXX/_source_ledger.json with every
        file's proposed classification and review_status: pending.
 
-       Scope of the content pre-check, deliberately narrow: only files
+       **The vision content pre-check that used to run here was removed
+       2026-08-20** (PoC owner's decision; see the comment at its former call
+       site). It made one vision call over each raw-proposed PDF's first pages
+       and set `content_warning` on a file whose contents looked like a
+       completed third-party loss-adjustment report -- the failure filename
+       patterns alone had missed (known-gaps.md item 2: CASE_002's
+       DOC_002/DOC_003). It was advisory only and never auto-rejected a file.
+       `content_warnings` is still an accepted input, so a ledger written while
+       the scan ran still validates and still shows its warning, and the
+       per-file HUMAN review gate below is unchanged and still mandatory.
+
+       Historical scope of that pre-check, deliberately narrow: only files
        proposed as 'raw' (a file already proposed as ground_truth is
        already headed for isolation, not the risk this catches), only PDFs
        (the only format this project's raw case files come in; a .txt/.md
@@ -74,14 +76,11 @@ from dao import (
     acquire_lock_blocking, release_lock,
 )
 from _validation import load_registry, validate_instance
-from llm_providers import (
-    DEFAULT_PROVIDER,
-    ProviderConfig,
-    ProviderConfigError,
-    ProviderExecutionError,
-    SUPPORTED_PROVIDERS,
-    build_provider,
-)
+# Only ProviderExecutionError is still used here: the vision content
+# pre-check that needed a provider was removed 2026-08-20, and importing
+# DEFAULT_PROVIDER / ProviderConfig / build_provider / SUPPORTED_PROVIDERS
+# after that left this module looking like it still selects one.
+from llm_providers import ProviderExecutionError
 from ocr_extract import scratch_dir, split_to_page_images
 # tools/trace.py, not the stdlib `trace` module.
 import trace as trace_mod
@@ -163,105 +162,6 @@ def build_adjuster_case_type(args) -> dict | None:
         "supplied_by": args.supplied_by, "supplied_at": now_iso(),
         **({"note": args.case_type_note} if args.case_type_note else {}),
     }
-
-# --------------------------------------------------- content pre-check --
-
-CONTENT_SCAN_PAGES = 5
-CONTENT_SCAN_PROMPT_VERSION = "intake_content_scan_v0.1"
-
-CONTENT_SCAN_PROMPT = (
-    "You are given up to {n} page images from the START of a document -- a "
-    "candidate input file for an insurance loss-adjustment pipeline. Determine "
-    "whether this document is, or contains, a COMPLETED, submitted professional "
-    "loss-adjustment report -- i.e. a document where a licensed adjuster "
-    "(손해사정사) has already reached and stated a final conclusion and/or "
-    "payout amount for an insurance claim. Typical indicators: titles like "
-    "보험금사정서/손해사정서, section headers like 사정 결과, 사정 요약, "
-    "보험금 사정내역, 사정 의견, an adjuster's license number or stamp, a "
-    "위임장 granting loss-adjustment authority to a firm, a stated 지급 금액 "
-    "or 사정금액 in 원 with a specific figure. This is DIFFERENT from an "
-    "ordinary claim document (diagnosis certificate, medical record, "
-    "insurance policy, plain claim form, denial notice) which does NOT "
-    "contain a professional's own completed adjustment conclusion.\n\n"
-    "Reply with exactly one line: FLAGGED: <brief reason, quoting the "
-    "specific text you saw> or CLEAR."
-)
-
-FLAGGED_RE = re.compile(r"\bFLAGGED\b")
-CLEAR_RE = re.compile(r"\bCLEAR\b")
-
-
-def _parse_content_scan_verdict(response_text: str) -> dict:
-    """Pure parsing, kept separate from the provider call so it's testable
-    without real page images or a real provider backend. Fails safe toward
-    flagged=True on anything unparseable -- this is a safety check, not a
-    productivity one, so an ambiguous response should mean "a human looks
-    at this," not "silently wave it through." Same discipline as
-    ocr_extract.compare()'s fail-toward-disagreed rule."""
-    text = response_text.strip()
-    text_upper = text.upper()
-    flagged_match = FLAGGED_RE.search(text_upper)
-    clear_match = CLEAR_RE.search(text_upper)
-    if flagged_match:
-        return {"flagged": True, "evidence": text}
-    if clear_match:
-        return {"flagged": False, "evidence": None}
-    return {"flagged": True, "evidence": f"unparseable content-scan response, flagged for safety: {text!r}"}
-
-
-def build_scan_provider(*, scan_provider_name: str | None = None, scan_model: str | None = None, env=None):
-    source_env = env if env is not None else os.environ
-    provider_name = (
-        scan_provider_name
-        or source_env.get("HARNESS_INTAKE_SCAN_PROVIDER")
-        or source_env.get("HARNESS_LLM_PROVIDER")
-        or DEFAULT_PROVIDER
-    )
-    model_name = scan_model or source_env.get("HARNESS_INTAKE_SCAN_MODEL") or source_env.get("HARNESS_LLM_MODEL")
-    return build_provider(ProviderConfig(provider_name, model_name), env=source_env, root=ROOT)
-
-
-def _append_provider_metadata_to_evidence(evidence: str | None, metadata: dict) -> str | None:
-    if evidence is None:
-        return None
-    provider_name = metadata.get("provider_name") or "unknown-provider"
-    model_name = metadata.get("model_name") or "unknown-model"
-    prompt_version = metadata.get("prompt_version") or CONTENT_SCAN_PROMPT_VERSION
-    return f"{evidence} [provider={provider_name}; model={model_name}; prompt={prompt_version}]"
-
-
-def scan_for_answer_key_content(
-    pdf_path: Path,
-    case_id: str,
-    index: int,
-    n_pages: int = CONTENT_SCAN_PAGES,
-    provider=None,
-) -> dict:
-    """One cheap vision call over the document's first n_pages -- a
-    classification SIGNAL for intake's human reviewer, not a full read.
-    See known-gaps.md item 2 (the CASE_002 incident this exists to catch)
-    and this module's docstring for scope."""
-    with scratch_dir(case_id, f"INTAKE_{index:03d}") as tmp_dir:
-        page_paths = split_to_page_images(pdf_path, tmp_dir, max_pages=n_pages)
-        # Pass the page images through the provider's image channel -- NOT as
-        # file paths embedded in the prompt text. Path-in-text only works for a
-        # CLI child that opens the files itself; an HTTP provider receives dead
-        # strings and scans nothing (the D2 check would silently pass-blind).
-        prompt = CONTENT_SCAN_PROMPT.format(n=n_pages)
-        try:
-            selected_provider = provider or build_scan_provider()
-            result = selected_provider.scan_intake_content(
-                prompt, CONTENT_SCAN_PROMPT_VERSION, image_paths=page_paths
-            )
-        except (ProviderConfigError, ProviderExecutionError) as exc:
-            sys.exit(f"error: content-scan provider failed for {pdf_path.name}: {exc}")
-        metadata = result.metadata()
-        verdict = _parse_content_scan_verdict(result.text)
-        verdict["evidence"] = _append_provider_metadata_to_evidence(verdict["evidence"], metadata)
-        verdict["provider_metadata"] = metadata
-        verdict["pages_checked"] = len(page_paths)
-        return verdict
-
 
 def classify(files, gt_patterns):
     plan = []
@@ -388,16 +288,6 @@ def main():
     ap.add_argument("--init-ledger", action="store_true", help="Write _source_ledger.json with the proposed plan (all pending)")
     ap.add_argument("--execute", action="store_true", help="Copy files, but only if the ledger is fully approved")
     ap.add_argument("--run-id", help="Only used for lock metadata on document_manifest.json; a fresh one is generated if omitted")
-    ap.add_argument("--no-content-scan", action="store_true",
-                    help="Skip the D2 vision content pre-check at --init-ledger. The per-file "
-                         "human review gate is unchanged -- every entry still starts 'pending' "
-                         "and must be approved. Use for reprocessing/timing intakes of material "
-                         "whose classification was already reviewed once; a first-contact "
-                         "source folder should keep the scan (known-gaps.md item 2: filename "
-                         "patterns alone missed two completed adjuster reports).")
-    ap.add_argument("--scan-provider", choices=SUPPORTED_PROVIDERS,
-                    help="Provider for D2 content pre-check; defaults to HARNESS_INTAKE_SCAN_PROVIDER or claude-cli")
-    ap.add_argument("--scan-model", help="Model name for --scan-provider")
     ap.add_argument("--coverage-basis", choices=COVERAGE_BASIS_VALUES, metavar="BASIS",
                     help="Adjuster-supplied 보상 근거 (%s). Requires --loss-type and --supplied-by."
                          % "|".join(COVERAGE_BASIS_VALUES))
@@ -480,37 +370,15 @@ def main():
             sys.exit(f"error: ledger already exists at {ledger_path} -- resolve/clear existing entries via "
                       f"`python tools/dao.py set-ledger-status` rather than overwriting it.")
 
-        pdf_raw = [f for f in raw if f.suffix.lower() == ".pdf"]
+        # D2's vision content pre-check was removed 2026-08-20 (PoC
+        # owner's decision). The per-file HUMAN review gate below is
+        # unchanged: every entry is still written 'pending', and
+        # --execute still refuses while any file is unapproved. The scan
+        # was advisory only -- it never auto-rejected a file -- cost ~41s
+        # on a 4-PDF case, and read raw pre-redaction pages.
+        # `content_warnings` stays an accepted input so a ledger written
+        # while the scan ran still validates and still shows its warning.
         content_warnings = {}
-        if args.no_content_scan and pdf_raw:
-            # User-directed opt-out (2026-08-14): the vision pre-check cost
-            # ~41s on CASE_144's 4 PDFs and is redundant on a re-intake whose
-            # classification a human already reviewed. The D2 gate itself is
-            # untouched: every entry below is still written 'pending'.
-            print(f"\nContent pre-check SKIPPED (--no-content-scan) for {len(pdf_raw)} "
-                  f"'raw'-proposed PDF(s). Reviewers approve without a scan signal; "
-                  f"do not use this on a first-contact source folder.")
-            pdf_raw = []
-        if pdf_raw:
-            print(f"\nContent pre-check: scanning {len(pdf_raw)} 'raw'-proposed PDF(s) for "
-                  f"answer-key-class content (harness-guardrails-dev D2, known-gaps.md item 2) ...")
-            try:
-                scan_provider = build_scan_provider(scan_provider_name=args.scan_provider, scan_model=args.scan_model)
-            except ProviderConfigError as exc:
-                sys.exit(f"error: {exc}")
-            for i, f in enumerate(pdf_raw, start=1):
-                verdict = scan_for_answer_key_content(f, args.case_id, i, provider=scan_provider)
-                if verdict["flagged"]:
-                    content_warnings[f.name] = verdict
-                    print(f"  FLAGGED: {f.name}\n    {verdict['evidence']}")
-            if content_warnings:
-                print(f"\n*** {len(content_warnings)} file(s) proposed as 'raw' show signs of "
-                      f"answer-key-class content -- see content_warning in the ledger. This does "
-                      f"NOT auto-reject them; a human still reviews every file, but this one needs "
-                      f"real attention before approving, not a rubber stamp. ***")
-            else:
-                print("  clear -- no answer-key-class content detected in the scanned pages.")
-
         ledger = build_ledger(args.case_id, src_dir, plan, splits, content_warnings)
         case_dir(args.case_id)
         atomic_write_json(ledger_path, ledger)
