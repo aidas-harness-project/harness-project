@@ -100,3 +100,37 @@ def test_the_driver_only_emits_values_both_schemas_accept():
     assert emitted <= allowed, (
         f"the driver emits stop_reason values no schema accepts: "
         f"{sorted(emitted - allowed)}")
+
+
+# --------------------------------------------- the same drift, one axis over --
+# `value_state` travels the same way `stop_reason` does, and had no guard.
+# `run_consistency_check.py` copies each observation's `value_state` verbatim
+# out of `claim_analysis_result.json` into `consistency_check_workitems.json`
+# (lines ~158 and ~190), so a value the first schema accepts and the second
+# rejects fails stage 6 on its write -- after stage 5's provider work is paid
+# for and published.
+#
+# Measured 2026-08-26, and it is the SEVENTH propagation surface of one change:
+# `printed_but_blank` was added to the result and trace schemas, stage 5 then
+# published 25 such fields across five cases, and stage 6 refused every write:
+#
+#     work_items/1/readings/1/value_state: 'printed_but_blank' is not one of
+#     ['asserted', 'explicitly_absent', 'unavailable', 'not_applicable']
+#
+# The identical shape as CASE_712 above, one contract further downstream. The
+# lesson `contract-axis-propagation-gap` records is that adding a value
+# upstream does not carry it anywhere; this test is what makes the next such
+# addition fail here, cheaply, instead of mid-run.
+
+def test_value_state_enum_agrees_between_result_and_workitems() -> None:
+    # The observation vocabulary is the widest `value_state` enum in the
+    # result schema; the per-state conditionals below it are `const`, not
+    # `enum`, so they are not collected here.
+    result = set().union(*(set(node["enum"]) for _, node in _enums(
+        "claim_analysis_result.schema.json", "value_state")))
+    workitems = set().union(*(set(node["enum"]) for _, node in _enums(
+        "consistency_check_workitems.schema.json", "value_state")))
+    missing = sorted(result - workitems)
+    assert not missing, (
+        "stage 6 copies value_state verbatim from the result contract, so a "
+        f"value it cannot carry fails the write: {missing}")

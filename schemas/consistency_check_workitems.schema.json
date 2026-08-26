@@ -53,7 +53,10 @@
       "additionalProperties": false,
       "properties": {
         "observation_id": { "type": "string", "pattern": "^CAO_[0-9]{4,}$" },
-        "value_state": { "enum": ["asserted", "explicitly_absent", "unavailable", "not_applicable"] },
+        "value_state": {
+          "enum": ["asserted", "explicitly_absent", "printed_but_blank", "unavailable", "not_applicable"],
+          "$comment": "Mirrors claim_analysis_result#/$defs/observation/value_state, because run_consistency_check.py copies the value verbatim out of that contract. `printed_but_blank` was added there 2026-08-26 and not here, and stage 6 then refused every write on the five cases stage 5 had just published (25 such fields) -- the CASE_712 shape, one contract further downstream. test_stop_reason_enums_agree.py now guards this pair. A blank reading is carried but never compared: every consistency rule gates on value_state == 'asserted', so a printed-and-empty cell contributes no value to contradict."
+        },
         "value": { "type": ["string", "null"] },
         "source_document_kind": { "type": ["string", "null"] },
         "evidence_references": {
