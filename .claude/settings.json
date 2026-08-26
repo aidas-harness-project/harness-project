@@ -1,6 +1,6 @@
 {
   "//": "Structural D1/P2 boundary (fleet review, amended 2026-08-22). The deny rules stop EVERY agent — including the verification agent — from opening answer-key or raw-source paths through Read. They are unchanged and must stay that way: direct reads have no gate, no attribution, and no log.",
-  "//2": "What changed: one verification stage may now reach ground truth, through exactly one door. `dao.py read-ground-truth` is allowed below because it is gated (caller_stage must be in dao.GROUND_TRUTH_ALLOWED_STAGES), conditioned (that version's human review must be marked complete), and logged. Permissions here are project-wide and cannot be scoped per agent, so the per-agent limit lives where it can be enforced — in the DAO's stage gate, not in this file. See harness-guardrails-dev D1 for the four conditions, including that the verification result is terminal and no producing stage may consume it.",
+  "//2": "What changed: one verification stage may now reach ground truth, and record what it found, through three gated commands. `read-ground-truth` requires caller_stage in dao.GROUND_TRUTH_ALLOWED_STAGES; `write-verification-result` and `read-verification-result` require the narrower dao.VERIFICATION_STAGES, plus the fixed screening_fidelity_result_v<n>.json filename, so the write cannot double as a hatch into the ground-truth tree. All three also require that version's human review to be marked complete, and all three log. Permissions here are project-wide and cannot be scoped per agent, so the per-agent limit lives where it can be enforced — in the DAO's stage gates, not in this file. Listing them explicitly matters: without it the calls fall to classifier judgement, which is how `ls source-cases` came to be blocked while `ls data/ground_truth` was not. See harness-guardrails-dev D1 for the four conditions.",
   "//3": "The full Evaluation suite (draft report vs ground truth, evaluation_result.schema.json) stays deferred to the isolated Unit 11 service with separate storage and credentials. NOTE: this file does not seal arbitrary Bash-based reads; the production boundary still requires Unit 11 OS/storage isolation.",
   "permissions": {
     "deny": [
@@ -11,7 +11,11 @@
     ],
     "allow": [
       "Bash(python tools/dao.py read-ground-truth:*)",
-      "Bash(python3 tools/dao.py read-ground-truth:*)"
+      "Bash(python3 tools/dao.py read-ground-truth:*)",
+      "Bash(python tools/dao.py write-verification-result:*)",
+      "Bash(python3 tools/dao.py write-verification-result:*)",
+      "Bash(python tools/dao.py read-verification-result:*)",
+      "Bash(python3 tools/dao.py read-verification-result:*)"
     ]
   }
 }

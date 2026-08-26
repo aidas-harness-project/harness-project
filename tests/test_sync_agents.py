@@ -249,12 +249,22 @@ def test_local_harness_is_fail_closed_and_ground_truth_blind():
     # `Bash(cat:*)` or a second command has to fail here rather than pass as a
     # config tweak.
     allow = json.loads(settings)["permissions"].get("allow", [])
-    assert allow, "the sanctioned ground-truth door must be allowed explicitly"
-    assert all(
-        entry.startswith(("Bash(python tools/dao.py read-ground-truth",
-                          "Bash(python3 tools/dao.py read-ground-truth"))
-        for entry in allow
-    ), allow
+    assert allow, "the sanctioned ground-truth doors must be allowed explicitly"
+    sanctioned = tuple(
+        f"Bash({interp} tools/dao.py {command}"
+        for interp in ("python", "python3")
+        for command in ("read-ground-truth",
+                        "write-verification-result",
+                        "read-verification-result")
+    )
+    assert all(entry.startswith(sanctioned) for entry in allow), allow
+
+    # Each door must actually be listed. Leaving one off does not close it --
+    # it drops that call to classifier judgement, which is how `ls source-cases`
+    # came to be refused while `ls data/ground_truth` was not.
+    for command in ("read-ground-truth", "write-verification-result",
+                    "read-verification-result"):
+        assert any(command in entry for entry in allow), command
     assert '"Run CASE_003 evaluation"    -> denied locally' in readme
 
 
