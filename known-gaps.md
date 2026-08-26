@@ -4224,7 +4224,7 @@ medical files, and they are not one thing:
 
 | file | n | cause |
 |---|---|---|
-| `test_run_checkpoint1` | 12 | fixtures return only legacy classification fields; `classification_from_model` now requires a medical kind for a medical `predicted_document_type` |
+| `test_run_checkpoint1` | 12 | fixtures returned only legacy classification fields -- FIXED 2026-08-26, all 12 revived, file now 61/61 |
 | `test_run_scenario_matrix` | 5 | same stale `routing_config` mock -- FIXED 2026-08-26, all 5 revived |
 | `test_dao_run_state` | 5 | 4 are medical-clearance gates; 1 is a v0.3 `receipt_sha256` binding |
 | `test_dao_human_review` | 4 | setup writes stage_name `evaluation`, which run_state v0.3's enum does not carry (evaluation is a deferred EXTERNAL service, so the schema is right and the test is stale) |

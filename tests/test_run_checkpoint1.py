@@ -52,7 +52,17 @@ def _mock_ocr(monkeypatch, pages):
     monkeypatch.setattr(rc1, "run_ocr", fake_run_ocr)
 
 
-def _mock_classify(monkeypatch, doc_type="insurer_response", label="보험사 회신"):
+# Broad medical type -> a fine kind that is valid for it, so the helper below
+# can produce a response of the same shape the real classifier returns.
+_MEDICAL_BROAD_TYPES = {
+    "diagnosis_certificate": "diagnosis_certificate",
+    "medical_record": "outpatient_record",
+    "imaging_report": "imaging_interpretation",
+}
+
+
+def _mock_classify(monkeypatch, doc_type="insurer_response", label="보험사 회신",
+                   medical_kind=None):
     # `routing_config` has been part of the production signature since
     # 2026-08-19 (55b20bf), when medical routing began passing it. This helper
     # was last touched 2026-08-05, so every test using it died on
@@ -61,8 +71,20 @@ def _mock_classify(monkeypatch, doc_type="insurer_response", label="보험사 �
     # rather than the raw page. Accept and ignore it: these tests are about
     # checkpoint-1 plumbing, not about routing.
     def fake_classify(text, classifier=None, routing_config=None):
-        return {"predicted_document_type": doc_type, "document_type_label": label,
-                "confidence": 0.9, "quote": text[:20]}
+        parsed = {"predicted_document_type": doc_type, "document_type_label": label,
+                  "confidence": 0.9, "quote": text[:20]}
+        # A REAL classifier response for a medical broad type also carries the
+        # fine-grained kind: `classification_from_model` requires one (or
+        # candidates) whenever `predicted_document_type` is medical, and
+        # `_finish_checkpoint1` turns a missing one into `sys.exit`. Verified
+        # against a live artifact -- CASE_700 DOC_011 publishes
+        # `medical_classification.kind: diagnosis_certificate`. Omitting it
+        # here made the mock unrepresentative of any response the pipeline can
+        # actually receive, so the tests died in setup rather than exercising
+        # the behaviour they name.
+        if doc_type in _MEDICAL_BROAD_TYPES:
+            parsed["medical_document_kind"] = medical_kind or _MEDICAL_BROAD_TYPES[doc_type]
+        return parsed
     monkeypatch.setattr(rc1, "classify_document", fake_classify)
 
 
@@ -204,6 +226,7 @@ def test_checkpoint1_provider_backed_classification_without_claude_cli(tmp_path,
     _mock_ocr(monkeypatch, [("provider page text", "provider page text b", "agreed")])
     classifier = FakeClassifier(
         '{"predicted_document_type": "medical_record", "document_type_label": "의무기록", '
+        '"medical_document_kind": "outpatient_record", '
         '"confidence": 0.88, "quote": "provider page text"}'
     )
 
@@ -214,7 +237,14 @@ def test_checkpoint1_provider_backed_classification_without_claude_cli(tmp_path,
 
     assert result["status"] == "passed"
     assert result["document_type"] == "medical_record"
-    assert classifier.prompts[0][1] == rc1.CLASSIFICATION_PROMPT_VERSION
+    # The MEDICAL constant, because medical routing is enabled in the
+    # shipped config and `classify_document` switches version with it.
+    # Verified against a real artifact: CASE_700's classification_result
+    # records prompt_version `classification_v0.3_medical_v0.1`. These
+    # assertions named the pre-routing constant, so they described a
+    # call the pipeline no longer makes.
+    assert (classifier.prompts[0][1]
+            == rc1.MEDICAL_CLASSIFICATION_PROMPT_VERSION)
     classification = json.loads(
         (tmp_path / "outputs" / "CASE_009" / "classification_result_DOC_001.json").read_text(encoding="utf-8")
     )
@@ -619,6 +649,7 @@ def test_cli_resolve_disagreement_uses_explicit_classifier_provider(
         return {
             "predicted_document_type": "medical_record",
             "document_type_label": "의무기록",
+            "medical_document_kind": "outpatient_record",
             "confidence": 0.9,
             "quote": text[:20],
         }
@@ -672,7 +703,14 @@ def test_classify_document_parses_provider_response():
     assert result["predicted_document_type"] == "insurer_response"
     assert result["confidence"] == 0.95
     assert result["_provider_metadata"]["provider_name"] == "openai-api"
-    assert classifier.prompts[0][1] == rc1.CLASSIFICATION_PROMPT_VERSION
+    # The MEDICAL constant, because medical routing is enabled in the
+    # shipped config and `classify_document` switches version with it.
+    # Verified against a real artifact: CASE_700's classification_result
+    # records prompt_version `classification_v0.3_medical_v0.1`. These
+    # assertions named the pre-routing constant, so they described a
+    # call the pipeline no longer makes.
+    assert (classifier.prompts[0][1]
+            == rc1.MEDICAL_CLASSIFICATION_PROMPT_VERSION)
 
 
 def test_classify_document_fails_loud_on_unparseable_response():
@@ -1232,7 +1270,9 @@ def test_classification_reads_the_redacted_text_when_it_exists(tmp_path, monkeyp
     def fake_classify(text, classifier=None, routing_config=None):
         seen["text"] = text
         return {"predicted_document_type": "diagnosis_certificate",
-                "document_type_label": "진단서", "confidence": 0.9, "quote": text[:20]}
+                "document_type_label": "진단서", "confidence": 0.9,
+                "medical_document_kind": "diagnosis_certificate",
+                "quote": text[:20]}
 
     monkeypatch.setattr(rc1, "classify_document", fake_classify)
 
