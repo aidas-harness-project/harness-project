@@ -38,9 +38,9 @@ the same pass.
 | 60 | OPEN | No OpenRouter call has ever been made against the real service -- everything is verified statically |
 | 61 | OPEN | scan_intake_content has no production caller after D2's pre-check was removed |
 | 62 | OPEN | Half the failing test baseline is Windows-platform (O_NOFOLLOW/symlink), not logic |
-| 63 | OPEN | An ambiguous-kind medical document is never read; 5 real losses in the corpus |
-| 64 | OPEN | A contradiction inside ONE document never becomes a conflict candidate |
-| 65 | OPEN | CASE_7044 CONFLICT_1's note states the opposite of DOC_002's own 부상병 |
+| 63 | RISK ACCEPTED | Ambiguous-kind medical documents stay unrouted (user decision 2026-08-26) |
+| 64 | OPEN | Two separately-issued 진단서 intaken as one document (CASE_7044 DOC_002) |
+| 65 | RESOLVED | CASE_7044 CONFLICT_1 note corrected by reviewer pyun 2026-08-26 |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
@@ -4247,7 +4247,7 @@ managed until 2026-08-26, and it hid 13 dead checkpoint-1 tests -- including
 the one pinning that classification reads REDACTED rather than raw page text.
 
 
-## 63. A medical document the classifier could not pin to one form kind is never read -- OPEN 2026-08-26
+## 63. A medical document the classifier could not pin to one form kind is never read -- RISK ACCEPTED 2026-08-26
 
 **What.** `claim_analysis` routes by fine-grained `medical_document_kind`, and
 `claim_analysis_selection.py:190` skips any document whose kind is `None` or
@@ -4284,38 +4284,66 @@ document under a `route_not_activated`-style disposition that a reviewer can
 see, or surfacing it as an explicit human gate. All three are design decisions,
 not repairs.
 
-**What closes it.** A decision on which of the three, then the routing change
-plus a test pinning that an ambiguous document is never silently dropped.
+**Decided 2026-08-26 (user):** exclude it. If the classification settled on
+nothing, the document is not routed. No code change -- that is what
+`claim_analysis_selection.py:190` already does; this item records the decision
+rather than a pending repair.
 
-## 64. A contradiction INSIDE one document does not become a conflict -- OPEN 2026-08-26
+The rationale is the one above, taken as the answer rather than as one option:
+a document read as the wrong form kind answers the wrong fields with real,
+verifiable citations, and a reviewer has no way to tell that from a correct
+reading. An unread document is visible in the trace as `ambiguous` or
+`skipped`; a misrouted one is invisible. At 0.5 top confidence on CASE_7044's
+`입원·통원 확인서`, accepting the candidate would be a coin flip carried into
+the contract as evidence.
 
-**What.** `claim_analysis` compares readings ACROSS documents. Two pages of the
-same document stating different things never meet, so no conflict candidate is
-raised and one of the two readings simply wins.
+What this costs, stated plainly so it is not rediscovered as a surprise: five
+corpus documents contribute nothing, and CASE_7044's DOC_009 (`공제처리확인서`,
+치료비 14,061,670원, 입원 26/27일) is not among them only because it is
+`not_medical` with zero candidates -- a different exclusion with the same
+effect. If duplicate-payment material needs to reach the pipeline, that is a
+routing question about `public_benefit_certificate`, not about ambiguity.
 
-**Measured on CASE_7044 DOC_002**, a single 진단서 whose two pages disagree:
+**Reopen if** the corpus run shows ambiguous documents concentrating on one
+form the classifier consistently cannot settle. That would be a classifier
+gap wearing this item's clothes, and the fix would belong in Stage 2.
 
-```
-p1: 현재 통증 및 붓기있고 발의 강직 있어 3주의 절대적인 안정가료가 추가적으로 필요합니다.
-p2: 기브스 및 목발 6주, 재활6 주 총12 주간의 안정가료가 필요합니다.
-```
+## 64. Two separately-issued 진단서 were intaken as ONE document -- OPEN 2026-08-26
 
-The published `treatment_period` holds one observation quoting p1 (`3주...`)
-and nothing from p2, and resolves `unavailable / partial_value_only`. A
-reviewer is told the records are partial; they are not told the document
-contradicts itself about a figure that drives 안정가료 duration.
+**Corrected 2026-08-26, same day.** This item was first written as "a
+contradiction inside one document never becomes a conflict candidate", from
+CASE_7044 DOC_002 stating `3주` on p1 and `총12주` on p2. Reading both pages in
+full shows that is the wrong diagnosis. **The two pages are two separate
+진단서, printed at different times, intaken as one document.**
 
-The same shape was recorded earlier on CASE_7046, where a laterality
-contradiction inside DOC_003 (`좌측 손목통증`/`Lt. wrist` vs `rt. distal radius
-fx`) resolved `asserted` with `conflict_candidate_ids: []` -- it never became a
-candidate, so `register` could not take it. Two independent observations of one
-gap.
+The evidence is structural, not interpretive. Each page carries the full form
+from `진 단 서` / 등록번호 / 연번호 through 병명 to 의료기관명칭 -- a complete
+certificate, twice. Page 2 additionally carries `출력자` and 면허번호. The
+checkbox glyphs differ between the pages (`☑`/`☐` vs `✔`/`○`), which is a
+different print session. Page 1 has the surgery date filled in (`2025-02-25`);
+on page 2 that same slot is blank. The five 상병명 are identical.
 
-**What closes it.** Either claim analysis raises a candidate when two readings
-of the SAME document disagree, or consistency check gains a within-document
-pass. The first is closer to where the readings already exist.
+So `3주` and `총12주` are not a self-contradiction: they are two opinions from
+different points in the course -- plausibly remaining vs total 안정가료 -- and
+publishing one of them without the other is a document-boundary problem, not an
+extraction one. `treatment_period` citing only p1 is the correct behaviour for
+the document it was given.
 
-## 65. A P6 resolution note stated the opposite of the source -- OPEN 2026-08-26
+Same family as the 법률의견서 finding already recorded: the split belongs at
+INTAKE, and page-number continuity is the detectable signal.
+
+**What closes it.** Detect a repeated full-form header inside one intaken PDF
+and split it, the same way the 25 법률의견서 pairs are detected. Until then a
+multi-certificate PDF silently publishes whichever page the ladder reaches
+first.
+
+**Still open and NOT explained by this** -- CASE_7046 DOC_003 carries a
+laterality contradiction WITHIN one page (`좌측 손목통증`/`Lt. wrist` vs
+`rt. distal radius fx`), which resolved `asserted` with
+`conflict_candidate_ids: []`. That one is a genuine within-document
+disagreement and is not addressed here.
+
+## 65. A P6 resolution note stated the opposite of the source -- RESOLVED 2026-08-26
 
 **What.** CASE_7044 `CONFLICT_1`'s `resolution_note` says DOC_002 and DOC_003
 record the 주상병 as ligament rupture and **"골절을 기재하지 않음"** (do not record
@@ -4337,5 +4365,17 @@ it means writing a new verdict through `set-conflict-verdict` under a named
 reviewer, which is the user's call. Recorded so the note is not carried forward
 as fact.
 
-**What closes it.** A reviewer decision on the corrected wording, then one
-`set-conflict-verdict` call recording it.
+**RESOLVED 2026-08-26.** Reviewer `pyun` directed the correction, and it was
+recorded through `set-conflict-verdict CASE_7044 CONFLICT_1 deferred_to_report`
+under that name (operation id
+`conflict-note-correction:CASE_7044:CONFLICT_1:20260826`). The verdict is
+unchanged -- only the note was rewritten.
+
+The corrected note states what the sources actually say: DOC_002 and DOC_003
+record the 주상병 as ligament rupture AND record fracture as 부상병 (S92.280,
+S92.30 named explicitly), while DOC_005/006/007 all presuppose fracture, so the
+live question is whether fracture belongs in the 주상병 -- which bears on
+담보 and 산정. It carries a `정정 사유` paragraph naming the previous wording,
+so a later reader sees that the record was corrected and why, rather than
+finding a silently different note. The old phrase therefore still appears in
+the ledger, but only inside that explanation.
