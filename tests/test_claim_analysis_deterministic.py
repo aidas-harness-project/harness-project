@@ -301,3 +301,97 @@ def test_a_multi_line_surgery_field_is_left_to_the_model() -> None:
     settled = deterministic.extract(
         pages, [{"field_id": "surgery_or_procedure_name"}])
     assert "surgery_or_procedure_name" not in settled
+
+
+# ---------------------------------- the second printed shape: 장해분류표 --
+# A 후유장해진단서 written against the insurer's 장해분류표 rather than McBride
+# prints the rate inside the classification item itself. Real pages, verbatim:
+#
+#   CASE_7005 DOC_003: 한 다리의 3대관절 중 1관절의 기능에 뚜렷한 장해를 남긴 때 (지급율 10%)
+#   CASE_7008 DOC_003: 척추에 뚜렷한 기형을 남긴때 (지급율 30%)
+#
+# Both published `documented_disability_rate: not_mentioned` before this
+# pattern existed, and the rate is what the payout is computed from.
+
+PAGE_PAYOUT_TABLE = """후 유 장 해 진 단 서
+
+장해상병명 | 요추1번 압박골절
+
+보험 약관기준
+
+    척추에 뚜렷한 기형을 남긴때 (지급율 30%)
+
+비고(장해부위의 그림표시 등)
+"""
+
+# The reason the pattern is anchored on 지급율 and NOT `[율률]`. This is a real
+# policy clause from the corpus: it uses a rate as an EXAMPLE about a
+# hypothetical person, and reading it as the claimant's rate would be exactly
+# the fabrication P1 exists to prevent.
+# ONE rate only, deliberately. The real clause names two (20% and 30%), and a
+# fixture carrying both passes even under a pattern widened to `[율률]` --
+# `_read_alternatives` backs off on the two differing values, so the ambiguity
+# guard masks the contamination the spelling guard is supposed to catch. With a
+# single rate, only the spelling stands between a policy clause and a published
+# claimant rate.
+PAGE_POLICY_CLAUSE = """제5조(보험금을 지급하지 않는 사유)
+
+이 계약의 보장개시전의 원인에 의하거나 또는 그 이전에 발생한 장해로
+후유장해보험금의 지급사유가 되지 않았던 장해: 보험가입 전 한 팔의
+손목관절에 심한 장해(지급률 20%)가 있었던 피보험자가 보험가입 후 상해를
+입은 경우에는 보험가입 후 발생한 장해에 대해서만 보험금을 지급합니다.
+"""
+
+
+def test_the_payout_table_shape_is_read():
+    found = deterministic.extract(_pages(PAGE_PAYOUT_TABLE), DISABILITY_FIELDS)
+    reading = found["documented_disability_rate"]
+    assert reading["value"] == 30
+    assert reading["quote"] == "척추에 뚜렷한 기형을 남긴때 (지급율 30%)"
+
+
+def test_a_policy_clause_is_never_read_as_the_claimants_rate():
+    """The whole reason for the narrow spelling.
+
+    Swept across all 56,540 processed pages (2026-08-26): 134 `지급율`
+    occurrences, every one in a certificate; 12 `지급률`, every one in a policy
+    clause. Zero crossover. Widening the pattern to `[율률]` re-admits all 12.
+    """
+    found = deterministic.extract(_pages(PAGE_POLICY_CLAUSE), DISABILITY_FIELDS)
+    assert "documented_disability_rate" not in found, (
+        f"a policy clause was read as the claimant's rate: "
+        f"{found.get('documented_disability_rate')}")
+
+
+def test_two_different_payout_rates_defer_to_the_provider():
+    """CASE_7007 DOC_004 prints two items -- 10% for a leg joint and 3% for a
+    toe. Which one the field means, or whether they combine, is a judgement."""
+    page = ("한 다리의 3대관절 중 1관절에 뚜렷한 장해를 남긴때 (지급율 10%)\n"
+            "한 발의 첫째발가락 이외의 발가락에 뚜렷한 장해를 남긴 때 (지급율 3%)")
+    found = deterministic.extract(_pages(page), DISABILITY_FIELDS)
+    assert "documented_disability_rate" not in found
+
+
+def test_the_mcbride_shape_still_wins_where_both_are_printed():
+    """Ordering, not preference: 노동능력상실율 is the assessment the physician
+    made, while a 장해분류표 item is the policy category it was mapped onto."""
+    page = ("| 노동능력 상실율(%) | 13 |\n"
+            "척추에 뚜렷한 기형을 남긴때 (지급율 30%)")
+    found = deterministic.extract(_pages(page), DISABILITY_FIELDS)
+    assert found["documented_disability_rate"]["value"] == 13
+
+
+def test_a_whole_percentage_does_not_gain_a_decimal():
+    """The report renders the value with `str()`, so a float would print
+    `30.0%` where the form printed `30%` -- a precision the document never
+    stated."""
+    found = deterministic.extract(_pages(PAGE_PAYOUT_TABLE), DISABILITY_FIELDS)
+    value = found["documented_disability_rate"]["value"]
+    assert value == 30 and isinstance(value, int), repr(value)
+    assert str(value) == "30"
+
+
+def test_a_printed_decimal_is_preserved():
+    found = deterministic.extract(
+        _pages("척추에 기형을 남긴때 (지급율 12.5%)"), DISABILITY_FIELDS)
+    assert found["documented_disability_rate"]["value"] == 12.5

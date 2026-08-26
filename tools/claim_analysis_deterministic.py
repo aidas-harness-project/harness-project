@@ -60,7 +60,41 @@ RULE_VERSION = "claim_analysis_deterministic.v0.1"
 # because the same document prints both -- verified on CASE_705/DOC_013, whose
 # page holds the colon form on one line and the pipe form on another.
 _DISABILITY_RATE = re.compile(
-    r"노동\s*능력\s*상실\s*[율률]\s*\(\s*%\s*\)\s*[:|]\s*(\d{1,3})\s*%?"
+    r"노동\s*능력\s*상실\s*[율률]\s*\(\s*%\s*\)\s*[:|]\s*(?P<value>\d{1,3})\s*%?"
+)
+
+# The SECOND printed shape for the same field, and the reason the sweep in this
+# module's docstring had to be re-run before adding it.
+#
+# A 후유장해진단서 written against the insurer's 장해분류표 rather than McBride
+# prints the rate inside the classification item itself:
+#
+#     한 다리의 3대관절 중 1관절의 기능에 뚜렷한 장해를 남긴 때 (지급율 10%)
+#     척추에 뚜렷한 기형을 남긴때 (지급율 30%)
+#
+# That is still a printed form value -- the item and its rate are both the
+# 약관's text, quoted by the physician who ticked it -- so it satisfies the
+# label-is-printed rule. What it does NOT satisfy on its own is the sweep,
+# because the SAME phrasing appears in the policy itself, where a clause uses a
+# rate as an EXAMPLE about a hypothetical person:
+#
+#     보험가입 전 한 팔의 손목관절에 심한 장해(지급률 20%)가 있었던 피보험자가...
+#
+# Reading that as this claimant's rate would be a fabrication of exactly the
+# kind P1 exists to prevent.
+#
+# The two are separated by the publisher's own SPELLING, which is why the
+# pattern is anchored on 율 and not `[율률]`. Swept across all 56,540 processed
+# pages (2026-08-26): 134 `지급율` occurrences, every one in a certificate
+# context, and 12 `지급률` occurrences, every one in a policy clause. Zero
+# crossover in either direction. Widening this to `[율률]` re-admits all 12
+# policy hits, so the narrow spelling is load-bearing rather than incidental.
+#
+# Ordered AFTER the McBride pattern in `_rate`: where a form prints both, the
+# 노동능력상실율 line is the assessment the physician made, while the 장해분류표
+# item is the policy category it was mapped onto.
+_DISABILITY_RATE_PAYOUT = re.compile(
+    r"[（(]\s*지\s*급\s*율\s*(?P<value>\d{1,3}(?:\.\d+)?)\s*%\s*[)）]"
 )
 
 # `비고사항 (영구/한시) | 영구`. The parenthetical names both options, so the
@@ -220,13 +254,21 @@ def _assert(value: Any, page: int, quote: str) -> dict[str, Any]:
     }
 
 
+def _percent(text: str) -> int | float:
+    """The printed percentage as a number, keeping the form's own precision.
+
+    `13` stays an int rather than becoming `13.0`: the screening report renders
+    the value with `str()`, so a float would print `13.0%` where the form
+    printed `13%` -- a decimal the document never stated. Only a rate the form
+    actually wrote with a decimal keeps one.
+    """
+    value = float(text)
+    return int(value) if value.is_integer() and "." not in text else value
+
+
 def _rate(pages):
-    hit = _match_on_pages(_DISABILITY_RATE, pages)
-    if not hit:
-        return None
-    page_no, match = hit
-    text = next(p["text"] for p in pages if p.get("page") == page_no)
-    return _assert(int(match.group(1)), page_no, _quote_for(match, text))
+    return _read_alternatives(
+        pages, (_DISABILITY_RATE, _DISABILITY_RATE_PAYOUT), cast=_percent)
 
 
 def _duration(pages):
@@ -326,12 +368,18 @@ def _first_named_group(match: re.Match[str]) -> str | None:
     return None
 
 
-def _read_alternatives(pages, patterns):
+def _read_alternatives(pages, patterns, cast=None):
     """The first pattern that yields ONE consistent value across the document.
 
     Ordered: an earlier pattern is the more authoritative printed shape. Two
     different values from the same pattern make the read ambiguous and hand the
     field back to the model, exactly as `_match_on_pages` does.
+
+    `cast` converts the captured text before it is asserted, for a field whose
+    `value_shape` is a number rather than text. It runs AFTER the
+    one-consistent-value check, so two spellings of the same number are still
+    two values here -- the check is on what the form printed, not on what the
+    figure means.
     """
     for pattern in patterns:
         hits = []
@@ -349,6 +397,14 @@ def _read_alternatives(pages, patterns):
             return None
         page_no, match, value = hits[0]
         text = next(p["text"] for p in pages if p.get("page") == page_no)
+        if cast is not None:
+            try:
+                value = cast(value)
+            except (TypeError, ValueError):
+                # A capture the declared shape cannot represent is not repaired
+                # into one; the field falls through to the model exactly as an
+                # unmatched pattern does.
+                continue
         return _assert(value, page_no, _quote_for(match, text))
     return None
 
