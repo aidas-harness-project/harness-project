@@ -53,7 +53,14 @@ def _mock_ocr(monkeypatch, pages):
 
 
 def _mock_classify(monkeypatch, doc_type="insurer_response", label="보험사 회신"):
-    def fake_classify(text, classifier=None):
+    # `routing_config` has been part of the production signature since
+    # 2026-08-19 (55b20bf), when medical routing began passing it. This helper
+    # was last touched 2026-08-05, so every test using it died on
+    # `unexpected keyword argument 'routing_config'` -- 13 of them, silently,
+    # including the ones pinning that classification reads REDACTED text
+    # rather than the raw page. Accept and ignore it: these tests are about
+    # checkpoint-1 plumbing, not about routing.
+    def fake_classify(text, classifier=None, routing_config=None):
         return {"predicted_document_type": doc_type, "document_type_label": label,
                 "confidence": 0.9, "quote": text[:20]}
     monkeypatch.setattr(rc1, "classify_document", fake_classify)
@@ -607,7 +614,7 @@ def test_cli_resolve_disagreement_uses_explicit_classifier_provider(
 
     monkeypatch.setattr(rc1, "build_classifier_provider", fake_build_classifier_provider)
 
-    def fake_classify(text, selected_classifier=None):
+    def fake_classify(text, selected_classifier=None, routing_config=None):
         assert selected_classifier is classifier
         return {
             "predicted_document_type": "medical_record",
@@ -1222,7 +1229,7 @@ def test_classification_reads_the_redacted_text_when_it_exists(tmp_path, monkeyp
         "<<<PAGE page=1>>>\n환자 [REDACTED] 진 단 서\n", encoding="utf-8")
     seen = {}
 
-    def fake_classify(text, classifier=None):
+    def fake_classify(text, classifier=None, routing_config=None):
         seen["text"] = text
         return {"predicted_document_type": "diagnosis_certificate",
                 "document_type_label": "진단서", "confidence": 0.9, "quote": text[:20]}
