@@ -521,7 +521,54 @@ def unconfirmed_section(
             "reason": field.get(
                 "resolution_reason", "자료에서 확인되지 않음"),
         })
+        # The readings a `partial_reading` row is telling the reviewer to go
+        # and check. Without them the sentence "인용은 보존되어 있으므로 검토자가
+        # 원문을 확인해야 합니다" names no source: the row said a quote existed
+        # and then withheld it, so the reviewer had to open the JSON contract
+        # to find out which document to open. Measured on the CASE_7* corpus
+        # (2026-08-26): 72 such rows, 55 of which hold exactly ONE reading --
+        # nothing to be ambiguous between, just a value that failed the
+        # trusted-value bar.
+        readings = partial_readings(field)
+        if readings:
+            rows[-1]["partial_readings"] = readings
     return sorted(rows, key=lambda row: row["field_id"])
+
+
+def partial_readings(field: Mapping[str, Any]) -> list[dict]:
+    """Each cited-but-untrusted reading, with the citation that grounds it.
+
+    Only observations flagged `partial_reading`: a field can also hold blank
+    cells and stated absences, and those are not values a reviewer confirms.
+
+    `why` names which of the two trusted-value requirements the reading failed,
+    because the two ask different things of a reader. `불완전` means the source
+    said less than the whole value -- read the rest of the page. `다의적` means
+    the text supports more than one reading -- decide which. A row saying only
+    that the value is unconfirmed tells the reviewer neither.
+    """
+    readings: list[dict] = []
+    for observation in field.get("observations") or []:
+        if not observation.get("partial_reading"):
+            continue
+        value = _as_text(observation.get("value"))
+        if not value:
+            continue
+        why = []
+        if not observation.get("complete", True):
+            why.append("불완전")
+        if not observation.get("unambiguous", True):
+            why.append("다의적")
+        reference = next(
+            (r for r in observation.get("evidence_references") or []
+             if r.get("document_id") and r.get("quote")), None)
+        entry = {"value_text": value, "why": "·".join(why) or "미상"}
+        if reference:
+            entry["document_id"] = reference["document_id"]
+            entry["page"] = reference.get("page", 1)
+            entry["quote"] = reference["quote"]
+        readings.append(entry)
+    return readings
 
 
 # What a reader is meant to DO about each cause, which is the distinction the
@@ -1620,15 +1667,36 @@ def markdown_sections(
     for row in unconfirmed:
         grouped.setdefault(row.get("gap_kind") or "records_gap", []).append(row)
     unconfirmed_lines: list[str] = []
-    for kind in ("records_gap", "disputed", "not_searched", "out_of_scope"):
+    # Ordered by what a reader can ACT on, then swept for anything the order
+    # does not name -- the loop is TOTAL, and that is the point. It used to
+    # iterate a hardcoded four, so `partial_reading` and `source_blank` were
+    # dropped from the rendered section entirely while sitting in
+    # `unconfirmed_items` in the JSON beside them. Measured across the CASE_7*
+    # corpus (2026-08-26): 132 rows of 734 never reached a reader -- 72 fields
+    # holding a real cited quote and 60 printed-and-blank cells -- and the
+    # markdown gave no sign anything was missing. A kind added to
+    # UNAVAILABLE_KIND but not to this tuple now still renders, at the end.
+    ordered = ("records_gap", "disputed", "partial_reading", "source_blank",
+               "not_searched", "out_of_scope")
+    for kind in ordered + tuple(k for k in grouped if k not in ordered):
         rows = grouped.get(kind)
         if not rows:
             continue
         if len(grouped) > 1:
             unconfirmed_lines.append(
                 f"**{UNAVAILABLE_KIND_LABEL.get(kind, kind)}** ({len(rows)}건)")
-        unconfirmed_lines.extend(
-            f"- {row['label']}: {row['reason']}" for row in rows)
+        for row in rows:
+            unconfirmed_lines.append(f"- {row['label']}: {row['reason']}")
+            # The readings themselves, indented under the row that sent the
+            # reviewer to look for them. A `partial_reading` row instructs a
+            # reader to check the source and, without these, names none.
+            for reading in row.get("partial_readings") or []:
+                where = ""
+                if reading.get("document_id"):
+                    where = f" [{reading['document_id']} p{reading.get('page', 1)}]"
+                unconfirmed_lines.append(
+                    f"  - 기재값: {reading['value_text']} "
+                    f"({reading['why']}){where}")
     sections.append({
         "heading": "7. 주요 미확인 항목",
         "content": "\n".join(unconfirmed_lines) or "- 미확인 항목 없음",
