@@ -190,47 +190,88 @@ def _first_value(facts: Mapping[str, Mapping[str, Any]], field_id: str) -> Any:
     return _selected_value(field)
 
 
-def summary_diagnosis_text(
-    facts: Mapping[str, Mapping[str, Any]],
+def conflict_reference(
+    field_id: str,
     conflict_entries: Mapping[str, Mapping[str, Any]] | None = None,
-) -> str:
-    """Section 1's 주요 진단명 line.
+) -> str | None:
+    """The ledger id holding this field's disagreement, if the ledger holds one.
 
-    `_first_value` returns None for anything not `asserted`, so a `conflict`
-    field used to render 확인 불가 -- the same words the report uses when no
-    source mentioned the field at all. Those are different facts and they lead
-    a reviewer to different actions: one asks for more records, the other asks
-    which of two records is right.
+    Only an id the ledger actually carries for THIS field. A candidate that
+    never reached the ledger has none, and citing one would point the reader at
+    nothing. Measured on the CASE_7* corpus (2026-08-26): 76 of 101 conflicted
+    fields have no ledger entry, so the no-entry branch is the common one, not
+    the edge case.
+    """
+    for conflict_id, entry in sorted((conflict_entries or {}).items()):
+        if (entry or {}).get("field_or_topic") == field_id:
+            return conflict_id
+    return None
+
+
+def conflict_text(
+    field: Mapping[str, Any],
+    field_id: str,
+    conflict_entries: Mapping[str, Mapping[str, Any]] | None = None,
+) -> str | None:
+    """Render a `conflict` field as the disagreement it is, or None.
+
+    Returns None when the field is not in conflict, or when it is but carries
+    no readable values -- the caller then falls back to its ordinary path, so
+    this never invents a line.
+
+    Why every summary field and not just the diagnosis: `_first_value` returns
+    None for anything not `asserted`, so a conflicted field rendered 확인 불가 --
+    the same words the report uses when no source mentioned it at all. Those
+    are different facts leading a reviewer to different actions: one asks for
+    more records, the other asks which of two records is right.
 
     Measured on CASE_7008 (2026-08-26): line 4 read `주요 진단명: 확인 불가`
     while line 71 of the same report carried both readings -- 진단서
-    `요추1번 압박공절` against 초진기록 `Non traumatic Compression
-    fracture vertebra, lumbar region`. 외상성 vs 비외상성 decides whether the
-    상해 담보 applies, so the summary was hiding the case's central question
-    behind the vocabulary of absence.
+    `요추1번 압박골절` against 초진기록 `Non traumatic Compression fracture
+    vertebra, lumbar region`. 외상성 vs 비외상성 decides whether the 상해 담보
+    applies, so the summary hid the case's central question behind the
+    vocabulary of absence.
+
+    Identical readings are NOT a disagreement to display. CASE_7015's
+    `diagnosis_code` conflicts as `S52590` against `s52590`: one KCD code
+    written twice. Printing "자료 간 불일치" there would manufacture a question
+    for a reviewer to resolve, so a set of one distinct value collapses back to
+    that value and the caller renders it normally.
 
     `resolve_withdrawn_conflicts` runs before this and promotes candidates
-    consistency_check judged `consistent`, so what reaches here as a conflict
-    is a real disagreement (CASE_049 is why that promotion exists).
+    consistency_check judged `consistent`, so what reaches here as a conflict is
+    a real disagreement (CASE_049 is why that promotion exists).
     """
-    field = facts.get("primary_diagnosis") or {}
-    if field.get("resolution_status") == "conflict":
-        values = [_as_text(o.get("value")) for o in field.get("observations") or []
-                  if o.get("value") is not None]
-        values = [v for v in values if v]
-        if values:
-            line = "자료 간 불일치: " + " / ".join(values)
-            # Name the ledger entry so the reader can reach the disagreement in
-            # full -- its professional_summary, its sources, its disposition --
-            # rather than being shown two values with nowhere to go. Only an id
-            # the ledger actually holds for THIS field: a candidate that never
-            # reached the ledger has none, and citing one would point at
-            # nothing.
-            for conflict_id, entry in sorted((conflict_entries or {}).items()):
-                if (entry or {}).get("field_or_topic") == "primary_diagnosis":
-                    return f"{line} ({conflict_id})"
-            return line
-    return _as_text(_first_value(facts, "primary_diagnosis")) or "확인 불가"
+    if (field or {}).get("resolution_status") != "conflict":
+        return None
+    values: list[str] = []
+    for observation in field.get("observations") or []:
+        if observation.get("value") is None:
+            continue
+        text = _as_text(observation["value"])
+        if text and text not in values:
+            values.append(text)
+    if not values:
+        return None
+    if len(values) == 1:
+        # Same reading recorded twice -- not a question for a reviewer.
+        return values[0]
+    line = "자료 간 불일치: " + " / ".join(values)
+    reference = conflict_reference(field_id, conflict_entries)
+    return f"{line} ({reference})" if reference else line
+
+
+def summary_fact_text(
+    facts: Mapping[str, Mapping[str, Any]],
+    field_id: str,
+    conflict_entries: Mapping[str, Mapping[str, Any]] | None = None,
+) -> str:
+    """One section-1 line: the asserted value, the disagreement, or 확인 불가."""
+    field = facts.get(field_id) or {}
+    conflict = conflict_text(field, field_id, conflict_entries)
+    if conflict is not None:
+        return conflict
+    return _as_text(_first_value(facts, field_id)) or "확인 불가"
 
 
 def _selected_evidence(field: Mapping[str, Any]) -> list[dict]:
@@ -659,19 +700,25 @@ def build_report(
         for row in assessments if row["status"] == "uncertain"
     ]
 
-    main_diagnosis = summary_diagnosis_text(facts, entries)
+    main_diagnosis = summary_fact_text(facts, "primary_diagnosis", entries)
     treatment_period = _first_value(facts, "treatment_period")
     period_block = None
     if isinstance(treatment_period, dict) and treatment_period.get("start"):
         period_block = {"start_date": treatment_period["start"]}
         if treatment_period.get("end"):
             period_block["end_date"] = treatment_period["end"]
+    # A conflicted period has no single start/end to put in `period_block`, so
+    # it travels as text beside it. The narrative prefers this when present;
+    # dropping it would put the period back in the 확인 불가 pile that hid the
+    # diagnosis conflict.
+    treatment_period_conflict = conflict_text(
+        facts.get("treatment_period") or {}, "treatment_period", entries)
 
     case_summary = {
         "case_type": " / ".join(applicable) if applicable else "확정된 유형 없음",
         "main_diagnosis": main_diagnosis,
-        "kcd_code": _as_text(_first_value(facts, "diagnosis_code")),
-        "accident_date": _as_text(_first_value(facts, "accident_date")),
+        "kcd_code": summary_fact_text(facts, "diagnosis_code", entries),
+        "accident_date": summary_fact_text(facts, "accident_date", entries),
         "claim_coverages": [],
         # Additive, and the point of this report: the four verdicts side by
         # side rather than one collapsed "case type" string.
@@ -693,6 +740,8 @@ def build_report(
     }
     if period_block:
         case_summary["treatment_period"] = period_block
+    if treatment_period_conflict and not period_block:
+        case_summary["treatment_period_text"] = treatment_period_conflict
 
     # Only conflicts consistency_check CONFIRMED reach the report. A withdrawn
     # or immaterial candidate is development detail, not a finding.
@@ -1395,7 +1444,7 @@ def markdown_sections(
         ("진단코드", "kcd_code", summary.get("kcd_code")),
         ("치료기간", "treatment_period",
          (f"{period.get('start_date')} ~ {period.get('end_date') or '미종결'}")
-         if period else None),
+         if period else summary.get("treatment_period_text")),
     ]
     # Each line carries one placeholder per citation it contributes, in the
     # same order the references are collected below, so assembly's 1:1 pairing

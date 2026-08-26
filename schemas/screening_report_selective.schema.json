@@ -145,14 +145,15 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "The KCD code, or the disagreement between the sources that record it (see accident_date). Identical readings that differ only in case are collapsed by the renderer and publish as the single value."
         },
         "accident_date": {
           "type": [
             "string",
             "null"
           ],
-          "format": "date"
+          "description": "The accident date, or the disagreement between the sources that record it. `format: date` was dropped 2026-08-26, when conflicted summary facts started rendering as `자료 간 불일치: A / B (CONFLICT_N)` instead of 확인 불가. A disagreement is not a date and cannot be spelled as one, so a validator enforcing the format would push the field back into the vocabulary of absence -- the exact defect the change removes. The machine-readable date is still available upstream: claim_analysis_result.json enforces `format: date` on each observation, and this field is the human-facing rendering of what those observations resolved to."
         },
         "onset_date": {
           "type": [
@@ -192,6 +193,10 @@
         },
         "fact_evidence": {
           "$ref": "#/$defs/fact_evidence"
+        },
+        "treatment_period_text": {
+          "type": "string",
+          "description": "Present ONLY when the treatment period is in conflict, which has no single start/end to put in `treatment_period`. Carries the rendered disagreement so a disputed period is not silently dropped into 확인 불가. Mutually exclusive with `treatment_period` by construction: a conflicted period produces no block, an asserted one produces no text."
         }
       },
       "required": [
