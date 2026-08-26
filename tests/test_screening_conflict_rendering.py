@@ -67,6 +67,32 @@ def test_a_conflicted_line_says_the_sources_disagree():
     assert "불일치" in rendered or "상충" in rendered, rendered
 
 
+def test_a_conflicted_line_names_its_ledger_entry():
+    """The summary must point at the entry that carries the full disagreement.
+
+    Without the reference a reader sees two values and has no way to reach the
+    professional_summary, the sources, or the disposition -- all of which live
+    on the ledger entry. CASE_7008's is CONFLICT_1 on `primary_diagnosis`.
+    """
+    facts = {"primary_diagnosis": _conflict_fact(
+        "primary_diagnosis", ["요추1번 압박공절", "Non traumatic Compression fracture"])}
+    entries = {"CONFLICT_1": {"field_or_topic": "primary_diagnosis",
+                              "verdict": "deferred_to_report"}}
+    rendered = screening.summary_diagnosis_text(facts, conflict_entries=entries)
+    assert "CONFLICT_1" in rendered, rendered
+
+
+def test_the_reference_is_omitted_when_no_entry_matches():
+    """A candidate that never reached the ledger has no id to cite, and an
+    invented one would point at nothing."""
+    facts = {"primary_diagnosis": _conflict_fact(
+        "primary_diagnosis", ["A진단", "B진단"])}
+    rendered = screening.summary_diagnosis_text(
+        facts, conflict_entries={"CONFLICT_1": {"field_or_topic": "diagnosis_site"}})
+    assert "CONFLICT" not in rendered, rendered
+    assert "불일치" in rendered
+
+
 def test_a_genuinely_absent_diagnosis_still_reads_확인_불가():
     """The guard must not cost the honest case its honest wording."""
     facts = {"primary_diagnosis": {

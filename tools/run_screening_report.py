@@ -190,7 +190,10 @@ def _first_value(facts: Mapping[str, Mapping[str, Any]], field_id: str) -> Any:
     return _selected_value(field)
 
 
-def summary_diagnosis_text(facts: Mapping[str, Mapping[str, Any]]) -> str:
+def summary_diagnosis_text(
+    facts: Mapping[str, Mapping[str, Any]],
+    conflict_entries: Mapping[str, Mapping[str, Any]] | None = None,
+) -> str:
     """Section 1's 주요 진단명 line.
 
     `_first_value` returns None for anything not `asserted`, so a `conflict`
@@ -216,7 +219,17 @@ def summary_diagnosis_text(facts: Mapping[str, Mapping[str, Any]]) -> str:
                   if o.get("value") is not None]
         values = [v for v in values if v]
         if values:
-            return "자료 간 불일치: " + " / ".join(values)
+            line = "자료 간 불일치: " + " / ".join(values)
+            # Name the ledger entry so the reader can reach the disagreement in
+            # full -- its professional_summary, its sources, its disposition --
+            # rather than being shown two values with nowhere to go. Only an id
+            # the ledger actually holds for THIS field: a candidate that never
+            # reached the ledger has none, and citing one would point at
+            # nothing.
+            for conflict_id, entry in sorted((conflict_entries or {}).items()):
+                if (entry or {}).get("field_or_topic") == "primary_diagnosis":
+                    return f"{line} ({conflict_id})"
+            return line
     return _as_text(_first_value(facts, "primary_diagnosis")) or "확인 불가"
 
 
@@ -646,7 +659,7 @@ def build_report(
         for row in assessments if row["status"] == "uncertain"
     ]
 
-    main_diagnosis = summary_diagnosis_text(facts)
+    main_diagnosis = summary_diagnosis_text(facts, entries)
     treatment_period = _first_value(facts, "treatment_period")
     period_block = None
     if isinstance(treatment_period, dict) and treatment_period.get("start"):
