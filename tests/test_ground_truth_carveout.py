@@ -77,6 +77,32 @@ def test_verification_stage_still_needs_the_review_flag(reviewed_case, capsys):
     assert "human review" in out
 
 
+def test_the_exempt_agent_exists_and_matches_the_gates():
+    """The gates admit a stage name; this checks an agent actually claims it.
+
+    Seven files named screening-fidelity before the agent was written. A stage
+    name the gates admit and no agent owns is the state where a human passes
+    --caller-stage by hand and no written procedure says what may be done with
+    what comes back.
+    """
+    from pathlib import Path
+
+    agent = (
+        Path(dao.__file__).resolve().parent.parent
+        / ".claude" / "agents" / "screening-fidelity.md"
+    ).read_text(encoding="utf-8")
+
+    assert "--caller-stage screening_fidelity" in agent
+    assert "write-verification-result" in agent
+
+    # The write must not go through the generic contract path: that lands in
+    # outputs/, where every producing stage can read the extracted answers.
+    assert "write-contract CASE_ID screening_fidelity" not in agent
+
+    # Condition 4 has no enforcement, so it has to be written down.
+    assert "Do not put ground-truth prose in the result, in your reply" in agent
+
+
 def test_allowed_set_is_exactly_two_stages():
     """Widening this set is a governance change (harness-guardrails-dev D1), so
     it should fail a test rather than pass review as a config tweak."""
