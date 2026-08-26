@@ -456,12 +456,7 @@ def redact_document(case_id: str, doc_id: str, held_by: str, run_id: str, redact
         # to 손해사정사, same role run_checkpoint1.py uses for its own
         # review_required case (a P8 disagreement).
         contract["reviewer_role"] = "손해사정사"
-        contract["review_reason"] = (
-            "Over-redaction risk: a span was left un-redacted because a safe "
-            "replacement could not be made without risking corruption of "
-            "surrounding kept text (privacy-safe direction, but needs a human "
-            "check). See warnings for the specific page(s)/span(s)."
-        )
+        contract["review_reason"] = review_reason_for(review_warnings)
 
     scratch_root = ROOT / "_redaction_scratch"
     scratch_root.mkdir(parents=True, exist_ok=True)
@@ -536,6 +531,46 @@ def resolve_skip_redaction(skip: bool | None = None) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return SKIP_REDACTION_DEFAULT
+
+
+def review_reason_for(review_warnings) -> str:
+    """Why this document needs a human look, from what actually happened.
+
+    This used to be ONE hardcoded sentence naming over-redaction risk. That is
+    true on the LLM path, where a span really was examined and deliberately
+    kept. It is false on the dev path, where nothing examines the page at all:
+    the artifact then told a reviewer a masking judgement had been made and
+    come out cautious, while `items_redacted: 0` and `categories: []` on the
+    same record said nothing was inspected.
+
+    Reported independently from CASE_7005 and CASE_7002 (2026-08-26), on a run
+    where the redaction model is skipped by default and the deterministic scan
+    was switched off -- so every document carried a reason describing a
+    decision that never happened.
+    """
+    warnings = [w for w in (review_warnings or []) if isinstance(w, str)]
+    gave_up = [w for w in warnings
+               if "unstructured" in w or "NOTHING checked" in w]
+    if gave_up and len(gave_up) == len(warnings):
+        return (
+            "Redaction model skipped: unstructured PII (a bare personal name "
+            "or address, which has no detectable format) was not checked for "
+            "on this document. Nothing was masked and nothing claims to have "
+            "been. See warnings for what each page did and did not verify."
+        )
+    if gave_up:
+        return (
+            "Mixed: some pages had a span left un-redacted because a safe "
+            "replacement could not be made (privacy-safe, needs a look), and "
+            "others were not checked for unstructured PII at all. See warnings "
+            "for which page is which."
+        )
+    return (
+        "Over-redaction risk: a span was left un-redacted because a safe "
+        "replacement could not be made without risking corruption of "
+        "surrounding kept text (privacy-safe direction, but needs a human "
+        "check). See warnings for the specific page(s)/span(s)."
+    )
 
 
 def _redactor_for(case_id: str, doc_id: str, provider_name: str, model: str | None,

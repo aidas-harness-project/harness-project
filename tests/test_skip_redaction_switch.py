@@ -206,3 +206,42 @@ def test_a_page_that_skipped_the_scan_says_so(monkeypatch):
     monkeypatch.delenv(redaction.RESIDUAL_SCAN_ENV, raising=False)
     with pytest.raises(RedactionLeakError):
         DevNoLlmRedactor().redact_page(text)
+
+
+# ----------------------------- the review_reason must describe what happened --
+# `review_required` is computed from ANY review warning, but `review_reason`
+# was one hardcoded sentence: "Over-redaction risk: a span was left
+# un-redacted because a safe replacement could not be made...". That is true
+# only on the LLM path, where a span really was examined and deliberately kept.
+#
+# On the dev path nothing examines the page at all, so the artifact told a
+# reviewer the opposite of what happened: it named a masking judgement call
+# that was never made, while `items_redacted: 0` and `categories: []` on the
+# same record say nothing was inspected. Two orchestrators reported it
+# independently from CASE_7005 and CASE_7002 (2026-08-26).
+#
+# The contract's own comment at redact_document.py:418 states the assumption
+# that stopped holding: "what remains here is over-redaction risk". Once the
+# model is skipped by default, what remains is usually the give-up notice.
+
+def test_the_dev_path_reason_names_the_give_up_not_a_masking_decision(monkeypatch):
+    monkeypatch.delenv(redaction.RESIDUAL_SCAN_ENV, raising=False)
+    outcome = DevNoLlmRedactor().redact_page("보통약관 제1조")
+    reason = rd.review_reason_for(outcome.review_warnings)
+
+    assert "Over-redaction risk" not in reason, (
+        "the dev path examined nothing, so it cannot have decided to keep a span")
+    assert "unstructured" in reason or "not checked" in reason.lower(), reason
+
+
+def test_the_llm_path_reason_still_names_over_redaction():
+    """The original sentence is correct where a span really was examined."""
+    reason = rd.review_reason_for([
+        "page 3: a span was left un-redacted because replace-all was unsafe"])
+    assert "Over-redaction risk" in reason
+
+
+def test_the_reason_carries_the_warnings_it_summarises():
+    """Whatever the cause, a reviewer needs to reach the specific pages."""
+    reason = rd.review_reason_for(["page 7: something"])
+    assert "warning" in reason.lower()
