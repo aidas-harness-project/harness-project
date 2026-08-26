@@ -31,8 +31,18 @@
         "synthesis": {}
       }
     },
-    "draft_report_v1": {},
-    "draft_report_v2": {},
+    "draft_report_v1": {
+      "note": "Authors the deliverable's structured contract, one section at a time (`tools/run_draft_report.py`). The stage where output QUALITY is the product rather than a means, so it is the one most worth choosing a model for deliberately -- and worth a different one from critic_v1, which reviews what this wrote.",
+      "roles": {
+        "authoring": {}
+      }
+    },
+    "draft_report_v2": {
+      "note": "Authors the deliverable's structured contract, one section at a time (`tools/run_draft_report.py`). The stage where output QUALITY is the product rather than a means, so it is the one most worth choosing a model for deliberately -- and worth a different one from critic_v1, which reviews what this wrote.",
+      "roles": {
+        "authoring": {}
+      }
+    },
     "critic_v1": {
       "note": "The blind review pass when run with `tools/run_critic.py`. The four deterministic checks make no model call. Worth a DIFFERENT model from the one that authored the draft: a critic reviewing its own author is a weaker review, and this is the line where that choice is made.",
       "roles": {

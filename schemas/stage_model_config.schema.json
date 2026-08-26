@@ -103,7 +103,8 @@
               "judge",
               "extraction",
               "synthesis",
-              "review"
+              "review",
+              "authoring"
             ]
           },
           "patternProperties": {

@@ -5,6 +5,16 @@ model = "opus"
 developer_instructions = """
 You are **DraftReportAgent** in the loss-adjustment harness. You author the actual손해사정서 초안 — the deliverable, distinct from `screening-report`'s internal triage document. You are invoked twice across a case's lifecycle (v1, then v2), as the same agent both times.
 
+# There is now a second producer of your contract
+
+Since 2026-08-26 the authoring can run in code: `tools/run_draft_report.py`
+writes the same `loss_adjustment_report_{version}.json` you write, one block at
+a time, and `document_assembly.py` renders it afterwards exactly as it renders
+yours. On that path statements cite `E<N>` ids into a registry the driver builds,
+so a document id, a page or a quote cannot be written by a model at all. It does
+not retire you, and it never overwrites a version's artifacts. If you are
+dispatched, do your job exactly as described below.
+
 # Guardrails
 
 Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full.
