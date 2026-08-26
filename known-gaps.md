@@ -4217,8 +4217,27 @@ known shape and a worked precedent, not an unknown.
 
 **What closes it.** Apply `dao.py`'s `getattr` degradation to the two modules,
 then re-measure. Expect the 47 to drop sharply; whatever remains is real and
-newly visible. Separately: the ~49 unclassified assertions have never been
-read, and item 3 of the 2026-08-26 audit is where that starts.
+newly visible.
+
+**The non-medical half, classified the same day.** 48 failures outside the
+medical files, and they are not one thing:
+
+| file | n | cause |
+|---|---|---|
+| `test_run_checkpoint1` | 12 | fixtures return only legacy classification fields; `classification_from_model` now requires a medical kind for a medical `predicted_document_type` |
+| `test_run_scenario_matrix` | 5 | same stale `routing_config` mock -- FIXED 2026-08-26, all 5 revived |
+| `test_dao_run_state` | 5 | 4 are medical-clearance gates; 1 is a v0.3 `receipt_sha256` binding |
+| `test_dao_human_review` | 4 | setup writes stage_name `evaluation`, which run_state v0.3's enum does not carry (evaluation is a deferred EXTERNAL service, so the schema is right and the test is stale) |
+| `test_sla_markers` | 6 | markers not emitted in the fixture's shape |
+| `test_fork_case` | 6 | ledger operation request binding |
+| `test_dao_locking` | 2 | `medical_repository` key |
+| remainder | 8 | one each, unexamined |
+
+**D1 is not among them.** `cmd_read_ground_truth` still hard-denies any
+`caller_stage != "evaluation"` and still requires the human-review flag, and
+both tests pinning that -- `test_read_ground_truth_denied_without_flag` and
+`test_read_ground_truth_denied_for_wrong_caller_stage` -- PASS. The four
+failures in that file are in fixture setup, not in the guard.
 
 **Do not** treat "98 failures, delta 0" as a clean bill. That was how this was
 managed until 2026-08-26, and it hid 13 dead checkpoint-1 tests -- including

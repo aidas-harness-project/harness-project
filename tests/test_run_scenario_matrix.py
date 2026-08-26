@@ -58,7 +58,9 @@ def _mock_ocr_once(monkeypatch, pages):
 
 
 def _mock_classify(monkeypatch):
-    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None: {
+    # `routing_config` joined the production signature 2026-08-19 (55b20bf);
+    # this mock predates it, so every test here died on an unexpected keyword.
+    monkeypatch.setattr(rc1, "classify_document", lambda text, classifier=None, routing_config=None: {
         "predicted_document_type": "insurer_response", "document_type_label": "회신",
         "confidence": 0.9, "quote": text[:20],
     })
