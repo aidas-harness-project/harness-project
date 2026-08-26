@@ -582,20 +582,35 @@ def conflict_row(
     field_config: Mapping[str, Any],
     conflict_entries: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict | None:
-    """One outstanding-item row for a field two sources disagree about.
+    """One outstanding-item row for a disagreement section 6 does NOT carry.
 
-    Returns None when the readings turn out to be the SAME value written twice.
-    `resolution_status: conflict` is set upstream by comparing observations, and
-    it fires on notation differences: CASE_7015 records `diagnosis_code` as
-    `S52590` against `s52590`. Listing that as an item to resolve manufactures
-    work, so a set of one distinct value is dropped here rather than published
-    as a disagreement -- the same guard `conflict_text` applies to section 1.
+    Returns None in two cases, and the first is the common one:
 
-    Every reading is carried with its document and page, because the row is
-    telling a reviewer to go and decide between them and cannot then withhold
-    which records to open. The ledger id is cited when one exists; most
-    conflicts have none, which is exactly why this row has to carry the
-    readings itself rather than pointing at section 6.
+    * **The conflict has a ledger entry.** Section 6 then holds it with the
+      `professional_summary` written when the evidence was in hand -- what each
+      form said, and what the difference decides -- and section 10 routes it to
+      a named reviewer. A row here would be a third mention carrying strictly
+      less than either. Measured across the CASE_7* corpus (2026-08-26): **all
+      25 surviving conflicts have an entry**, so today this branch renders
+      nothing at all. It exists for the case section 6 cannot reach.
+    * **The readings are the SAME value written twice.** `resolution_status:
+      conflict` is set upstream by comparing observations and fires on notation
+      differences -- CASE_7015 records `diagnosis_code` as `S52590` against
+      `s52590`. Listing that as an item to resolve manufactures work.
+
+    Corrects a claim made earlier the same day. This row was added believing 62
+    of 101 conflicts reached no section at all; that count came from feeding
+    `resolve_withdrawn_conflicts` the wrong contract
+    (`consistency_check_workitems.json` rather than the
+    `evidence_validation_result.json` the driver reads). Recounted correctly:
+    **76 of the 101 are WITHDRAWN by consistency_check and publish as
+    `asserted` values**, and every one of the 25 that survive was already
+    shown. The gap this row was built for did not exist.
+
+    When it does fire, every reading is carried with its document and page: a
+    row telling a reviewer to decide between two records cannot then withhold
+    which records to open, and with no ledger entry there is nothing to point
+    at instead.
     """
     readings: list[dict] = []
     for observation in field.get("observations") or []:
@@ -613,12 +628,13 @@ def conflict_row(
         readings.append(entry)
     if len({_same_reading(reading["value_text"]) for reading in readings}) < 2:
         return None
+    reference_id = conflict_reference(field_id, conflict_entries)
+    if reference_id:
+        # Section 6 has it, with more than this row could say.
+        return None
 
     reason = field.get(
         "resolution_reason", "두 개 이상의 출처가 서로 다른 값을 기재하고 있습니다")
-    reference_id = conflict_reference(field_id, conflict_entries)
-    if reference_id:
-        reason = f"{reason} ({reference_id})"
     return {
         "field_id": field_id,
         "label": _label_ko(field_config, "field_id"),

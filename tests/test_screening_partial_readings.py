@@ -305,7 +305,17 @@ def test_the_row_is_grouped_as_disputed():
     assert row["unavailable_reason"] == "conflict_unresolved"
 
 
-def test_the_ledger_id_is_cited_when_one_exists():
+def test_a_conflict_section_six_already_carries_produces_no_row():
+    """The narrowing, and today the branch that fires for every real conflict.
+
+    A conflict with a ledger entry is held by section 6 with the
+    `professional_summary` written when the evidence was in hand, and routed by
+    section 10 to a named reviewer. A row here would be a third mention
+    carrying strictly less than either.
+
+    Measured across the CASE_7* corpus (2026-08-26): all 25 surviving conflicts
+    have an entry, so this is not an edge case -- it is the normal path.
+    """
     report = screening.build_report(
         case_id="CASE_9003", run_id="RUN_20260826_1",
         claim_analysis={"case_id": "CASE_9003",
@@ -317,9 +327,9 @@ def test_the_ledger_id_is_cited_when_one_exists():
         consistency={"work_items": []}, config=CONFIG,
         conflict_entries={"CONFLICT_1": {"field_or_topic": "primary_diagnosis",
                                          "conflict_id": "CONFLICT_1"}})
-    row = next(r for r in report["unconfirmed_items"]
-               if r["field_id"] == "primary_diagnosis")
-    assert "CONFLICT_1" in row["reason"]
+    assert not [r for r in report["unconfirmed_items"]
+                if r.get("gap_kind") == "disputed"], (
+        "section 6 already carries this conflict with more than the row says")
 
 
 def test_a_conflict_with_no_ledger_entry_still_renders():
@@ -355,3 +365,77 @@ def test_a_conflict_row_carries_no_why_marker():
     assert all("why" not in reading for reading in row["partial_readings"])
     assert "()" not in _section_seven(report), (
         "an empty parenthesis was rendered where `why` would have gone")
+
+
+def test_a_conflict_with_no_ledger_entry_is_the_only_one_that_gets_a_row():
+    """The narrowing must not become a hole.
+
+    Section 7 gives up its `disputed` rows on the claim that section 6 has
+    them. That claim holds only while every surviving conflict reaches the
+    ledger -- if one stops doing so, section 6 will not carry it either and the
+    field goes back to being omitted, which is the defect this whole file is
+    about. Asserted directly rather than left to the corpus check below, so it
+    holds on a case that has not been run yet.
+    """
+    report = _report([_conflict_field(
+        "primary_diagnosis", [("좌측 골절", "DOC_002"), ("우측 골절", "DOC_005")])])
+    rows = [r for r in report["unconfirmed_items"]
+            if r.get("gap_kind") == "disputed"]
+    assert len(rows) == 1, "a ledger-less conflict must still get a row"
+    assert len(rows[0]["partial_readings"]) == 2
+
+
+def test_no_surviving_conflict_is_omitted_from_every_section():
+    """The property, over the real corpus: a conflict that survived
+    consistency_check appears in section 1, or the ledger (section 6), or as a
+    section 7 row. Never nowhere.
+
+    This is the check that would have caught the miscount made while building
+    this feature -- 62 conflicts were believed unshown because
+    `resolve_withdrawn_conflicts` was fed `consistency_check_workitems.json`
+    instead of the `evidence_validation_result.json` the driver reads. Reading
+    the same contract the driver does is the point.
+    """
+    import pytest
+
+    cases = sorted((ROOT / "outputs").glob("CASE_7*/claim_analysis_result.json"))
+    if not cases:
+        pytest.skip("no CASE_7* corpus in this checkout")
+
+    config = json.loads(
+        (ROOT / "config" / "claim_analysis" /
+         "claim_analysis_routing_v0.1.json").read_text(encoding="utf-8"))
+    summary_fields = set(screening.SUMMARY_FACT_FIELDS.values())
+    orphans = []
+    for path in cases:
+        folder = path.parent
+        validation = folder / "evidence_validation_result.json"
+        if not validation.exists():
+            continue
+        analysis = json.loads(path.read_text(encoding="utf-8"))
+        consistency = json.loads(validation.read_text(encoding="utf-8"))
+        ledger_path = folder / "_conflict_ledger.json"
+        entries = {}
+        if ledger_path.exists():
+            entries = {row["conflict_id"]: row for row in
+                       json.loads(ledger_path.read_text(encoding="utf-8"))
+                       .get("conflicts") or []}
+        report = screening.build_report(
+            case_id=folder.name, run_id="RUN_20260826_1",
+            claim_analysis=analysis, consistency=consistency, config=config,
+            conflict_entries=entries)
+
+        facts = {row["field_id"]: row for row in analysis["claim_facts"]}
+        resolved = screening.resolve_withdrawn_conflicts(facts, consistency)
+        in_ledger = {entry.get("field_or_topic") for entry in entries.values()}
+        in_seven = {row["field_id"] for row in report["unconfirmed_items"]
+                    if row.get("gap_kind") == "disputed"}
+        for field_id, field in resolved.items():
+            if field.get("resolution_status") != "conflict":
+                continue
+            if field_id in summary_fields or field_id in in_ledger                     or field_id in in_seven:
+                continue
+            orphans.append(f"{folder.name}/{field_id}")
+    assert not orphans, (
+        "these conflicts survived review and appear in NO section: " +
+        ", ".join(orphans))
