@@ -69,7 +69,7 @@ def test_the_prompt_says_these_are_verbatim_codes_not_translations():
     assert "exactly as written" in prompt or "verbatim" in prompt
 
 
-def test_every_dropped_enum_is_covered(): 
+def test_every_dropped_enum_is_covered():
     """The guard against this recurring: any closed vocabulary inside the two
     collections the transport schema declares as bare objects must appear in
     the prompt. A new enum value added to the schema fails here until the
