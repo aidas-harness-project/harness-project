@@ -38,6 +38,9 @@ the same pass.
 | 60 | OPEN | No OpenRouter call has ever been made against the real service -- everything is verified statically |
 | 61 | OPEN | scan_intake_content has no production caller after D2's pre-check was removed |
 | 62 | OPEN | Half the failing test baseline is Windows-platform (O_NOFOLLOW/symlink), not logic |
+| 63 | OPEN | An ambiguous-kind medical document is never read; 5 real losses in the corpus |
+| 64 | OPEN | A contradiction inside ONE document never becomes a conflict candidate |
+| 65 | OPEN | CASE_7044 CONFLICT_1's note states the opposite of DOC_002's own 부상병 |
 
 Resolved items keep their full write-up below -- the reasoning is the point,
 not the checkbox.
@@ -4242,3 +4245,97 @@ failures in that file are in fixture setup, not in the guard.
 **Do not** treat "98 failures, delta 0" as a clean bill. That was how this was
 managed until 2026-08-26, and it hid 13 dead checkpoint-1 tests -- including
 the one pinning that classification reads REDACTED rather than raw page text.
+
+
+## 63. A medical document the classifier could not pin to one form kind is never read -- OPEN 2026-08-26
+
+**What.** `claim_analysis` routes by fine-grained `medical_document_kind`, and
+`claim_analysis_selection.py:190` skips any document whose kind is `None` or
+whose classification is `ambiguous`. Stage 2 publishes `status: ambiguous` with
+a ranked candidate list when it cannot settle on one kind, and that list is
+discarded -- the document is not read at all, for any field.
+
+**Measured 2026-08-26** across the CASE_70xx corpus: 238 documents, 91 not
+routed. Most of those are correct -- `insurance_policy`, `legal_opinion`,
+`insurance_certificate` and the like have no medical route by design. **Five
+are real losses**, all typed medical and all carrying narrowed candidates:
+
+| case | doc | manifest type | candidates |
+|---|---|---|---|
+| CASE_7044 | DOC_004 | medical_record | admission_discharge_summary 0.5 / other_medical 0.3 / diagnosis_certificate 0.15 |
+| CASE_7034 | DOC_005 | medical_record | 3 candidates |
+| CASE_703 | DOC_015 | medical_record | 3 candidates |
+| CASE_704 | DOC_015 | medical_record | 3 candidates |
+| CASE_7061 | DOC_013 | imaging_report | 2 candidates |
+
+CASE_7044's DOC_004 is an `입원·통원 확인서` whose top candidate reads 0.5. It
+grounds none of the 58 `claim_facts`. The stage-7 agent raised it as ISSUE_3,
+alongside DOC_009 (`공제처리확인서`, 치료비 14,061,670원, 입원 26/27일) -- that one
+is typed `public_benefit_certificate` and has no medical route at all, so it is
+a different question: whether a benefit certificate should reach the pipeline
+as duplicate-payment material.
+
+**Why it is not simply a bug.** Routing by form kind is what makes the ladder
+mean anything -- a document read as the wrong kind answers the wrong fields
+with real citations, which is worse than not reading it. Taking the top
+candidate at 0.5 confidence would do exactly that. The honest options are a
+confidence floor above which a single candidate is accepted, reading such a
+document under a `route_not_activated`-style disposition that a reviewer can
+see, or surfacing it as an explicit human gate. All three are design decisions,
+not repairs.
+
+**What closes it.** A decision on which of the three, then the routing change
+plus a test pinning that an ambiguous document is never silently dropped.
+
+## 64. A contradiction INSIDE one document does not become a conflict -- OPEN 2026-08-26
+
+**What.** `claim_analysis` compares readings ACROSS documents. Two pages of the
+same document stating different things never meet, so no conflict candidate is
+raised and one of the two readings simply wins.
+
+**Measured on CASE_7044 DOC_002**, a single 진단서 whose two pages disagree:
+
+```
+p1: 현재 통증 및 붓기있고 발의 강직 있어 3주의 절대적인 안정가료가 추가적으로 필요합니다.
+p2: 기브스 및 목발 6주, 재활6 주 총12 주간의 안정가료가 필요합니다.
+```
+
+The published `treatment_period` holds one observation quoting p1 (`3주...`)
+and nothing from p2, and resolves `unavailable / partial_value_only`. A
+reviewer is told the records are partial; they are not told the document
+contradicts itself about a figure that drives 안정가료 duration.
+
+The same shape was recorded earlier on CASE_7046, where a laterality
+contradiction inside DOC_003 (`좌측 손목통증`/`Lt. wrist` vs `rt. distal radius
+fx`) resolved `asserted` with `conflict_candidate_ids: []` -- it never became a
+candidate, so `register` could not take it. Two independent observations of one
+gap.
+
+**What closes it.** Either claim analysis raises a candidate when two readings
+of the SAME document disagree, or consistency check gains a within-document
+pass. The first is closer to where the readings already exist.
+
+## 65. A P6 resolution note stated the opposite of the source -- OPEN 2026-08-26
+
+**What.** CASE_7044 `CONFLICT_1`'s `resolution_note` says DOC_002 and DOC_003
+record the 주상병 as ligament rupture and **"골절을 기재하지 않음"** (do not record
+fracture). DOC_002 p1 records two fracture codes as 부상병:
+
+```
+(주) Rupture of ligaments at ankle and foot level [S93.2]
+(부) Fracture of other part of tarsal bone, closed [S92.280]
+(부) Fracture of metatarsal bone, closed [S92.30]
+```
+
+So the live question is whether fracture belongs in the **주상병**, not whether
+it appears at all. The note overstates the disagreement on a record a
+손해사정사 reads verbatim.
+
+**Not corrected here, deliberately.** A P6 note is a human-owned record; the
+stage-7 agent flagged it and did not rewrite it, and neither did I. Correcting
+it means writing a new verdict through `set-conflict-verdict` under a named
+reviewer, which is the user's call. Recorded so the note is not carried forward
+as fact.
+
+**What closes it.** A reviewer decision on the corrected wording, then one
+`set-conflict-verdict` call recording it.
