@@ -4379,3 +4379,55 @@ live question is whether fracture belongs in the 주상병 -- which bears on
 so a later reader sees that the record was corrected and why, rather than
 finding a silently different note. The old phrase therefore still appears in
 the ledger, but only inside that explanation.
+
+
+## 66. Nothing stated which files share a vocabulary, so an added value kept failing to propagate -- GUARDED 2026-08-26
+
+The single most repeated defect in this project, and always the same shape: a
+value is added to `claim_analysis_result`, the writing stage starts emitting
+it, and a downstream contract that never learned it rejects the write.
+`printed_but_blank` did it **seven times** between 2026-08-25 and 2026-08-26 --
+the result schema, the trace schema, `consistency_check_workitems`, the
+extraction prompt's `presence` enum, the publish path, and the screening
+renderer's `UNAVAILABLE_KIND` map.
+
+**Why it kept happening is not carelessness.** There was no artifact anywhere
+naming the set of files that share `unavailable_reason` / `stop_reason` /
+`value_state`. Each surface had to be remembered, and a missed one was
+invisible in exactly the same way as a surface that legitimately did not need
+the value: absence looked identical either way. Three of the seven were found
+only when a real case failed mid-run.
+
+**Guarded by `tests/test_shared_axis_propagation.py`** (2026-08-26). It
+declares `claim_analysis_result.schema.json` the PRODUCER OF RECORD for the
+three axes and checks every consumer carries the same set -- across schemas and
+the two code surfaces no schema check can see:
+
+* `run_screening_report.UNAVAILABLE_KIND`, a TOTAL map. An unmapped reason
+  renders with no kind, so a reviewer sees an empty field with no indication
+  why -- the same silence the reason exists to break.
+* `claim_analysis_extraction.output_schema`'s `presence` enum, which binds what
+  the model may return. A presence the publisher handles but the prompt never
+  offers is a state that cannot occur however well it is plumbed downstream.
+
+Both mirror checks are included: a consumer accepting a value the producer
+never emits is dead vocabulary that validates forever while describing an
+impossible state.
+
+**The mechanism is `NARROWER_CONSUMERS`.** A contract that legitimately handles
+a subset registers it there WITH a reason, which is what makes a value missing
+by design distinguishable from one missing because someone forgot. That
+distinction is the entire fix -- the seven misses were invisible precisely
+because the two looked the same. The registry is empty today: every consumer
+currently carries the full set.
+
+Verified by reintroducing three of the real defects (the consistency-check
+enum that blocked 3 cases, the `UNAVAILABLE_KIND` entry, the presence enum).
+Each fails naming the file, the JSON path, the missing value, and both
+remedies.
+
+**What this does NOT cover**, and is worth knowing before trusting it: axes
+other than those three, contracts outside `schemas/`, and any consumer that
+reads a value without declaring an enum for it (a Python `if` on a string
+literal is still invisible). Extending it means adding to `SHARED_AXES` or
+adding another code-surface test in the same file.
