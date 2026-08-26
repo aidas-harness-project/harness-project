@@ -62,7 +62,7 @@ def _result():
         "ground_truth_access": {
             "version": "screening",
             "caller_stage": "screening_fidelity",
-            "human_review_complete": True,
+            "screening_stage_passed": True,
             "ground_truth_files": ["GT_001.pdf"],
         },
         "dimensions": [
@@ -110,14 +110,19 @@ class _ReadArgs:
 
 @pytest.fixture
 def reviewed(isolated_dao):
-    """The screening review signed off -- the token this path requires.
+    """A case with a screening report its own run finished.
 
-    Not a draft (v1/v2) review: these cases stop at screening_report and never
-    produce one, which is the whole reason the token exists.
+    That is this path's precondition -- an integrity check, not a reader gate.
+    Fidelity scoring measures pipeline performance, so it does not wait on a
+    human having read the report (owner's decision, 2026-08-26).
     """
-    flag = dao.human_review_flag_path(CASE, dao.SCREENING_REVIEW_VERSION)
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("{}", encoding="utf-8")
+    (dao.case_dir(CASE) / "screening_report.json").write_text(
+        json.dumps({"case_id": CASE}), encoding="utf-8")
+    state = dao.load_run_state(CASE)
+    state["stages"] = [{"stage_name": "screening_report", "status": "passed",
+                        "started_at": "2026-08-26T09:00:00+09:00",
+                        "updated_at": "2026-08-26T09:10:00+09:00"}]
+    dao.atomic_write_json(dao.run_state_path(CASE), state)
     return isolated_dao
 
 
@@ -187,11 +192,18 @@ def test_traversal_out_of_the_verification_dir_is_refused(reviewed, tmp_path, ca
     assert not (reviewed / "outputs" / CASE / "leak.json").exists()
 
 
-def test_write_requires_the_human_review_flag(reviewed, tmp_path, capsys):
-    dao.human_review_flag_path(CASE, dao.SCREENING_REVIEW_VERSION).unlink()
+def test_write_requires_a_report_its_run_finished(reviewed, tmp_path, capsys):
+    """CASE_712 is the live example: document_processing left in_progress, four
+    later stages failed, and a screening_report.md in the directory anyway. A
+    score over that measures nothing about the pipeline."""
+    state = dao.load_run_state(CASE)
+    state["stages"] = [{"stage_name": "screening_report", "status": "failed",
+                        "started_at": "2026-08-26T09:00:00+09:00",
+                        "updated_at": "2026-08-26T09:10:00+09:00"}]
+    dao.atomic_write_json(dao.run_state_path(CASE), state)
     assert dao.cmd_write_verification_result(_WriteArgs(tmp_path)) == 1
     out = capsys.readouterr().out
-    assert "DENIED" in out and "human review" in out
+    assert "DENIED" in out and "screening_report as passed" in out
 
 
 def test_invalid_content_does_not_land(reviewed, tmp_path, capsys):

@@ -26,9 +26,11 @@ rubric_version: screening_fidelity.v0.1
 - 정답지는 `python tools/dao.py read-ground-truth CASE_ID --caller-stage screening_fidelity
   --version screening [--list | --file NAME]`으로만 읽는다. 직접 파일 열기는 `.claude/settings.json`의
   deny 글롭이 채점자에게도 그대로 적용된다.
-- **스크리닝 리포트가 사인오프된 뒤에만** 읽힌다 — `dao.py mark-human-review-complete CASE_ID screening`.
-  리포트가 존재하고 스테이지가 passed여야 만들어진다. 초안 리뷰 토큰(v1/v2)은 여기서 거부된다:
-  스크리닝에서 끝나는 케이스는 초안 리뷰를 만들 수 없고, 그것을 전제로 걸면 아무도 열 수 없는 게이트가 된다.
+- **리포트의 런이 끝난 케이스에서만** 읽힌다 — 리포트가 존재하고 `screening_report`가 `passed`일 것.
+  **사람이 읽었는지는 묻지 않는다.** 이 채점은 파이프라인 성능을 재는 것이고, 누가 리포트를
+  읽었는지는 그 측정과 무관하다. 대신 막는 것은 **자기 런이 실패한 리포트를 채점하는 일**이다
+  (CASE_712: document_processing 진행 중, 이후 4개 스테이지 failed, 그런데 리포트 파일은 존재).
+  초안 경로(`evaluation`)는 사람 사인오프 게이트를 그대로 유지하며, 두 토큰은 서로 통용되지 않는다.
 - **채점 결과는 종단이다.** 규칙이 아니라 구조로 그렇다 — 결과는
   `data/ground_truth/CASE_ID/_verification/screening_fidelity_result_v{n}.json`에 놓이고,
   그 자리는 deny 글롭이 이미 걸린 트리다. 쓰기·읽기 모두 `screening_fidelity` 스테이지로 제한된

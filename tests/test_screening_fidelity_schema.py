@@ -51,7 +51,7 @@ VALID = {
     "ground_truth_access": {
         "version": "screening",
         "caller_stage": "screening_fidelity",
-        "human_review_complete": True,
+        "screening_stage_passed": True,
         "ground_truth_files": ["GT_001.pdf"],
     },
     "dimensions": [
@@ -149,7 +149,7 @@ def test_ground_truth_locator_rejects_a_sentence_length_string():
 
 
 def test_access_record_pins_the_d1_conditions():
-    for field, value in [("caller_stage", "evaluation"), ("human_review_complete", False)]:
+    for field, value in [("caller_stage", "evaluation"), ("screening_stage_passed", False)]:
         bad = copy.deepcopy(VALID)
         bad["ground_truth_access"][field] = value
         assert _errors(bad), field

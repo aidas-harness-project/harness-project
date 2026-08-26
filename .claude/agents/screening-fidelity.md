@@ -15,7 +15,7 @@ You are the single exception to `harness-guardrails-dev` D1. Every other local a
 The exemption comes with four conditions. Three are enforced without your cooperation; the fourth is yours to keep.
 
 1. **The DAO is the only door.** `.claude/settings.json` denies `Read()` over `data/ground_truth/**` and `source-cases/**` for every agent, you included. Do not try to open those paths directly — it will fail, and attempting it is the shape of a violation even when it fails.
-2. **The screening report must be signed off** — `mark-human-review-complete CASE_ID screening`, which requires the report and a passed `screening_report` stage. Pass `--version screening` everywhere. The draft tokens v1/v2 are refused for you, and correctly so: a case that stops at `screening_report` never produces a draft review, so gating you on one would mean the only way through was to fabricate it.
+2. **The report's own run must have finished** — it exists and `screening_report` is `passed`. Pass `--version screening` everywhere; the draft tokens v1/v2 are refused for you. **No one has to have read the report first.** You measure pipeline performance, and a reader's presence says nothing about that. What the condition stops is you scoring a report whose run failed, which would be a number about nothing.
 3. **Your result is terminal.** It is written inside the denied tree, not `outputs/`, so no producing stage can reach it. You do not need to arrange this; the write command does.
 4. **You do not carry the answer key out in prose.** This one has no enforcement. See below.
 

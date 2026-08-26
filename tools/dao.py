@@ -99,7 +99,7 @@ Subcommands:
     set-human-input-status CASE_ID STAGE {waiting|received} --held-by NAME --run-id RUN_ID
         [--description TEXT]  (required when status is waiting)
     request-expert-review CASE_ID {v1|v2} --held-by NAME --run-id RUN_ID
-    mark-human-review-complete CASE_ID {v1|v2|screening} --reviewer NAME --held-by NAME --run-id RUN_ID
+    mark-human-review-complete CASE_ID {v1|v2} --reviewer NAME --held-by NAME --run-id RUN_ID
     get-last-passed-stage CASE_ID
     snapshot-backup CASE_ID RUN_ID STAGE --held-by NAME
     read-conflict-ledger CASE_ID
@@ -2252,8 +2252,18 @@ def cmd_read_ground_truth(args):
     if token_blocker:
         print(token_blocker)
         return 1
-    review_flag = human_review_flag_path(args.case_id, args.version)
-    if not review_flag.exists():
+    if args.version == SCREENING_REVIEW_VERSION:
+        # No reader gate on this path -- an integrity condition instead.
+        blockers = _screening_artifact_blockers(args.case_id)
+        if blockers:
+            print(f"DENIED: {args.case_id} has no scorable screening report:")
+            for b in blockers:
+                print(f"  - {b}")
+            return 1
+        review_flag = None
+    else:
+        review_flag = human_review_flag_path(args.case_id, args.version)
+    if review_flag is not None and not review_flag.exists():
         print(f"DENIED: human review is not yet marked complete for {args.version} of this case. "
               f"{args.caller_stage} may not read ground truth until review is confirmed (D1) -- "
               f"see dao.py mark-human-review-complete {args.case_id} {args.version}.")
@@ -2369,11 +2379,10 @@ def _verification_gate(args, action: str) -> str | None:
     token_blocker = _review_token_blocker(args.caller_stage, args.version)
     if token_blocker:
         return token_blocker
-    if not human_review_flag_path(args.case_id, args.version).exists():
-        return (f"DENIED: human review is not yet marked complete for {args.version} "
-                "of this case. A verification result cannot exist before the read it "
-                "would have to be based on is permitted (D1) -- see "
-                f"dao.py mark-human-review-complete {args.case_id} {args.version}.")
+    blockers = _screening_artifact_blockers(args.case_id)
+    if blockers:
+        return (f"DENIED: {args.case_id} has no scorable screening report, so a "
+                "verification result for it would describe nothing: " + "; ".join(blockers))
     return None
 
 
@@ -7428,33 +7437,37 @@ def cmd_request_expert_review(args):
 
 SCREENING_REVIEW_VERSION = "screening"
 
-# The review that authorizes reading ground truth has to be a review of the
-# artifact being scored. The v1/v2 flags are a DRAFT-report review: they require
-# expert_review_v{n}.json, and mark-human-review-complete refuses without it.
+# `screening` names WHICH ARTIFACT a ground-truth read is for -- the screening
+# report, not the draft. It is deliberately not a human sign-off.
 #
-# That precondition cannot be met by a case that stops at screening_report --
-# CASE_705/710/711/712 all do, with seven stages passed and no draft. Reusing
-# the draft flag for screening-fidelity scoring made a gate no legitimate run
-# could open: the only way through would have been to fabricate a draft review.
+# The draft path (evaluation, v1/v2) keeps its human gate: ground truth stays
+# shut until a reviewer has signed expert_review_v{n}.json, because that path
+# scores the deliverable and the ordering protects the deliverable from being
+# fixed against the answer key.
 #
-# So `screening` is its own review token. Its substance is different because the
-# artifact is: there is no expert_review contract for a screening report, so what
-# is required is that the report actually exists and its stage actually passed.
-# The human is still in the loop the same way -- the CLI invocation is the human
-# action, as it is for v1/v2 (see human_review_ledger's trust model).
-def _screening_review_blockers(case_id: str) -> list[str]:
+# Fidelity scoring answers a different question -- how the PIPELINE performed --
+# and its input is a finished report that no one needs to have read for the
+# measurement to mean something (owner's decision, 2026-08-26). Requiring a
+# reader there would gate a performance measurement on an unrelated human act.
+#
+# What remains is not a review but an integrity condition: the report has to
+# exist and its stage has to have passed. Without it the scorer would happily
+# score CASE_712, whose run left document_processing in_progress and four later
+# stages failed while a screening_report.md sat in the directory anyway. A score
+# over that is a number about nothing.
+def _screening_artifact_blockers(case_id: str) -> list[str]:
     blockers = []
     report = case_dir(case_id) / "screening_report.json"
     if not report.exists():
-        blockers.append(f"{report} does not exist -- there is no screening report to review")
+        blockers.append(f"{report} does not exist -- there is no screening report to score")
     stages = load_run_state(case_id).get("stages", [])
     status = next((s.get("status") for s in stages
                    if s.get("stage_name") == "screening_report"), None)
     if status != "passed":
         blockers.append(
             "run state does not record screening_report as passed "
-            f"(status={status!r}) -- a report whose stage never finished is not "
-            "a reviewed artifact")
+            f"(status={status!r}) -- scoring a report its own run did not finish "
+            "measures nothing about the pipeline")
     return blockers
 
 
@@ -7469,30 +7482,12 @@ def cmd_mark_human_review_complete(args):
     gate. --reviewer is required for the same accountability reason
     set-ledger-status's approved status requires one."""
     if args.version == SCREENING_REVIEW_VERSION:
-        blockers = _screening_review_blockers(args.case_id)
-        if blockers:
-            print(f"BLOCKED: cannot mark screening review complete for {args.case_id}:")
-            for b in blockers:
-                print(f"  - {b}")
-            return 1
-        target = human_review_flag_path(args.case_id, args.version)
-        existing_lock = acquire_lock_blocking(
-            target, args.held_by, args.run_id, "mark human review complete (screening)")
-        if existing_lock is not None:
-            print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
-                  f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
-            return 1
-        try:
-            atomic_write_json(target, {
-                "case_id": args.case_id, "version": args.version,
-                "reviewer": args.reviewer, "marked_complete_at": now_iso(),
-            })
-        finally:
-            release_lock(target)
-        print(f"OK: {target} created -- screening_fidelity may now read ground truth "
-              "for this case's screening report (D1 exception unlocked). This flag "
-              "authorizes nothing for the deferred Evaluation suite.")
-        return 0
+        print("BLOCKED: 'screening' is not a review token. Fidelity scoring measures "
+              "pipeline performance and does not gate on a reader (owner's decision, "
+              "2026-08-26) -- screening_fidelity needs only a screening report whose "
+              "stage passed, checked at read time. There is nothing to sign off here; "
+              "human review flags remain draft-report only (v1/v2).")
+        return 1
 
     expert_review_path = case_dir(args.case_id) / f"expert_review_{args.version}.json"
     data = load_json(expert_review_path)

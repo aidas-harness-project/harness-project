@@ -10,9 +10,10 @@ A carve-out is only as good as its edges, and these are the edges worth pinning:
      it to "the run may read ground truth now" is exactly the leak D1 exists to
      stop, so each producing stage name is asserted individually rather than by
      sampling one.
-  2. The verification stage does not skip the OTHER gate. Ground truth stays
-     unreadable until that version's human review is marked complete -- being on
-     the allowed list buys one condition, not both.
+  2. The verification stage does not skip the OTHER gate. Being on the allowed
+     list buys the stage check, not the second condition -- which differs by
+     path: the draft path waits on a human sign-off, the fidelity path on the
+     scored report's own run having finished.
   3. The allowed set stays small. A test that only checked "screening_fidelity
      passes" would not notice a third stage being appended later.
 """
@@ -30,14 +31,26 @@ class _Args:
 
 @pytest.fixture
 def reviewed_case(isolated_dao):
-    """A case whose v2 human review is complete -- the second gate satisfied."""
+    """Both second gates satisfied at once, since the two paths no longer share
+    one: the draft path has its v2 human sign-off, and the fidelity path has a
+    screening report whose own run finished."""
+    import json
+
     gt_dir = isolated_dao / "data" / "ground_truth" / "CASE_907"
     gt_dir.mkdir(parents=True, exist_ok=True)
     (gt_dir / "GT_001.txt").write_text("answer key stand-in", encoding="utf-8")
-    for version in ("v2", dao.SCREENING_REVIEW_VERSION):
-        flag = dao.human_review_flag_path("CASE_907", version)
-        flag.parent.mkdir(parents=True, exist_ok=True)
-        flag.write_text("{}", encoding="utf-8")
+
+    flag = dao.human_review_flag_path("CASE_907", "v2")
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.write_text("{}", encoding="utf-8")
+
+    (dao.case_dir("CASE_907") / "screening_report.json").write_text(
+        json.dumps({"case_id": "CASE_907"}), encoding="utf-8")
+    state = dao.load_run_state("CASE_907")
+    state["stages"] = [{"stage_name": "screening_report", "status": "passed",
+                        "started_at": "2026-08-26T09:00:00+09:00",
+                        "updated_at": "2026-08-26T09:10:00+09:00"}]
+    dao.atomic_write_json(dao.run_state_path("CASE_907"), state)
     return isolated_dao
 
 
@@ -69,13 +82,21 @@ def test_verification_stage_is_admitted(reviewed_case):
     assert dao.cmd_read_ground_truth(_Args(list=True)) == 0
 
 
-def test_verification_stage_still_needs_the_review_flag(reviewed_case, capsys):
-    dao.human_review_flag_path("CASE_907", dao.SCREENING_REVIEW_VERSION).unlink()
+def test_verification_stage_still_needs_a_finished_report(reviewed_case, capsys):
+    """Being on the allowed list buys the stage gate, not the second condition.
+    For this path that second condition is the report's own run finishing --
+    not a reader, which fidelity scoring deliberately does not wait on."""
+    state = dao.load_run_state("CASE_907")
+    state["stages"] = [{"stage_name": "screening_report", "status": "failed",
+                        "started_at": "2026-08-26T09:00:00+09:00",
+                        "updated_at": "2026-08-26T09:10:00+09:00"}]
+    dao.atomic_write_json(dao.run_state_path("CASE_907"), state)
+
     rc = dao.cmd_read_ground_truth(_Args(list=True))
     assert rc == 1
     out = capsys.readouterr().out
     assert "DENIED" in out
-    assert "human review" in out
+    assert "screening_report as passed" in out
 
 
 def test_the_exempt_agent_exists_and_matches_the_gates():
