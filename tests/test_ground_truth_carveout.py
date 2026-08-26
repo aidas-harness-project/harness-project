@@ -23,7 +23,7 @@ import dao
 
 class _Args:
     def __init__(self, case_id="CASE_907", caller_stage="screening_fidelity",
-                 version="v2", file=None, transcribe=False, list=False):
+                 version="screening", file=None, transcribe=False, list=False):
         self.case_id, self.caller_stage, self.version = case_id, caller_stage, version
         self.file, self.transcribe, self.list = file, transcribe, list
 
@@ -34,9 +34,10 @@ def reviewed_case(isolated_dao):
     gt_dir = isolated_dao / "data" / "ground_truth" / "CASE_907"
     gt_dir.mkdir(parents=True, exist_ok=True)
     (gt_dir / "GT_001.txt").write_text("answer key stand-in", encoding="utf-8")
-    flag = dao.human_review_flag_path("CASE_907", "v2")
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("{}", encoding="utf-8")
+    for version in ("v2", dao.SCREENING_REVIEW_VERSION):
+        flag = dao.human_review_flag_path("CASE_907", version)
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.write_text("{}", encoding="utf-8")
     return isolated_dao
 
 
@@ -69,7 +70,7 @@ def test_verification_stage_is_admitted(reviewed_case):
 
 
 def test_verification_stage_still_needs_the_review_flag(reviewed_case, capsys):
-    dao.human_review_flag_path("CASE_907", "v2").unlink()
+    dao.human_review_flag_path("CASE_907", dao.SCREENING_REVIEW_VERSION).unlink()
     rc = dao.cmd_read_ground_truth(_Args(list=True))
     assert rc == 1
     out = capsys.readouterr().out
@@ -101,6 +102,36 @@ def test_the_exempt_agent_exists_and_matches_the_gates():
 
     # Condition 4 has no enforcement, so it has to be written down.
     assert "Do not put ground-truth prose in the result, in your reply" in agent
+
+
+def test_review_token_must_match_what_the_caller_scores(reviewed_case, capsys):
+    """The bug this closes: screening_fidelity was gated on the DRAFT review flag.
+
+    That flag requires expert_review_v{n}.json, which a case stopping at
+    screening_report can never produce -- CASE_705/710/711/712 each finish seven
+    stages with no draft. The gate was unopenable by any legitimate run; the only
+    way through would have been to fabricate a draft review.
+
+    Both directions are pinned. A verification caller asking for v1/v2 is asking
+    for that unopenable gate, and an evaluation caller asking for 'screening' is
+    trying to open the answer key on a sign-off that says nothing about the
+    artifact it scores.
+    """
+    rc = dao.cmd_read_ground_truth(_Args(version="v2", list=True))
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "DENIED" in out and "screening" in out
+
+    rc = dao.cmd_read_ground_truth(
+        _Args(caller_stage="evaluation", version=dao.SCREENING_REVIEW_VERSION, list=True))
+    assert rc == 1
+    assert "DENIED" in capsys.readouterr().out
+
+
+def test_evaluation_keeps_its_draft_review_gate(reviewed_case):
+    """The fix must not loosen the path it was not about."""
+    assert dao.cmd_read_ground_truth(
+        _Args(caller_stage="evaluation", version="v2", list=True)) == 0
 
 
 def test_allowed_set_is_exactly_two_stages():

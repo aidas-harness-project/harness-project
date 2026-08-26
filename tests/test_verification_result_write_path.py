@@ -60,7 +60,7 @@ def _result():
         "target_report_path": "outputs/CASE_907/screening_report.md",
         "target_report_sha256": "c" * 64,
         "ground_truth_access": {
-            "version": "v1",
+            "version": "screening",
             "caller_stage": "screening_fidelity",
             "human_review_complete": True,
             "ground_truth_files": ["GT_001.pdf"],
@@ -91,7 +91,7 @@ def _result():
 
 class _WriteArgs:
     def __init__(self, tmp_path, case_id=CASE, filename=FILENAME,
-                 caller_stage="screening_fidelity", version="v1", data=None):
+                 caller_stage="screening_fidelity", version="screening", data=None):
         self.case_id, self.filename = case_id, filename
         self.caller_stage, self.version = caller_stage, version
         self.held_by, self.run_id, self.purpose = "screening-fidelity", "RUN_20260826_001", None
@@ -103,14 +103,19 @@ class _WriteArgs:
 
 class _ReadArgs:
     def __init__(self, case_id=CASE, filename=FILENAME,
-                 caller_stage="screening_fidelity", version="v1"):
+                 caller_stage="screening_fidelity", version="screening"):
         self.case_id, self.filename = case_id, filename
         self.caller_stage, self.version = caller_stage, version
 
 
 @pytest.fixture
 def reviewed(isolated_dao):
-    flag = dao.human_review_flag_path(CASE, "v1")
+    """The screening review signed off -- the token this path requires.
+
+    Not a draft (v1/v2) review: these cases stop at screening_report and never
+    produce one, which is the whole reason the token exists.
+    """
+    flag = dao.human_review_flag_path(CASE, dao.SCREENING_REVIEW_VERSION)
     flag.parent.mkdir(parents=True, exist_ok=True)
     flag.write_text("{}", encoding="utf-8")
     return isolated_dao
@@ -183,7 +188,7 @@ def test_traversal_out_of_the_verification_dir_is_refused(reviewed, tmp_path, ca
 
 
 def test_write_requires_the_human_review_flag(reviewed, tmp_path, capsys):
-    dao.human_review_flag_path(CASE, "v1").unlink()
+    dao.human_review_flag_path(CASE, dao.SCREENING_REVIEW_VERSION).unlink()
     assert dao.cmd_write_verification_result(_WriteArgs(tmp_path)) == 1
     out = capsys.readouterr().out
     assert "DENIED" in out and "human review" in out

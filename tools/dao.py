@@ -36,12 +36,12 @@ cannot do; the orchestrator/agent owns that loop.
 Subcommands:
     read-document-text CASE_ID DOC_ID
     read-page-text CASE_ID DOC_ID PAGE --caller-stage STAGE
-    read-ground-truth CASE_ID --caller-stage STAGE --version {v1|v2}
+    read-ground-truth CASE_ID --caller-stage STAGE --version {v1|v2|screening}
         [--file GT_ID | --list]
     write-verification-result CASE_ID FILENAME --caller-stage STAGE
-        --version {v1|v2} --data-file PATH --held-by NAME --run-id RUN_ID
+        --version {v1|v2|screening} --data-file PATH --held-by NAME --run-id RUN_ID
     read-verification-result CASE_ID FILENAME --caller-stage STAGE
-        --version {v1|v2}
+        --version {v1|v2|screening}
     read-contract CASE_ID FILENAME
     check-segmentation-ready CASE_ID [--doc-id DOC_ID]
     declare-no-policy-documents CASE_ID --reviewer NAME --note TEXT
@@ -99,7 +99,7 @@ Subcommands:
     set-human-input-status CASE_ID STAGE {waiting|received} --held-by NAME --run-id RUN_ID
         [--description TEXT]  (required when status is waiting)
     request-expert-review CASE_ID {v1|v2} --held-by NAME --run-id RUN_ID
-    mark-human-review-complete CASE_ID {v1|v2} --reviewer NAME --held-by NAME --run-id RUN_ID
+    mark-human-review-complete CASE_ID {v1|v2|screening} --reviewer NAME --held-by NAME --run-id RUN_ID
     get-last-passed-stage CASE_ID
     snapshot-backup CASE_ID RUN_ID STAGE --held-by NAME
     read-conflict-ledger CASE_ID
@@ -2221,11 +2221,36 @@ def _transcribe_ground_truth_ephemeral(path: Path, args) -> int:
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+def _review_token_blocker(caller_stage: str, version: str) -> str | None:
+    """The review token has to match what the caller is scoring.
+
+    `screening` attests that a screening report exists and its stage passed --
+    it says nothing about a draft report, so it must not open ground truth for
+    the stage whose target IS the draft. And v1/v2 attest to a draft review,
+    which a screening-only case can never produce; a verification caller asking
+    for one is asking for a gate no legitimate run can open.
+    """
+    if version == SCREENING_REVIEW_VERSION and caller_stage not in VERIFICATION_STAGES:
+        return (f"DENIED: the {SCREENING_REVIEW_VERSION!r} review token authorizes "
+                f"{sorted(VERIFICATION_STAGES)} only. caller_stage={caller_stage!r} "
+                "scores the draft report and needs a draft review (v1/v2).")
+    if version != SCREENING_REVIEW_VERSION and caller_stage in VERIFICATION_STAGES:
+        return (f"DENIED: {caller_stage!r} scores the screening report, so it needs the "
+                f"{SCREENING_REVIEW_VERSION!r} review token, not {version!r}. A case that "
+                "stops at screening_report has no draft review and never will -- see "
+                "dao.py mark-human-review-complete CASE_ID screening.")
+    return None
+
+
 def cmd_read_ground_truth(args):
     if args.caller_stage not in GROUND_TRUTH_ALLOWED_STAGES:
         print(f"DENIED: ground truth may only be read by {sorted(GROUND_TRUTH_ALLOWED_STAGES)} "
               f"(harness-guardrails-dev D1). "
               f"caller_stage={args.caller_stage!r} is not permitted. This is logged as a potential violation.")
+        return 1
+    token_blocker = _review_token_blocker(args.caller_stage, args.version)
+    if token_blocker:
+        print(token_blocker)
         return 1
     review_flag = human_review_flag_path(args.case_id, args.version)
     if not review_flag.exists():
@@ -2341,11 +2366,14 @@ def _verification_gate(args, action: str) -> str | None:
                 "Expected screening_fidelity_result_v<n>.json -- this path exists for "
                 "that one contract, not as a general writable area inside "
                 "data/ground_truth/.")
+    token_blocker = _review_token_blocker(args.caller_stage, args.version)
+    if token_blocker:
+        return token_blocker
     if not human_review_flag_path(args.case_id, args.version).exists():
         return (f"DENIED: human review is not yet marked complete for {args.version} "
                 "of this case. A verification result cannot exist before the read it "
                 "would have to be based on is permitted (D1) -- see "
-                "dao.py mark-human-review-complete.")
+                f"dao.py mark-human-review-complete {args.case_id} {args.version}.")
     return None
 
 
@@ -7398,6 +7426,38 @@ def cmd_request_expert_review(args):
     return _set_human_input_status(args.case_id, "evaluation", "waiting", description, args.held_by, args.run_id)
 
 
+SCREENING_REVIEW_VERSION = "screening"
+
+# The review that authorizes reading ground truth has to be a review of the
+# artifact being scored. The v1/v2 flags are a DRAFT-report review: they require
+# expert_review_v{n}.json, and mark-human-review-complete refuses without it.
+#
+# That precondition cannot be met by a case that stops at screening_report --
+# CASE_705/710/711/712 all do, with seven stages passed and no draft. Reusing
+# the draft flag for screening-fidelity scoring made a gate no legitimate run
+# could open: the only way through would have been to fabricate a draft review.
+#
+# So `screening` is its own review token. Its substance is different because the
+# artifact is: there is no expert_review contract for a screening report, so what
+# is required is that the report actually exists and its stage actually passed.
+# The human is still in the loop the same way -- the CLI invocation is the human
+# action, as it is for v1/v2 (see human_review_ledger's trust model).
+def _screening_review_blockers(case_id: str) -> list[str]:
+    blockers = []
+    report = case_dir(case_id) / "screening_report.json"
+    if not report.exists():
+        blockers.append(f"{report} does not exist -- there is no screening report to review")
+    stages = load_run_state(case_id).get("stages", [])
+    status = next((s.get("status") for s in stages
+                   if s.get("stage_name") == "screening_report"), None)
+    if status != "passed":
+        blockers.append(
+            "run state does not record screening_report as passed "
+            f"(status={status!r}) -- a report whose stage never finished is not "
+            "a reviewed artifact")
+    return blockers
+
+
 def cmd_mark_human_review_complete(args):
     """Creates the versioned D1 gate (_human_review_complete_v{version}.flag)
     that read-ground-truth checks -- the actual mechanism letting evaluation
@@ -7408,6 +7468,32 @@ def cmd_mark_human_review_complete(args):
     CASE_002 failure shape (see known-gaps.md item 2), just at a different
     gate. --reviewer is required for the same accountability reason
     set-ledger-status's approved status requires one."""
+    if args.version == SCREENING_REVIEW_VERSION:
+        blockers = _screening_review_blockers(args.case_id)
+        if blockers:
+            print(f"BLOCKED: cannot mark screening review complete for {args.case_id}:")
+            for b in blockers:
+                print(f"  - {b}")
+            return 1
+        target = human_review_flag_path(args.case_id, args.version)
+        existing_lock = acquire_lock_blocking(
+            target, args.held_by, args.run_id, "mark human review complete (screening)")
+        if existing_lock is not None:
+            print(f"LOCKED: held_by={existing_lock['held_by']} run_id={existing_lock['run_id']} "
+                  f"since={existing_lock['started_at']} purpose={existing_lock['purpose']}")
+            return 1
+        try:
+            atomic_write_json(target, {
+                "case_id": args.case_id, "version": args.version,
+                "reviewer": args.reviewer, "marked_complete_at": now_iso(),
+            })
+        finally:
+            release_lock(target)
+        print(f"OK: {target} created -- screening_fidelity may now read ground truth "
+              "for this case's screening report (D1 exception unlocked). This flag "
+              "authorizes nothing for the deferred Evaluation suite.")
+        return 0
+
     expert_review_path = case_dir(args.case_id) / f"expert_review_{args.version}.json"
     data = load_json(expert_review_path)
     if data is None:
@@ -12434,7 +12520,12 @@ def build_parser():
     p.set_defaults(fn=cmd_read_page_text)
 
     p = sub.add_parser("read-ground-truth"); p.add_argument("case_id"); p.add_argument("--caller-stage", required=True)
-    p.add_argument("--version", required=True, choices=["v1", "v2"])
+    p.add_argument("--version", required=True,
+                   choices=["v1", "v2", SCREENING_REVIEW_VERSION],
+                   help="Which human review authorizes this read. Must match what the "
+                        "caller scores: evaluation takes v1/v2 (a draft review), "
+                        f"{sorted(VERIFICATION_STAGES)} take "
+                        f"{SCREENING_REVIEW_VERSION!r}.")
     p.add_argument("--file", help="Ground-truth file id (stem, e.g. GT_001). Prints its "
                                   "text content -- the sanctioned read path. Without this "
                                   "the command prints only the directory path, which no "
@@ -12462,9 +12553,12 @@ def build_parser():
                             f"{sorted(VERIFICATION_STAGES)}; anything else is DENIED. "
                             "The result names ground-truth values, so it lives inside the "
                             "denied zone and no producing stage may reach it (D1).")
-        p.add_argument("--version", required=True, choices=["v1", "v2"],
-                       help="Which reviewed version this result scores. Its "
-                            "human-review-complete flag must exist.")
+        p.add_argument("--version", required=True,
+                       choices=["v1", "v2", SCREENING_REVIEW_VERSION],
+                       help="Which human review authorizes this. For a screening-report "
+                            f"score that is {SCREENING_REVIEW_VERSION!r}; its "
+                            "human-review-complete flag must exist. v1/v2 are draft "
+                            "reviews and are refused here.")
         if name.startswith("write"):
             p.add_argument("--data-file", required=True)
             p.add_argument("--held-by", required=True)
@@ -12645,7 +12739,13 @@ def build_parser():
     p.set_defaults(fn=cmd_request_expert_review)
 
     p = sub.add_parser("mark-human-review-complete")
-    p.add_argument("case_id"); p.add_argument("version", choices=["v1", "v2"])
+    p.add_argument("case_id")
+    p.add_argument("version", choices=["v1", "v2", SCREENING_REVIEW_VERSION],
+                   help="Which review is being signed off. v1/v2 are draft-report "
+                        "reviews and require expert_review_v{n}.json. 'screening' is "
+                        "the screening-report review that authorizes screening_fidelity, "
+                        "and requires the report plus a passed screening_report stage -- "
+                        "a case that stops there has no draft review and never will.")
     p.add_argument("--reviewer", required=True)
     p.add_argument("--held-by", required=True); p.add_argument("--run-id", required=True)
     p.set_defaults(fn=cmd_mark_human_review_complete)

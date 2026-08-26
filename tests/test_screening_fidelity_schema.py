@@ -49,7 +49,7 @@ VALID = {
     "target_report_path": "outputs/CASE_021/screening_report.md",
     "target_report_sha256": "b" * 64,
     "ground_truth_access": {
-        "version": "v1",
+        "version": "screening",
         "caller_stage": "screening_fidelity",
         "human_review_complete": True,
         "ground_truth_files": ["GT_001.pdf"],

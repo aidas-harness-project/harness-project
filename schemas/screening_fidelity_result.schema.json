@@ -89,7 +89,10 @@
       "additionalProperties": false,
       "description": "How the answer key was reached. Recorded so a reader can confirm the D1 conditions held at scoring time without taking the agent's word for it.",
       "properties": {
-        "version": {"enum": ["v1", "v2"], "description": "Which reviewed version's ground truth was read."},
+        "version": {
+          "enum": ["v1", "v2", "screening"],
+          "description": "Which human review authorized the read. Normally 'screening': the screening-report review, signed off with dao.py mark-human-review-complete CASE_ID screening. v1/v2 are draft-report reviews and the DAO refuses them for this stage -- a case that stops at screening_report has no draft review and never will. They remain expressible only so a result written under the earlier gate still validates."
+        },
         "caller_stage": {
           "const": "screening_fidelity",
           "description": "The stage name passed to dao.py read-ground-truth. Const because this contract exists for exactly one stage."

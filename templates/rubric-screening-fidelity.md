@@ -24,9 +24,11 @@ rubric_version: screening_fidelity.v0.1
 채점자는 `harness-guardrails-dev` D1이 예외로 지정한 **유일한 스테이지**다.
 
 - 정답지는 `python tools/dao.py read-ground-truth CASE_ID --caller-stage screening_fidelity
-  --version {v1|v2} [--list | --file NAME]`으로만 읽는다. 직접 파일 열기는 `.claude/settings.json`의
+  --version screening [--list | --file NAME]`으로만 읽는다. 직접 파일 열기는 `.claude/settings.json`의
   deny 글롭이 채점자에게도 그대로 적용된다.
-- 해당 버전의 human review가 완료 표시된 뒤에만 읽힌다. 명령이 강제한다.
+- **스크리닝 리포트가 사인오프된 뒤에만** 읽힌다 — `dao.py mark-human-review-complete CASE_ID screening`.
+  리포트가 존재하고 스테이지가 passed여야 만들어진다. 초안 리뷰 토큰(v1/v2)은 여기서 거부된다:
+  스크리닝에서 끝나는 케이스는 초안 리뷰를 만들 수 없고, 그것을 전제로 걸면 아무도 열 수 없는 게이트가 된다.
 - **채점 결과는 종단이다.** 규칙이 아니라 구조로 그렇다 — 결과는
   `data/ground_truth/CASE_ID/_verification/screening_fidelity_result_v{n}.json`에 놓이고,
   그 자리는 deny 글롭이 이미 걸린 트리다. 쓰기·읽기 모두 `screening_fidelity` 스테이지로 제한된
@@ -178,7 +180,7 @@ fidelity_score = Σ적용가능(차원점수 × 가중) ÷ Σ적용가능(가중
 
 ```bash
 python tools/dao.py write-verification-result CASE_ID screening_fidelity_result_v1.json \
-  --caller-stage screening_fidelity --version v1 \
+  --caller-stage screening_fidelity --version screening \
   --data-file <경로> --held-by screening-fidelity --run-id RUN_ID
 ```
 
