@@ -26,6 +26,31 @@ Decide which of the two you are before running anything:
   report; do not run stage commands, `update-run-state`, `record-dispatch`, or
   `finalize-stage` yourself.
 
+**One orchestrator handles exactly ONE case.** To process several cases,
+dispatch several orchestrators -- one per case -- never one orchestrator
+carrying a list. Standing decision by the user, 2026-08-26.
+
+The reason is measured, not stylistic. An orchestrator running several cases
+at once dispatches its stage agents concurrently, and those agents generate
+through a shared scratchpad path. On the eight-case re-run of 2026-08-26 two
+screening-report agents overwrote each other between generation and the DAO
+write, and `outputs/CASE_7044/screening_report_judgement.json` ended up holding
+CASE_7023's judgement -- correct schema, correct shape, wrong case. It reached
+`write-contract` and PASSED, because schema validation checks a payload's shape
+and never its identity. A scan of all 410 JSON files across those cases found
+exactly one mismatch and the orchestrator caught it before assembly, so nothing
+was published; the margin was one check by one agent.
+
+`write-contract` now refuses a payload whose `case_id` names a different case
+than the one it is being written into, so the same collision fails loudly
+rather than silently. That guard is a backstop, NOT a licence to run cases
+together: it catches a contract that carries `case_id`, and says nothing about
+one that does not, or about two agents racing on any other shared path.
+
+Per-case orchestrators also make the run legible -- one run id, one report, one
+timing summary per case, and a failure that stops one case instead of
+entangling several.
+
 Loading this skill is not the same as holding the role, and reading a correct
 procedure is not the same as being the right executor of it. A main session
 that follows every gate below perfectly is still wrong if it never dispatched

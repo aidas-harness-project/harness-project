@@ -4535,6 +4535,32 @@ def cmd_write_contract(args):
             for e in errors:
                 print(f"  - {e}")
             return 1
+        # Identity, not shape. Schema validation asks "is this a well-formed
+        # judgement?", never "is this THIS case's judgement?", so a payload
+        # belonging to another case passed every check and was written under
+        # the wrong case_id.
+        #
+        # Measured 2026-08-26 on the eight-case re-run: concurrent
+        # screening-report agents generated to a shared scratchpad filename and
+        # overwrote each other between generation and this write, leaving
+        # CASE_7023's judgement (case_id CASE_7023, run RUN_20260826_602, its
+        # own conflicts) in outputs/CASE_7044/. This returned PASS. Serialising
+        # the agents removes that collision and is the right operational fix,
+        # but a write that names one case and lands in another is wrong however
+        # it arose -- a race, a mistyped --case-id, a resumed run reusing a
+        # stale path -- and refusing it belongs to the layer that owns "no
+        # ungoverned write".
+        #
+        # Only when the payload actually carries `case_id`: not every contract
+        # does, and this must not become a back-door requirement for the field.
+        payload_case_id = data.get("case_id") if isinstance(data, dict) else None
+        if payload_case_id is not None and payload_case_id != args.case_id:
+            print(f"FAIL: {args.filename} names case_id {payload_case_id!r} but is "
+                  f"being written into {args.case_id!r}. A contract is refused "
+                  "rather than relabelled -- the payload was built for another "
+                  "case, and rewriting its id would publish that case's findings "
+                  "under this one.")
+            return 1
         if schema_name == "claim_analysis_result.schema.json":
             # The selective lane validates on its OWN terms and never reaches
             # the canonical medical-revision path below. That separation is the

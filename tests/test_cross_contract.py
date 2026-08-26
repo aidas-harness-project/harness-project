@@ -1456,10 +1456,18 @@ def test_dao_write_contract_refuses_and_does_not_persist(isolated_dao, make_args
 
     case = dao.case_dir("CASE_009")
     case.mkdir(parents=True, exist_ok=True)
+    reasons_doc["case_id"] = "CASE_009"
     good = json.dumps(reasons_doc, ensure_ascii=False)
     (case / "denial_reason_result.json").write_text(good, encoding="utf-8")
 
     corrupt = copy.deepcopy(reasons_doc)
+    # Relabelled to the target case (2026-08-26). This payload is lifted from
+    # CASE_903 and written into CASE_009, and `write-contract` now refuses a
+    # contract whose `case_id` names a different case than the one it is being
+    # written into. Without this the guard fires first and the write never
+    # reaches the cross-contract layer this test exists to exercise -- the
+    # duplicate id below must stay the ONLY thing wrong with the payload.
+    corrupt["case_id"] = "CASE_009"
     corrupt["denial_reasons"].append(copy.deepcopy(corrupt["denial_reasons"][0]))
     payload = tmp_path / "corrupt.json"
     payload.write_text(json.dumps(corrupt, ensure_ascii=False), encoding="utf-8")
