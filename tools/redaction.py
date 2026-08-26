@@ -38,6 +38,7 @@ caught here -- only a real NER redactor closes that fully (open-decisions.md #1)
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -336,6 +337,33 @@ def _is_billing_table_code(
     return bool(_BILLING_DATE_CELL.search(before[:-1]))
 
 
+RESIDUAL_SCAN_ENV = "HARNESS_SKIP_PII_SCAN"
+
+
+def residual_scan_disabled(env=None) -> bool:
+    """Whether the deterministic residual-PII scan is switched OFF entirely.
+
+    A DEV switch for a corpus that is ALREADY pseudonymised at source, where
+    every hit this scan produces is a false positive and the block is pure
+    cost. Measured on CASE_7077 (2026-08-26): the 보험증권's 계약자/피보험자/
+    주소 cells are blank in the source, and the only things `long_digit_run`
+    caught were the 증권번호 `20236147840` and a print serial
+    `20251222143900290378511` -- neither a person. The named
+    `영업담당자` beside them is the INSURER's agent, printed in the issuing
+    branch's boilerplate, not the claimant.
+
+    Off by default and env-only on purpose. There is no CLI flag, because a
+    flag invites reaching for it to get a blocked document through, which is
+    exactly the situation the scan exists for. A run with this set is NOT
+    privacy-preserving and every page it touches records
+    `pii_scan_skipped` in its review warnings, so a later reader cannot
+    mistake it for a scanned run.
+    """
+    source = os.environ if env is None else env
+    raw = str(source.get(RESIDUAL_SCAN_ENV, "")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def scan_residual_pii(
     redacted_text: str,
     *,
@@ -363,7 +391,12 @@ def scan_residual_pii(
 
     Everything else -- RRNs, account numbers, vehicle plates, personal
     numbers, unlabelled long runs -- still blocks, so this narrows the scan
-    rather than turning it off. Pass either flag False to scan strictly."""
+    rather than turning it off. Pass either flag False to scan strictly.
+
+    `HARNESS_SKIP_PII_SCAN` turns the whole scan off for an already-pseudonymised
+    corpus -- see `residual_scan_disabled`."""
+    if residual_scan_disabled():
+        return []
     scanned = _normalize_widths(redacted_text)
     hits: list[dict[str, str]] = []
     for kind, pattern in _RESIDUAL_PII_PATTERNS.items():
@@ -694,16 +727,25 @@ class DevNoLlmRedactor:
                 "PII is present, so the page cannot pass through unmodified: "
                 + ", ".join(f"{h['kind']}={h['sample']!r}" for h in residual)
             )
+        if residual_scan_disabled():
+            warning = (
+                "redaction model skipped (HARNESS_SKIP_REDACTION) AND the "
+                "deterministic structured-PII scan was switched off "
+                "(HARNESS_SKIP_PII_SCAN): NOTHING checked this page for PII. "
+                "Valid only for a corpus already pseudonymised at source."
+            )
+        else:
+            warning = (
+                "redaction model skipped (HARNESS_SKIP_REDACTION): structured-PII "
+                "scan passed, but unstructured PII (e.g. a bare personal name) "
+                "was not checked by any model on this page"
+            )
         return RedactionOutcome(
             redacted_text=text,
             items_redacted=0,
             categories=[],
             provider_metadata=None,
-            review_warnings=[
-                "redaction model skipped (HARNESS_SKIP_REDACTION): structured-PII "
-                "scan passed, but unstructured PII (e.g. a bare personal name) "
-                "was not checked by any model on this page"
-            ],
+            review_warnings=[warning],
         )
 
 
