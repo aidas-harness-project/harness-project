@@ -52,7 +52,20 @@ _VALUE_SHAPE_HINT = {
     "enum": "one short token",
     "code": "the code exactly as printed",
     "number": "a number",
-    "period": 'an object {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD or null"}',
+    # `start` is REQUIRED and must be a real date -- the contract's `value`
+    # schema types it `string`/`format: date` and does not accept null (only
+    # `end` may be null, for a period still open). Korean medical forms very
+    # often state a DURATION with no start date at all -- 진단서 writes
+    # `수술 후 약 8(팔)주 간의 안정가료` and `기브스 및 목발 6주, 재활6 주 총12
+    # 주간의 안정가료`. Told only the object shape, a model fills
+    # `{"start": null, "end": null}`, which `parse_result` used to pass through
+    # and which then failed the stage at contract write (CASE_9412,
+    # 2026-08-26, claim_facts/27 and /29). Naming the fallback here is what
+    # keeps a duration-only statement reportable instead of fatal.
+    "period": ('an object {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD or null"}. '
+               'Use this ONLY when the document states an actual start date. If '
+               'it states a duration with no start date (e.g. "수술 후 약 8주간"), '
+               'return the duration as a plain string instead'),
 }
 
 
@@ -220,6 +233,40 @@ Document text:
 """
 
 
+def _value_is_publishable(value: Any) -> bool:
+    """Whether this value can survive the contract's `value` schema.
+
+    Mirrors `claim_analysis_result.schema.json#/$defs/value`, which accepts a
+    non-empty string, a number, a boolean, a non-empty array of non-empty
+    strings, or a period object whose `start` is a real date (`end` may be
+    null). Checking here rather than only at write time is what keeps ONE bad
+    field from failing a stage whose provider work is already paid for.
+
+    Deliberately STRICTER than the schema in exactly one place: the schema
+    enforces `minLength: 1`, so a whitespace-only string passes it, while this
+    rejects it. A value of "   " carries no fact and would print as an empty
+    cell in the report, so dropping it leaves the field honestly unresolved
+    rather than publishing a blank as an answer. Any other divergence is a
+    defect -- the two are compared case-by-case in
+    `test_value_guard_matches_the_contract_schema`.
+    """
+    if isinstance(value, bool) or isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return bool(value) and all(
+            isinstance(item, str) and item.strip() for item in value)
+    if isinstance(value, dict):
+        if set(value) - {"start", "end"}:
+            return False
+        start, end = value.get("start"), value.get("end")
+        if not isinstance(start, str) or not start.strip():
+            return False
+        return end is None or (isinstance(end, str) and bool(end.strip()))
+    return False
+
+
 def parse_result(
     structured: Mapping[str, Any] | None,
     field_rows: Sequence[Mapping[str, Any]],
@@ -276,7 +323,15 @@ def parse_result(
             continue
 
         value = payload.get("value")
-        if value is None:
+        if value is None or not _value_is_publishable(value):
+            # A structurally invalid value is dropped here, exactly like an
+            # unverifiable quote. It must not reach the contract: the schema
+            # rejects it at write time, which fails the whole stage AFTER every
+            # provider call is paid for (CASE_9412, 2026-08-26 -- a 진단서
+            # stating `수술 후 약 8(팔)주 간의 안정가료` produced
+            # {"start": null, "end": null} for treatment_period, and two such
+            # fields killed the write). Dropping leaves the field unresolved,
+            # which is honest and recoverable; publishing kills the run.
             continue
         parsed[field_id] = {
             "presence": "asserted",

@@ -223,6 +223,33 @@ class FieldExtractionOutcome:
         self.comparisons = 0
 
 
+def _carry_provenance(observation: dict, found: Mapping[str, Any]) -> dict:
+    """Copy how a reading was produced onto the observation that publishes it.
+
+    `claim_analysis_deterministic` stamps every rule reading with
+    `extraction_method`/`rule_version`, and until 2026-08-26 nothing carried
+    them into the contract -- the driver built its observation field by field
+    and simply did not name them, so a value read by a regex was
+    indistinguishable from one a model produced. That is the same
+    written-by-several-call-sites-read-by-none shape as `raw_page_text` and
+    `medical_review_adopted`.
+
+    It matters for audit: the two have different failure modes. A rule cannot
+    invent a value but can miss a variant form; a model reads any phrasing but
+    was measured returning different answers on identical text across runs
+    (CASE_705 vs CASE_713). A reviewer checking a suspicious value needs to
+    know which one is in front of them.
+
+    Absent means `model_read`, so nothing is stamped on an ordinary reading.
+    """
+    method = found.get("extraction_method")
+    if method:
+        observation["extraction_method"] = method
+        if found.get("rule_version"):
+            observation["rule_version"] = found["rule_version"]
+    return observation
+
+
 def _partial_observation(found: Mapping[str, Any], *, observation_id: str,
                          kind: str | None, priority_rank: int, wave: str,
                          reference: Mapping[str, Any]) -> dict:
@@ -249,7 +276,7 @@ def _partial_observation(found: Mapping[str, Any], *, observation_id: str,
     }
     if kind is not None:
         observation["source_document_kind"] = kind
-    return observation
+    return _carry_provenance(observation, found)
 
 
 def _settle_unresolved(outcome: "FieldExtractionOutcome") -> None:
@@ -266,17 +293,26 @@ def _settle_unresolved(outcome: "FieldExtractionOutcome") -> None:
     """
     if outcome.status != "unavailable" or not outcome.observations:
         return
+    partial = [o for o in outcome.observations if o.get("partial_reading")]
     absent = [o for o in outcome.observations
               if o.get("value_state") == "explicitly_absent"]
-    if absent:
+    if absent and not partial:
+        # A stated absence, and nothing cited a value against it.
         outcome.status = "explicitly_absent"
         outcome.stop_reason = "explicitly_absent"
         outcome.selected_ids = []
         outcome.reason = "라우팅된 출처가 이 항목이 없다고 기재하고 있습니다"
         return
-    partial = [o for o in outcome.observations if o.get("partial_reading")]
     if not partial:
         return
+    # A CITED VALUE OUTRANKS A STATED ABSENCE. One source saying the thing is
+    # not present does not undo another source quoting it: on CASE_9417's
+    # `objective_change` the field held three readings -- `요통 호전 경향`,
+    # `처음보다는 40% 호전된 상태`, and an imaging line `No definite abnormal
+    # signal change in bones` -- and reporting the whole field as
+    # `explicitly_absent` told a reviewer the records were silent about a
+    # change the records had described twice. The absence readings stay in
+    # `observations`; they simply no longer decide the field.
     outcome.stop_reason = "partial_value_only"
     outcome.unavailable_reason = "partial_reading_only"
     outcome.selected_ids = []
@@ -382,6 +418,7 @@ def resolve_field(
                 "extraction_wave": plan.wave,
                 "evidence_references": [reference],
             }
+            _carry_provenance(observation, found)
             outcome.observations.append(observation)
             if trusted is None:
                 trusted = observation
@@ -569,6 +606,7 @@ def resolve_from_cache(
                 "extraction_wave": plan.wave,
                 "evidence_references": [reference],
             }
+            _carry_provenance(observation, found)
             outcome.observations.append(observation)
             if trusted is None:
                 trusted = observation
@@ -681,6 +719,7 @@ def resolve_opportunistic(
                 "extraction_wave": "opportunistic",
                 "evidence_references": [reference],
             }
+            _carry_provenance(observation, found)
             outcome.observations.append(observation)
             outcome.status = "asserted"
             outcome.stop_reason = "trusted_value_found"
@@ -865,6 +904,7 @@ def _consume(
         "extraction_wave": progress.plan.wave,
         "evidence_references": [reference],
     }
+    _carry_provenance(observation, found)
     outcome.observations.append(observation)
 
     if progress.trusted is None:
@@ -1168,6 +1208,7 @@ def extract_additional(
                 "extraction_wave": "type_conditional",
                 "evidence_references": [reference],
             }
+            _carry_provenance(observation, payload)
             outcome.observations.append(observation)
             outcome.documents_read += 1
 

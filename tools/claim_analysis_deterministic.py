@@ -81,6 +81,78 @@ _DISABILITY_STANDARD = re.compile(
 )
 
 
+# --- 확진구분 (진단서) -------------------------------------------------
+# The form prints BOTH options and marks one. Which glyph means "checked"
+# varies by publisher, so the two sets are enumerated from the corpus rather
+# than guessed -- surveyed across all 29 processed 진단서 (2026-08-26):
+#   checked:   ◉ (13)  ☑ (9)  ✔ (2)  [√] / [ √ ] (2)
+#   unchecked: ○ (14)  ☐ (2)  □ (1)  [ ] / [  ] (4)
+# Reading only the checked glyph is what makes this a lookup: `○ 임상적 추정`
+# beside `◉ 최 종 진 단` states 최종진단, and a pattern that ignored the mark
+# would report whichever label happened to come first.
+#
+# 최 종 진 단 prints with per-character spacing on several publishers' forms,
+# so every label allows internal whitespace.
+_CHECKED = r"[◉☑✔✓■●]|\[\s*[√✓vVxX]\s*\]"
+_CERTAINTY = re.compile(
+    r"(?:" + _CHECKED + r")\s*"
+    r"(임\s*상\s*적\s*추\s*정|최\s*종\s*진\s*단)"
+)
+
+# --- 수술명 (수술기록지) -----------------------------------------------
+# Two printed shapes, both from the corpus (24 processed 수술기록지):
+#   `수술명 :` / `수술명:` / `수 술 명 :`  -- value follows on the same line
+#   `수술명` alone                          -- value opens the NEXT line
+# A THIRD shape is deliberately excluded: a 수술코드/수술명 TABLE HEADER, where
+# the value sits in a body row under the header rather than after the label.
+# Reading that with a label anchor would return the next header cell, so the
+# header form is detected and refused -- the model reads those.
+_SURGERY_NAME_INLINE = re.compile(
+    r"^[|\s]*수\s*술\s*명\s*[:：]\s*(?P<value>[^\n|]+?)\s*\|?\s*$", re.MULTILINE)
+_SURGERY_NAME_NEXTLINE = re.compile(
+    r"^[|\s]*수\s*술\s*명\s*$\n(?P<value>[^\n|]+?)\s*$", re.MULTILINE)
+# A header row names OTHER columns beside 수술명; a value line never does.
+_SURGERY_TABLE_HEADER = re.compile(r"수술\s*코드|진단\s*코드")
+
+
+# --- 장해상병명 (후유장해진단서) ---------------------------------------
+# Surveyed across all 26 processed 후유장해진단서 (2026-08-26). Three printed
+# shapes, all label-anchored:
+#   `상병명 | S6280 : 손목...골절, 폐쇄성`       value in the next table cell
+#   `상병명` then the value on the FOLLOWING line
+#   `장해상병명 | 좌측 손목 원위요골 골절 | 부상 (발병)일 | ...`
+# The third continues with ANOTHER label in the same row, so the value is cut
+# at the next `|` rather than run to end of line.
+#
+# `상병명(상병명이 많을 때에는 ...)` is the form's own INSTRUCTION line, not a
+# value, and is excluded: the parenthetical is what distinguishes it.
+_DISABILITY_DIAGNOSIS_INLINE = re.compile(
+    r"^[|\s]*(?:장해)?상\s*병\s*명\s*(?!\()[:：|]\s*(?P<value>[^\n|]{3,}?)\s*(?:\||$)",
+    re.MULTILINE)
+_DISABILITY_DIAGNOSIS_NEXTLINE = re.compile(
+    r"^[|\s]*(?:장해)?상\s*병\s*명\s*(?!\()[:：|]?\s*$\n(?P<value>[^\n|]{3,}?)\s*$",
+    re.MULTILINE)
+
+# --- 수술전/후 진단명 (수술기록지) --------------------------------------
+# The 수술기록지 prints both; the POST-operative name is the settled one (the
+# pre-operative name is what was suspected going in), so it is read first and
+# the pre-operative name is the fallback. 21 of 25 processed 수술기록지 carry
+# them, in `수술후 진단명 :` and label-then-next-line shapes alike.
+_POSTOP_DIAGNOSIS = re.compile(
+    r"^[|\s]*수술\s*후\s*진단명\s*[:：|]?\s*(?P<value>[^\n|]{3,}?)\s*\|?\s*$"
+    r"|^[|\s]*수술\s*후\s*진단명\s*$\n(?P<value2>[^\n|]{3,}?)\s*$", re.MULTILINE)
+
+# --- 영구/한시 장해 유형 (후유장해진단서) --------------------------------
+# Two printed shapes: the table cell `비고사항 (영구/한시) | 영구` that
+# `_DISABILITY_DURATION` already anchors on, and a free-standing sentence
+# `본 장해는 영구 장해임`. The sentence form is included because the publisher
+# still prints 영구/한시 as the closed pair -- the writer picks one, not the
+# wording.
+_DISABILITY_TYPE = re.compile(
+    r"비고\s*사항\s*\(\s*영구\s*/\s*한시\s*\)\s*[:|]\s*(?P<value>영구|한시)"
+    r"|본\s*장해는\s*(?P<value2>영구|한시)\s*장해")
+
+
 def _match_on_pages(
     pattern: re.Pattern[str],
     pages: Sequence[Mapping[str, Any]],
@@ -175,12 +247,125 @@ def _standard(pages):
     return _assert(match.group(1).strip(), page_no, _quote_for(match, text))
 
 
+def _certainty(pages):
+    """확진 or 임상적 추정, read from which box the form actually marks.
+
+    `_match_on_pages` refuses the document when two DIFFERENT values are
+    marked, which on this form means the publisher checked both boxes -- a
+    real contradiction the model and the consistency stage should see, not
+    something a rule may silently resolve by taking the first.
+    """
+    hit = _match_on_pages(_CERTAINTY, pages)
+    if not hit:
+        return None
+    page_no, match = hit
+    text = next(p["text"] for p in pages if p.get("page") == page_no)
+    # Normalise the per-character spacing the form prints: `최 종 진 단`.
+    value = re.sub(r"\s+", "", match.group(1))
+    return _assert(value, page_no, _quote_for(match, text))
+
+
+def _surgery_name(pages):
+    """The 수술명 line's value, from either printed shape.
+
+    Returns None on a 수술코드/진단코드 table header, where the label names a
+    COLUMN rather than introducing a value.
+    """
+    for pattern in (_SURGERY_NAME_INLINE, _SURGERY_NAME_NEXTLINE):
+        hits: list[tuple[int, re.Match[str]]] = []
+        for page in pages:
+            text, page_no = page.get("text"), page.get("page")
+            if not isinstance(text, str) or not isinstance(page_no, int):
+                continue
+            for match in pattern.finditer(text):
+                line_start = text.rfind("\n", 0, match.start()) + 1
+                line_end = text.find("\n", match.start())
+                line = text[line_start:line_end if line_end > 0 else len(text)]
+                if _SURGERY_TABLE_HEADER.search(line):
+                    continue          # a column header, not a label
+                hits.append((page_no, match))
+        if not hits:
+            continue
+        values = {re.sub(r"\s+", " ", h[1].group("value")).strip() for h in hits}
+        if len(values) > 1:
+            return None               # two different 수술명 -- the model reads it
+        page_no, match = hits[0]
+        value = re.sub(r"\s+", " ", match.group("value")).strip()
+        if not value:
+            continue
+        text = next(p["text"] for p in pages if p.get("page") == page_no)
+        return _assert(value, page_no, _quote_for(match, text))
+    return None
+
+
+def _first_named_group(match: re.Match[str]) -> str | None:
+    """The first non-empty capture among `value`/`value2`.
+
+    Patterns that cover two printed shapes use a second alternative, so only
+    one group is populated per match.
+    """
+    for name in ("value", "value2"):
+        try:
+            got = match.group(name)
+        except (IndexError, re.error):
+            # A pattern that declares only `value` has no `value2` group.
+            continue
+        if got and got.strip():
+            return re.sub(r"\s+", " ", got).strip()
+    return None
+
+
+def _read_alternatives(pages, patterns):
+    """The first pattern that yields ONE consistent value across the document.
+
+    Ordered: an earlier pattern is the more authoritative printed shape. Two
+    different values from the same pattern make the read ambiguous and hand the
+    field back to the model, exactly as `_match_on_pages` does.
+    """
+    for pattern in patterns:
+        hits = []
+        for page in pages:
+            text, page_no = page.get("text"), page.get("page")
+            if not isinstance(text, str) or not isinstance(page_no, int):
+                continue
+            for match in pattern.finditer(text):
+                value = _first_named_group(match)
+                if value:
+                    hits.append((page_no, match, value))
+        if not hits:
+            continue
+        if len({h[2] for h in hits}) > 1:
+            return None
+        page_no, match, value = hits[0]
+        text = next(p["text"] for p in pages if p.get("page") == page_no)
+        return _assert(value, page_no, _quote_for(match, text))
+    return None
+
+
+def _disability_diagnosis(pages):
+    return _read_alternatives(
+        pages, (_DISABILITY_DIAGNOSIS_INLINE, _DISABILITY_DIAGNOSIS_NEXTLINE))
+
+
+def _postop_diagnosis(pages):
+    return _read_alternatives(pages, (_POSTOP_DIAGNOSIS,))
+
+
+def _disability_type(pages):
+    return _read_alternatives(pages, (_DISABILITY_TYPE,))
+
+
 # field_id -> reader. Keyed by field so the driver can subtract exactly what a
 # rule settled from what it still has to ask the model about.
 RULES = {
     "documented_disability_rate": _rate,
     "documented_disability_duration": _duration,
     "documented_disability_standard": _standard,
+    "diagnostic_certainty": _certainty,
+    "surgery_or_procedure_name": _surgery_name,
+    "disability_related_diagnosis": _disability_diagnosis,
+    "primary_diagnosis": _postop_diagnosis,
+    "disability_type": _disability_type,
 }
 
 

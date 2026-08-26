@@ -768,8 +768,35 @@ def test_a_trusted_source_still_wins_over_an_earlier_partial_reading() -> None:
     assert not selected.get("partial_reading")
 
 
-def test_explicit_absence_still_outranks_a_partial_reading() -> None:
-    """A stated absence is a finding; it must not be relabelled partial."""
+def test_a_stated_absence_alone_settles_the_field() -> None:
+    """With no value cited anywhere, a stated absence is the finding."""
+    documents = [selection.DocumentRef("DOC_002", "admission_discharge_summary")]
+    progress, outcome = _progress_for("surgery_or_procedure_name", documents)
+    page_text = {("DOC_002", 1): "수술 시행하지 않음"}
+
+    driver._consume(progress, "DOC_002", "admission_discharge_summary",
+                    {"presence": "explicitly_absent", "page": 1,
+                     "quote": "수술 시행하지 않음", "reason": "미시행"},
+                    page_text, driver._observation_id_sequence())
+    driver._finish(progress)
+
+    assert outcome.status == "explicitly_absent"
+    assert outcome.stop_reason == "explicitly_absent"
+
+
+def test_a_cited_value_outranks_a_stated_absence() -> None:
+    """One source denying the thing does not undo another source quoting it.
+
+    Written the other way round first, from an assumption rather than from
+    data, and CASE_9417 refuted it: `objective_change` held `요통 호전 경향`
+    and `처음보다는 40% 호전된 상태` alongside an imaging line `No definite
+    abnormal signal change in bones`, and settling the field as
+    `explicitly_absent` told a reviewer the records were silent about a change
+    the records had described twice.
+
+    The absence reading is still PRESERVED as an observation -- it simply does
+    not decide the field.
+    """
     documents = [
         selection.DocumentRef("DOC_001", "surgery_procedure_record"),
         selection.DocumentRef("DOC_002", "admission_discharge_summary"),
@@ -788,8 +815,12 @@ def test_explicit_absence_still_outranks_a_partial_reading() -> None:
                     page_text, ids)
     driver._finish(progress)
 
-    assert outcome.status == "explicitly_absent"
-    assert outcome.stop_reason == "explicitly_absent"
+    assert outcome.status == "unavailable"
+    assert outcome.stop_reason == "partial_value_only"
+    # Both readings survive; the absence is recorded, not discarded.
+    states = [o.get("value_state") for o in outcome.observations]
+    assert states.count("explicitly_absent") == 1
+    assert any(o.get("partial_reading") for o in outcome.observations)
 
 
 def test_partial_reading_survives_into_the_published_contract() -> None:

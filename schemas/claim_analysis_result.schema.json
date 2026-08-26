@@ -305,6 +305,18 @@
           "items": {
             "$ref": "#/$defs/exact_evidence_reference"
           }
+        },
+        "extraction_method": {
+          "enum": [
+            "deterministic_label_anchor",
+            "model_read"
+          ],
+          "description": "How this reading was produced. 'deterministic_label_anchor' means a rule in claim_analysis_deterministic.py matched a label the FORM PUBLISHER prints (노동능력상실율(%), 수술명, the 임상적추정/최종진단 checkbox) and read the value beside it -- no model call was involved for this field, so the reading is exactly repeatable. 'model_read' is an ordinary provider extraction. Recorded because the two have different failure modes and a reviewer auditing a value needs to know which one produced it: a rule cannot hallucinate but can miss a variant form, while a model reads any phrasing but was measured returning different answers on the same text across runs (CASE_705 vs CASE_713, the observation that motivated the rule layer). Absent means model_read -- older contracts predate this axis."
+        },
+        "rule_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The rule set that produced a deterministic_label_anchor reading (e.g. claim_analysis_deterministic.v0.1). Present only with that extraction_method, so a value can be traced to the exact pattern version that read it when a pattern is later widened."
         }
       },
       "required": [

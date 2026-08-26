@@ -39,7 +39,10 @@
       "kind": "diagnosis_certificate",
       "default_roles": [
         "accident_context_source",
-        "diagnosis_source"
+        "clinical_course_source",
+        "complication_source",
+        "diagnosis_source",
+        "treatment_source"
       ],
       "claim_analysis_read_mode": "content"
     },
@@ -47,36 +50,39 @@
       "kind": "initial_visit_record",
       "default_roles": [
         "accident_context_source",
+        "clinical_course_source",
         "diagnosis_source",
         "diagnostic_evidence_source",
-        "clinical_course_source",
-        "prior_history_source"
+        "prior_history_source",
+        "treatment_source"
       ],
       "claim_analysis_read_mode": "content"
     },
     {
       "kind": "outpatient_record",
       "default_roles": [
+        "accident_context_source",
+        "clinical_course_source",
+        "complication_source",
         "diagnosis_source",
         "diagnostic_evidence_source",
-        "treatment_source",
-        "clinical_course_source",
+        "disability_source",
         "prior_history_source",
-        "complication_source",
-        "disability_source"
+        "treatment_source"
       ],
       "claim_analysis_read_mode": "content"
     },
     {
       "kind": "progress_record",
       "default_roles": [
+        "accident_context_source",
+        "clinical_course_source",
+        "complication_source",
         "diagnosis_source",
         "diagnostic_evidence_source",
-        "treatment_source",
-        "clinical_course_source",
+        "disability_source",
         "prior_history_source",
-        "complication_source",
-        "disability_source"
+        "treatment_source"
       ],
       "claim_analysis_read_mode": "content"
     },
@@ -94,14 +100,18 @@
     {
       "kind": "surgery_procedure_record",
       "default_roles": [
-        "treatment_source",
-        "complication_source"
+        "clinical_course_source",
+        "complication_source",
+        "diagnosis_source",
+        "diagnostic_evidence_source",
+        "treatment_source"
       ],
       "claim_analysis_read_mode": "content"
     },
     {
       "kind": "imaging_interpretation",
       "default_roles": [
+        "clinical_course_source",
         "diagnostic_evidence_source",
         "disability_source"
       ],
@@ -110,6 +120,7 @@
     {
       "kind": "major_test_result",
       "default_roles": [
+        "clinical_course_source",
         "diagnostic_evidence_source",
         "disability_source"
       ],
@@ -118,10 +129,11 @@
     {
       "kind": "admission_discharge_summary",
       "default_roles": [
-        "diagnosis_source",
-        "treatment_source",
         "clinical_course_source",
-        "complication_source"
+        "complication_source",
+        "diagnosis_source",
+        "disability_source",
+        "treatment_source"
       ],
       "claim_analysis_read_mode": "content"
     },
@@ -130,15 +142,20 @@
       "default_roles": [
         "accident_context_source",
         "diagnosis_source",
-        "diagnostic_evidence_source",
-        "clinical_course_source"
+        "diagnostic_evidence_source"
       ],
       "claim_analysis_read_mode": "content"
     },
     {
       "kind": "disability_assessment",
       "default_roles": [
-        "disability_source"
+        "accident_context_source",
+        "clinical_course_source",
+        "diagnosis_source",
+        "diagnostic_evidence_source",
+        "disability_source",
+        "prior_history_source",
+        "treatment_source"
       ],
       "claim_analysis_read_mode": "content"
     },
@@ -179,7 +196,9 @@
     },
     {
       "kind": "other_medical",
-      "default_roles": [],
+      "default_roles": [
+        "accident_context_source"
+      ],
       "claim_analysis_read_mode": "content"
     }
   ],
@@ -1091,8 +1110,13 @@
           "diagnosis_certificate"
         ],
         [
+          "disability_assessment"
+        ],
+        [
           "outpatient_record",
-          "progress_record",
+          "progress_record"
+        ],
+        [
           "other_medical"
         ]
       ],
@@ -1114,9 +1138,18 @@
           "initial_visit_record"
         ],
         [
+          "surgery_procedure_record"
+        ],
+        [
+          "disability_assessment"
+        ],
+        [
+          "final_visit_record",
           "outpatient_record",
-          "progress_record",
-          "final_visit_record"
+          "progress_record"
+        ],
+        [
+          "emergency_record"
         ]
       ],
       "allow_intake_source": false,
@@ -1132,10 +1165,16 @@
           "major_test_result"
         ],
         [
-          "initial_visit_record",
           "emergency_record",
+          "initial_visit_record",
           "outpatient_record",
           "progress_record"
+        ],
+        [
+          "surgery_procedure_record"
+        ],
+        [
+          "disability_assessment"
         ]
       ],
       "allow_intake_source": false,
@@ -1153,9 +1192,18 @@
           "admission_discharge_summary"
         ],
         [
+          "diagnosis_certificate"
+        ],
+        [
+          "final_visit_record",
           "outpatient_record",
-          "progress_record",
-          "final_visit_record"
+          "progress_record"
+        ],
+        [
+          "initial_visit_record"
+        ],
+        [
+          "disability_assessment"
         ],
         [
           "prescription_treatment_history"
@@ -1180,6 +1228,20 @@
           "admission_discharge_summary"
         ],
         [
+          "disability_assessment"
+        ],
+        [
+          "diagnosis_certificate"
+        ],
+        [
+          "initial_visit_record",
+          "surgery_procedure_record"
+        ],
+        [
+          "imaging_interpretation",
+          "major_test_result"
+        ],
+        [
           "nursing_routine_record"
         ]
       ],
@@ -1195,6 +1257,9 @@
           "initial_visit_record",
           "outpatient_record",
           "progress_record"
+        ],
+        [
+          "disability_assessment"
         ]
       ],
       "allow_intake_source": true,
@@ -1213,6 +1278,9 @@
         [
           "admission_discharge_summary",
           "surgery_procedure_record"
+        ],
+        [
+          "diagnosis_certificate"
         ]
       ],
       "allow_intake_source": false,
@@ -1234,6 +1302,9 @@
         [
           "imaging_interpretation",
           "major_test_result"
+        ],
+        [
+          "admission_discharge_summary"
         ]
       ],
       "allow_intake_source": false,

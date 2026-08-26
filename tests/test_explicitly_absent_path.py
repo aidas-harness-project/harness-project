@@ -237,3 +237,95 @@ def test_the_absence_does_not_spill_onto_another_case_type() -> None:
     by_type = {row["case_type"]: row for row in result}
     for other in ("personal_insurance", "industrial_accident", "liability"):
         assert by_type[other]["status"] == "uncertain"
+
+
+# ------------------------------------------------ publishable value guard --
+# A structurally invalid value used to pass `parse_result` and only fail at
+# contract write, which kills the stage AFTER every provider call is paid for.
+# Measured on CASE_9412 (2026-08-26): a 진단서 stating `수술 후 약 8(팔)주 간의
+# 안정가료` -- a DURATION with no start date -- produced
+# {"start": null, "end": null} for `treatment_period` and `admission_period`,
+# and those two fields failed the whole run's write.
+
+def test_period_without_a_start_date_is_dropped_not_published() -> None:
+    """The exact CASE_9412 payload must not reach the contract."""
+    rows = [{"field_id": "treatment_period", "value_shape": "period"}]
+    parsed = extraction.parse_result({"fields": {"treatment_period": {
+        "presence": "asserted",
+        "value": {"start": None, "end": None},
+        "page": 1, "quote": "수술 후 약 8(팔)주 간의 안정가료 요하며",
+    }}}, rows)
+    assert parsed == {}, "a period with no start date must be dropped"
+
+
+def test_a_real_period_still_publishes() -> None:
+    rows = [{"field_id": "admission_period", "value_shape": "period"}]
+    parsed = extraction.parse_result({"fields": {"admission_period": {
+        "presence": "asserted",
+        "value": {"start": "2025-02-25", "end": "2025-04-19"},
+        "page": 1, "quote": "입원 일수 | 총53   일",
+    }}}, rows)
+    assert parsed["admission_period"]["value"] == {
+        "start": "2025-02-25", "end": "2025-04-19"}
+
+
+def test_an_open_period_still_publishes() -> None:
+    """`end: null` is legitimate -- a period that has not closed."""
+    rows = [{"field_id": "treatment_period", "value_shape": "period"}]
+    parsed = extraction.parse_result({"fields": {"treatment_period": {
+        "presence": "asserted",
+        "value": {"start": "2025-02-25", "end": None},
+        "page": 1, "quote": "2025-02-25 일에",
+    }}}, rows)
+    assert parsed["treatment_period"]["value"]["end"] is None
+
+
+def test_a_duration_stated_as_text_publishes() -> None:
+    """The documented fallback: a duration with no start date, as a string."""
+    rows = [{"field_id": "treatment_period", "value_shape": "period"}]
+    parsed = extraction.parse_result({"fields": {"treatment_period": {
+        "presence": "asserted",
+        "value": "기브스 및 목발 6주, 재활6 주 총12 주간의 안정가료",
+        "page": 1, "quote": "기브스 및 목발 6주, 재활6 주 총12 주간의 안정가료가 필요합니다.",
+    }}}, rows)
+    assert parsed["treatment_period"]["value"].startswith("기브스")
+
+
+def test_value_guard_matches_the_contract_schema() -> None:
+    """The guard must agree with `$defs/value`, case by case.
+
+    Any divergence other than the documented whitespace-only case is a defect:
+    stricter drops a value the contract would have accepted, looser lets a
+    write-time failure back in.
+    """
+    import jsonschema
+    from _validation import load_registry
+
+    schemas, registry = load_registry()
+    value_schema = schemas["claim_analysis_result.schema.json"]["$defs"]["value"]
+    validator = jsonschema.Draft202012Validator(
+        value_schema, registry=registry,
+        format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER)
+
+    cases = [
+        "수술 후 약 8주간의 안정가료", "", 10, 0, True, False,
+        ["a", "b"], [], ["a", ""],
+        {"start": "2025-02-25", "end": "2025-05-25"},
+        {"start": "2025-02-25", "end": None},
+        {"start": None, "end": None},
+        {"end": "2025-05-25"},
+        {"start": "", "end": None},
+        {"start": "2025-02-25", "end": None, "extra": 1},
+        None,
+    ]
+    for value in cases:
+        mine = extraction._value_is_publishable(value)
+        theirs = not list(validator.iter_errors(value))
+        assert mine == theirs, (
+            f"guard and schema disagree on {value!r}: guard={mine} schema={theirs}")
+
+    # The one deliberate divergence, asserted so it cannot drift silently.
+    assert extraction._value_is_publishable("   ") is False
+    assert not list(validator.iter_errors("   ")), (
+        "schema is expected to accept whitespace-only; if this changes, the "
+        "guard's documented divergence should be revisited")
