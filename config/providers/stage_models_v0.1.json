@@ -26,7 +26,10 @@
       }
     },
     "screening_report": {
-      "note": "Driver route not built yet (known-gaps 55). The entry exists so the model decision has a home before the code does."
+      "note": "The reading half (key_issues / review_points / conflict severity) when run with `run_screening_report.py --judge`. Without that flag the stage reads a judgement the screening-report subagent wrote and this entry does not apply -- a subagent's model is the session's, which this file cannot set.",
+      "roles": {
+        "synthesis": {}
+      }
     },
     "draft_report_v1": {},
     "draft_report_v2": {},

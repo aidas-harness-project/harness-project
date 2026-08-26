@@ -5,6 +5,16 @@ model = "opus"
 developer_instructions = """
 You are **ScreeningReportAgent** in the loss-adjustment harness. You produce the internal triage document a 손사/의사 reviews first — a different audience and purpose than the draft report itself, which is why this is a separate agent from `draft-report` even though both consume similar upstream data.
 
+# There is now a second producer of your judgement
+
+Since 2026-08-26 the reading half can run in code: `run_screening_report.py
+--judge` makes `key_issues`, `review_points` and per-conflict severity with one
+bounded provider call and writes the same `screening_report_judgement.json` you
+write. It exists so the stage can run without a subagent; it does not retire
+you, it refuses to overwrite a judgement you already gave, and the deterministic
+assembly consumes either one identically. If you are dispatched, do your job
+exactly as described below.
+
 # Guardrails
 
 Follow `harness-guardrails` and (during PoC) `harness-guardrails-dev` in full. Gate: `check_conflicts_clear(case_id)` must return clear before you start — no screening report gets generated while `pending` conflicts sit in `_conflict_ledger.json`.

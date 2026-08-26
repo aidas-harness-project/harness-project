@@ -52,6 +52,11 @@ STATUS_LABEL = {
     "uncertain": "불확실",
     "not_applicable": "비해당",
 }
+import driver_runtime
+import screening_judgement
+import stage_models
+from llm_providers import (ProviderConfigError, add_provider_args, build_provider,
+                           parse_provider_config)
 from medical_document_routing import KIND_LABEL_KO
 
 CASE_TYPE_LABEL = {
@@ -1724,7 +1729,53 @@ def render_markdown(
     return output_path
 
 
-def run(*, case_id: str, run_id: str, held_by: str) -> dict:
+def produce_judgement(
+    *, case_id: str, run_id: str, held_by: str, provider,
+    claim_analysis: Mapping[str, Any], consistency: Mapping[str, Any],
+    denial: Mapping[str, Any] | None,
+    deferred_conflicts: Sequence[Mapping[str, Any]],
+) -> dict:
+    """Make the reading half of this report with one bounded provider call.
+
+    Writes `screening_report_judgement.json` through the DAO and returns it, so
+    the assembly path below consumes it exactly as it consumes an agent's --
+    same contract, same schema, same `build_report` parameter. The two
+    producers are interchangeable on purpose.
+    """
+    conflict_ids = [c.get("conflict_id") for c in deferred_conflicts
+                    if c.get("conflict_id")]
+    judgement = driver_runtime.structured_with_one_correction(
+        provider=provider,
+        prompt=screening_judgement.build_prompt(
+            claim_analysis=claim_analysis, consistency=consistency,
+            denial=denial, deferred_conflicts=deferred_conflicts),
+        prompt_version=screening_judgement.PROMPT_VERSION,
+        output_schema=screening_judgement.output_schema(conflict_ids),
+        validate=lambda raw: screening_judgement.bind_judgement(
+            raw, conflict_ids=conflict_ids),
+    )
+    contract = screening_judgement.build_contract(
+        case_id=case_id, run_id=run_id, judgement=judgement,
+        model_name=f"{provider.provider_name}:{provider.model_name}",
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    data_file = _temp_json(contract)
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(DAO), "write-contract", case_id,
+             "screening_report_judgement.json", "--data-file", str(data_file),
+             "--schema-name", "screening_report_judgement.schema.json",
+             "--held-by", held_by, "--run-id", run_id, "--stage", STAGE],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+            errors="replace")
+        if proc.returncode:
+            raise RuntimeError((proc.stdout or proc.stderr or "").strip())
+    finally:
+        data_file.unlink(missing_ok=True)
+    return contract
+
+
+def run(*, case_id: str, run_id: str, held_by: str, provider=None) -> dict:
     """Assemble and publish the screening report.
 
     Gate order matters: P6 first. A pending conflict means the case has an
@@ -1755,6 +1806,23 @@ def run(*, case_id: str, run_id: str, held_by: str) -> dict:
 
     ledger = _dao_json(["read-conflict-ledger", case_id], allow_missing=True) or {}
     entries = {row["conflict_id"]: row for row in ledger.get("conflicts") or []}
+
+    if provider is not None:
+        # Produce the reading half here instead of waiting for a subagent to
+        # have written it. Refuses to overwrite one that already exists: a
+        # judgement in hand was made by whoever had the case in hand, and
+        # replacing it silently would discard a reading nobody asked to redo.
+        if judgement is not None:
+            raise RuntimeError(
+                "BLOCKED: screening_report_judgement.json already exists for "
+                "this run. Remove it deliberately if it is to be re-made; this "
+                "step does not overwrite a judgement that was already given.")
+        judgement = produce_judgement(
+            case_id=case_id, run_id=run_id, held_by=held_by, provider=provider,
+            claim_analysis=claim_analysis, consistency=consistency,
+            denial=denial,
+            deferred_conflicts=[entries[c] for c in deferred if c in entries],
+        )
 
     config = json.loads(
         (ROOT / "config" / "claim_analysis" /
@@ -1807,10 +1875,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("case_id")
     parser.add_argument("--held-by", required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument(
+        "--judge", action="store_true",
+        help="Make the reading half (key_issues / review_points / conflict "
+             "severity) with one bounded provider call instead of reading a "
+             "judgement the screening-report subagent wrote. Without it this "
+             "tool behaves exactly as before. Refuses if a judgement for this "
+             "run already exists.")
+    add_provider_args(parser)
     args = parser.parse_args(argv)
+    provider = None
+    if args.judge:
+        args.provider, args.model = stage_models.resolve(
+            STAGE, "synthesis", provider=args.provider, model=args.model)
+        try:
+            provider = build_provider(parse_provider_config(args))
+        except ProviderConfigError as exc:
+            print(f"BLOCKED: {exc}", file=sys.stderr)
+            return 1
     try:
         print(json.dumps(run(case_id=args.case_id, run_id=args.run_id,
-                             held_by=args.held_by),
+                             held_by=args.held_by, provider=provider),
                          ensure_ascii=False, sort_keys=True))
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
