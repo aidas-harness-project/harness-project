@@ -143,29 +143,72 @@ Four findings, of which two are structural rather than per-report:
   the adjuster applied 민법 제750조·제755조). Discretionary, kept out of the
   headline.
 
-## CASE_710 and CASE_711 — not scored: the answer keys are for different cases
+## Correction — CASE_711 is correctly paired; the earlier claim was wrong
 
-Read through the gate and compared against each report's own subject:
+The section this replaces said CASE_711's answer key was for a different case.
+That was wrong, and wrong in a way worth recording: I never read
+`outputs/CASE_711/screening_report.md`. What I read and called "711" was
+`rubric_test/screening_report_711.md`, which is CASE_712's report — the
+mislabelling found earlier in this same note. I then compared CASE_712's subject
+against CASE_711's answer key and reported a mismatch that does not exist.
 
-| Placed as | Answer key is about | The report is about |
+Read from the real file:
+
+| | Report | Answer key placed with it |
 | --- | --- | --- |
-| `data/ground_truth/CASE_710/GT_001.pdf` | 자동차보험 손해사정서 — 상치골지골절 / 천골골절(천장관절) / 골반환 골절, 자배법 제3조, 과실 10%, 상실수익 27% | 요골 하단의 상세불명 골절 (S52590), 좌측 손목, 개인보험 후유장해, 보행 중 전도 |
-| `data/ground_truth/CASE_711/GT_001.pdf` | 배상책임 손해사정서 — 요추부 압박골절 (S32090), 나무 구덩이에 걸려 전도 | 천골(薦骨)의 골절 (S3210), 차대 차 교통사고, 골반환 골절, 맥브라이드 27% |
+| CASE_705 | 우측 손목 요골 원위부 골절, 결빙 계단, 배상 | same case ✅ |
+| CASE_711 | **요추부 압박골절 (L1)**, 척추 32% 영구 | 요추부 압박골절 S32090, 나무 구덩이 전도, 척추골절 I-A-1-C 32% ✅ |
 
-Neither pair matches. One re-pairing is evident from content: the answer key
-placed under CASE_710 is the traffic case with 천장관절 골절 and a 27% rating —
-which is CASE_711's report. The file names carry the same signal
-(`CASE_710_GT_TA1.pdf` — TA for traffic accident).
+## CASE_711 — scored
 
-That leaves two open ends:
+| | |
+| --- | --- |
+| F1 factual field agreement | **53.8** (fact 7/13; discretionary 0/7) |
+| F2 issue-prediction recall | **37.5** (3 of 8) |
+| F3 required-document agreement | **60.0** |
+| F4 | `screening_declined` |
+| **fidelity_score** | **50.1** |
+| **verdict** | **divergent** |
 
-- The answer key placed under CASE_711 (`배상 17`, 요추부 압박골절) matches **no
-  report in this corpus**.
-- CASE_710's report (개인보험, 손목) has no matching answer key here. The one
-  named `CASE_712_GT_개인보험 15.pdf` is the only 개인보험 file, so it is the
-  likely partner — **unverified**, because the gate refuses CASE_712 (its run
-  failed) and no read was attempted around it.
+Diagnosis, level, and the whole disability block (32%, permanent, McBride) match
+exactly. The score falls on two things: an accident narrative where the answer
+key's version (나무 구덩이) is **neither** of the two the report preserved, and
+five fields the report declared unavailable that the answer key does carry
+(admission period, outpatient period, current status, treatment cost, coverage).
 
-Nothing was re-placed. Scoring a report against another case's answer key would
-produce a number with no meaning, and moving answer-key files on inference is
-not a step to take without the owner's decision.
+The report's own diagnosis of that gap is correct — it names the missing
+document kinds (최종진료기록, 주요검사결과, 진료비영수증) as the cause. The loss
+is in evidence collection, not judgement.
+
+**SF-1 (high)** is a self-contradiction: the header says `진단코드: 확인 불가`
+while §10 quotes S32090 from the 진단서. The report has the value and declares it
+missing.
+
+**SF-4** repeats CASE_705's SF-3 exactly: 사고경위서 is not a document kind the
+checklist contains, in a second case where the accident narrative is the central
+issue. Two for two makes it a checklist defect, not a per-report miss.
+
+## CASE_710 — still not scored, and the evidence points at a 710/712 swap
+
+`data/ground_truth/CASE_710/GT_001.pdf` is a 자동차보험 손해사정서: 자배법 제3조,
+상치골지골절 / 천골골절(천장관절) / 골반환 골절, 휴업손해 60일, 상실수익 27%,
+과실 10%. CASE_710's report is a wrist case — 요골 하단의 상세불명 골절 (S52590),
+좌측, 개인보험 후유장해, 보행 중 전도. No body part, insurance line, or mechanism
+in common.
+
+That answer key matches **CASE_712's** report on three independent points:
+
+| | Answer key (placed under CASE_710) | CASE_712's report |
+| --- | --- | --- |
+| 장해상병명 | 상치골지골절 / 천골골절(천장관절) / 골반환 골절 | 상치골지골절 / 천골 골절 (천장관절 골절) / 골반환 골절 |
+| 노동능력상실률 | 27% | 맥브라이드 27% (천장관절 골절) |
+| 입원일수 | 60일 | 합계 만 60일 (DOC_012) |
+
+So the likely state is that the CASE_710 and CASE_712 answer keys are swapped —
+`CASE_712_GT_개인보험 15.pdf` being the only 개인보험 file, and CASE_710's report
+being the only 개인보험 report. That last step is **unverified**: the file sits
+under CASE_712, whose run failed, so the gate refuses to open it and no attempt
+was made to go around the gate.
+
+Nothing was moved. Swapping the two files would make CASE_710 scorable and is one
+copy away, but it is a change to answer-key placement and belongs to the owner.
