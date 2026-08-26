@@ -3852,7 +3852,7 @@ Open: whether the field's prompt or its route priority needs work, or whether
 extraction's vocabulary. Needs a targeted A/B on this page before changing
 anything -- a blind prompt edit would be guessing.
 
-## 55. The agent-executed stages never reach `llm_providers`, so the OpenRouter switch cannot cover them -- PARTIAL 2026-08-25
+## 55. The agent-executed stages never reach `llm_providers`, so the OpenRouter switch cannot cover them -- PARTIAL 2026-08-26
 
 The 2026-08-21 switch moved every LLM call in `tools/` onto `openrouter`, and
 2026-08-25 carried it into the layers that call those tools. Neither touched
@@ -3884,8 +3884,17 @@ bounded provider call, so `consistency_check` no longer needs a subagent.
 Deliberately additive -- the `consistency-check` agent stays a valid producer of
 the same contract, and `register` still runs its binding checks against whatever
 wrote it, so the two routes can be compared on a real case before either is
-retired. The remaining four (`screening_report`, `critic`, `denial_validation`,
-`draft_report` v1/v2) are unstarted, and the analysis's four open questions --
+retired. **2026-08-26 update -- all five built.** `screening_report --judge`,
+`tools/run_critic.py`, `tools/run_denial_validation.py` and
+`tools/run_draft_report.py` join the consistency pilot. Every one is ADDITIVE:
+the agent spec stays a valid producer of the same contract, nothing overwrites
+an artifact another producer wrote, and the deterministic halves (`register`,
+the screening assembler, `document_assembly`) consume either producer
+identically. What remains OPEN is the reason this item is not RESOLVED: **not
+one of these has made a live call**, so the comparison the analysis asked for
+(driver output against an agent-led run of the same case) has never happened and
+cannot until there is an API key -- see item 56. The analysis's four open
+questions --
 agent-spec disposition, whether `draft_report` belongs in the list at all,
 per-stage model selection, and who pays -- are still decisions for the PoC
 owner. The orchestrator's and `document-pipeline`'s own inference are
