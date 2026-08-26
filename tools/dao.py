@@ -2255,8 +2255,8 @@ def cmd_read_ground_truth(args):
     review_flag = human_review_flag_path(args.case_id, args.version)
     if not review_flag.exists():
         print(f"DENIED: human review is not yet marked complete for {args.version} of this case. "
-              f"evaluation may not read ground truth until review is confirmed (D1) -- "
-              f"see dao.py mark-human-review-complete.")
+              f"{args.caller_stage} may not read ground truth until review is confirmed (D1) -- "
+              f"see dao.py mark-human-review-complete {args.case_id} {args.version}.")
         return 1
     gt_dir = DATA / "ground_truth" / args.case_id
 
