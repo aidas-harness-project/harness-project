@@ -45,6 +45,11 @@
         "review": {}
       }
     },
-    "denial_validation": {}
+    "denial_validation": {
+      "note": "Phase 2. Two provider passes -- the verdict per denial reason, then a rebuttal per reason whose position did not hold up -- both under the `review` role today. Split them into separate roles when there is a reason to run them on different models.",
+      "roles": {
+        "review": {}
+      }
+    }
   }
 }

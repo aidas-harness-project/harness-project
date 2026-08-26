@@ -94,9 +94,23 @@ before the next attempt.
 | 9 | `critic_v1` | **agent** | Dispatch `critic`. **The review can also run in code**: `tools/run_critic.py CASE_ID v1 --template KEY --held-by critic --run-id RUN_ID` runs the four deterministic checks itself, hands their output plus the draft and its sidecar to one bounded provider call, and writes `critic_result_v1.json`. `passed` is taken from the model exactly as given -- it is a severity judgement the schema refuses to derive from the finding count -- and a check that could not run records NO count rather than a zero. |
 | 10 | human review | human-owned | `dao.py request-expert-review CASE_ID v1` sets `human_input_status: waiting`. Never call `mark-human-review-complete` yourself. |
 
-Phase 2 (`denial_validation` → `draft_report_v2` → `critic_v2`) is all agent
+Phase 2 (`denial_validation` → `draft_report_v2` → `critic_v2`) is agent
 dispatch, same lifecycle. `draft_report_v2` is a strict join: v1, `critic_v1`
 and `denial_validation` must all be passed.
+
+**Two of the three can also run in code**, writing the same contracts the agents
+write:
+
+* `tools/run_denial_validation.py CASE_ID --held-by denial-validation --run-id
+  RUN_ID` -- one bounded call per denial reason, every cited quote verified
+  verbatim before anything is written, then a second pass producing
+  `rebuttal_points.json` for the reasons whose position did NOT hold up.
+  `retrieved_chunk_ids` and each match's `match_source` are copied by the
+  driver, never asked of the model.
+* `tools/run_critic.py CASE_ID v2 --template KEY --held-by critic --run-id
+  RUN_ID` -- the four deterministic checks, then one bounded reading.
+
+Either route still leaves the attempt lifecycle with you.
 
 ## Running `denial_response` concurrently — the exact sequence
 
