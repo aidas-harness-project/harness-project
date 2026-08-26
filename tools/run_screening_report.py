@@ -449,6 +449,13 @@ UNAVAILABLE_KIND = {
     "unreadable": "records_gap",
     "route_not_activated": "not_searched",
     "not_scheduled": "not_searched",
+    # Its own kind, and NOT records_gap. The form printed the field and the
+    # writer left the cell blank, so the document exists, was read, and did
+    # raise the item -- no further records request can fill that cell. What it
+    # needs is a person checking the original. Measured on CASE_7061 DOC_003
+    # (2026-08-26): four printed-and-blank rows all published `not_mentioned`,
+    # which told a reviewer to chase documents that would change nothing.
+    "printed_but_blank": "source_blank",
     "outside_poc_scope": "out_of_scope",
     "conflict_unresolved": "disputed",
     # Its own kind on purpose. It is NOT a records_gap: the document exists,
@@ -463,6 +470,7 @@ UNAVAILABLE_KIND_LABEL = {
     "out_of_scope": "PoC 범위 밖",
     "disputed": "자료 간 불일치",
     "partial_reading": "부분 기재(원문 확인 필요)",
+    "source_blank": "서식 공란(원본 확인 필요)",
 }
 
 

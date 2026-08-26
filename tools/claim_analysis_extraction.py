@@ -122,7 +122,7 @@ def output_schema(field_rows: Sequence[Mapping[str, Any]]) -> dict:
                     "properties": {
                         "presence": {
                             "enum": ["asserted", "explicitly_absent",
-                                     "not_mentioned"],
+                                     "not_mentioned", "printed_but_blank"],
                         },
                         # `value`, `page`, `quote` and `reason` are legitimately
                         # nullable, so they carry no `type` here -- see the ajv
@@ -204,12 +204,17 @@ Rules, all of which matter more than filling the fields in:
    - "explicitly_absent" this document states the thing is NOT present --
                          "골절 소견 없음", "특이소견 없음", "수술 시행하지 않음".
                          This is a FINDING, not a blank.
+   - "printed_but_blank" this document PRINTS the field -- a form label, a
+                         table row, a checkbox line -- and the cell is empty.
+                         The item was raised and nobody filled it in.
    - "not_mentioned"     this document simply does not discuss the field.
    Do not guess, and do not carry a value over from general knowledge.
 2. "asserted" needs `value`, `page`, and `quote`. "explicitly_absent" needs
    `page` and `quote` too -- the quote is the sentence stating the absence --
-   plus a short `reason`; it carries NO `value`. "not_mentioned" carries none
-   of them: there is nothing to cite when a document says nothing.
+   plus a short `reason`; it carries NO `value`. "printed_but_blank" is the
+   same shape: quote the PRINTED LABEL or the empty row itself, and carry no
+   `value`. "not_mentioned" carries none of them: there is nothing to cite
+   when a document says nothing.
 3. Every quote must appear on the page you name CHARACTER FOR CHARACTER. Do not
    normalise spacing, fix a typo, expand an abbreviation, or translate. If you
    cannot reproduce it exactly, downgrade to "not_mentioned" rather than
@@ -221,7 +226,12 @@ Rules, all of which matter more than filling the fields in:
 5. `complete` is false when the document states only part of the value.
    `unambiguous` is false when the text could support more than one reading.
    Both default to true; set them false rather than picking one reading.
-6. A stated absence is NOT the boolean false. For a yes/no field, "수술을
+6. A blank cell is NOT a stated absence. "| 기왕증 | |" -- a printed row whose
+   cell is empty -- is `printed_but_blank`, never `explicitly_absent`: nobody
+   said there was no prior history, they just did not write anything. And it is
+   not `not_mentioned` either, because the form did raise the item. Report it
+   as blank rather than reading anything into the silence.
+7. A stated absence is NOT the boolean false. For a yes/no field, "수술을
    시행하지 않았다" is `explicitly_absent` with that sentence quoted -- not
    `asserted` with `value: false`. The distinction is what lets a reader tell a
    recorded negative finding from a value someone computed.
@@ -305,20 +315,29 @@ def parse_result(
         # provider result is read rather than silently discarded.
         if presence is None and "found" in payload:
             presence = "asserted" if payload.get("found") else "not_mentioned"
-        if presence not in {"asserted", "explicitly_absent"}:
+        if presence not in {"asserted", "explicitly_absent",
+                            "printed_but_blank"}:
             continue
 
         page, quote = payload.get("page"), payload.get("quote")
         if not isinstance(page, int) or not isinstance(quote, str) or not quote.strip():
             continue
 
-        if presence == "explicitly_absent":
+        if presence in {"explicitly_absent", "printed_but_blank"}:
+            # Both carry a quote and no value, and both are graded by the same
+            # bar above: an ungrounded claim is dropped rather than repaired.
+            # They stay separate because they say different things about the
+            # SOURCE -- one is the form asserting the thing is not present, the
+            # other is the form raising the item and nobody filling it in.
+            default_reason = (
+                "the source states this is not present"
+                if presence == "explicitly_absent"
+                else "the form prints this field and the cell is empty")
             parsed[field_id] = {
-                "presence": "explicitly_absent",
+                "presence": presence,
                 "page": page,
                 "quote": quote,
-                "reason": (payload.get("reason")
-                           or "the source states this is not present"),
+                "reason": payload.get("reason") or default_reason,
             }
             continue
 

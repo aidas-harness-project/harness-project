@@ -285,6 +285,8 @@ def _settle_unresolved(outcome: "FieldExtractionOutcome") -> None:
     Three endings, and a reviewer is owed a different thing by each:
 
     * `explicitly_absent` -- a source stated the thing is not present.
+    * `printed_but_blank` -- a form printed the field and left the cell empty.
+      No value, and no records request can close it.
     * `partial_value_only` -- a source cited a value that failed the
       trusted-value requirements. The records are NOT silent, and the quote is
       preserved, so the reviewer should read the source rather than request
@@ -296,6 +298,21 @@ def _settle_unresolved(outcome: "FieldExtractionOutcome") -> None:
     partial = [o for o in outcome.observations if o.get("partial_reading")]
     absent = [o for o in outcome.observations
               if o.get("value_state") == "explicitly_absent"]
+    blank = [o for o in outcome.observations
+             if o.get("value_state") == "printed_but_blank"]
+    if blank and not partial and not absent:
+        # The form raised the item and left it empty. The field still holds no
+        # value; what changes is the stated CAUSE, and with it the action --
+        # `not_mentioned` would send a reviewer to request records that cannot
+        # fill a blank cell, when what is needed is a look at the original.
+        # Ranked below both of the others: a cited value and a stated absence
+        # each say more than an empty cell does.
+        outcome.stop_reason = "printed_but_blank_only"
+        outcome.unavailable_reason = "printed_but_blank"
+        outcome.reason = (
+            "서식에 항목이 인쇄되어 있으나 해당 칸이 비어 있습니다. "
+            "자료를 추가로 요청해도 채워지지 않으므로 원본을 확인해야 합니다")
+        return
     if absent and not partial:
         # A stated absence, and nothing cited a value against it.
         outcome.status = "explicitly_absent"
@@ -844,14 +861,27 @@ def _consume(
         # An unverifiable or ambiguous quote is dropped, never repaired.
         return
 
-    if presence == "explicitly_absent":
-        # A stated absence is evidence, and it is recorded with the sentence
-        # that states it. It does not become a value, and it does not satisfy
-        # the search -- a later source may still assert one.
+    if presence in ("explicitly_absent", "printed_but_blank"):
+        # Both are evidence about the SOURCE rather than values, and both are
+        # recorded with the text that grounds them -- the sentence stating the
+        # absence, or the printed label whose cell is empty. Neither becomes a
+        # value and neither satisfies the search: a later source may still
+        # assert one.
+        #
+        # They stay distinct because the reader's next action differs. A stated
+        # absence is a finding. A blank cell is the form raising the item and
+        # nobody filling it in, which no records request can close -- someone
+        # has to look at the original. Collapsing the second into
+        # `not_mentioned` is what CASE_7061 DOC_003 did to four printed-and-
+        # blank rows (기왕증 / 기여율 / 기존장애 / 수상일·초진일·장해진단일).
+        default_reason = (
+            "해당 출처가 이 항목이 없다고 기재하고 있습니다"
+            if presence == "explicitly_absent"
+            else "서식에 항목은 인쇄되어 있으나 해당 칸이 비어 있습니다")
         outcome.observations.append({
             "observation_id": next(observation_ids),
-            "value_state": "explicitly_absent",
-            "reason": found.get("reason") or "해당 출처가 이 항목이 없다고 기재하고 있습니다",
+            "value_state": presence,
+            "reason": found.get("reason") or default_reason,
             "source_document_kind": kind,
             "source_priority_rank": progress.current_rank(),
             "extraction_wave": progress.plan.wave,

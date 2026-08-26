@@ -808,6 +808,34 @@
       "label_ko": "기록상 동일부위 기왕력"
     },
     {
+      "field_id": "documented_prior_condition_contribution_rate",
+      "domain_code": "prior_history_influences",
+      "label": "Contribution rate of a prior condition to the current disability",
+      "medical_advisory_grade": "B",
+      "extraction_wave": "B",
+      "activation_basis": "advisory_priority",
+      "value_shape": "number",
+      "cardinality": "single",
+      "source_route_id": "disability",
+      "critical_conflict_field": true,
+      "notes": "Transcribe the figure the document itself prints -- Korean disability certificates carry a 전병력 block whose row reads 기왕증의 현재 장애에 대한 기여율. Report the printed number only. This is NOT the deferred `final_disability_rate`: that one is the adjuster's own calculation, which the PoC excludes (scope.final_eligibility: out_of_scope), while this is a doctor's already-written figure, exactly as `documented_disability_rate` handles 노동능력상실율. A blank cell is `printed_but_blank`, never a zero -- a contribution rate of 0 and an unfilled row mean opposite things for apportionment.",
+      "label_ko": "기왕증 기여율"
+    },
+    {
+      "field_id": "documented_prior_condition_causation",
+      "domain_code": "prior_history_influences",
+      "label": "Stated causal relation between a prior condition and the accident",
+      "medical_advisory_grade": "B",
+      "extraction_wave": "B",
+      "activation_basis": "advisory_priority",
+      "value_shape": "enum",
+      "cardinality": "single",
+      "source_route_id": "disability",
+      "critical_conflict_field": true,
+      "notes": "The printed verdict on the same 전병력 block: 기왕증과 (교통)사고 상당 인과관계 유/무. Transcribe what the form states; do not infer it from the diagnosis or from the absence of a prior history. The row is printed on every McBride certificate, so a 무 on a case with no accident of that kind is the form's own boilerplate rather than a finding about this claim -- record the verdict, and let a reviewer weigh it.",
+      "label_ko": "기왕증-사고 인과관계 기재"
+    },
+    {
       "field_id": "major_complication_or_unexpected_long_treatment",
       "domain_code": "complications_new_problems",
       "label": "Major complication or unexpected long treatment",

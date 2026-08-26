@@ -329,3 +329,77 @@ def test_value_guard_matches_the_contract_schema() -> None:
     assert not list(validator.iter_errors("   ")), (
         "schema is expected to accept whitespace-only; if this changes, the "
         "guard's documented divergence should be revisited")
+
+
+# ------------------------------------------- a printed field left blank --
+# A form that PRINTS a field and leaves the cell empty is a third thing, and
+# until 2026-08-26 the pipeline had only two words for it. `not_mentioned`
+# claims "sources were read and none discussed the field, a real records gap a
+# reviewer may close by requesting documents" -- both halves false here: the
+# document did raise the item, and no further request will ever fill that
+# cell. `explicitly_absent` is equally wrong; a blank cell is not the form
+# stating the thing is absent, and treating it as one would manufacture a
+# finding out of an omission.
+#
+# Measured on CASE_7061 DOC_003, a McBride disability certificate:
+#
+#   | 기왕증 | |
+#   | 기왕증의 현재 장애에 대한 기여율 | |
+#   | 기존장애 및 장애율 | |
+#   | 수상일 | | 초진일 | | 장해진단일 | | |
+#
+# Four printed rows, every cell blank, all four published `not_mentioned`.
+#
+# The value it carries is still NOTHING -- this does not weaken
+# `patient_reported_prior_same_site_history`'s own rule ("never infer no
+# history from silence"). Only the stated CAUSE changes, and with it what a
+# person is asked to do about it.
+
+BLANK_ROW = "| 기왕증 | |"
+
+
+def test_the_output_schema_offers_the_blank_verdict() -> None:
+    """The model cannot report what the transport will not carry."""
+    schema = extraction.output_schema([{"field_id": "primary_diagnosis"}])
+    presence = (schema["properties"]["fields"]["additionalProperties"]
+                ["properties"]["presence"]["enum"])
+    assert "printed_but_blank" in presence
+
+
+def test_the_prompt_distinguishes_a_blank_cell_from_silence() -> None:
+    prompt = extraction.build_prompt(
+        document_id="DOC_003", document_kind="disability_assessment",
+        pages=[{"page": 1, "text": "후유장애진단서" + chr(10) + BLANK_ROW + chr(10)}],
+        field_rows=[{"field_id": "patient_reported_prior_same_site_history",
+                     "label": "prior history", "value_shape": "enum"}])
+    assert "printed_but_blank" in prompt
+
+
+def test_the_parser_keeps_a_blank_cell_apart_from_silence() -> None:
+    rows = [{"field_id": "patient_reported_prior_same_site_history"}]
+    blank = extraction.parse_result(
+        {"patient_reported_prior_same_site_history": {
+            "presence": "printed_but_blank", "page": 1, "quote": BLANK_ROW,
+            "reason": "서식에 항목은 있으나 칸이 비어 있음"}}, rows)
+    assert (blank["patient_reported_prior_same_site_history"]["presence"]
+            == "printed_but_blank")
+    # No value, ever -- the distinction is about the cause, not the answer.
+    assert "value" not in blank["patient_reported_prior_same_site_history"]
+
+    silent = extraction.parse_result(
+        {"patient_reported_prior_same_site_history":
+         {"presence": "not_mentioned"}}, rows)
+    assert silent == {}
+
+
+def test_a_blank_cell_without_a_quote_is_dropped() -> None:
+    """Same grounding bar as every other verdict: the printed label is the
+    evidence, so a claim with no quote has nothing behind it."""
+    rows = [{"field_id": "patient_reported_prior_same_site_history"}]
+    assert extraction.parse_result(
+        {"patient_reported_prior_same_site_history": {
+            "presence": "printed_but_blank", "page": 1, "quote": "  "}},
+        rows) == {}
+    assert extraction.parse_result(
+        {"patient_reported_prior_same_site_history": {
+            "presence": "printed_but_blank", "quote": BLANK_ROW}}, rows) == {}

@@ -734,3 +734,69 @@ def test_internal_trace_is_separate_and_caps_comparisons_at_one() -> None:
     assert _errors(trace, "claim_analysis_trace.schema.json") == []
     trace["field_stops"][0]["additional_comparisons"] = 2
     assert _errors(trace, "claim_analysis_trace.schema.json") != []
+
+
+# ------------------------------- 기왕증 기여율: a printed row with no field --
+# Korean disability certificates print a 전병력 block whose rows the catalogue
+# had no receiver for. Read from CASE_7061 DOC_003 and CASE_7071 DOC_003
+# (both McBride 후유장애진단서, 2026-08-26) -- the same four rows in the same
+# order, so this is the form's standard block and not one case's quirk:
+#
+#   | 기왕증 | |
+#   | 기왕증의 현재 장애에 대한 기여율 | |      <- no field received this
+#   | 기존장애 및 장애율 | |
+#   | 기왕증과 교통사고 상당 인과관계 유/무 | 무 |  <- nor this
+#
+# Contribution rate decides how much of a disability the insurer pays for, so
+# a printed figure that reaches no field is a silent loss of the number the
+# whole apportionment turns on.
+#
+# It is deliberately NOT the deferred D-grade `final_disability_rate`. That one
+# is a JUDGMENT the adjuster makes and the PoC excludes (`scope.final_eligibility:
+# out_of_scope`). These two only TRANSCRIBE what a doctor already wrote, which
+# is exactly the line `documented_disability_rate` already sits on -- its own
+# note says "Report the printed number; the pipeline does not calculate or
+# endorse a final rate of its own".
+
+def test_the_catalogue_receives_the_printed_contribution_rate() -> None:
+    config = _config()
+    by_id = {f["field_id"]: f for f in config["fields"]}
+    field = by_id.get("documented_prior_condition_contribution_rate")
+    assert field is not None, (
+        "기왕증 기여율 is printed on the disability certificate and reaches no "
+        "field, so the figure apportionment turns on is silently dropped")
+    # Same shape as the precedent it mirrors.
+    precedent = by_id["documented_disability_rate"]
+    assert field["source_route_id"] == precedent["source_route_id"] == "disability"
+    assert field["medical_advisory_grade"] == "B"
+    assert field["extraction_wave"] == "B"
+    assert field["domain_code"] == "prior_history_influences"
+
+
+def test_the_catalogue_receives_the_printed_causation_verdict() -> None:
+    config = _config()
+    by_id = {f["field_id"]: f for f in config["fields"]}
+    field = by_id.get("documented_prior_condition_causation")
+    assert field is not None, (
+        "'기왕증과 ... 상당 인과관계 유/무' is a printed verdict with no receiver")
+    assert field["source_route_id"] == "disability"
+    assert field["domain_code"] == "prior_history_influences"
+
+
+def test_transcribing_a_printed_rate_is_not_the_deferred_judgment() -> None:
+    """The PoC excludes CALCULATING a final rate, not reading one off a form.
+
+    If these ever became D/deferred they would be indistinguishable from
+    `final_disability_rate`, and the printed figure would go missing again for
+    a reason that does not apply to it.
+    """
+    config = _config()
+    by_id = {f["field_id"]: f for f in config["fields"]}
+    for field_id in ("documented_prior_condition_contribution_rate",
+                     "documented_prior_condition_causation"):
+        assert by_id[field_id]["medical_advisory_grade"] != "D"
+        assert by_id[field_id]["extraction_wave"] != "deferred"
+    # The deferred set stays exactly what it was; this change adds no judgment.
+    deferred = {f["field_id"] for f in config["fields"]
+                if f.get("medical_advisory_grade") == "D"}
+    assert deferred == {"symptom_fixation_judgment", "final_disability_rate"}

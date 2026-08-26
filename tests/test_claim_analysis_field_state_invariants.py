@@ -200,6 +200,16 @@ def test_unavailable_reason_enum_matches_spec() -> None:
         # unavailable fields, among them 사고일 and 수술명. Requesting more
         # records cannot close it; a person must read the preserved quote.
         "partial_reading_only",
+        # Added 2026-08-26. A form that PRINTS the field and leaves the cell
+        # empty is neither of the above: the document did raise the item, so
+        # `not_mentioned`'s promise of "a records gap a request may close" is
+        # false -- no further document will ever fill that cell. Measured on
+        # CASE_7061 DOC_003, a McBride disability certificate whose 기왕증 /
+        # 기왕증 기여율 / 기존장애 / 수상일·초진일·장해진단일 rows were all
+        # printed and all blank, every one published `not_mentioned`. The field
+        # still holds NO value; only the cause, and the action it implies,
+        # change.
+        "printed_but_blank",
     }
     assert set(schema["$defs"]["field_result"]["properties"]["unavailable_reason"]["enum"]) == expected
     assert set(schema["$defs"]["observation"]["properties"]["unavailable_reason"]["enum"]) == expected

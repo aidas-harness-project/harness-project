@@ -276,6 +276,40 @@ fingerprint and returns a no-op result; it BLOCKS if a normalized policy
 document somehow exists, which is a real precondition failure to report, not a
 reason to fall back to dispatching the agent.
 
+**A case with no 약관 must not end the run either (standing decision, pyun,
+2026-08-26).** Much of this corpus arrives as medical records plus at most an
+insurance CERTIFICATE (증권), with no 약관 at all, and the driver then blocks
+with `no active text-processed insurance policy is available`. Record the D5
+declaration yourself and continue:
+
+```text
+python tools/dao.py declare-no-policy-documents CASE_ID --reviewer pyun \
+  --note "<why no 약관, plus the case's REAL document composition>" \
+  --held-by orchestrator --run-id RUN_ID
+```
+
+Write the actual composition into `--note` — "증권 DOC_009만 존재, 나머지 진단서
+2·진료기록 2·영상판독 3", not "약관 없음". The declaration carries a human's
+name, so a later reader must be able to tell genuine absence from policy work
+that was skipped.
+
+Two things this does NOT license. **Never re-type an `insurance_certificate` as
+`insurance_policy` to satisfy the gate**: a 증권 is proof of one concluded
+contract, not the 약관 itself, and `declare_no_policy_documents` refuses the
+moment the manifest types anything `insurance_policy` — so mistyping corrupts
+the taxonomy to get past a check that would otherwise have passed honestly. And
+a case that DOES carry a 약관 is processed normally; the declaration is for
+absence, not for inconvenience.
+
+The 증권 itself is still an ordinary document: OCR'd, classified, redacted,
+chunked and citable as evidence. It simply does not satisfy the policy-clause
+layer.
+
+This matters beyond stage 4. Per `dao.py`'s `_no_policy_waiver`, without the
+declaration a case passes `policy_clause_processing` and can then NEVER
+finalize `claim_analysis` — measured on CASE_047 (2026-08-18, 52 documents, no
+약관). The declaration is what keeps stage 5 reachable.
+
 This is worth stating as a rule because dispatching cost real time for no work.
 Measured on CASE_142: the stage's two attempts spanned **370.9s** of which the
 DAO did **0.69s** (finalize + snapshot + locks), with zero provider calls and
@@ -363,6 +397,28 @@ The contact-sheet/vision code is retained only as a diagnostic tuning seam; it c
 3. **Conflict-ledger check**: before dispatching *any* stage, call `check_conflicts_clear(case_id)`. If not clear, halt and report every pending entry (old and new) — do not proceed past an unresolved conflict, no matter which stage raised it.
 
    Halting is not the only disposition. A `pending` entry needs a human, but most conflicts worth raising cannot be settled from the case file at all — they need a physician's reading, or a document nobody has. For those, record `deferred_to_report`: `python tools/dao.py set-conflict-verdict CASE_ID CONFLICT_N deferred_to_report --note "why this needs a human and what would settle it" --held-by NAME --run-id RUN --operation-id ...`. The disagreement stays open and un-withdrawn, the pipeline proceeds, and the conflict must then be carried into the screening report — `finalize-stage screening_report` refuses unless every deferred id appears in the report's `inconsistencies` with a matching `conflict_ref`. Pass the deferred ids from `check_conflicts_clear`'s `deferred_to_report` list into the screening-report dispatch so the agent knows what it must carry. Do NOT reach for `resolved` to unblock a run: that is what happened on CASE_047, where four real disagreements were marked resolved and every note had to explain that the verdict was not to be believed.
+
+   **A P6 conflict must not end the run (standing decision, pyun, 2026-08-26).**
+   The orchestrator disposes it as `deferred_to_report` itself and continues to
+   `screening_report`; it does not stop and wait. This is not a way of quietly
+   passing a case: `finalize-stage screening_report` refuses unless every
+   deferred id appears in the report's `inconsistencies` with a matching
+   `conflict_ref`, so the disagreement lands in front of a human either way —
+   the difference is that the rest of the case gets processed first.
+
+   The `--note` must say what the disagreement IS and what would settle it,
+   never merely that it was deferred. `consistency_check` has already written a
+   `professional_summary` on every confirmed entry; that summary is the
+   material for the note. Measured on the pilot: all three cases stopped here,
+   and all three conflicts were real and genuinely undecidable from the case
+   file — CASE_7044's 진단서 and 입퇴원요약 record only 인대 파열 while the
+   초진기록, 영상판독 and 수술기록 all record a 입방골 골절 and an ORIF for it.
+   Deciding that needs a clinician, not a rerun.
+
+   `resolved` and `withdrawn` remain human-only. This standing decision covers
+   `deferred_to_report` and nothing else, and it does not touch the other hard
+   stops: a possible PII leak, a `raw_page_text` classification review, and any
+   D1 ground-truth situation still halt the run.
 4. **Lock check**: at run start/resume, ask the DAO — `python tools/dao.py check-lock CASE_ID TARGET_FILENAME` — rather than looking for a lock file yourself; the lock is the DAO's to interpret and its on-disk shape is not an agent-facing contract. If a lock is held, do not poll and do not assume it is stale — halt, report the lock's full contents, and wait for human confirmation (P5).
 5. **Medical-clearance check**: after canonical medical variables have been published, call `python tools/dao.py check-medical-reviews-clear CASE_ID` immediately before every downstream agent dispatch. Halt while it reports blocked. The DAO independently repeats this check before downstream `in_progress`/`passed` transitions and snapshots.
 6. **Begin the stage attempt** using the T13 lifecycle command above, noting the wall time, then dispatch. Never infer an attempt start from the first output write.

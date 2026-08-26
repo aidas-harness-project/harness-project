@@ -1330,3 +1330,85 @@ def test_page_range_slice_does_not_mutate_the_raw_source(tmp_path):
     assert pdf_path.read_bytes() == before, "the raw source PDF was modified"
     with fitz.open(pdf_path) as doc:
         assert doc.page_count == 5, "the raw source lost pages"
+
+
+# --------------------------------------------------- classify_document's own
+# provider resolution.
+#
+# `build_classifier_provider` (tested above) walks the full ladder --
+# --classifier-provider, HARNESS_CLASSIFIER_PROVIDER, the comparator,
+# HARNESS_OCR_COMPARATOR_PROVIDER, HARNESS_LLM_PROVIDER, then DEFAULT_PROVIDER.
+# `classify_document` did NOT use it: with no `classifier` handed in it built
+# `ProviderConfig(DEFAULT_PROVIDER)` directly, which bypasses even
+# `parse_provider_config`'s env read, so every environment variable in that
+# ladder was unreachable on this path.
+#
+# Measured on CASE_7077 (2026-08-26): a run whose shell exported
+# HARNESS_LLM_PROVIDER=claude-cli still reached openrouter and died
+# `ProviderConfigError: openrouter requires OPENROUTER_API_KEY`, twice, before
+# a third attempt passing --provider explicitly completed. The stage was
+# blocked honestly each time -- the defect is the unreachable env var, not a
+# silent pass.
+
+def test_classify_document_honours_the_llm_provider_env_var(monkeypatch):
+    """The env var the harness documents must reach the classifier."""
+    built = []
+
+    def fake_build_provider(config, **kwargs):
+        built.append(config)
+        return FakeClassifier(
+            '{"predicted_document_type": "receipt", '
+            '"document_type_label": "영수증", "confidence": 0.9, '
+            '"quote": "page text"}'
+        )
+
+    monkeypatch.setattr(rc1, "build_provider", fake_build_provider)
+    monkeypatch.setenv("HARNESS_LLM_PROVIDER", "claude-cli")
+    monkeypatch.delenv("HARNESS_CLASSIFIER_PROVIDER", raising=False)
+    monkeypatch.delenv("HARNESS_OCR_COMPARATOR_PROVIDER", raising=False)
+
+    rc1.classify_document("page text", routing_config={})
+
+    assert built, "classify_document built no provider"
+    assert built[0].provider_name == "claude-cli", (
+        f"env var unreachable: built {built[0].provider_name!r}")
+
+
+def test_classify_document_still_falls_back_to_the_default(monkeypatch):
+    """With nothing set anywhere, the harness default still governs."""
+    built = []
+
+    def fake_build_provider(config, **kwargs):
+        built.append(config)
+        return FakeClassifier(
+            '{"predicted_document_type": "receipt", '
+            '"document_type_label": "영수증", "confidence": 0.9, '
+            '"quote": "page text"}'
+        )
+
+    monkeypatch.setattr(rc1, "build_provider", fake_build_provider)
+    for name in ("HARNESS_LLM_PROVIDER", "HARNESS_CLASSIFIER_PROVIDER",
+                 "HARNESS_OCR_COMPARATOR_PROVIDER"):
+        monkeypatch.delenv(name, raising=False)
+
+    rc1.classify_document("page text", routing_config={})
+
+    assert built[0].provider_name == rc1.DEFAULT_PROVIDER
+
+
+def test_an_explicit_classifier_still_wins(monkeypatch):
+    """A handed-in provider must not be re-resolved -- run_stage2 passes
+    --classifier-provider down this path and that has to keep governing."""
+    def explode(*a, **kw):
+        raise AssertionError("must not build a provider when given one")
+
+    monkeypatch.setattr(rc1, "build_provider", explode)
+    monkeypatch.setenv("HARNESS_LLM_PROVIDER", "claude-cli")
+
+    given = FakeClassifier(
+        '{"predicted_document_type": "receipt", '
+        '"document_type_label": "영수증", "confidence": 0.9, '
+        '"quote": "page text"}'
+    )
+    result = rc1.classify_document("page text", given, routing_config={})
+    assert result["predicted_document_type"] == "receipt"

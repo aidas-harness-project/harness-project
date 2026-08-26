@@ -258,3 +258,59 @@ def test_unavailable_reason_enum_is_identical_in_observation_and_field_result() 
         "unavailable_reason drifted between observation and field_result: "
         f"observation-only={sorted(set(observation) - set(field_result))}, "
         f"field_result-only={sorted(set(field_result) - set(observation))}")
+
+
+# --- a printed field the writer left blank ---------------------------------
+# `not_mentioned`'s own schema text promises "sources WERE read and none
+# discussed the field, which is a real records gap a reviewer may close by
+# requesting documents". A form that PRINTS the field and leaves the cell
+# empty breaks both halves: the document did raise the item, and no further
+# records request will ever fill that cell. Sending a reviewer to request
+# documents is the wrong instruction; the right one is to check the original.
+#
+# Measured on CASE_7061 DOC_003 (2026-08-26), a 맥브라이드 후유장애진단서:
+#
+#   | 기왕증 | |
+#   | 기왕증의 현재 장애에 대한 기여율 | |
+#   | 기존장애 및 장애율 | |
+#   | 수상일 | | 초진일 | | 장해진단일 | | |
+#
+# Four printed rows, every cell blank, all published `not_mentioned`. The same
+# defect produced the date axis reading as a records gap on all four cases of
+# that run -- one cause, two symptoms.
+#
+# This is NOT the same as inferring a value from silence, which
+# `patient_reported_prior_same_site_history`'s own note forbids ("never infer
+# no history from silence"). A blank cell still yields NO value; what changes
+# is only what the contract says about WHY, and therefore what it asks a
+# person to do about it.
+
+def test_the_schema_offers_a_value_for_a_printed_but_blank_field():
+    schemas, _ = load_registry()
+    enum = schemas["claim_analysis_result.schema.json"]["$defs"][
+        "field_result"]["properties"]["unavailable_reason"]["enum"]
+    assert "printed_but_blank" in enum, (
+        "a form that prints a field and leaves it empty has no code, so it "
+        "reports as a records gap a document request could close")
+
+
+def test_a_printed_blank_is_not_a_records_gap():
+    """The whole point of the value: it must not route to 자료 미비, whose
+    action is to request more documents."""
+    assert screening.UNAVAILABLE_KIND.get("printed_but_blank") == "source_blank"
+    assert "source_blank" in screening.UNAVAILABLE_KIND_LABEL
+
+
+def test_a_printed_blank_is_not_grouped_with_records_gaps(tmp_path):
+    """End-to-end through the report writer, not just the mapping table: a
+    blank cell and a genuinely undiscussed field must land in different
+    groups, because the reader's next action differs."""
+    ids = _searched_field_ids(2)
+    facts = {
+        ids[0]: _fact(ids[0], "not_mentioned"),
+        ids[1]: _fact(ids[1], "printed_but_blank"),
+    }
+    rows = screening.unconfirmed_section(facts, CONFIG)
+    kinds = {row["field_id"]: row.get("gap_kind") for row in rows}
+    assert kinds[ids[0]] == "records_gap"
+    assert kinds[ids[1]] == "source_blank"

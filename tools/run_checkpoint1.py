@@ -161,8 +161,19 @@ def classify_document(text: str, classifier=None, routing_config: dict | None = 
 
     Fails loud on an unparseable response -- same fail-safe discipline as
     ocr_extract.compare(), not a silent guess.
+
+    Provider resolution goes through `build_classifier_provider`, the same
+    ladder every other classifier call site uses. It used to build
+    `ProviderConfig(DEFAULT_PROVIDER)` here directly, which skipped not only
+    that ladder but `parse_provider_config`'s own env read -- so no environment
+    variable could reach this path at all and the harness default always won.
+    Measured on CASE_7077 (2026-08-26): a shell exporting
+    HARNESS_LLM_PROVIDER=claude-cli still reached openrouter and failed
+    `openrouter requires OPENROUTER_API_KEY` on two attempts, until a third
+    passed --provider explicitly. A handed-in `classifier` still wins, which is
+    how run_stage2.py's --classifier-provider keeps governing.
     """
-    selected_classifier = classifier or build_provider(ProviderConfig(DEFAULT_PROVIDER), root=ROOT)
+    selected_classifier = classifier or build_classifier_provider()
     selected_routing = (
         routing_config if routing_config is not None
         else _medical_routing.load_routing_config()
