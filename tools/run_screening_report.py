@@ -190,6 +190,36 @@ def _first_value(facts: Mapping[str, Mapping[str, Any]], field_id: str) -> Any:
     return _selected_value(field)
 
 
+def summary_diagnosis_text(facts: Mapping[str, Mapping[str, Any]]) -> str:
+    """Section 1's 주요 진단명 line.
+
+    `_first_value` returns None for anything not `asserted`, so a `conflict`
+    field used to render 확인 불가 -- the same words the report uses when no
+    source mentioned the field at all. Those are different facts and they lead
+    a reviewer to different actions: one asks for more records, the other asks
+    which of two records is right.
+
+    Measured on CASE_7008 (2026-08-26): line 4 read `주요 진단명: 확인 불가`
+    while line 71 of the same report carried both readings -- 진단서
+    `요추1번 압박공절` against 초진기록 `Non traumatic Compression
+    fracture vertebra, lumbar region`. 외상성 vs 비외상성 decides whether the
+    상해 담보 applies, so the summary was hiding the case's central question
+    behind the vocabulary of absence.
+
+    `resolve_withdrawn_conflicts` runs before this and promotes candidates
+    consistency_check judged `consistent`, so what reaches here as a conflict
+    is a real disagreement (CASE_049 is why that promotion exists).
+    """
+    field = facts.get("primary_diagnosis") or {}
+    if field.get("resolution_status") == "conflict":
+        values = [_as_text(o.get("value")) for o in field.get("observations") or []
+                  if o.get("value") is not None]
+        values = [v for v in values if v]
+        if values:
+            return "자료 간 불일치: " + " / ".join(values)
+    return _as_text(_first_value(facts, "primary_diagnosis")) or "확인 불가"
+
+
 def _selected_evidence(field: Mapping[str, Any]) -> list[dict]:
     """The exact citations behind the observation this field actually elected.
 
@@ -616,7 +646,7 @@ def build_report(
         for row in assessments if row["status"] == "uncertain"
     ]
 
-    main_diagnosis = _as_text(_first_value(facts, "primary_diagnosis")) or "확인 불가"
+    main_diagnosis = summary_diagnosis_text(facts)
     treatment_period = _first_value(facts, "treatment_period")
     period_block = None
     if isinstance(treatment_period, dict) and treatment_period.get("start"):
