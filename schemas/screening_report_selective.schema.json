@@ -106,12 +106,11 @@
               },
               "partial_readings": {
                 "type": "array",
-                "description": "Present only on a `partial_reading` row: the cited-but-untrusted readings the row is telling the reviewer to go and check. Without them the row's own sentence -- 인용은 보존되어 있으므로 검토자가 원문을 확인해야 합니다 -- names no source, so a reviewer had to open the JSON contract to learn which document to open. Measured across the CASE_7* corpus (2026-08-26): 72 such rows, 55 holding exactly one reading.",
+                "description": "The readings a row is telling the reviewer to go and check, each with the citation that grounds it. Carried by two kinds of row and the shape is shared deliberately: a `partial_reading` row (a value that failed the trusted-value requirements) and a `disputed` row (two sources that disagree) both send a reader to the same place for the same reason. Without them a row's own sentence names no source, so confirming one field meant opening the JSON contract by hand.",
                 "items": {
                   "type": "object",
                   "required": [
-                    "value_text",
-                    "why"
+                    "value_text"
                   ],
                   "properties": {
                     "value_text": {
@@ -119,7 +118,7 @@
                     },
                     "why": {
                       "type": "string",
-                      "description": "Which trusted-value requirement the reading failed: 불완전 (the source said less than the whole value -- read the rest of the page), 다의적 (the text supports more than one reading -- decide which), or both joined by '·'. The two ask different things of a reader, and a row saying only that the value is unconfirmed tells them neither."
+                      "description": "Which trusted-value requirement the reading failed: 불완전 (the source said less than the whole value -- read the rest of the page), 다의적 (the text supports more than one reading -- decide which), or both joined by '·'. Present only on a `partial_reading` row. A `disputed` row's readings each MET the bar on their own -- what is unresolved is which one the field takes -- so there is nothing to name and the key is absent rather than filled with a placeholder."
                     },
                     "document_id": {
                       "type": "string"

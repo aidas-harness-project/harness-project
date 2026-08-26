@@ -145,16 +145,49 @@ def test_a_conflicted_kcd_code_names_the_disagreement():
 
 
 def test_identical_readings_are_not_shown_as_a_disagreement():
-    """CASE_7015 records `diagnosis_code` as a conflict between `S52590` and
-    `s52590` -- one code written twice, differing only in case. Rendering
-    "자료 간 불일치" there would manufacture a question for a reviewer to
-    resolve, which is the mirror of the defect this file exists for.
-    """
+    """Byte-identical readings: the trivial half of the guard."""
     facts = {"diagnosis_code": _conflict_fact(
         "diagnosis_code", ["S52590", "S52590"])}
     rendered = screening.summary_fact_text(facts, "diagnosis_code")
     assert rendered == "S52590", rendered
     assert "불일치" not in rendered
+
+
+def test_readings_differing_only_in_case_are_not_a_disagreement():
+    """The REAL corpus value, and the reason the test above was not enough.
+
+    CASE_7015 records `diagnosis_code` as `S52590` against `s52590` -- one KCD
+    code written twice. The first version of this file asserted on two
+    byte-identical strings, which the `len(set) < 2` guard caught for free
+    while the actual case sailed past it and rendered
+    `자료 간 불일치: S52590 / s52590` -- handing a reviewer a question the
+    documents do not raise.
+    """
+    facts = {"diagnosis_code": _conflict_fact(
+        "diagnosis_code", ["S52590", "s52590"])}
+    rendered = screening.summary_fact_text(facts, "diagnosis_code")
+    assert "불일치" not in rendered, rendered
+    assert rendered == "S52590", rendered
+
+
+def test_readings_differing_only_in_whitespace_are_not_a_disagreement():
+    """OCR of a form splits and pads text; the spacing is the scanner's, not
+    the document's."""
+    facts = {"primary_diagnosis": _conflict_fact(
+        "primary_diagnosis", ["요추1번 압박골절", "요추1번  압박골절 "])}
+    rendered = screening.summary_fact_text(facts, "primary_diagnosis")
+    assert "불일치" not in rendered, rendered
+
+
+def test_a_translation_pair_is_still_shown_as_a_disagreement():
+    """The normalizer is deliberately shallow. 34 of the corpus's 101 conflicts
+    are Korean-vs-English renderings of one diagnosis, and folding those away
+    here would need a translation judgement this renderer has no standing to
+    make -- it would hide a real stage-5 defect behind a display rule."""
+    facts = {"primary_diagnosis": _conflict_fact(
+        "primary_diagnosis", ["좌 대퇴골 골절", "Fx. shaft of femur LT"])}
+    rendered = screening.summary_fact_text(facts, "primary_diagnosis")
+    assert "불일치" in rendered
 
 
 def test_a_conflict_with_no_readable_values_falls_back():

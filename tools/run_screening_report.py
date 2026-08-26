@@ -190,6 +190,24 @@ def _first_value(facts: Mapping[str, Mapping[str, Any]], field_id: str) -> Any:
     return _selected_value(field)
 
 
+def _same_reading(text: str) -> str:
+    """The key two readings are compared on to decide if they really differ.
+
+    Case and surrounding whitespace are not a disagreement. CASE_7015 records
+    `diagnosis_code` as `S52590` against `s52590` -- one KCD code written twice,
+    and a reviewer shown that as 자료 간 불일치 is being handed a question the
+    documents do not raise.
+
+    Deliberately shallow: it folds case and collapses internal whitespace, and
+    nothing else. It does NOT try to decide that `좌 대퇴골 골절` and `Fx. shaft
+    of femur LT` are the same diagnosis -- they are, and 34 of the corpus's 101
+    conflicts are that shape, but recognising it needs a translation judgement
+    this renderer has no standing to make. Those stay visible as disagreements
+    until stage 5 stops raising them.
+    """
+    return " ".join(text.split()).casefold()
+
+
 def conflict_reference(
     field_id: str,
     conflict_entries: Mapping[str, Mapping[str, Any]] | None = None,
@@ -245,12 +263,18 @@ def conflict_text(
     if (field or {}).get("resolution_status") != "conflict":
         return None
     values: list[str] = []
+    seen: set[str] = set()
     for observation in field.get("observations") or []:
         if observation.get("value") is None:
             continue
         text = _as_text(observation["value"])
-        if text and text not in values:
-            values.append(text)
+        if not text:
+            continue
+        key = _same_reading(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append(text)
     if not values:
         return None
     if len(values) == 1:
@@ -476,6 +500,7 @@ def _label_ko(row, key):
 def unconfirmed_section(
     facts: Mapping[str, Mapping[str, Any]],
     config: Mapping[str, Any],
+    conflict_entries: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict]:
     """Fields the records could not establish.
 
@@ -502,7 +527,23 @@ def unconfirmed_section(
     for field_id, field in facts.items():
         if field_id not in searched:
             continue
-        if field.get("resolution_status") != "unavailable":
+        status = field.get("resolution_status")
+        if status == "conflict":
+            # A disputed field is an outstanding item too, and until 2026-08-26
+            # it appeared NOWHERE. This filter took only `unavailable`, and
+            # section 6 takes only conflicts consistency_check CONFIRMED into
+            # the ledger -- so a conflict that never reached the ledger fell
+            # between them and the report simply omitted the field. Measured
+            # across the CASE_7* corpus: of 101 conflicted fields, 19 reached
+            # section 1's summary lines and 20 had a ledger entry, leaving
+            # **62 shown nowhere at all** -- including diagnosis_laterality,
+            # where 좌 against 우 decides which 담보 pays.
+            row = conflict_row(field_id, field, searched[field_id],
+                               conflict_entries)
+            if row is not None:
+                rows.append(row)
+            continue
+        if status != "unavailable":
             continue
         if field.get("unavailable_reason") == "route_not_activated":
             continue
@@ -533,6 +574,59 @@ def unconfirmed_section(
         if readings:
             rows[-1]["partial_readings"] = readings
     return sorted(rows, key=lambda row: row["field_id"])
+
+
+def conflict_row(
+    field_id: str,
+    field: Mapping[str, Any],
+    field_config: Mapping[str, Any],
+    conflict_entries: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict | None:
+    """One outstanding-item row for a field two sources disagree about.
+
+    Returns None when the readings turn out to be the SAME value written twice.
+    `resolution_status: conflict` is set upstream by comparing observations, and
+    it fires on notation differences: CASE_7015 records `diagnosis_code` as
+    `S52590` against `s52590`. Listing that as an item to resolve manufactures
+    work, so a set of one distinct value is dropped here rather than published
+    as a disagreement -- the same guard `conflict_text` applies to section 1.
+
+    Every reading is carried with its document and page, because the row is
+    telling a reviewer to go and decide between them and cannot then withhold
+    which records to open. The ledger id is cited when one exists; most
+    conflicts have none, which is exactly why this row has to carry the
+    readings itself rather than pointing at section 6.
+    """
+    readings: list[dict] = []
+    for observation in field.get("observations") or []:
+        value = _as_text(observation.get("value"))
+        if not value:
+            continue
+        reference = next(
+            (r for r in observation.get("evidence_references") or []
+             if r.get("document_id") and r.get("quote")), None)
+        entry = {"value_text": value}
+        if reference:
+            entry["document_id"] = reference["document_id"]
+            entry["page"] = reference.get("page", 1)
+            entry["quote"] = reference["quote"]
+        readings.append(entry)
+    if len({_same_reading(reading["value_text"]) for reading in readings}) < 2:
+        return None
+
+    reason = field.get(
+        "resolution_reason", "두 개 이상의 출처가 서로 다른 값을 기재하고 있습니다")
+    reference_id = conflict_reference(field_id, conflict_entries)
+    if reference_id:
+        reason = f"{reason} ({reference_id})"
+    return {
+        "field_id": field_id,
+        "label": _label_ko(field_config, "field_id"),
+        "unavailable_reason": "conflict_unresolved",
+        "gap_kind": "disputed",
+        "reason": reason,
+        "partial_readings": readings,
+    }
 
 
 def partial_readings(field: Mapping[str, Any]) -> list[dict]:
@@ -822,7 +916,7 @@ def build_report(
         if row["status"] in {"missing", "ambiguous"}
     ]
 
-    unconfirmed = unconfirmed_section(facts, config)
+    unconfirmed = unconfirmed_section(facts, config, entries)
     # The agent's half. key_issues, review_points, and per-conflict severity
     # are readings of the case -- which questions matter and who can answer
     # them -- so they come from the screening-report agent, not from a rule
@@ -1694,9 +1788,14 @@ def markdown_sections(
                 where = ""
                 if reading.get("document_id"):
                     where = f" [{reading['document_id']} p{reading.get('page', 1)}]"
+                # `why` names which trusted-value requirement a PARTIAL
+                # reading failed. A conflict row's readings each met the bar
+                # on their own -- what is unresolved is which one the field
+                # takes -- so there is nothing to name and the marker is
+                # omitted rather than filled with a placeholder.
+                why = f" ({reading['why']})" if reading.get("why") else ""
                 unconfirmed_lines.append(
-                    f"  - 기재값: {reading['value_text']} "
-                    f"({reading['why']}){where}")
+                    f"  - 기재값: {reading['value_text']}{why}{where}")
     sections.append({
         "heading": "7. 주요 미확인 항목",
         "content": "\n".join(unconfirmed_lines) or "- 미확인 항목 없음",

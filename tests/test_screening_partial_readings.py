@@ -243,3 +243,115 @@ def test_the_corpus_rows_that_were_dropped_are_real():
             kinds.add(row.get("gap_kind") or "records_gap")
     assert {"partial_reading", "source_blank"} <= kinds, (
         f"the corpus no longer holds the dropped kinds; found {sorted(kinds)}")
+
+
+# ------------------------------- 3. a disputed field is an outstanding item --
+# The same defect once more, in the one place left. `unconfirmed_section` took
+# only `resolution_status == "unavailable"`, and section 6 takes only conflicts
+# consistency_check CONFIRMED into the ledger -- so a conflict that never
+# reached the ledger fell between them and the report omitted the field
+# entirely, with no "see the conflict section" pointer either.
+#
+# Measured across the CASE_7* corpus (2026-08-26): of 101 conflicted fields, 19
+# reached section 1's summary lines and 20 had a ledger entry, leaving **62
+# shown nowhere at all** -- among them `diagnosis_laterality`, where 좌 against
+# 우 decides which 담보 pays.
+
+
+def _conflict_field(field_id: str, readings):
+    return {
+        "field_id": field_id,
+        "resolution_status": "conflict",
+        "stop_reason": "conflict_found",
+        "resolution_reason": "두 출처가 서로 다른 값을 기재하고 있습니다",
+        "selected_observation_ids": [],
+        "conflict_candidate_ids": ["CAC_0001"],
+        "observations": [
+            {
+                "observation_id": f"CAO_000{index}",
+                "value_state": "asserted",
+                "value": value,
+                "evidence_references": [{
+                    "document_id": document_id, "page": 1, "quote": value,
+                    "start_char": 0, "end_char": len(str(value))}],
+            }
+            for index, (value, document_id) in enumerate(readings, start=1)
+        ],
+    }
+
+
+def test_a_conflicted_field_reaches_the_rendered_section():
+    report = _report([_conflict_field(
+        "primary_diagnosis", [("좌측 골절", "DOC_002"), ("우측 골절", "DOC_005")])])
+    assert "주요 진단명" in _section_seven(report)
+
+
+def test_the_row_carries_both_readings_and_their_documents():
+    """The row sends a reviewer to decide between two records, so it cannot
+    then withhold which records to open."""
+    report = _report([_conflict_field(
+        "primary_diagnosis", [("좌측 골절", "DOC_002"), ("우측 골절", "DOC_005")])])
+    rendered = _section_seven(report)
+    assert "좌측 골절" in rendered and "우측 골절" in rendered
+    assert "DOC_002" in rendered and "DOC_005" in rendered
+
+
+def test_the_row_is_grouped_as_disputed():
+    report = _report([_conflict_field(
+        "primary_diagnosis", [("좌측 골절", "DOC_002"), ("우측 골절", "DOC_005")])])
+    row = next(r for r in report["unconfirmed_items"]
+               if r["field_id"] == "primary_diagnosis")
+    assert row["gap_kind"] == "disputed"
+    assert row["unavailable_reason"] == "conflict_unresolved"
+
+
+def test_the_ledger_id_is_cited_when_one_exists():
+    report = screening.build_report(
+        case_id="CASE_9003", run_id="RUN_20260826_1",
+        claim_analysis={"case_id": "CASE_9003",
+                        "claim_facts": [_conflict_field(
+                            "primary_diagnosis",
+                            [("좌측 골절", "DOC_002"), ("우측 골절", "DOC_005")])],
+                        "case_type_assessment": [],
+                        "required_document_checklist": []},
+        consistency={"work_items": []}, config=CONFIG,
+        conflict_entries={"CONFLICT_1": {"field_or_topic": "primary_diagnosis",
+                                         "conflict_id": "CONFLICT_1"}})
+    row = next(r for r in report["unconfirmed_items"]
+               if r["field_id"] == "primary_diagnosis")
+    assert "CONFLICT_1" in row["reason"]
+
+
+def test_a_conflict_with_no_ledger_entry_still_renders():
+    """The common case -- 76 of the corpus's 101 conflicts have no entry -- and
+    the reason the row must carry the readings rather than point at section 6.
+    """
+    report = _report([_conflict_field(
+        "primary_diagnosis", [("좌측 골절", "DOC_002"), ("우측 골절", "DOC_005")])])
+    row = next(r for r in report["unconfirmed_items"]
+               if r["field_id"] == "primary_diagnosis")
+    assert "CONFLICT" not in row["reason"]
+    assert len(row["partial_readings"]) == 2
+
+
+def test_readings_differing_only_in_case_produce_no_row():
+    """CASE_7015's `diagnosis_code`: `S52590` against `s52590`, one code twice.
+    Listing it as an item to resolve manufactures work."""
+    report = _report([_conflict_field(
+        "documented_disability_rate", [("S52590", "DOC_002"),
+                                       ("s52590", "DOC_005")])])
+    assert not [r for r in report["unconfirmed_items"]
+                if r.get("gap_kind") == "disputed"]
+
+
+def test_a_conflict_row_carries_no_why_marker():
+    """`why` names which trusted-value requirement a PARTIAL reading failed. A
+    conflict's readings each met the bar -- what is unresolved is which one the
+    field takes -- so there is nothing to name."""
+    report = _report([_conflict_field(
+        "primary_diagnosis", [("좌측 골절", "DOC_002"), ("우측 골절", "DOC_005")])])
+    row = next(r for r in report["unconfirmed_items"]
+               if r["field_id"] == "primary_diagnosis")
+    assert all("why" not in reading for reading in row["partial_readings"])
+    assert "()" not in _section_seven(report), (
+        "an empty parenthesis was rendered where `why` would have gone")
