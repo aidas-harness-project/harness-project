@@ -4818,3 +4818,54 @@ check of four things: every `legal_basis_cited` row scored
 `documented_disability_rate` mismatch (one of these wrongly pinned a verdict),
 values truncated by redaction, and predictions that live in a structured field
 rather than in prose. Or fold the check into whatever v0.3 re-scoring happens.
+
+## 75. The v0.1 scoring pass was not reliable enough to carry per-case verdicts -- OPEN 2026-08-27
+
+The v0.2 re-scoring instructed every scorer to re-derive all F1/F3 rows rather
+than carry v0.1 forward. That turned the exercise into a cross-validation, and
+the v0.1 pass did not survive it.
+
+**Corrections found in roughly two thirds of re-scored cases**, running in both
+directions. Confirmed instances by shape:
+
+* **`legal_basis_cited` mis-scored** -- 3 cases (8008, 8015, 8018). The answer key
+  cites 보험업법 제188조, the adjuster's authority to ISSUE a 사정서, and it was
+  read as 적용 법조 of a liability determination. Correct call is
+  `missing_in_ground_truth`. **Not universal**: on 8022/8023/8026/8027/8032/8035/8037
+  the key cites 민법 750/755/758 as a real liability basis, and the row correctly
+  stays `missing_in_screening`. Scorers checked and rejected the pattern on all
+  seven, which is the behaviour wanted.
+* **`documented_disability_rate` / `_standard` compared against a SUMMED rate** --
+  8003, 8032, 8035. The field's config note says transcribe the printed rate;
+  the key's figure is the adjuster's derived multiplier. On 8003 this **wrongly
+  pinned the verdict to `divergent`**.
+* **A value published in a structured field read as absent** -- 8002, 8003, 8022
+  (x2), 8035. Section 7 부분 기재 rows and `established_facts` carry published
+  values that a scorer reading only the review-points prose records as
+  `missing_in_screening`.
+* **A truncated value read as a contradiction** -- 8001 (redaction removed a
+  location and the sentence head), 8022, 8028 (the key's finer narrative comes
+  from a 사고경위서 not in the case: absence of detail, not disagreement).
+  8026 was checked for this shape and correctly **kept** as a real mismatch.
+* **The mirror: a hit credited on adjacent wording** -- 8004, 8028, 8032, 8035
+  (x2). An issue counted `predicted` on a quote sharing vocabulary that never
+  raises the question.
+
+**A structural symptom, measured across all 39 v0.1 results:** 22 cases contain
+at least one ground-truth locator where sibling rows are scored **both** as
+agreement and as mismatch -- 33 locator groups, 138 rows, **24 of them core-field
+mismatches**. CASE_8005 p.6 III-2-가 scores `injury_site_and_laterality`,
+`primary_diagnosis` and `diagnosis_site` all `mismatch` while
+`diagnosis_laterality` against the same line is `exact`. Some of that is
+legitimate (one locator can carry several distinct facts), but CASE_8037 showed
+the illegitimate case concretely: three rows compared against one locator, two
+`normalized` and one `mismatch`, the same comparison scored two ways. **This is a
+cheap detector** -- it needs no ground truth, only the result file -- and it
+should be run over any future scoring pass as a review queue.
+
+**Consequence for the eval_20260827 numbers.** Per-case v0.1 verdicts are not
+dependable; at least two (8003, 8028) were pinned `divergent` by rows that do not
+hold. The v0.2 pass is better -- every row re-derived, four error shapes named in
+advance, and scorers demonstrably rejecting them where they did not apply -- but
+it has had no second reading of its own. Treat batch-level distributions as
+indicative and any single case's verdict as provisional until re-checked.
