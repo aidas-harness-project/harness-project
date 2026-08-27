@@ -4717,6 +4717,23 @@ are all intact -- v0.2 wrote to `screening_fidelity_result_v2.json` throughout,
 and the comparison tooling verifies both describe the same report bytes. So the
 batch's real measurements are not lost.
 
+**Softened 2026-08-27 as the harder cases returned.** The halt call was made on
+the first 9 re-scores, which were the personal-insurance cases -- they finished
+first because they are smaller. At 22 cases the picture is less absolute: F2 is
+**100.0 on 16 of 22 (73%), not effectively all**, and six cases sit below it
+(CASE_8027 and CASE_8032 at 50.0, CASE_8026 71.4, CASE_8007 75.0, CASE_8004 and
+CASE_8008 85.7). Those six are the liability cases, where enough issues survive
+the exclusion for the dimension to discriminate again. F2 mean is 91.7, in_scope
+denominator mean 5.2.
+
+So the accurate statement is narrower than the one first recorded here: **v0.2's
+F2 stops discriminating on personal-insurance cases, where the answer key is a
+short single-coverage 사정서 and almost everything it raises beyond the medical
+facts is 금액 or 약관.** On liability cases it still separates. That is a real
+defect -- a dimension whose informativeness depends on case type cannot carry a
+batch mean -- but it is not the total collapse the first 9 cases suggested, and
+the correlation figures below are drawn from that early subset.
+
 **What v0.3 has to do differently.** Excluding whole issues is the wrong shape.
 Options, none yet chosen:
 * Keep one denominator and report F2 alongside a separate out-of-scope miss
