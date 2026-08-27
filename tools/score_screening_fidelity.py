@@ -51,7 +51,7 @@ OUTPUTS = ROOT / "outputs"
 WEIGHTS = {"F1": 50, "F2": 30, "F3": 20, "F4": 0}
 AGREED = {"exact", "normalized"}
 COUNTED = AGREED | {"mismatch", "missing_in_screening"}
-EXCLUDED = {"missing_in_ground_truth", "not_applicable"}
+EXCLUDED = {"missing_in_ground_truth", "not_applicable", "preserved_without_adoption"}
 DOC_COUNTED = {"correct", "under", "miss"}
 
 SCHEMA_VERSION = "screening_fidelity_result.v0.1"
@@ -112,6 +112,17 @@ def build(rows, run_id):
             problems.append(f"{fid}: not a field_id in {cfg['config_version']}")
             continue
         match_kind = row["match_kind"]
+        if match_kind == "preserved_without_adoption":
+            if cfg_row.get("legal_authority") != "legal_opinion":
+                problems.append(
+                    f"{fid}: preserved_without_adoption is for a legal_opinion field "
+                    f"(this one is {cfg_row.get('legal_authority')!r}) -- a report that "
+                    "carried no value for an ordinary field did not preserve anything")
+            elif not row.get("screening_quote"):
+                problems.append(
+                    f"{fid}: preserved_without_adoption needs the line that shows the "
+                    "opinions were carried; without it the exemption is a way to spend "
+                    "silence")
         if is_deferred(cfg_row) and match_kind not in EXCLUDED:
             problems.append(
                 f"{fid}: the pipeline is not asked to extract it "

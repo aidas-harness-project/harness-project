@@ -153,8 +153,20 @@ F1 점수 = (exact + normalized) ÷ (exact + normalized + mismatch + missing_in_
 `legal_authority: legal_opinion`인 필드(`liability_opinion_conclusion`, `comparative_negligence_rate`,
 `negligence_reasoning`, `duty_breach_grounds`)는 **문서에 기재된 사실이 아니라 어느 당사자 대리인의
 의견**이다. 상반된 두 의견서가 있는 것은 기록 모순이 아니며, 성립 의견은 유형을 성립시키지만
-불성립 의견은 유형을 닫지 않는다. 리포트가 양쪽을 보존하고 판단을 유보한 것은 이 규칙을 따른 것이지
-누락이 아니다 — `mismatch`로 잡지 말고 정답지가 채택한 쪽과 함께 기록한다.
+불성립 의견은 유형을 닫지 않는다.
+
+리포트가 **양쪽을 보존하고 채택하지 않은 것은 이 규칙을 따른 처신**이다. 그런데 채택값이 없으니
+`missing_in_screening`으로 잡히면 **F4가 `screening_declined`로 칭찬하는 행동을 F1이 감점**하게 된다.
+그래서 판정값 `preserved_without_adoption`을 둔다 — **분모에서 빼되 행으로 남긴다.**
+
+- 일치로 **치지도 않는다.** 리포트가 정답지의 값에 도달한 것은 아니다.
+- **`legal_authority: legal_opinion`인 필드에만** 쓸 수 있다. 일반 필드가 값을 안 담은 것은 보존이 아니다.
+- **보존을 보여주는 리포트 인용이 필수**다. 없으면 침묵을 면제로 바꾸는 통로가 된다.
+- 리포트가 애초에 의견 자료를 담지 않았다면(CASE_711처럼 배상책임 사실 전부 `unavailable`)
+  이 판정을 쓰지 않는다 — 보존할 것이 없었으므로 `missing_in_screening`이다.
+
+세 조건 모두 `score_screening_fidelity.py`와 계약 스키마가 강제한다. **다만 인용문이 실제로 보존을
+보여주는지는 검사하지 못한다** — 도구가 대신할 수 없는 판단으로 남는다.
 
 ## F2 · 쟁점 예측 리콜 — 가중 30
 

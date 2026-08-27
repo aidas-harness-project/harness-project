@@ -536,9 +536,10 @@
             "mismatch",
             "missing_in_screening",
             "missing_in_ground_truth",
-            "not_applicable"
+            "not_applicable",
+            "preserved_without_adoption"
           ],
-          "description": "'not_applicable' is for a field the pipeline deliberately does not extract (extraction_wave or activation_basis 'deferred'). The answer key may carry such a value; not carrying it is not a miss, so the row leaves the denominator -- as does missing_in_ground_truth, where the report carried more than the key."
+          "description": "'not_applicable' is for a field the pipeline deliberately does not extract (extraction_wave or activation_basis 'deferred'). The answer key may carry such a value; not carrying it is not a miss, so the row leaves the denominator -- as does missing_in_ground_truth, where the report carried more than the key. 'preserved_without_adoption' is for a legal_opinion field where the report carried the opposing opinions and declined to adopt one. That is what the asymmetry rule asks for -- an opinion finding 성립 establishes the type, one finding 불성립 does not close it -- so scoring it as a miss made F1 penalise the behaviour F4 credits as screening_declined. It leaves the denominator: not rewarded as agreement either, since the report did not reach the key's value."
         },
         "screening_absence_kind": {
           "enum": [
@@ -615,6 +616,36 @@
         "match_kind",
         "screening_absence_kind",
         "ground_truth_ref"
+      ],
+      "allOf": [
+        {
+          "$comment": "The exemption is scoped to opinion fields and requires the line that shows the preservation -- otherwise it becomes a way to spend silence.",
+          "if": {
+            "properties": {
+              "match_kind": {
+                "const": "preserved_without_adoption"
+              }
+            },
+            "required": [
+              "match_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "legal_authority": {
+                "const": "legal_opinion"
+              },
+              "screening_quote": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "legal_authority",
+              "screening_quote"
+            ]
+          }
+        }
       ]
     },
     "issue_match": {

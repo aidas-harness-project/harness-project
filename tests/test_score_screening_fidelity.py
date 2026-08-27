@@ -174,3 +174,71 @@ def test_a_field_the_pipeline_resolved_must_have_a_row(tmp_path):
     proc, _ = _run(tmp_path, _rows("CASE_705", [_row("primary_diagnosis", "exact")]))
     assert proc.returncode == 1
     assert "have no row" in proc.stdout
+
+
+# ---- the opinion exemption ----
+
+OPINION_FIELD = "liability_opinion_conclusion"
+OPINION_QUOTE = "이 리포트는 어느 결론이 옳은지 판단하지 않으며, 양쪽 기재를 그대로 제시합니다."
+
+
+def test_preserving_opposed_opinions_leaves_the_denominator(tmp_path):
+    """F4 credits a report for not adopting one of two opposing 법률의견서;
+    F1 used to charge it for carrying no value. The same behaviour cannot be
+    both."""
+    proc, result = _run(tmp_path, _rows("CASE_099", [
+        _row("primary_diagnosis", "exact"),
+        _row(OPINION_FIELD, "preserved_without_adoption",
+             screening_value=None, ground_truth_value="성립",
+             screening_quote=OPINION_QUOTE),
+    ]))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    f1 = result["dimensions"][0]
+    assert f1["score"] == 100.0, "the preserved row must not count as a miss"
+    kinds = {c["field_id"]: c["match_kind"] for c in f1["field_comparisons"]}
+    assert kinds[OPINION_FIELD] == "preserved_without_adoption", "and it is still recorded"
+
+
+def test_the_exemption_does_not_reward_agreement(tmp_path):
+    """Excluded, not credited: the report did not reach the key's value."""
+    proc, result = _run(tmp_path, _rows("CASE_099", [
+        _row("primary_diagnosis", "mismatch", ground_truth_value="y"),
+        _row(OPINION_FIELD, "preserved_without_adoption",
+             screening_value=None, ground_truth_value="성립",
+             screening_quote=OPINION_QUOTE),
+    ]))
+    assert proc.returncode == 0
+    assert result["dimensions"][0]["score"] == 0.0
+
+
+def test_the_exemption_is_scoped_to_opinion_fields(tmp_path):
+    proc, _ = _run(tmp_path, _rows("CASE_099", [
+        _row("primary_diagnosis", "preserved_without_adoption",
+             screening_quote=OPINION_QUOTE),
+    ]))
+    assert proc.returncode == 1
+    assert "is for a legal_opinion field" in proc.stdout
+
+
+def test_the_exemption_needs_the_line_that_shows_the_preservation(tmp_path):
+    proc, _ = _run(tmp_path, _rows("CASE_099", [
+        _row("primary_diagnosis", "exact"),
+        _row(OPINION_FIELD, "preserved_without_adoption",
+             screening_value=None, ground_truth_value="성립", screening_quote=None),
+    ]))
+    assert proc.returncode == 1
+    assert "way to spend silence" in proc.stdout
+
+
+def test_an_opinion_field_the_report_never_carried_stays_a_miss(tmp_path):
+    """CASE_711 is the live example: the liability fields are unavailable
+    outright, so there was nothing to preserve and the exemption must not
+    apply. Scoring it as missing keeps that distinct from CASE_705."""
+    proc, result = _run(tmp_path, _rows("CASE_099", [
+        _row("primary_diagnosis", "exact"),
+        _row(OPINION_FIELD, "missing_in_screening", screening_value=None,
+             ground_truth_value="성립", screening_absence_kind="declared",
+             screening_quote=None),
+    ]))
+    assert proc.returncode == 0
+    assert result["dimensions"][0]["score"] == 50.0
