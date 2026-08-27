@@ -2490,6 +2490,29 @@ def cmd_write_verification_result(args):
             for e in errors:
                 print(f"  - {e}")
             return 1
+
+        # The payload must be ABOUT the case it is filed under. Schema validation
+        # cannot catch this: a result scoring CASE_A is a perfectly valid document,
+        # and nothing in it contradicts being written into CASE_B's directory.
+        #
+        # Observed 2026-08-27, twice in one batch of eight concurrent scorers: two
+        # agents wrote another case's result into their own case's folder
+        # (CASE_8001's score filed under CASE_8006, CASE_8010's under CASE_8005).
+        # Both files validated and were accepted. The corruption is silent and
+        # self-consistent -- the filed result names the OTHER case throughout, so
+        # a reader who trusts the directory gets a score for a report that case
+        # never produced, and the case's real score is gone. Detectable only by
+        # noticing two directories share a target_report_sha256.
+        payload_case = data.get("case_id")
+        if payload_case and payload_case != args.case_id:
+            print(f"REFUSED: this result is about {payload_case}, but is being filed "
+                  f"under {args.case_id}. A verification result must live in the "
+                  f"directory of the case it scores -- otherwise {args.case_id} "
+                  f"reports a score for a report it never produced, and its own "
+                  f"score is silently lost. Re-score {args.case_id}, or file this "
+                  f"under {payload_case}.")
+            return 1
+
         atomic_write_json(target, data)
     finally:
         release_lock(target)

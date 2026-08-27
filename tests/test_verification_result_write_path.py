@@ -141,6 +141,40 @@ def test_result_lands_in_the_denied_tree_not_outputs(reviewed, tmp_path):
     assert not (reviewed / "outputs" / CASE / FILENAME).exists()
 
 
+def test_a_result_cannot_be_filed_under_another_case(reviewed, tmp_path, capsys):
+    """A score must live in the directory of the case it scores.
+
+    Schema validation cannot catch a misfile: a result scoring CASE_A is a
+    perfectly valid document, and nothing inside it contradicts being written
+    into CASE_B's folder. So the check has to be an explicit comparison.
+
+    Observed 2026-08-27, twice in one batch of eight concurrent scorers --
+    CASE_8001's score was filed under CASE_8006 and CASE_8010's under CASE_8005.
+    Both validated and were accepted. The corruption is silent and internally
+    consistent: every field of the filed result names the OTHER case, so a
+    reader trusting the directory gets a score for a report this case never
+    produced, while the case's real score is simply absent. It surfaced only
+    because two directories shared one target_report_sha256.
+    """
+    other = dict(_result())
+    other["case_id"] = "CASE_910"
+
+    args = _WriteArgs(tmp_path, data=other)
+    assert dao.cmd_write_verification_result(args) == 1
+
+    out = capsys.readouterr().out
+    assert "REFUSED" in out
+    assert "CASE_910" in out and CASE in out
+
+    assert not (reviewed / "data" / "ground_truth" / CASE
+                / "_verification" / FILENAME).exists()
+
+
+def test_a_matching_case_id_still_writes(reviewed, tmp_path):
+    """The guard must not block the ordinary path it sits on."""
+    assert dao.cmd_write_verification_result(_WriteArgs(tmp_path)) == 0
+
+
 PRODUCING_STAGES = [
     "claim_analysis",
     "denial_response",
