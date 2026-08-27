@@ -4717,6 +4717,23 @@ are all intact -- v0.2 wrote to `screening_fidelity_result_v2.json` throughout,
 and the comparison tooling verifies both describe the same report bytes. So the
 batch's real measurements are not lost.
 
+**Final numbers, 2026-08-27 (37 cases).** The verdict recorded below was drawn
+from the first 9 re-scores and overstated the defect badly. Completed:
+**F2 reads 100.0 on 17 of 37 cases (46%)**, and the other 20 span 50.0-87.5
+(CASE_8027 and CASE_8032 at 50.0, then 60.0, 60.0, 62.5, 71.4, 71.4, 75.0,
+75.0, 77.8, 80.0, 83.3, and six at 85.7-87.5). F2 mean 86.6, median 87.5. So the
+dimension does still discriminate across the batch -- it is compressed toward the
+top, not flattened.
+
+**What remains a real defect is the denominator, not the ceiling.** F2's in_scope
+count is **mean 5.8, median 6, range 2-10, and <=4 on 11 of 37 cases**. At the
+narrowest a single issue moves F2 by 50 points and the headline by 15. That is
+the finding worth carrying into v0.3, and it is measurable without any judgement
+call. F1 (mean 24.6, range 11-37) and F3 (mean 6.8, range 4-12) have the same
+shape less severely.
+
+**Superseded first reading, kept for the record:**
+
 **Softened 2026-08-27 as the harder cases returned.** The halt call was made on
 the first 9 re-scores, which were the personal-insurance cases -- they finished
 first because they are smaller. At 22 cases the picture is less absolute: F2 is
