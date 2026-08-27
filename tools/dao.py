@@ -12233,7 +12233,7 @@ def build_parser():
                         "document with no --pages is returned whole. Use it "
                         "for a long policy once search-document-text or "
                         "read-document-index has told you which pages matter: "
-                        "on CASE_027 the two policy bundles were 81% of the "
+                        "on CASE_027 the two policy bundles were 81%% of the "
                         "stage's input and five pages of them were cited. The "
                         "revision hash still covers the FULL document, so a "
                         "narrowed read verifies exactly like a whole one.")
