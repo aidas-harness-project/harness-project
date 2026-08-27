@@ -4893,6 +4893,14 @@ the illegitimate case concretely: three rows compared against one locator, two
 cheap detector** -- it needs no ground truth, only the result file -- and it
 should be run over any future scoring pass as a review queue.
 
+**The exclusion is not a one-way ratchet, and CASE_8024 proves it directly.**
+There its F2 *fell* on the rubric change alone, 45.5 -> 40.0, because three of
+the five issues v0.1 had credited as predicted were out-of-scope ones: excluding
+them removed more numerator than denominator. Batch-wide, exclusion removed a
+credited hit in 13 of 18 early cases (20 hits against 44 misses). The net rise
+comes from misses outnumbering hits in the excluded set, not from the mechanism
+being one-directional.
+
 **Corrections are not all in the report's favour.** CASE_8025 netted **-3.25**:
 two F2 predictions were restored (+7.5) and one F1 row was pulled back INTO the
 denominator (-1.06), because the answer key does state a duty-breach ground. On
