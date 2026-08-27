@@ -4621,3 +4621,57 @@ heuristic and a later document can legitimately supersede an earlier one
 (`current_treatment_status` is the obvious case). What is not defensible is
 publishing `asserted` when the sibling field is in `conflict`, which is the
 subset worth fixing first.
+
+## 72. F2 counts three different failures as one number, and has no exclusion rule at all -- OPEN 2026-08-27
+
+Raised by the owner during the eval_20260827 batch: if a report could not raise
+an issue because the source document does not exist, should that issue not leave
+the F2 denominator, the way F1 drops a field the answer key never states?
+
+**F1 and F2 are deliberately asymmetric, and the asymmetry is defensible.** F1
+excludes `missing_in_ground_truth` because there is nothing to compare against --
+the answer key states no value. An issue F2 counts as missed is the opposite: the
+answer key demonstrably DID raise it. The adjuster handled it. So it is not
+"nothing to measure", it is "the pipeline did not reach it", and a screening
+report whose whole purpose is to flag what will matter has still not delivered
+that to its reader. Dropping it would erase the deficit from the metric.
+
+**But the measured composition shows the number is currently unreadable.** Across
+the batch the missed issues collapse into three distinct causes that share one
+score:
+
+1. **Real recall failure** -- material and route both present, issue not raised.
+2. **Configuration gap** -- the document IS in the case and correctly classified,
+   but `document_kinds` has no entry for it (known-gaps #69; 증권 present in 28 of
+   47 manifests).
+3. **Structurally uncatchable** -- no `field_id` exists for the issue at all, or
+   it is outside the PoC evaluation axes entirely (보험료·사정금액 are excluded by
+   decision).
+
+Category 3 dominates on liability cases. CASE_8031: all six missed issues are the
+damages-quantum spine (소득 기준, 위자료, 가동연한·중간이자, 직접청구권,
+향후치료비, 치료비 인정범위) and **no `field_id` in the routing config touches
+income or quantum**. CASE_8032: three of six are money-calculation items already
+out of PoC scope. CASE_8027 scored F2 35.7 with the misses concentrated the same
+way.
+
+Category 3 is exactly what F1 already excludes as `not_applicable` for `deferred`
+fields. Counting it in F2 is inconsistent with F1's own treatment of "the
+pipeline deliberately does not do this".
+
+**Proposed for rubric v0.2** (a scorer independently proposed the same split):
+
+* **F2a, reachable recall** -- denominator restricted to issues with a
+  corresponding `field_id` inside the PoC axes. This becomes the headline.
+* **F2b, total recall** -- the present definition, retained as a record of
+  coverage against the adjuster's full job.
+
+Category 2 stays IN both denominators on purpose: the document is present and
+correctly typed, the gap is fixable, and removing it would hide the finding that
+motivates fixing it.
+
+**Deliberately not applied to the eval_20260827 batch.** 30 of 39 cases were
+already scored under the current definition; changing the denominator mid-batch
+would make them incomparable with each other and with the completed cases. Ship
+the batch on v0.1, apply the split from v0.2 onward, and re-score only if a
+like-for-like comparison is needed.
