@@ -4850,6 +4850,19 @@ directions. Confirmed instances by shape:
 * **The mirror: a hit credited on adjacent wording** -- 8004, 8028, 8032, 8035
   (x2). An issue counted `predicted` on a quote sharing vocabulary that never
   raises the question.
+* **A ground-truth value invented by inference** -- 8041 (x3). The scorer filled
+  the key side from the key's narrative rather than checking whether the key
+  states that item at all: `accident_date` where the 사고일시란 is blank,
+  `diagnosis_body_system` and `diagnosis_site` where the key records only 상병명
+  and code. All three are `missing_in_ground_truth`, and one of them was a
+  **phantom core mismatch** -- a core field cannot mismatch a value the key does
+  not hold.
+* **A field's own definition ignored** -- 8025, 8031. `duty_breach_grounds` was
+  put outside the denominator although the key states a facility-maintenance
+  ground distinct from the accident mechanism, which is exactly what the field's
+  config note asks for; `existing_disability_assessment` was counted a miss
+  although it means a PRE-existing assessment and the key cites only the current
+  one. Both directions, both from not reading the field note.
 
 **A structural symptom, measured across all 39 v0.1 results:** 22 cases contain
 at least one ground-truth locator where sibling rows are scored **both** as
@@ -4862,6 +4875,13 @@ the illegitimate case concretely: three rows compared against one locator, two
 `normalized` and one `mismatch`, the same comparison scored two ways. **This is a
 cheap detector** -- it needs no ground truth, only the result file -- and it
 should be run over any future scoring pass as a review queue.
+
+**Corrections are not all in the report's favour.** CASE_8025 netted **-3.25**:
+two F2 predictions were restored (+7.5) and one F1 row was pulled back INTO the
+denominator (-1.06), because the answer key does state a duty-breach ground. On
+CASE_8032 the F1 corrections (+2.0) and an F2 correction (-3.75) nearly
+cancelled, leaving the rubric change worth 0.0 on that case. So the re-scoring is
+behaving like verification, not like a ratchet.
 
 **Consequence for the eval_20260827 numbers.** Per-case v0.1 verdicts are not
 dependable; at least two (8003, 8028) were pinned `divergent` by rows that do not
