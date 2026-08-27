@@ -46,6 +46,7 @@ VALID = {
     "created_at": "2026-08-25T10:00:00+09:00",
     "schema_version": "screening_fidelity_result.v0.1",
     "rubric_version": "screening_fidelity.v0.1",
+    "routing_config_version": "claim_analysis_routing.v0.1",
     "target_report_path": "outputs/CASE_021/screening_report.md",
     "target_report_sha256": "b" * 64,
     "ground_truth_access": {
@@ -61,7 +62,9 @@ VALID = {
             discretionary_agreement_rate=0.0,
             field_comparisons=[
                 {
+                    "field_id": "primary_diagnosis",
                     "field_name": "주진단명",
+                    "field_grade": "A",
                     "field_kind": "fact",
                     "core_field": True,
                     "screening_value": "기타 명시된 뇌혈관질환",
@@ -105,6 +108,7 @@ VALID = {
     "fidelity_score": 86.1,
     "core_field_mismatch": False,
     "verdict": "aligned",
+    "out_of_universe_items": [],
     "findings": [],
 }
 
@@ -131,6 +135,47 @@ def test_ground_truth_side_has_no_quote_field():
         "피보험자의 청구는 약관상 지급요건을 충족하지 아니하므로"
     )
     assert _errors(bad), "an added ground-truth quote field must not validate"
+
+
+def test_row_without_a_field_id_is_rejected():
+    """The denominator is the routing config's field list, so a row that names
+    no field_id cannot be joined to it -- which is how the hand-picked sets
+    happened in the first place."""
+    bad = copy.deepcopy(VALID)
+    del _dim_of(bad, "F1")["field_comparisons"][0]["field_id"]
+    assert _errors(bad)
+
+
+def test_grade_outside_the_config_axes_is_rejected():
+    bad = copy.deepcopy(VALID)
+    _dim_of(bad, "F1")["field_comparisons"][0]["field_grade"] = "S"
+    assert _errors(bad)
+
+
+def test_deferred_field_may_leave_the_denominator():
+    ok = copy.deepcopy(VALID)
+    _dim_of(ok, "F1")["field_comparisons"][0].update(
+        {"match_kind": "not_applicable", "screening_value": None,
+         "screening_absence_kind": "not_applicable"}
+    )
+    assert _errors(ok) == []
+
+
+def test_out_of_universe_item_is_expressible():
+    ok = copy.deepcopy(VALID)
+    ok["out_of_universe_items"] = [
+        {
+            "kind": "document_kind",
+            "label": "사고경위서",
+            "why_it_matters": "정답지가 근거로 삼았으나 설정의 document_kinds에 없다.",
+            "ground_truth_ref": GT_REF,
+        }
+    ]
+    assert _errors(ok) == []
+
+    bad = copy.deepcopy(ok)
+    bad["out_of_universe_items"][0]["kind"] = "그밖"
+    assert _errors(bad)
 
 
 def test_ground_truth_value_is_capped_to_a_field_value():

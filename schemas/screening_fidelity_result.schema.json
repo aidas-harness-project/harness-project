@@ -62,6 +62,18 @@
             "$ref": "#/$defs/finding"
           },
           "description": "What to change, numbered stably so a human disposition can reference one. An empty array means no change was called for, not that findings were skipped."
+        },
+        "routing_config_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "config_version of the routing config the denominators came from (claim_analysis_routing.v0.1). Scores taken against different field universes are not comparable, and this records which one was used."
+        },
+        "out_of_universe_items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/out_of_universe_item"
+          },
+          "description": "Empty is a valid outcome, and means the answer key stayed inside the configured universe."
         }
       },
       "required": [
@@ -78,7 +90,9 @@
         "fidelity_score",
         "core_field_mismatch",
         "verdict",
-        "findings"
+        "findings",
+        "routing_config_version",
+        "out_of_universe_items"
       ]
     },
     {
@@ -318,7 +332,8 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/document_comparison"
-          }
+          },
+          "description": "F3 rows. document_kind uses the routing config's own vocabulary, and the denominator is required_documents_by_case_type for the case's determined types."
         },
         "conclusion_agreement": {
           "enum": [
@@ -441,9 +456,12 @@
       "additionalProperties": false,
       "properties": {
         "field_name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 120
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 120,
+          "description": "Human label for the row, normally the config's label_ko. Convenience only -- field_id is the identity."
         },
         "field_kind": {
           "enum": [
@@ -454,7 +472,7 @@
         },
         "core_field": {
           "type": "boolean",
-          "description": "One of 주진단명 / 사고일 / 청구 담보 / 부지급·감액 사유. A mismatch on any of these pins the verdict."
+          "description": "Mirrors the config's critical_conflict_field -- 'fields whose disagreement can change a determination' (run_consistency_check.critical_field_ids), 32 of the 64. Read from the config, never chosen here. A mismatch on one pins the verdict to divergent."
         },
         "screening_value": {
           "type": [
@@ -477,9 +495,10 @@
             "normalized",
             "mismatch",
             "missing_in_screening",
-            "missing_in_ground_truth"
+            "missing_in_ground_truth",
+            "not_applicable"
           ],
-          "description": "'normalized' counts as agreement and records that normalisation was applied (date formats, laterality spellings, amount separators, KCD code punctuation). 'missing_in_ground_truth' leaves the denominator: the report is not penalised for carrying more than the answer key."
+          "description": "'not_applicable' is for a field the pipeline deliberately does not extract (extraction_wave or activation_basis 'deferred'). The answer key may carry such a value; not carrying it is not a miss, so the row leaves the denominator -- as does missing_in_ground_truth, where the report carried more than the key."
         },
         "screening_absence_kind": {
           "enum": [
@@ -487,7 +506,7 @@
             "silent",
             "not_applicable"
           ],
-          "description": "For missing_in_screening: whether the report declared the absence with its scope ('확인 불가') or said nothing. Both count the same in the match rate -- a value the answer key holds was still not carried -- but they call for different fixes, so the distinction is kept."
+          "description": "How the REPORT presented the absence -- 'declared' when it scoped it ('확인 불가'), 'silent' when it said nothing at all. Kept alongside pipeline_unavailable_reason because the two answer different questions: why the value is missing, and whether the reader was told."
         },
         "screening_quote": {
           "type": [
@@ -497,11 +516,59 @@
         },
         "ground_truth_ref": {
           "$ref": "#/$defs/ground_truth_ref"
+        },
+        "field_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The routing config's own field_id (config/claim_analysis/claim_analysis_routing_v0.1.json, fields[].field_id). That list is the denominator, not a set the scorer assembles: the first two cases were scored over hand-picked sets of 11 and 13 fact fields, which made their scores incomparable and left nothing to appeal to."
+        },
+        "field_grade": {
+          "enum": [
+            "A",
+            "B",
+            "C",
+            "D"
+          ],
+          "description": "From whichever axis the field declares: medical_advisory_grade for a medical domain, priority_grade for a legal_factual one. The config enforces exactly one of the two (never both, never neither), so this needs no default. Do not merge the axes -- ranking 과실비율 on what a physician needs is what once put the sole basis of a liability determination at grade C."
+        },
+        "legal_authority": {
+          "enum": [
+            "asserted_fact",
+            "legal_opinion",
+            null
+          ],
+          "description": "For a legal_factual field: whether the value is a fact a document states or an opinion a party's counsel reached. Two opposing 법률의견서 are not a records contradiction, so a report that preserved both instead of choosing is following the rule, not omitting a value."
+        },
+        "pipeline_resolution_status": {
+          "enum": [
+            "asserted",
+            "explicitly_absent",
+            "unavailable",
+            "not_applicable",
+            "conflict",
+            null
+          ],
+          "description": "What claim_analysis_result recorded for this field_id. Copied, never inferred."
+        },
+        "pipeline_unavailable_reason": {
+          "enum": [
+            "not_mentioned",
+            "source_document_missing",
+            "unreadable",
+            "outside_poc_scope",
+            "route_not_activated",
+            "not_scheduled",
+            "printed_but_blank",
+            "conflict_unresolved",
+            "partial_reading_only",
+            null
+          ],
+          "description": "Upstream's own account of why a value is absent. Supersedes the rubric's declared/silent guess: a value missing because the document kind is absent, one the document had but left blank, and one never mentioned anywhere are three different failures that the two-value split scored identically."
         }
       },
       "required": [
-        "field_name",
-        "field_kind",
+        "field_id",
+        "field_grade",
         "core_field",
         "screening_value",
         "ground_truth_value",
@@ -686,6 +753,38 @@
         "dimension_id",
         "description",
         "fix_suggestion"
+      ]
+    },
+    "out_of_universe_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Something the answer key relied on that has no field_id and no document_kind in the routing config. Recorded, never scored. Binding the denominators to the pipeline otherwise leaves the rubric able to measure only what the pipeline already knows to look for; 사고경위서 is the live example -- the answer key's evidence for the accident narrative in both scored cases, and absent from document_kinds entirely.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "field",
+            "document_kind"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "why_it_matters": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "ground_truth_ref": {
+          "$ref": "#/$defs/ground_truth_ref"
+        }
+      },
+      "required": [
+        "kind",
+        "label",
+        "why_it_matters",
+        "ground_truth_ref"
       ]
     }
   }

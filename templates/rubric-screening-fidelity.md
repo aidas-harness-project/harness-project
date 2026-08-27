@@ -63,47 +63,70 @@ rubric_version: screening_fidelity.v0.1
 
 ## F1 · 사실 항목 일치 — 가중 50
 
-**대조 대상 필드**
+**항목 집합은 채점자가 고르지 않는다.** `config/claim_analysis/claim_analysis_routing_v0.1.json`의
+`fields`가 분모다(64개, `behavior_enabled: true`, 승인 2026-08-20 pyun). 대조는 `field_id` 단위로 하고,
+결과에도 `field_id`를 기록한다.
 
-| 구분 | 필드 |
-| --- | --- |
-| 사건 | 사고일 / 진단일 / 치료기간 / 입원기간 |
-| 진단 | 주진단명 / 진단코드 / 진단 부위 / 좌우 |
-| 치료 | 주요 치료 유형 / 수술·시술명 / 수술일 |
-| 담보·금액 | 청구 담보 / 청구금액 / 지급금액 / 부지급금액 / 감액금액 |
-| 판단 근거 | 부지급·감액 사유 / 적용 약관 조항 |
-| 장해 | 기재된 장해율 / 평가 기준 / 영구·한시 구분 |
-| 재량 | 과실률 / 손해액 / 소득 기준 |
+### 등급 — 축은 둘이고 필드마다 정확히 하나다
 
-**fact와 discretionary를 나눈다.** 답이 자료에 **기재되어 있는** 값이 `fact`, 전문가가 **판단으로
-도출하는** 값이 `discretionary`다. 과실률·손해액·소득 기준은 후자다.
+| 도메인 종류 | 등급 필드 | 값 |
+| --- | --- | --- |
+| `medical` (8개 도메인) | `medical_advisory_grade` | A / B / C / D |
+| `legal_factual` (`liability_basis`) | `priority_grade` | A / B / C |
 
-> **헤드라인은 fact 일치율만 쓴다.** 재량값은 P3상 스크리닝이 단정하지 않는 것이 옳고, 그러면
-> 바르게 처신한 리포트가 감점된다. `discretionary_agreement_rate`로 따로 기록하고 합치지 않는다.
+스키마가 `oneOf`로 강제한다 — *"exactly one grading axis … never both and never neither"*.
+과실비율을 의사 기준으로 매기는 것이 무의미했기 때문이다(그렇게 했을 때 배상책임 판단의 유일한
+근거 필드가 의학적으로 안 중요하다는 이유로 C에 앉았다). 채점자는 두 축을 합치지 말고
+`selection.field_grade()`와 같은 규칙으로 읽는다: 의료 등급이 있으면 그것, 없으면 `priority_grade`.
 
-**대조 판정**
+**따라서 루브릭이 예전에 손으로 적었던 A등급 목록은 폐기한다.** A는 두 축의 A를 합친 집합이다 —
+의료 A 9개 + 법률 A 3개(`legal_basis_cited`, `liability_opinion_conclusion`,
+`comparative_negligence_rate`). 과실비율과 적용 법조는 **재량이 아니라 A등급 추출 대상**이다.
+
+### 핵심 필드도 이미 정의돼 있다
+
+`critical_conflict_field: true`인 필드(32개)가 그것이다 — *"fields whose disagreement can change a
+determination"* (`run_consistency_check.critical_field_ids`). 채점자가 고르는 목록이 아니라
+설정에서 읽는다. `core_field_mismatch`는 이 플래그가 붙은 필드의 `mismatch`로 판정한다.
+
+### 부재는 9값으로 구분한다
+
+리포트의 침묵/명시 2분법 대신 상류 계약의 `unavailable_reason`을 그대로 쓴다:
+`not_mentioned` / `source_document_missing` / `unreadable` / `outside_poc_scope` /
+`route_not_activated` / `not_scheduled` / `printed_but_blank` / `conflict_unresolved` /
+`partial_reading_only`. 문서종이 없어서 못 채운 값과 서식이 공란이라 못 채운 값은 다른 실패다.
+`resolution_status`(`asserted`/`explicitly_absent`/`unavailable`/`not_applicable`/`conflict`)도 함께 기록한다.
+
+### 추출 대상이 아닌 필드는 분모에서 뺀다
+
+`extraction_wave: deferred`(6개) 및 `activation_basis: deferred`는 파이프라인이 의도적으로 추출하지
+않는 필드다. 정답지에 값이 있어도 **감점하지 않고** `not_applicable`로 기록한다. 반대로
+`extraction_wave`가 A/B인데 산출물에 항목 자체가 없으면 그것은 파이프라인 결함으로 보고한다
+(현재 `documented_prior_condition_causation`·`documented_prior_condition_contribution_rate` 두 건이
+설정상 wave B인데 네 케이스 모두에서 미출력).
 
 | 판정 | 의미 |
 | --- | --- |
-| `exact` | 표기까지 동일 |
-| `normalized` | 정규화 후 동일 — 만점 처리하되 정규화했음을 남긴다 |
-| `mismatch` | 양쪽 다 값이 있는데 다르다 |
+| `exact` / `normalized` | 일치 (정규화 범위는 아래) |
+| `mismatch` | 양쪽 값이 다르다 |
 | `missing_in_screening` | 정답지에 있고 리포트에 없다 |
-| `missing_in_ground_truth` | 리포트에 있고 정답지에 없다 — **감점하지 않는다**(분모 제외) |
+| `missing_in_ground_truth` | 리포트에만 있다 — 분모에서 제외 |
+| `not_applicable` | deferred 필드 — 분모에서 제외 |
 
-정규화가 인정되는 범위: 날짜 표기(`2023-12-04` / `2023.12.4` / `2023년 12월 4일`), 좌우 표기
-(`LT` / `Lt.` / `좌측`), 금액 구분자, 진단명의 한자·괄호·공백 변형, 진단코드의 점 유무(`S6280` /
-`S62.80`). 의미가 달라지는 축약은 정규화가 아니다.
-
-**부재의 성격을 함께 남긴다.** `missing_in_screening`일 때 리포트가 `확인 불가`처럼 **범위를 한정해
-부재를 선언**했는지(`declared`), 아무 언급이 없었는지(`silent`)를 기록한다. **일치율은 둘을 같게 센다** —
-정답지에 있는 값을 못 담은 것은 어느 쪽이든 부합하지 않은 것이다. 다만 그 둘은 개선 방향이 다르므로
-구분해 남긴다.
+정규화 인정 범위: 날짜 표기, 좌우 표기(`LT`/`Lt.`/`좌측`), 금액 구분자, 진단명의 한자·괄호·공백
+변형, 진단코드의 점 유무. 의미가 달라지는 축약은 정규화가 아니다.
 
 ```
-fact_match_rate = (exact + normalized) ÷ (exact + normalized + mismatch + missing_in_screening)
-F1 점수 = fact_match_rate × 100
+F1 점수 = (exact + normalized) ÷ (exact + normalized + mismatch + missing_in_screening) × 100
 ```
+
+### 법률의견 필드의 비대칭
+
+`legal_authority: legal_opinion`인 필드(`liability_opinion_conclusion`, `comparative_negligence_rate`,
+`negligence_reasoning`, `duty_breach_grounds`)는 **문서에 기재된 사실이 아니라 어느 당사자 대리인의
+의견**이다. 상반된 두 의견서가 있는 것은 기록 모순이 아니며, 성립 의견은 유형을 성립시키지만
+불성립 의견은 유형을 닫지 않는다. 리포트가 양쪽을 보존하고 판단을 유보한 것은 이 규칙을 따른 것이지
+누락이 아니다 — `mismatch`로 잡지 말고 정답지가 채택한 쪽과 함께 기록한다.
 
 ## F2 · 쟁점 예측 리콜 — 가중 30
 
@@ -121,21 +144,34 @@ F2 점수 = (예측한 정답지 쟁점 수 ÷ 정답지 쟁점 총수) × 100
 
 ## F3 · 필요서류 일치 — 가중 20
 
-정답지가 **실제로 근거로 삼은 문서**를 리포트가 맞게 분류했는지를 본다.
+**분모도 설정에서 온다.** `required_documents_by_case_type` — 개인보험 6종 / 교통사고 12 / 산재 13 /
+배상 14. 케이스의 판정된 유형에 해당하는 목록을 쓴다. 문서종 이름은 설정의 `document_kinds` 어휘를
+그대로 쓴다(`diagnosis_certificate`, `initial_visit_record`, …).
 
 | 판정 | 조건 |
 | --- | --- |
-| `correct` | 정답지가 쓴 문서를 리포트가 `보유`로 분류 / 정답지가 쓰지 않은 문서를 `부족`으로 지적 |
-| `under` | 정답지가 쓴 문서를 리포트가 `미확인`·`부족`으로 분류 |
-| `miss` | 정답지가 쓴 문서를 리포트가 언급조차 하지 않음 |
-| `over` | 리포트가 `부족`으로 지적했으나 정답지 판단에 필요 없던 문서 — **감점하지 않고 기록만 한다** |
+| `correct` | 정답지가 쓴 문서를 리포트가 `보유`로 분류 / 정답지가 안 쓴 문서를 `부족`으로 지적 |
+| `under` | 정답지가 쓴 문서를 `미확인`·`부족`으로 분류 |
+| `miss` | 정답지가 쓴 문서를 언급조차 안 함 |
+| `over` | `부족`으로 지적했으나 정답지 판단에 불필요 — 기록만, 감점 없음 |
 
-부족서류 지적이 과한 것은 실무상 비용이지 오류가 아니다. 반대로 정답지가 근거로 쓴 문서를
-리포트가 못 짚은 것은 다음 단계가 그 문서 없이 진행된다는 뜻이다.
+상류가 `ambiguous`(Stage 2가 문서를 봤으나 종류를 못 정함)와 `missing`을 구분해 기록하므로,
+'문서가 없어서 미확인'과 '분류를 못 해서 미확인'을 같은 under로 묶지 않는다.
 
 ```
 F3 점수 = correct ÷ (correct + under + miss) × 100
 ```
+
+## 우주 밖 항목 — 분모에 없는 것을 기록하는 자리
+
+분모를 파이프라인에 묶으면 **파이프라인이 모르는 것은 잴 수 없게 된다.** 실제로 발생했다:
+정답지가 사고경위의 근거로 삼는 `사고경위서`는 `document_kinds`와 `required_documents_by_case_type`
+어디에도 없다(프로그램으로 확인). 그대로 바인딩하면 CASE_705·CASE_711에서 각각 잡았던 그 결손이
+**측정 불가능해진다.**
+
+그래서 정답지가 근거로 삼았는데 대응하는 `field_id` 또는 `document_kind`가 존재하지 않는 항목은
+`out_of_universe_items`에 별도로 기록한다. 점수에는 반영하지 않는다 — 리포트의 잘못이 아니라
+**설정의 결손**이고, 고칠 자리가 다르다.
 
 ## F4 · 결론 방향 일치 — 헤드라인 제외
 

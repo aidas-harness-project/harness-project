@@ -57,6 +57,7 @@ def _result():
         "created_at": "2026-08-26T10:00:00+09:00",
         "schema_version": "screening_fidelity_result.v0.1",
         "rubric_version": "screening_fidelity.v0.1",
+        "routing_config_version": "claim_analysis_routing.v0.1",
         "target_report_path": "outputs/CASE_907/screening_report.md",
         "target_report_sha256": "c" * 64,
         "ground_truth_access": {
@@ -68,7 +69,9 @@ def _result():
         "dimensions": [
             _dim("F1", 50, 90.0, fact_match_rate=0.9,
                  field_comparisons=[{
+                     "field_id": "accident_date",
                      "field_name": "사고일",
+                     "field_grade": "B",
                      "field_kind": "fact",
                      "core_field": True,
                      "screening_value": None,
@@ -85,6 +88,7 @@ def _result():
         "fidelity_score": 83.0,
         "core_field_mismatch": False,
         "verdict": "aligned",
+        "out_of_universe_items": [],
         "findings": [],
     }
 
