@@ -212,6 +212,20 @@
             "maxLength": 200
           },
           "description": "File NAMES read, never contents."
+        },
+        "source": {
+          "enum": [
+            "data_ground_truth",
+            "handoff_bundle"
+          ],
+          "default": "data_ground_truth",
+          "description": "Which tree served the answer key. 'data_ground_truth' is the intaked case, whose GT passed a D2 per-file review. 'handoff_bundle' is a case whose GT was quarantined by a corpus split and never intaked, read in place from _handoff/ -- the gates are identical, but the provenance is not, and a score should not hide which one it rests on. Absent means 'data_ground_truth': results written before the bundle path existed stay valid."
+        },
+        "source_bundle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Bundle name under _handoff/ when source is 'handoff_bundle'. Names the exact assembly the answer key came from, since a bundle is hand-assembled and can be rebuilt differently."
         }
       },
       "required": [

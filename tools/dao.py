@@ -1951,6 +1951,68 @@ PAGE_TEXT_ALLOWED_STAGES = frozenset({"document-pipeline"})
 # verification result is terminal and may never be consumed by a producing stage.
 GROUND_TRUTH_ALLOWED_STAGES = frozenset({"evaluation", "screening_fidelity"})
 
+# A handoff bundle pairs each case's ground truth with the outputs it should be
+# scored against, for cases whose answer key was never intaked into
+# data/ground_truth/. That is the normal shape for a corpus split by
+# _workspace/corpus-split: the raw half is intaked and the GT half is
+# quarantined, so the source ledger approves one file, classified 'raw', and the
+# DAO's own tree stays legitimately empty. read-ground-truth --list then exits 0
+# with no rows: authorized, and nothing to read.
+#
+# The alternative was re-intaking 39 cases, which rewrites an approved D2 ledger
+# to add a ground_truth classification no human reviewer approved -- forging a
+# review record to satisfy a path check. This reads the bundle where it already
+# sits instead, and leaves the ledgers alone.
+#
+# What does NOT change: the stage restriction, the review token, the
+# screening-passed integrity check, and the ephemeral-transcription rule all run
+# first and identically. A bundle is only ever a SOURCE for the read that those
+# gates have already authorized. Nothing is copied into data/ground_truth/, so
+# the deny globs keep covering the same tree, and the verification result stays
+# terminal in the same place.
+GROUND_TRUTH_BUNDLE_ROOT = ROOT / "_handoff"
+
+# Bundle-sourced reads are marked in the result contract rather than being made
+# indistinguishable from a DAO-tree read. A score whose answer key came from a
+# hand-assembled bundle is a different provenance claim, and a reader checking
+# the D1 conditions is entitled to see which one applied.
+GROUND_TRUTH_SOURCE_TREE = "data_ground_truth"
+GROUND_TRUTH_SOURCE_BUNDLE = "handoff_bundle"
+
+
+def _resolve_bundle_gt(bundle: str, case_id: str) -> tuple[Path | None, str | None]:
+    """Locate a case's ground-truth files inside a handoff bundle.
+
+    Returns (directory, error). The directory is synthetic: bundles store one
+    flat `CASE_XXXX_GT.pdf` per case rather than a per-case folder, so this
+    reports the bundle root and the caller filters by name.
+    """
+    _require_safe_id("case_id", case_id)
+    if not isinstance(bundle, str) or not bundle or "\x00" in bundle:
+        return None, f"error: unsafe bundle name {bundle!r}"
+    if Path(bundle).is_absolute() or any(
+            part in ("..",) for part in Path(bundle).parts):
+        return None, (f"DENIED: bundle must be a name under {GROUND_TRUTH_BUNDLE_ROOT}, "
+                      f"not a path -- refusing {bundle!r}")
+    bundle_dir = _require_within(GROUND_TRUTH_BUNDLE_ROOT, bundle)
+    if not bundle_dir.is_dir():
+        return None, f"NOT_FOUND: no handoff bundle at {bundle_dir}"
+    return bundle_dir, None
+
+
+def _bundle_gt_files(bundle_dir: Path, case_id: str) -> list[Path]:
+    """Ground-truth files in a bundle belonging to one case.
+
+    Matches `CASE_XXXX_GT*.pdf` at the bundle root. The case's OUTPUT folder
+    (`bundle_dir/CASE_XXXX/`) is deliberately not searched: it holds pipeline
+    artifacts, which are not ground truth and must not be served through this
+    command as though they were.
+    """
+    prefix = f"{case_id}_GT"
+    return sorted(p for p in bundle_dir.iterdir()
+                  if p.is_file() and p.stem.startswith(prefix))
+
+
 PAGE_TEXT_CAPABILITY_ENV = "HARNESS_CHECKPOINT2_CAPABILITY"
 
 
@@ -2268,7 +2330,23 @@ def cmd_read_ground_truth(args):
               f"{args.caller_stage} may not read ground truth until review is confirmed (D1) -- "
               f"see dao.py mark-human-review-complete {args.case_id} {args.version}.")
         return 1
-    gt_dir = DATA / "ground_truth" / args.case_id
+    # Every gate above has now run. A bundle only changes WHERE the authorized
+    # read is served from; it cannot reach this line without passing them.
+    bundle = getattr(args, "bundle", None)
+    if bundle:
+        bundle_dir, err = _resolve_bundle_gt(bundle, args.case_id)
+        if err:
+            print(err)
+            return 1
+        gt_dir = bundle_dir
+        bundle_files = _bundle_gt_files(bundle_dir, args.case_id)
+        if not bundle_files:
+            print(f"NOT_FOUND: bundle {bundle!r} has no ground-truth file for "
+                  f"{args.case_id} (expected {args.case_id}_GT*.pdf at its root)")
+            return 1
+    else:
+        gt_dir = DATA / "ground_truth" / args.case_id
+        bundle_files = None
 
     # Without --file/--list this prints the directory path and stops, which is
     # all it ever did. That was a real hole rather than a design: the 2026-07-22
@@ -2289,7 +2367,12 @@ def cmd_read_ground_truth(args):
         print(f"NOT_FOUND: no ground-truth directory for {args.case_id} at {gt_dir}")
         return 1
 
-    files = sorted(p for p in gt_dir.iterdir() if p.is_file()) if gt_dir.is_dir() else []
+    if bundle_files is not None:
+        # A bundle root holds every case's files side by side, so serving the
+        # whole directory would hand this case the other cases' answer keys.
+        files = bundle_files
+    else:
+        files = sorted(p for p in gt_dir.iterdir() if p.is_file()) if gt_dir.is_dir() else []
     if getattr(args, "list", False):
         for p in files:
             print(f"{p.stem}\t{p.name}\t{p.stat().st_size}")
@@ -12532,6 +12615,14 @@ def build_parser():
                         "temporary directory, vision-transcribe them, and return the text without "
                         "persisting anything. The pages are deleted on exit, so no answer-key "
                         "artifact is left on disk for a later stage to read.")
+    p.add_argument("--bundle",
+                   help="Serve ground truth from a handoff bundle under _handoff/ (e.g. "
+                        "eval_20260827) instead of data/ground_truth/CASE_ID/, for a case whose "
+                        "answer key was quarantined by a corpus split and never intaked. Only "
+                        "CASE_ID_GT*.pdf at the bundle root is served -- the bundle's per-case "
+                        "output folder is not ground truth. Every gate (stage, review token, "
+                        "screening-passed, ephemeral transcription) applies unchanged; this "
+                        "selects the source, it does not relax a check.")
     p.set_defaults(fn=cmd_read_ground_truth)
 
     for name, fn, verb in (
