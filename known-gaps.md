@@ -4730,3 +4730,56 @@ Also unresolved: whether F2 should ever have been recall over the adjuster's
 whole issue set. A screening report and a completed 손해사정서 do not have the
 same job, and 40% of v0.1's misses were topics the pipeline was never built to
 reach.
+
+## 74. Re-scoring found five v0.1 scoring errors, and they are independent of the rubric question -- OPEN 2026-08-27
+
+The v0.2 re-scoring was halted for the reason in #73, but it functioned as an
+unplanned cross-validation of v0.1: a second scorer re-derived every F1 and F3
+row against the config and its own reading of the answer key. **Five errors
+surfaced in 14 cases (36%), all in the direction of scoring the report too
+harshly**, and two of them had wrongly pinned a verdict.
+
+| case | field / issue | v0.1 call | correct call | effect |
+|---|---|---|---|---|
+| CASE_8003 | `documented_disability_rate` | `mismatch` | agreement | **wrongly pinned `divergent`** |
+| CASE_8003 | `diagnosis_laterality` | `missing_in_screening` | published, agrees | F1 70.0 -> 80.0 |
+| CASE_8015 | `legal_basis_cited` | `missing_in_screening` | `missing_in_ground_truth` | F1 66.7 -> 70.6 |
+| CASE_8002 | GT-2 재해 해당 여부 | `predicted: false` | predicted | F2 2/3 -> 3/3 |
+| CASE_8001 | `accident_mechanism` | `mismatch` | `normalized` | F1 57.9 -> 63.2 |
+
+Three have causes worth acting on rather than just correcting:
+
+1. **`documented_disability_rate` (CASE_8003)** -- the v0.1 scorer compared the
+   report's printed per-item rate against the answer key's *summed* payout
+   multiplier. The field's own config note directs the opposite: *"Transcribe the
+   rate the document itself prints... the pipeline does not calculate or endorse
+   a final rate of its own"*, `cardinality: multi`. **This one pinned the case to
+   `divergent`.** The scorer flagged that if the misreading is systematic, other
+   v0.1 `divergent` verdicts resting on a single `documented_disability_rate`
+   mismatch are suspect -- not yet checked across the batch.
+
+2. **`accident_mechanism` (CASE_8001)** -- the report's value reads
+   `에 넘어지면서 엉덩방아`: de-identification removed the location and took the
+   front of the sentence with it. All three sources record the same fall, and so
+   does the answer key. **A value truncated by redaction is not a value that
+   contradicts.** Two fixes implied, one per side: the rubric should name the
+   redaction-truncation case in its normalisation rules, and the masking unit
+   upstream should not swallow the sentence head when it redacts a place name.
+
+3. **GT-2 (CASE_8002)** -- recorded unpredicted although the report publishes
+   `injury_event_present` with a citation and uses it as the stated basis for its
+   type call. The likely cause is that the v0.1 scorer searched the report's
+   review-points section rather than its `established_facts` entries. If that
+   search habit is general, F2 is understated wherever a prediction lives in a
+   structured field rather than in prose.
+
+**The direction is the point.** Five for five ran against the report. That is a
+small sample, but a scorer working from an answer key has an obvious pull toward
+treating any difference as the report's error, and nothing in the v0.1 process
+pushed back. The 25 cases not re-scored have had no second reading at all.
+
+Not yet decided: whether to re-verify the remaining 25 v0.1 results for these
+specific error shapes (cheaper than a full re-score -- it is a targeted check of
+`documented_disability_rate` mismatches, redaction-truncated values, and
+predictions that live in structured fields), or to fold the check into whatever
+v0.3 re-scoring happens.
