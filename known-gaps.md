@@ -4773,13 +4773,31 @@ Three have causes worth acting on rather than just correcting:
    search habit is general, F2 is understated wherever a prediction lives in a
    structured field rather than in prose.
 
-**The direction is the point.** Five for five ran against the report. That is a
-small sample, but a scorer working from an answer key has an obvious pull toward
-treating any difference as the report's error, and nothing in the v0.1 process
-pushed back. The 25 cases not re-scored have had no second reading at all.
+**Direction, corrected 2026-08-27 after more cases returned.** The first five all
+ran against the report, and I recorded that as the finding. It did not hold:
+CASE_8004 turned up the opposite shape -- GT-7 was counted as *predicted* on a
+quote about which missing documents to prioritise, which never puts the issue on
+the table. A false positive, corrected to `predicted: false`, costing 6.0 points
+of F2. So the v0.1 pass has errors in both directions, and the honest statement is
+that individual row judgements were unreliable at roughly a 40% case rate, not
+that they were systematically harsh. The pull toward treating any difference as
+the report's error is still real and still worth guarding against -- but it is a
+hypothesis about the mechanism, not something these numbers establish.
 
-Not yet decided: whether to re-verify the remaining 25 v0.1 results for these
-specific error shapes (cheaper than a full re-score -- it is a targeted check of
-`documented_disability_rate` mismatches, redaction-truncated values, and
-predictions that live in structured fields), or to fold the check into whatever
-v0.3 re-scoring happens.
+A separate and firmer pattern did emerge: **`legal_basis_cited` was mis-scored the
+same way on three cases** (CASE_8008, CASE_8015, CASE_8018). Each time the answer
+key cites the adjuster's statutory authority to ISSUE a 사정서 (보험업법 제188조),
+and each time it was read as 적용 법조 of a liability determination. The field's
+domain is `liability_basis`; on a personal-insurance case the key holds no value
+for it, so the row is `missing_in_ground_truth` and leaves the denominator. Three
+for three is systematic, and the 21 un-re-scored cases likely carry it too.
+
+The 21 cases not re-scored have had no second reading at all.
+
+Not yet decided: whether to re-verify the remaining 21 v0.1 results for these
+specific error shapes -- far cheaper than a full re-score, since it is a targeted
+check of four things: every `legal_basis_cited` row scored
+`missing_in_screening` (three-for-three systematic), every
+`documented_disability_rate` mismatch (one of these wrongly pinned a verdict),
+values truncated by redaction, and predictions that live in a structured field
+rather than in prose. Or fold the check into whatever v0.3 re-scoring happens.
