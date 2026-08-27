@@ -4532,3 +4532,46 @@ now running would have to be re-scored against a changed denominator. Scorers
 repeatedly proposed the minimal form: add `accident_report` and
 `insurance_certificate` to `document_kinds` and to the per-type required lists --
 no classifier change needed, since the types are already assigned correctly.
+
+## 70. Fidelity dimension scores are not comparable across cases without their denominators -- OPEN 2026-08-27
+
+Measured on the eval_20260827 batch (27 cases scored at time of writing). Both
+headline dimensions rest on per-case denominators that vary by a factor of two
+or more, so a bare score comparison between two cases is not meaningful.
+
+**F1.** The denominator is the config's 64 fields minus every row the answer key
+takes no position on. Measured: **mean 22.8, median 21, range 15-34.** So ~41
+rows are excluded per case, nearly all `missing_in_ground_truth` -- correct by
+rubric (a report is not charged for carrying more than the key), but it means a
+case with 15 comparable fields moves 6.7 points per row while one with 34 moves
+2.9. CASE_8016 (denominator 15) and CASE_8026 (34) cannot be ranked against each
+other on F1 alone.
+
+**F3.** The denominator is `required_documents_by_case_type` for the case's
+DETERMINED type -- 6 kinds for personal_insurance, 12-14 for traffic/liability.
+The split is stark:
+
+| denominator | n | F3 mean | range |
+|---|---|---|---|
+| <=7 kinds (personal_insurance) | 17 | **90.7** | 60-100 |
+| 12-14 kinds (liability/traffic) | 10 | **80.0** | 67-100 |
+
+The batch F3 mean is therefore partly an artifact of case-type mix rather than a
+statement about report quality. Compounding it, `document_kind` has no entry for
+증권 or 사고경위서 (known-gaps #69), so a document with no kind **has no slot to
+be missed from** -- an F3 of 100 means "correct on everything the config can
+express", not "requested everything the adjuster used". All 25 cases with an
+F1 breakdown carry out-of-universe items (108 total).
+
+**A further wrinkle surfaced on CASE_8029:** the answer key adjudicated it as a
+배상책임 case while `case_type_assessment` left `liability: uncertain` and only
+`personal_insurance: applicable`, so F3 scored against the 6-kind list. The
+rubric binds the denominator to the DETERMINED type, which is right -- but it
+means a case-type misdetermination silently changes the denominator, and the
+score cannot show it. The scorer's recommendation, adopted here: **record the
+determined case type and both denominators alongside every score.**
+
+Not a defect in the rubric -- config-bound denominators are what stop a scorer
+choosing its own field set (the reason they were bound in the first place, see
+2026-08-27 CHANGELOG). It is a reporting requirement: cite F1n/F3n and the case
+type, or do not compare the numbers.
