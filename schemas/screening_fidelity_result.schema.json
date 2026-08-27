@@ -14,8 +14,11 @@
           "const": "screening_fidelity_result.v0.1"
         },
         "rubric_version": {
-          "const": "screening_fidelity.v0.1",
-          "description": "Which revision of templates/rubric-screening-fidelity.md produced this score. Scores from different rubric revisions are not comparable."
+          "enum": [
+            "screening_fidelity.v0.1",
+            "screening_fidelity.v0.2"
+          ],
+          "description": "Which revision of templates/rubric-screening-fidelity.md produced this score. **Scores from different revisions are not comparable and must never be averaged together or ranked against each other**: v0.2 removed out-of-PoC-scope issues from the F2 denominator, so the same report scores higher under it without having changed. Both values stay accepted because the eval_20260827 batch (39 cases) was scored under v0.1 and those results remain valid as v0.1 results -- a const here would have retroactively invalidated them. Always state which revision a number came from."
         },
         "target_report_path": {
           "type": "string",
@@ -336,6 +339,23 @@
           "maximum": 1,
           "description": "Reported beside the headline, never folded into it. Under P3 a screening report may correctly decline to assert a discretionary value and score 0 here for being right."
         },
+        "total_issue_recall": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100,
+          "description": "F2 only (rubric v0.2). Recall over ALL answer-key issues, including the out-of-scope ones the headline F2 excludes. Recorded so the coverage question -- how much of the adjuster's whole job the pipeline touches -- survives alongside the in-scope score, which answers the narrower question of how well it does what it undertook. The two are never combined, and the headline is the in-scope one."
+        },
+        "scored_denominator": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "How many rows actually entered this dimension's denominator after exclusions (rubric v0.2). Measured across the eval_20260827 batch: F1 ranged 14-40 and F3 6-14, so one row is worth 7.1 points on a narrow case and 2.5 on a wide one. Without this figure two cases' dimension scores are not comparable, and the batch mean is partly a statement about corpus composition rather than report quality."
+        },
         "issue_matches": {
           "type": "array",
           "items": {
@@ -614,6 +634,21 @@
         "predicted": {
           "type": "boolean",
           "description": "Whether the screening report raised this issue. Different wording still counts: what matters is whether the same question was put on the table."
+        },
+        "scope": {
+          "enum": [
+            "in_scope",
+            "out_of_scope_amount",
+            "out_of_scope_policy"
+          ],
+          "default": "in_scope",
+          "description": "Whether this issue is inside what the PoC set out to do. Only in_scope issues enter the F2 denominator (rubric v0.2), on the same principle by which F1 drops a deferred field as not_applicable: failing to do what the pipeline never undertook measures the scope, not the report. out_of_scope_amount is loss quantification (위자료, 일실수익, 소득 기준, 가동연한·중간이자, 사정금액) -- excluded because money is not a PoC evaluation axis. out_of_scope_policy is clause interpretation (면책사유, 담보 적용, 약관상 지급사유) -- excluded because much of this corpus carries a D5 no-policy declaration, so the clause text does not exist to interpret. THE FIRST TEST IS WHETHER A field_id EXISTS: if the config already commits to extracting the value, it is in_scope no matter what the answer key computes with it -- comparative_negligence_rate is grade A and critical_conflict_field, so it is always in_scope. An issue missed because its document sits unread in the case for want of a routing vocabulary is NOT out of scope; it stays in the denominator. Absent means in_scope, so v0.1 results stay valid."
+        },
+        "scope_reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "One line saying why this scope was chosen. Required in practice for anything not in_scope: an exclusion raises the score, so it has to be defensible to a reader who did not make the call. Never decide scope by keyword-matching the label -- 치료비 can be a clinical-appropriateness question (in_scope) or a 인정액 question (out_of_scope_amount)."
         },
         "screening_quote": {
           "type": [
