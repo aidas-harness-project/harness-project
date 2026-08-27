@@ -55,7 +55,8 @@ EXCLUDED = {"missing_in_ground_truth", "not_applicable", "preserved_without_adop
 DOC_COUNTED = {"correct", "under", "miss"}
 
 SCHEMA_VERSION = "screening_fidelity_result.v0.1"
-RUBRIC_VERSION = "screening_fidelity.v0.1"
+RUBRIC_VERSION = "screening_fidelity.v0.2"
+IN_SCOPE = "in_scope"
 
 
 def load_config():
@@ -160,7 +161,22 @@ def build(rows, run_id):
     f1, f1_hits, f1_n = rate(
         comparisons,
         lambda c: (c["match_kind"] in AGREED) if c["match_kind"] in COUNTED else None)
-    f2, f2_hits, f2_n = rate(rows["issues"], lambda i: bool(i["predicted"]))
+    # v0.2: the F2 denominator is in-scope issues only, on the same principle
+    # that excludes a deferred field from F1 -- charging the report for work the
+    # PoC never undertook measures the scope, not the report. Overall recall is
+    # still reported beside it so the exclusion cannot quietly inflate the number.
+    in_scope = [i for i in rows["issues"]
+                if i.get("scope", IN_SCOPE) == IN_SCOPE]
+    f2, f2_hits, f2_n = rate(in_scope, lambda i: bool(i["predicted"]))
+    f2_all, f2_all_hits, f2_all_n = rate(rows["issues"], lambda i: bool(i["predicted"]))
+    for issue in rows["issues"]:
+        if issue.get("scope", IN_SCOPE) != IN_SCOPE and not issue.get("scope_reason"):
+            problems.append(
+                f"{issue['gt_issue_id']}: excluded from the F2 denominator with no "
+                "scope_reason -- exclusion raises the score, so the ground for it "
+                "has to be on the record")
+    if problems:
+        return None, problems
     f3, f3_hits, f3_n = rate(
         rows["documents"],
         lambda d: (d["verdict"] == "correct") if d["verdict"] in DOC_COUNTED else None)
@@ -189,13 +205,17 @@ def build(rows, run_id):
          "field_comparisons": comparisons},
         {"dimension_id": "F2", "weight": WEIGHTS["F2"], "applicable": True,
          "na_reason": None, "score": f2,
-         "rationale": (f"정답지 쟁점 {f2_n}건 중 {f2_hits}건 예측. 이 분모는 설정이 정해 주지 "
-                       "않는다 -- 채점자 열거로 남는 유일한 차원."),
+         "rationale": (f"PoC 범위 내 쟁점 {f2_n}건 중 {f2_hits}건 예측 (v0.2). "
+                       f"총괄 리콜은 {f2_all_hits}/{f2_all_n}. 범위 밖으로 뺀 쟁점은 "
+                       f"{f2_all_n - f2_n}건이며 각각 scope_reason을 갖는다. "
+                       "이 분모는 설정이 정해 주지 않는다 -- 채점자 열거로 남는 유일한 차원."),
          "screening_quotes": [i.get("screening_quote") for i in rows["issues"]
                               if i.get("screening_quote")][:2] or ["(no predicted issue)"],
          "issue_matches": [
              {"gt_issue_id": i["gt_issue_id"], "gt_issue_label": i["gt_issue_label"],
               "predicted": bool(i["predicted"]),
+              **({"scope_reason": i["scope_reason"]} if i.get("scope_reason") else {}),
+              "scope": i.get("scope", IN_SCOPE),
               "screening_quote": i.get("screening_quote"),
               "screening_section": i.get("screening_section"),
               "ground_truth_ref": {"file": rows["ground_truth_files"][0],
@@ -248,6 +268,7 @@ def build(rows, run_id):
     }
     readout = {
         "F1": (f1, f1_hits, f1_n), "F2": (f2, f2_hits, f2_n), "F3": (f3, f3_hits, f3_n),
+        "F2_overall": (f2_all, f2_all_hits, f2_all_n),
         "F4": rows["conclusion_agreement"], "total": total, "verdict": verdict,
         "core_mismatches": core_mismatches, "grades": grade_note,
         "rows": len(comparisons), "excluded": len(comparisons) - f1_n,
@@ -264,6 +285,8 @@ def render(case_id, r):
         score, hits, n = r[dim]
         bar = "#" * int(round((score or 0) / 5)) if score is not None else ""
         print(f" {dim} {str(score):>5}  {hits:>3}/{n:<3} {bar}")
+    o, oh, on = r["F2_overall"]
+    print(f"    overall recall {o} ({oh}/{on}) -- {on - r['F2'][2]} issue(s) out of PoC scope")
     print(f" F4 {'':>5}  {r['F4']}  (excluded from the headline)")
     print("-" * w)
     print(f" rows {r['rows']} scored, {r['excluded']} excluded from the denominator")
@@ -292,8 +315,11 @@ def main():
         return 1
     result, readout = built
 
+    # The case id belongs in the default name. Without it, scoring two cases in
+    # one run silently overwrote the first result -- the same failure the DAO
+    # write path was just taught to refuse, reintroduced one level up.
     out = Path(args.out) if args.out else Path(args.rows).with_name(
-        f"screening_fidelity_result_{args.run_id}.json")
+        f"{rows['case_id']}_screening_fidelity_result_{args.run_id}.json")
     out.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n",
                    encoding="utf-8")
     if not args.quiet:
