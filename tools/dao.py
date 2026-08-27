@@ -2435,7 +2435,14 @@ VERIFICATION_STAGES = frozenset({"screening_fidelity"})
 # and an agent scanning its case artifacts reads the answer values straight out
 # of the score file and writes them into the report. The next score rises
 # because the report copied the answer -- an evaluation confirming itself.
-_VERIFICATION_FILENAME = re.compile(r"^screening_fidelity_result_v[0-9]+\.json$")
+# A score names the run that produced it. `_v1` was the contract-format version,
+# not a run counter, so a second scoring of the same case landed on the same path
+# and the first was gone -- which happened twice while the denominators were
+# still being argued about, and left the earlier numbers only in a run note.
+# Both spellings are accepted so results written before this stay readable, but
+# an existing file is never overwritten: rescoring means a new run id.
+_VERIFICATION_FILENAME = re.compile(
+    r"^screening_fidelity_result_(v[0-9]+|RUN_[0-9]{8}_[0-9]+)\.json$")
 
 _VERIFICATION_SCHEMA = "screening_fidelity_result.schema.json"
 
@@ -2469,12 +2476,49 @@ def _verification_gate(args, action: str) -> str | None:
     return None
 
 
+def _fidelity_coverage_gaps(case_id: str, data: dict) -> list[str]:
+    """Every field the pipeline resolved must appear in the score.
+
+    Binding the rubric to the routing config fixed the vocabulary but not the
+    denominator: the first two scores compared 15 rows each, chosen by the
+    scorer after reading the answer key, out of the 56 fields claim_analysis
+    actually emitted. Which 15 was never written down and never had to be, so
+    two scores were not taken with the same instrument.
+
+    Requiring the full set does not remove the judgement -- deciding that the
+    answer key says nothing about a field is still a judgement. It makes that
+    judgement visible: the row has to exist and say `missing_in_ground_truth`,
+    where before it simply was not there.
+    """
+    contract = case_dir(case_id) / "claim_analysis_result.json"
+    if not contract.exists():
+        return []  # nothing to measure coverage against; the schema still applies
+    emitted = {
+        f["field_id"] for f in (load_json(contract) or {}).get("claim_facts", [])
+    }
+    if not emitted:
+        return []
+    scored = {
+        row.get("field_id")
+        for dim in data.get("dimensions", [])
+        for row in dim.get("field_comparisons", []) or []
+    }
+    return [f"{fid}: resolved by claim_analysis, absent from field_comparisons"
+            for fid in sorted(emitted - scored)]
+
+
 def cmd_write_verification_result(args):
     denial = _verification_gate(args, "written")
     if denial:
         print(denial)
         return 1
     target = _require_within(verification_dir(args.case_id), args.filename)
+    if target.exists():
+        print(f"REFUSED: {target.name} already exists. A score is a record of one run, "
+              "not a slot -- rescoring writes "
+              f"screening_fidelity_result_{args.run_id}.json so the earlier numbers stay "
+              "comparable against it. Delete the old file deliberately if it was wrong.")
+        return 1
     existing_lock = acquire_lock_blocking(
         target, args.held_by, args.run_id, args.purpose or f"write {args.filename}")
     if existing_lock is not None:
@@ -2512,7 +2556,15 @@ def cmd_write_verification_result(args):
                   f"score is silently lost. Re-score {args.case_id}, or file this "
                   f"under {payload_case}.")
             return 1
-
+        gaps = _fidelity_coverage_gaps(args.case_id, data)
+        if gaps:
+            print(f"FAIL: the score does not cover every field claim_analysis "
+                  f"resolved for {args.case_id} -- not written:")
+            for g in gaps[:12]:
+                print(f"  - {g}")
+            if len(gaps) > 12:
+                print(f"  … and {len(gaps) - 12} more")
+            return 1
         atomic_write_json(target, data)
     finally:
         release_lock(target)

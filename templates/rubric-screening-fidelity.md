@@ -108,6 +108,16 @@ determination"* (`run_consistency_check.critical_field_ids`). 채점자가 고�
 `partial_reading_only`. 문서종이 없어서 못 채운 값과 서식이 공란이라 못 채운 값은 다른 실패다.
 `resolution_status`(`asserted`/`explicitly_absent`/`unavailable`/`not_applicable`/`conflict`)도 함께 기록한다.
 
+### 모든 필드가 행을 가진다 — 배제는 보이는 판단이어야 한다
+
+`claim_analysis_result.json`이 해결한 필드는 **하나도 빠짐없이** `field_comparisons`에 행을 갖는다.
+정답지가 말하지 않는 필드는 `missing_in_ground_truth`로 남기고 분모에서 뺀다. 빼는 것 자체는
+여전히 판단이지만, 행이 존재하므로 **어떤 판단을 했는지가 기록에 남는다.**
+
+이 규칙이 없던 동안 두 케이스가 각각 15행으로 채점됐고 어느 15행이었는지는 어디에도 없었다 —
+같은 자로 잰 두 숫자가 아니었다. `dao.py write-verification-result`가 커버리지를 검사해
+누락된 필드가 있으면 저장을 거부한다.
+
 ### 추출 대상이 아닌 필드는 분모에서 뺀다
 
 `extraction_wave: deferred`(6개) 및 `activation_basis: deferred`는 파이프라인이 의도적으로 추출하지
@@ -305,6 +315,11 @@ fidelity_score = Σ적용가능(차원점수 × 가중) ÷ Σ적용가능(가중
 - 적용되는 모든 차원은 **스크리닝 리포트 원문 인용을 최소 1개** 단다. 스키마가 강제한다.
 - 정답지 쪽은 `ground_truth_ref`(문서명 + 위치)를 단다. 인용 필드는 존재하지 않는다.
 - `target_report_sha256`은 채점한 파일의 실제 해시를 복사한다. 기억으로 적지 않는다.
+- 점수 계산은 `python tools/score_screening_fidelity.py --rows <행 파일> --run-id RUN_...`이 한다.
+  채점자가 만드는 것은 비교 행뿐이고, 등급·핵심 여부·deferred·부재 사유·가중치·판정은 도구가
+  설정과 계약에서 읽는다.
+- **재채점은 덮어쓰지 않는다.** 파일명이 실행을 담는다 —
+  `screening_fidelity_result_<RUN_ID>.json`. 이미 있는 파일에 쓰면 거부된다.
 - 결과는 `screening_fidelity_result_v{n}.json`, `schemas/screening_fidelity_result.schema.json` 준수.
 
 ```bash
