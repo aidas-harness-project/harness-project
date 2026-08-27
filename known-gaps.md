@@ -4483,3 +4483,52 @@ today; its value is structural, removing a second routing mechanism.
 
 Revisit when stage 3-a is next opened. The English reason text these fields
 published was fixed separately on 2026-08-26 and does not depend on this.
+
+## 69. The document vocabulary is medical-only, so a correctly-classified 증권 or 사고경위서 reaches no field -- OPEN 2026-08-27
+
+Measured on the eval_20260827 fidelity batch (12 cases scored at the time of
+writing). **Every one of the 12 has `out_of_universe_items`**, 49 items total,
+and they group into three causes:
+
+| group | items | cases | share |
+|---|---|---|---|
+| 보험증권 | 12 | 12 | 100% |
+| 사고경위서 | 11 | 11 | 92% |
+| 가입금액 | 11 | 11 | 92% |
+| 사정금액 | 5 | 5 | 42% |
+| 약관/지급률 | 5 | 5 | 42% |
+
+The cause is a vocabulary gap, not a classifier failure. `document_kinds` holds
+**17 entries and all 17 are medical** (`diagnosis_certificate` ... `other_medical`);
+there is no kind for an insurance certificate or an accident statement. So a
+document Stage 2 typed correctly has nowhere to land: **28 of 47 CASE_80xx
+manifests carry a `document_type: insurance_certificate`**, and none of them can
+be reached by any field route or appear in any `required_documents_by_case_type`
+checklist.
+
+The scoring consequence is that this is charged to the CONFIGURATION, not the
+report -- `out_of_universe_items` is unscored by rubric design, precisely so a
+gap in the measuring apparatus does not read as a failure of the thing measured.
+The cost is nonetheless real and lands on F2: the missed issues are
+약관/증권-premised in nearly every case (면책사유 검토, 가입금액x지급률 산정,
+입원·수술급여금 배제). Scorers put it at roughly 19 F2 points / ~11 headline
+points on the cases where they estimated it.
+
+F3 is affected in the opposite direction and must not be quoted bare: it averages
+~94 because a document with no `document_kind` **has no checklist slot to be
+missed from**. An F3 of 100 means "the report classified correctly everything the
+config can express", not "the report requested everything the adjuster used".
+
+Two further field-side gaps ride along: 보험가입금액 (the left-hand side of the
+answer key's payout arithmetic) and the 사정 금액 have no `field_id`, so the
+adjuster's central calculation is unmeasurable in F1. Note 보험료·사정금액 are
+outside the PoC's evaluation axes by decision, so the 가입금액 entry matters more
+than the 사정금액 one.
+
+Not fixed here because it is a vocabulary + routing change with downstream reach
+(`document_kinds`, `required_documents_by_case_type`, the field routes that would
+consume the new kinds, and the classifier's type -> kind mapping), and the batch
+now running would have to be re-scored against a changed denominator. Scorers
+repeatedly proposed the minimal form: add `accident_report` and
+`insurance_certificate` to `document_kinds` and to the per-type required lists --
+no classifier change needed, since the types are already assigned correctly.
