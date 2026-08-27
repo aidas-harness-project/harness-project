@@ -4575,3 +4575,49 @@ Not a defect in the rubric -- config-bound denominators are what stop a scorer
 choosing its own field set (the reason they were bound in the first place, see
 2026-08-27 CHANGELOG). It is a reporting requirement: cite F1n/F3n and the case
 type, or do not compare the numbers.
+
+## 71. A published value can come from a lower-ranked source while a higher-ranked one disagrees -- OPEN 2026-08-27
+
+Surfaced independently by several fidelity scorers on the eval_20260827 batch,
+then measured across the CASE_80xx corpus. Of **229 `asserted` fields carrying
+more than one observation, 30 selected a source of WORSE priority rank than one
+available, while the observations held differing values.**
+
+By field: `diagnosis_code` 5, `current_treatment_status` 4, `primary_diagnosis` 3,
+`diagnosis_laterality` 3, `diagnosis_site` 2, `accident_date` 2, and one each of
+`accident_mechanism`, `final_clinical_course`, `major_treatment_category`,
+`repeated_treatment`, `major_symptom_change` and others.
+
+The clearest instance is CASE_8030 `diagnosis_code`. Two observations:
+
+* `CAO_0012` -- `S3210`, from DOC_002, a `diagnosis_certificate`, source_priority_rank **1**,
+  flagged `unambiguous: false`
+* `CAO_0044` -- `S33.7`, from DOC_009, an `outpatient_record`, source_priority_rank **3**
+
+`selected_observation_ids` is `["CAO_0044"]` and `resolution_status` is
+`asserted`, so the rank-3 outpatient code was published as settled fact. In the
+SAME contract `primary_diagnosis` -- the same clinical question -- resolved
+`conflict`, and the screening report names the disagreement explicitly (the 골절
+documents against the 염좌·긴장 outlier). **So the report tells a reader the
+diagnosis is disputed while printing the losing side's code as confirmed.** The
+answer key uses the 골절 code, so this cost a core field and pinned the verdict.
+
+Two distinct problems sit here, and the second is the more serious:
+
+1. **Rank is not decisive when a better-ranked observation is merely flagged.**
+   The rank-1 reading was `unambiguous: false`, which appears to have dropped it
+   in favour of a clean lower-ranked one. Preferring a confident wrong source
+   over a flagged right one is the wrong trade for a `critical_conflict_field`.
+2. **Sibling fields in one domain resolve independently.** `diagnosis_code` and
+   `primary_diagnosis` are the same fact in two notations; nothing makes the code
+   inherit the conflict its own diagnosis is in. The scorer's proposed fix, which
+   looks right: a code-shaped field should inherit the resolution status of the
+   diagnosis field in its `domain_code`.
+
+Not fixed here -- it changes selection behaviour on 30 live values across the
+corpus and would move the denominators the eval_20260827 batch was scored
+against. Note also that not every one of the 30 is necessarily wrong: rank is a
+heuristic and a later document can legitimately supersede an earlier one
+(`current_treatment_status` is the obvious case). What is not defensible is
+publishing `asserted` when the sibling field is in `conflict`, which is the
+subset worth fixing first.
