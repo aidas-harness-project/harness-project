@@ -4675,3 +4675,58 @@ already scored under the current definition; changing the denominator mid-batch
 would make them incomparable with each other and with the completed cases. Ship
 the batch on v0.1, apply the split from v0.2 onward, and re-score only if a
 like-for-like comparison is needed.
+
+## 73. Rubric v0.2's F2 exclusion emptied the denominator of everything the report got wrong -- HALTED 2026-08-27
+
+The owner's premise was right and F1 already honours it: charging a report for
+work the PoC never undertook measures the scope, not the report. v0.2 applied
+that to F2. **The implementation is wrong and the re-scoring was halted after
+9 cases.**
+
+Measured across the 9 completed v0.2 re-scores (58 answer-key issues):
+
+| | predicted | missed | recall |
+|---|---|---|---|
+| `in_scope` (the F2 denominator) | 45 | **1** | **97.8%** |
+| excluded | 13 | 21 | 38.2% |
+
+**F2 read exactly 100.0 on 8 of the 9 cases.** A dimension that cannot vary is
+not measuring anything. The exclusion is not a neutral slice of the issue set --
+it removes 21 of the 22 misses and leaves the successes, because the topics that
+were excluded (금액 산정, 약관 해석) are precisely the topics the pipeline could
+not reach. Scope and outcome are almost perfectly correlated, so cutting on
+scope cuts on outcome.
+
+Second defect: **the denominators collapse.** in_scope counts came out 2, 4, 4,
+5, 6, 6, 7 -- on CASE_8012 a single issue is worth 50 points, on CASE_8003 25.
+Three scorers independently filed this as a finding without being asked
+(CASE_8012 SF-7, CASE_8019 SF-6, CASE_8010 SF-9).
+
+Third: **scorers disagreed on the same topic**, because the rubric's exclusion
+list is worded by topic while its decision rule is the field_id lookup.
+"후유장해 지급률" went `out_of_scope_policy` on CASE_8012 and `in_scope` on
+CASE_8006/8010/8019/8005 (all four citing `documented_disability_rate`, grade B,
+`critical_conflict_field: true` -- the correct call). 보험계약사항 확인 went
+`in_scope` on CASE_8006 and `out_of_scope_amount` on CASE_8003. A mid-run rubric
+patch (commit ae23998) stated field_id-first explicitly, but by then the split
+had already happened.
+
+**What survives.** `total_issue_recall` was recorded on every v0.2 result and
+reproduces the v0.1 question honestly (75.0, 87.5, 66.7, 80.0, ...). The v1 files
+are all intact -- v0.2 wrote to `screening_fidelity_result_v2.json` throughout,
+and the comparison tooling verifies both describe the same report bytes. So the
+batch's real measurements are not lost.
+
+**What v0.3 has to do differently.** Excluding whole issues is the wrong shape.
+Options, none yet chosen:
+* Keep one denominator and report F2 alongside a separate out-of-scope miss
+  count, so the coverage gap stays visible instead of vanishing.
+* Weight batch aggregation by `scored_denominator` rather than averaging case
+  scores (a scorer's proposal; the field now exists to make it possible).
+* Make scope decidable mechanically -- issue -> field_id -> in/out -- rather than
+  by per-scorer judgement over a topic list, which is what produced the split.
+
+Also unresolved: whether F2 should ever have been recall over the adjuster's
+whole issue set. A screening report and a completed 손해사정서 do not have the
+same job, and 40% of v0.1's misses were topics the pipeline was never built to
+reach.
