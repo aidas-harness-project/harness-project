@@ -88,3 +88,70 @@ Whether the upstream 56-field list is itself config-driven or hard-coded, and
 whether it is stable across upstream versions. Nothing in this repository can
 answer that; the four imported cases agreeing only shows they came from one
 upstream version.
+
+---
+
+# Re-scored on the bound denominators — 2026-08-27
+
+Both cases re-scored with the field universe, grades and core set read from
+`claim_analysis_routing_v0.1.json` instead of assembled by the scorer. Both
+results validate and are stored.
+
+| | CASE_705 | CASE_711 |
+| --- | --- | --- |
+| F1 (was) | 66.7 (83.3) | 40.0 (53.8) |
+| F2 | 50.0 (unchanged) | 37.5 (unchanged) |
+| F3 (was) | 75.0 (60.0) | 75.0 (60.0) |
+| **total (was)** | **63.4** (68.7) | **46.2** (50.1) |
+| **verdict (was)** | **divergent** (partial) | **divergent** (divergent) |
+
+Both verdicts are now `divergent`, and in both cases it is a **core-field
+mismatch** that pins them, not the score:
+
+- CASE_705 — `legal_basis_cited`: 민법 제758조 제1항 against the key's 제750조·제755조.
+  Grade **A** on the legal axis and `critical_conflict_field: true`. Under the
+  hand-built rubric this sat in "discretionary", excluded from the headline, and
+  the case scored `partial`.
+- CASE_711 — `accident_mechanism`: the two preserved narratives against the key's
+  나무 구덩이. Also `critical_conflict_field: true`.
+
+## By grade
+
+| | A | B | C |
+| --- | --- | --- | --- |
+| CASE_705 | 2/6 | 6/7 | 2/2 |
+| CASE_711 | 2/6 | 4/7 | 0/2 |
+
+The pattern the old scoring could not show: **both reports agree with the
+adjuster on grade-B clinical detail and disagree on grade-A**. Six of the twelve
+grade-A rows across the two cases are the liability triad
+(`legal_basis_cited`, `comparative_negligence_rate`,
+`liability_opinion_conclusion`), which the hand-built rubric had classed as
+discretionary and kept out of the headline entirely.
+
+## What moved and why
+
+- **F1 fell** on both. Adopting the config's grades pulled 과실비율 / 적용 법조 /
+  배상책임 성립 여부 into the denominator; all three are absent or divergent in
+  both reports.
+- **F3 rose** on both, 60.0 → 75.0. The denominator is now
+  `required_documents_by_case_type` in the config's own `document_kinds`, and
+  사고경위서 — which the old scoring counted as a `miss` against the report — is
+  not a kind the config has. It moved to `out_of_universe_items`, where it is
+  recorded as a gap in the configuration rather than charged to the report.
+- **Upstream absence reasons came out uniform**: every absence in both cases is
+  `not_mentioned` (3 in CASE_705, 9 in CASE_711). None is
+  `source_document_missing` or `printed_but_blank`. So the nine-value split did
+  not discriminate here — worth knowing before treating it as an improvement.
+
+## Honest limits of this run
+
+- **F2's denominator is still the scorer's.** The config says nothing about which
+  issues an answer key raises, so issue recall stays a hand-enumerated 8 in both
+  cases and is the one dimension the binding did not fix.
+- **One row is scored against the report's correct behaviour.**
+  `liability_opinion_conclusion` is a `legal_opinion` field, and preserving two
+  opposing 법률의견서 without choosing is what the asymmetry rule asks for — yet
+  the report carries no adopted value, so it counts as `missing_in_screening`.
+  The rubric now penalises, in F1, the same behaviour it credits in F4. That is
+  a real defect in the binding, not in the reports.
