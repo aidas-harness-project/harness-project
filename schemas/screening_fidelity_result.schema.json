@@ -26,6 +26,12 @@
           "pattern": "^[0-9a-f]{64}$",
           "description": "SHA-256 of the scored screening report's bytes, binding the score to one exact document version."
         },
+        "scoring_run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "The run that PRODUCED this score, which is not the run that produced the report. Inherited `run_id` names the latter -- it is the scored artifact's own run and must stay that way, or the score stops being traceable to the exact pipeline execution it describes. A separate field is therefore the only place a scoring run can be recorded. Deliberately not bound to the RUN_YYYYMMDD_N pattern: a scoring pass is identified by what it scored and under which rubric (e.g. fidelity_bundle_20260827_8002), and forcing it into the pipeline's run vocabulary would make the two indistinguishable at a glance."
+        },
         "ground_truth_access": {
           "$ref": "#/$defs/ground_truth_access"
         },
